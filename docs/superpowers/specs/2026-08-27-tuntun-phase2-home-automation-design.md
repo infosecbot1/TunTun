@@ -1,6 +1,6 @@
 # Tuntun Phase 2 “Home Automation” Architecture Specification
 
-**Status:** design approved; written-spec review pending
+**Status:** design baseline complete; implementation plan ready; implementation not started
 **Date:** 2026-08-27
 **Scope:** deterministic local household control, governed automations, and screen-time policy foundations
 **Primary operator:** one owner-managed household
@@ -37,11 +37,12 @@ Phase 2 also establishes Manual, Assisted, and Learning automation-governance mo
 | Televisions | Samsung Neo LED 49-inch and TCL 42-inch; exact model/OS/control capability remains a commissioning gate |
 | Network edge | TP-Link Archer BE800 connected to ISP ONT/modem as the primary router |
 | Household network | ASUS ROG Rapture GT-AX6000 downstream, controlling three AX5400 AiMesh nodes |
-| Office laptop | Wired directly to BE800 for maximum speed; outer-to-inner NAT plus host/BE800 controls block both unsolicited directions |
+| Office laptop | Wired directly to BE800 for maximum speed; double NAT is directional, so Mac host-firewall and BE800/ASUS controls plus negative-reachability evidence are required before either unsolicited direction is treated as blocked |
 | Phase 2 placement | Tuntun Mac, Green, MZHUB, TVs, lights, and household clients use the inner ASUS network; Reachy joins only if its Phase 1 service-isolation gate passes |
 | Remote access | No public inbound service or port forwarding; any later remote owner path uses VPN and is designed in Phase 6 |
 | Canonical inventory | Phase 2 introduces the shared room/area/device/endpoint/capability registry and cross-domain event envelope |
 | Storage | Green keeps operational state; backups are exported to encrypted owner storage; Green never stores Tuntun family memory or biometrics |
+| Power protection | A signalling-capable UPS covering Green and the essential inner-network path is required for the family-ready gate; the exact SKU may be ordered only after its current NUT compatibility, landed price, load, and runtime are verified |
 
 ## 3. Scope boundaries
 
@@ -52,7 +53,7 @@ Phase 2 also establishes Manual, Assisted, and Learning automation-governance mo
 - MZHUB-to-Home-Assistant Matter bridge pilot and staged twelve-light onboarding.
 - Stable rooms, areas, entity identifiers, endpoint identifiers, capabilities, and device aliases.
 - A Home Assistant-side mediation boundary plus a closed Tuntun adapter that observes allowlisted state and exposes only registered typed actions.
-- Adult, child, guardian, designated-Guest, and anonymous-restricted policy evaluation for light actions.
+- Canonical `owner|adult|k2|n1|guest` profile evaluation plus separate guardian relationship, designated-Guest request-session, and `anonymous_restricted` identity-evidence states for light actions.
 - Local confirmations, exact-scope passkey step-up, durable action recovery, HA Core-side deduplication, reconciliation, and minimized audit receipts.
 - Manual, Assisted, and Learning automation-governance modes.
 - Screen-time allowance, warning, grace, extension, override, and bounded-enforcement state machines.
@@ -61,7 +62,7 @@ Phase 2 also establishes Manual, Assisted, and Learning automation-governance mo
 
 ### 3.2 Explicitly excluded
 
-- Reolink cameras, video retention, NAS selection, and camera-derived identity; those belong to Phase 3.
+- Reolink camera recording, video retention, and NAS/storage evaluation; those belong to Phase 3. Camera-derived family identity remains explicitly prohibited and absent rather than becoming a Phase 3 feature.
 - Multi-room voice and media routing, whole-home audio, TV teaching surfaces, and display sessions; those belong to Phase 4.
 - Local LLM or vision inference migration; that belongs to Phase 5.
 - Public internet administration, router port forwarding, or a public Home Assistant API.
@@ -77,7 +78,7 @@ Phase 2 also establishes Manual, Assisted, and Learning automation-governance mo
 flowchart LR
   WAN[Internet] --> ONT[ISP modem / ONT]
   ONT --> BE[TP-Link Archer BE800\nprimary outer router]
-  BE --- OFFICE[Office laptop\nwired outer trusted host]
+  BE --- OFFICE[Office laptop\nwired outer host]
   BE --> GT[ASUS GT-AX6000\ninner router + AiMesh controller]
 
   subgraph INNER[Protected inner household network]
@@ -88,7 +89,7 @@ flowchart LR
       MATTER[Matter Server app]
       HA <--> MATTER
     end
-    MOES[MOES MZHUB\nMatter bridge + existing Zigbee coordinator]
+    MOES[MOES MZHUB\nexisting Zigbee coordinator\nMatter-bridge capability unproven]
     LIGHTS[12 MOES Zigbee ceiling lights]
     TV1[Samsung Neo LED 49-inch]
     TV2[TCL 42-inch]
@@ -96,7 +97,7 @@ flowchart LR
 
     REACHY <-->|enabled only after the isolation gate| MAC
     MAC <-->|pinned TLS + signed challenge/envelope\nminimized state + typed desired state| HA
-    MATTER <-->|local Matter over IPv6 LAN| MOES
+    MATTER <-.->|commissioning probe only; retain link only after gate passes| MOES
     MOES <-->|Zigbee| LIGHTS
     HA -. eligibility probes .-> TV1
     HA -. eligibility probes .-> TV2
@@ -135,7 +136,8 @@ Home Assistant is the authoritative source for the state its integrations can ob
 
 Phase 2 creates the shared registry used by every later hardware phase:
 
-- `area`: a stable household location such as `living_room`; display names are mutable.
+- `area`: a stable household location whose sole canonical key is `area_id`, such as a pseudonymous ID representing the living room; display names are mutable and never accepted as target identity. Later phases do not mint `room_id` aliases.
+- `zone`: an optional stable, versioned sub-area keyed by `zone_id`, nested beneath exactly one `area_id` and the owning adapter/binding generation; it cannot move between areas, replace an area, or broaden an ambiguous target.
 - `device`: a physical or virtual product, with vendor/model/firmware and lifecycle state.
 - `endpoint`: one addressable function exposed by a device or bridge.
 - `capability`: one closed operation or observation schema such as `light.on_off.v1`.
@@ -251,7 +253,7 @@ entries[1..12]:
 aggregate_envelope_signature
 ```
 
-The owner registers or edits a scene with an exact-scope passkey. Execution is available only to an identified adult after one confirmation that displays the scene name, exact manifest digest, rooms, endpoint count, and desired effects. The aggregate uses the same `authorized_at`/`issued_at` checks and 30-second pre-dispatch admission deadline as a single action. Child, designated-Guest, and anonymous roles cannot execute a scene. A manifest contains at most the twelve Phase 2 light endpoints, each exactly once and canonically ordered by stable endpoint ID; duplicate or conflicting entries are rejected. Wildcard areas, dynamic membership, nested scenes, non-light endpoints, `toggle`, and relative state are invalid.
+The owner registers or edits a scene with an exact-scope passkey. Execution is available only to an identified adult after one confirmation that displays the scene name, exact manifest digest, rooms, endpoint count, and desired effects. The aggregate uses the same `authorized_at`/`issued_at` checks and 30-second pre-dispatch admission deadline as a single action. K2/N1 profiles, a designated-Guest request-session state, and the `anonymous_restricted` evidence state cannot execute a scene. A manifest contains at most the twelve Phase 2 light endpoints, each exactly once and canonically ordered by stable endpoint ID; duplicate or conflicting entries are rejected. Wildcard areas, dynamic membership, nested scenes, non-light endpoints, `toggle`, and relative state are invalid.
 
 There is no cross-machine transaction. Commit order is strict: (1) the Mac atomically commits the aggregate execution plus every child intent and consumes one aggregate authorization; (2) it signs the canonical aggregate envelope; (3) the HA integration verifies it, reserves all endpoint and session rate-limit capacity, and commits the aggregate plus every child `PRE_DISPATCH` receipt in one local SQLite transaction; and only then (4) device service calls may begin. Failure in steps 1–3 produces no device I/O and no partial rate-limit reservation. Every child invocation, including the last, must start before the aggregate `expires_at` and within two seconds of the aggregate/child receipt transaction; a child that misses either bound transitions to `EXPIRED` with no service I/O. After a crash, `DISPATCHING` children are reconciled without replay and still-`PRE_DISPATCH` children past the bound expire without dispatch.
 
@@ -269,7 +271,7 @@ Each endpoint has its own desired-state idempotency and result. Physical executi
 8. Tuntun atomically consumes the grant and commits `AUTHORIZED_COMMITTED` plus the audit outbox before external I/O. This commit is the policy/guardian-revocation linearization point: a revision committed before it forces transaction conflict and re-evaluation; a revision after it cannot retroactively cancel the already-authorized low-risk action and is recorded as crossing an in-flight action.
 9. The action service signs only the canonical committed envelope, records its digest and key ID, and transitions to `SIGNED`. Signing failure transitions to `FAILED` with no Home Assistant I/O.
 10. The adapter sends one closed, expiring desired-state action—or the bounded scene manifest and its child actions—to the HA integration. The integration revalidates the binding, capability, epoch, expiry, schema, signature, and idempotency commitments and writes durable pre-dispatch receipts before service I/O. It does not pretend to possess the Mac’s live family-policy state.
-11. Home Assistant controls the MZHUB locally through Matter; MZHUB controls the light through Zigbee.
+11. Home Assistant dispatches through the single controller branch accepted by commissioning: either the gate-passed MZHUB local-Matter bridge or the conditional Connect ZBT-2 direct-Zigbee path (ZHA by default, Zigbee2MQTT only after its separate support gate). The accepted Zigbee controller then controls the light.
 12. The adapter reconciles the resulting state, source, freshness, and verification strength and detects stale, optimistic, or contradictory results.
 13. Tuntun reports `completed and verified`, `command accepted but not verified`, `not completed`, or `outcome unknown`; a timeout never becomes a verbal success.
 14. The Mac commits the terminal result and minimized receipt containing actor class, policy/action versions, target commitment, decision, dispatch, and result—not transcript or biometric material.
@@ -341,11 +343,11 @@ Learning does not consume actor/role identifiers, raw conversation, biometric, c
 
 Tuntun-installed routines carry an origin, schema version, policy digest, content digest, installer authorization receipt, and rollback reference. Manual drift creates an owner-visible conflict; Tuntun does not overwrite the changed routine until the owner reconciles it.
 
-Child, designated-Guest, and anonymous profiles cannot access an authoring mode. A child’s repeated device use is not treated as consent to learn or install a routine.
+K2/N1 profiles cannot access an authoring mode; neither a designated-Guest request-session nor the `anonymous_restricted` evidence state creates a new profile or authoring authority. A child’s repeated device use is not treated as consent to learn or install a routine.
 
 ### 9.4 Owner console extension
 
-The Phase 1 owner console gains five authenticated local surfaces:
+The existing owner surface gains five authenticated local page modules:
 
 1. **Home inventory:** areas, devices, endpoints, exact HA bindings, capability/freshness state, commissioning generations, aliases, and topology diffs. Every binding/alias/room mutation requires an owner passkey and invalidates outstanding target commitments.
 2. **Household permissions:** child room/hour rules, primary-guardian status, optional delegated-guardian grants, common-area declarations, bounded designated-Guest sessions, denials, and current policy digests.
@@ -401,7 +403,7 @@ Per-session screen-time detail is retained for 30 days. Content-minimized allowa
 
 ### 11.1 Deployable Phase 2 boundary
 
-- The Archer BE800 remains the internet edge and outer trusted network.
+- The Archer BE800 remains the internet edge and outer network; attachment to it grants no Tuntun trust.
 - The office laptop stays wired to the BE800 and has no ambient administrative route to inner household services. Its host firewall and, where supported, a BE800 ACL also reject connections originating from the ASUS WAN/inner subnet; double NAT alone does not block inner-to-outer initiation.
 - The GT-AX6000 and three AX5400 AiMesh nodes serve the inner household network.
 - Green, MZHUB, Tuntun Mac, televisions, lights’ bridge, and household clients use the inner network. Reachy joins that network only after the Phase 1 service-isolation gate passes; otherwise its automatic voice/face processing remains disabled until a tested isolated network boundary exists.
@@ -494,7 +496,7 @@ For Phase 2 lights, execution preflight requires an active custom-integration qu
 - Record the supported commissioning phone, Companion app/OS versions, IPv6/mDNS behavior on every AiMesh path, non-overlapping subnets, reservations, and current router mappings.
 - Disable UPnP/automatic mapping, DMZ, and WAN administration; configure office-laptop/BE800 source filtering and Reachy’s Phase 1 isolation gate.
 - Provision the Home Assistant Core custom integration, internal TLS identity/rotation, Secure Enclave signing key, owner-confirmed public-key/controller-epoch pairing, integration source-address check, Mac backup share, encrypted backup key recovery, storage alerts, and supported UPS/shutdown path.
-- Before UPS purchase approval, verify the exact model exposes a USB/network interface supported by the current NUT driver. The preferred deployment is an audited NUT server app on Green with USB telemetry, an inner-LAN/loopback-only listener, and host-shutdown enabled; measure runtime under the complete Green/router/switch/MZHUB load, execute a real low-battery Green shutdown before exhaustion, and prove restart/recovery when mains returns. If this path fails, select a different signalling-compatible UPS; do not represent battery outlets alone as graceful shutdown.
+- Before ordering the selected UPS model, verify that its exact hardware revision exposes a USB/network interface supported by the current NUT driver and capture a current landed quotation. The preferred deployment is an audited NUT server app on Green with USB telemetry, an inner-LAN/loopback-only listener, and host-shutdown enabled; measure runtime under the complete Green/router/switch/MZHUB load, execute a real low-battery Green shutdown before exhaustion, and prove restart/recovery when mains returns. If this path fails, select a different signalling-compatible UPS; do not represent battery outlets alone as graceful shutdown.
 - Create and validate a Home Assistant Green configuration backup and rollback procedure without activating a cloned controller beside production.
 
 **Gate:** no device reset; the existing household controls still work and every proposed change has a recovery path.
@@ -600,7 +602,7 @@ Phase 1 prohibits child external side effects. Phase 2 introduces `child_guarded
 
 ### 16.3 Designated-Guest versus identity uncertainty
 
-Phase 1 safely maps uncertain identity to Guest because Guest has no side-effect authority. Phase 2 preserves that behavior as `anonymous_restricted`. The new `designated_guest_request_v1` role is never inferred from failed biometrics: the owner creates a bounded visitor request session with an exact common-area scope and expiry. The session is not a speaker authenticator and cannot itself execute an action; every exact request needs the owner’s independent trusted-console/passkey co-approval. It grants no memory retrieval or personalized authority. Expiry, identity conflict, possible-child evidence, or owner cancellation returns immediately to `anonymous_restricted` and invalidates pending requests.
+Phase 1 safely maps uncertain identity to the canonical Guest profile because Guest has no side-effect authority. Phase 2 additionally records `anonymous_restricted` as a request-policy/evidence state, never as a sixth identity role. The new `designated_guest_request_v1` capability creates a bounded visitor request-session state and is never inferred from failed biometrics: the owner creates the session with an exact common-area scope and expiry. The session is not a speaker authenticator and cannot itself execute an action; every exact request needs the owner’s independent trusted-console/passkey co-approval. It grants no memory retrieval or personalized authority. Expiry, identity conflict, possible-child evidence, or owner cancellation returns immediately to the canonical Guest profile with `anonymous_restricted` request policy and invalidates pending requests.
 
 ### 16.4 Offline grammar and transactional action lifecycle
 
@@ -675,7 +677,7 @@ After the Phase 1 family-private-beta gate is stable, Phase 2 is estimated at **
 - Assisted/Learning governance and drift/rollback: 2–3 weeks;
 - screen-time simulator, failure injection, restore evidence, and household soak: 1–2 weeks.
 
-Expected steady-state owner maintenance is **one to two hours per month** for health/update review plus a quarterly isolated restore rehearsal. Failed capability, security, backup, or recovery gates take precedence over the estimate.
+The Phase 2 planning allocation for steady-state owner maintenance is **one to two hours per month** for health/update review; the quarterly isolated restore rehearsal is timed separately. This allocation is not a separate promotion trigger: all ordinary time contributes to the single Phase 6 full-system maintenance gate. Failed capability, security, backup, or recovery gates take precedence over the estimate.
 
 ## 20. Reference baseline
 
