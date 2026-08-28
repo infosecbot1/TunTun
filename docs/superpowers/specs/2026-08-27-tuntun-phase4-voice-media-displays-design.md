@@ -4,7 +4,7 @@
 **Date:** 2026-08-27
 **Scope:** room voice endpoints, deterministic legal-media playback, local teaching displays, television control qualification, and real screen-time enforcement
 **Primary operator:** one owner-managed household
-**Depends on:** Phase 1 identity, policy, memory, speech, privacy, budget, and audit foundations; Phase 2 topology, signed Home Assistant mediation, durable action lifecycle, and screen-time state machine
+**Depends on:** Phase 1 identity, policy, memory, speech, privacy, budget, and audit foundations; Phase 2 topology, signed Home Assistant mediation, durable action lifecycle, and screen-time state machine; and, before Task 04 or any owner-HTTP route work, the accepted Phase 3 Task 17 owner-ingress takeover and signed route-manifest infrastructure. Phase 4 Tasks 01–03 and simulator-only work may begin from the accepted Phase 1/2 baseline without enabling camera features. Every Phase 4 owner-route promotion checkpoint rebuilds the same Phase 3-owned owner-ingress wheel, refreshes/re-signs its canonical service row against the exact current route-manifest digest, and completes the installed lifecycle before physical or gate evidence starts; a predecessor row is accepted only with its complete matching rollback set. Final Phase 4 acceptance additionally waits for Phase 3 Task 32's final service-inventory freeze, then repeats that refresh for the final Phase 4 wheel/routes rather than allowing a later Phase 3 package step to overwrite it.
 
 ## 1. Outcome
 
@@ -12,7 +12,7 @@ Phase 4 lets a family member address Tuntun from commissioned rooms rather than 
 
 Music and other legal media can play through separately commissioned, music-quality players. Home Assistant and, where it passes its gate, Music Assistant supply deterministic device/catalog integration. They never decide who spoke, which family policy applies, which memory may be retrieved, or whether an action is authorized. Those decisions remain inside Tuntun Core on the Mac.
 
-Age-appropriate teaching sessions render through a paired local browser/HDMI agent. The Samsung Neo LED 49-inch and TCL 42-inch televisions are display surfaces, not trusted computers or identity sensors. Their marketing descriptions are insufficient to select a control adapter. Until exact model, operating system, firmware, network API, HDMI-CEC, infrared, and observation probes pass, each television remains `DISPLAY_ONLY_MANUAL`: Tuntun may prepare a local teaching surface, but a person must select the input and control power with the ordinary remote.
+Age-appropriate teaching sessions render through a paired local browser/HDMI agent. The Samsung Neo LED 49-inch and TCL 42-inch televisions are display surfaces, not trusted computers or identity sensors. Their marketing descriptions are insufficient to select a control adapter. Each begins `UNCOMMISSIONED` and may become `DISPLAY_ONLY_MANUAL` only after exact identity/HDMI inventory; until exact model, operating system, firmware, network API, HDMI-CEC, infrared, and observation probes pass, Tuntun may prepare a local teaching surface, but a person must select the input and control power with the ordinary remote.
 
 The Phase 2 screen-time simulator becomes real enforcement on a television only after the exact unit has a repeatable desired-state control path and a trustworthy observation path. Strict mode additionally requires independently evidenced observation. A manual physical intervention always stops automatic contention. One enforcement generation can make at most two control attempts, and no Tuntun component may enter a power, source, volume, or application retry contest with a person.
 
@@ -43,6 +43,7 @@ Phase 4 extends, but does not silently reinterpret, the Phase 1 and Phase 2 spec
 | Data retention | No application-managed durable raw room audio, wake buffer, transcript, speech waveform, or display screenshot |
 | Remote access | LAN-only and outbound cloud calls under Phase 1 policy; no public inbound route or router port forwarding |
 | Open source | All endpoint, media, display, and television implementations are adapters; household devices, account details, and credentials are deployment data, never repository fixtures |
+| Continuous feature authority | Phase 4 reuses Phase 2's externally pre-issued `SignedFeatureManifestRolloverChainV1`, `FeatureManifestLeaseSupervisor`, `FeatureAuthorityLease`, and `FeatureAuthorityCampaignEvidenceV1`/canonical schema unchanged. No Phase 4 process can sign, renew, substitute, extend, or locally redefine authority. Every endpoint/per-area/family seven-day campaign and any maintenance interval later counted by Phase 6 requires one frozen-candidate chain covering the complete interval; its counted clock starts only after an index-zero controlled-restart activation receipt exact-matches the live candidate/composition, and every admission/background iteration checks both half-open wall validity and the non-extendable monotonic lease. Purchased and DIY endpoint candidates use separate externally signed chains whenever their hardware/configuration commitments differ, and every commissioned area/endpoint/binding or steady-state maintenance generation uses its own chain after any candidate or configuration mutation; no prior chain is widened, merged, copied, or reused across those generations. Missing/stale initial activation, nonzero initial index, missing, extra, late, reordered, widened, rollback, signature-invalid, candidate-drifted, or expired current/next authority, either exact deadline equality, wall rollback, stale composition, or a missing/substituted rollover/restart receipt closes affected work before preparation or I/O, invalidates the campaign, and enters controlled whole-composition recovery. The shared downstream adversarial harness proves no admission, preparation, provider-call, trigger, or effect counter advances after each injected fault and that a dishonest zero-gap claim is rejected. Closed-authority maintenance observations remain truthful but cannot count toward day 60, day 90, or promotion. Evidence binds the chain ID/digest, ordered envelope and transition/restart-receipt digests, admission-sample-log digest, exact interval, and every canonical literal-zero counter |
 
 ### 2.1 Versioned policy amendments
 
@@ -79,7 +80,7 @@ The Phase 1 action registry, guarded-child corpus, provider redaction, transacti
 - Cloud smart-speaker assistants as Tuntun speech endpoints.
 - Continuous room streaming, ambient transcription, passive conversation capture, voiceprints stored on satellites, or room audio used as general presence surveillance.
 - Camera-based speaker selection or television-viewer recognition in Phase 4. Phase 3 presence events, if available, remain non-identity evidence throughout this six-phase program; changing that boundary requires a new explicit system-wide privacy/security design and consent model, not a policy toggle.
-- Microphones in bathrooms, toilets, changing areas, or any room classified `prohibited_sensitive`.
+- Microphones in bathrooms, toilets, changing areas, or any area classified `prohibited` by the canonical Phase 2 `AreaV1` authority.
 - Whole-home broadcast of personalized answers, private memory, child disclosures, authentication prompts, or security information.
 - A general Home Assistant service API, Music Assistant administrative API, television remote API, arbitrary HDMI-CEC opcode, arbitrary IR code, shell, browser navigation, or arbitrary URL exposed to an LLM.
 - Unlicensed music acquisition, account circumvention, advertisements removal, DRM bypass, media ripping, torrenting, or downloading streams for reuse.
@@ -204,10 +205,11 @@ flowchart LR
 
 ## 7. Room topology and commissioning classes
 
-Each room is an existing Phase 2 `area`. `area_id` is the sole canonical room/location identifier across Phases 2–6; Phase 4 does not mint a parallel `room_id`. A finer location may be represented only by a stable, versioned `zone_id` nested beneath exactly one `area_id`. A zone is never an alias for an area, cannot move between areas without a new identity, and cannot be used to broaden an ambiguous target.
+Each room is an existing Phase 2 `AreaV1`; Phase 4 imports `AreaV1` and `CanonicalLocationRefV1` unchanged and carries exact `(area_id, area_generation)` wherever location affects authority. Every located Phase 4 endpoint, player, group member, display/teaching session, television, and screen-time adapter row persists the composite foreign key `(area_id, area_generation) -> home_areas(area_id, generation)`; a naked `area_id` foreign key is not authority. Dispatch additionally reopens the current `AreaV1`, so a row that still references a historically valid generation fails closed after reclassification and across restart/restore. Phase 4 does not mint a parallel `room_id` or room-class vocabulary. A finer location may be represented only by a stable, versioned `zone_id`/`zone_generation` nested beneath that exact area generation. A zone is never an alias for an area, cannot move between areas without a new identity, and cannot be used to broaden an ambiguous target.
 
 ```text
 area_id
+area_generation
 zones[]: zone_id, zone_generation
 room_class
 speech_endpoint_ids[]
@@ -226,13 +228,12 @@ Room class is one closed value:
 
 | Class | Microphone default | Commissioning authority | Additional rule |
 |---|---|---|---|
-| `common_shared` | Disabled until owner commissioning; may then remain locally wake-listening | Owner plus household notice acknowledgement | Guest disclosure and visible hardware controls are required |
+| `common` | Disabled until owner commissioning; may then remain locally wake-listening | Owner plus household notice acknowledgement | Guest disclosure and visible hardware controls are required |
 | `adult_private` | Off | Owner plus each recorded adult occupant's current opt-in | Revocation disables new leases immediately; no cross-room reply by default |
 | `child_private` | Off | Owner plus a distinct current primary guardian bound to the exact child/room/device/policy generation | Child can always mute/stop; no live web; bedtime availability is owner/guardian configured; no passive discovery |
-| `temporary_guest` | Off | Owner for a fixed expiry no longer than seven days | No private memory, profile enrollment, or unattended always-on mode |
-| `prohibited_sensitive` | Permanently ineligible | No override in Phase 4 | Covers bathrooms, toilets, and changing areas |
+| `prohibited` | Permanently ineligible | No override in Phase 4 | Covers bathrooms, toilets, changing areas, and every location whose current Phase 2 class is prohibited |
 
-A room-class, microphone, occupant, guardian, or endpoint-binding change increments the privacy generation, revokes outstanding capture leases, and requires new exact-scope approval where applicable. A stale or missing consent reference makes the endpoint ineligible. A person can physically mute any endpoint without authentication. Software unmute is impossible; after the hardware switch is returned to on, the endpoint still needs a current commissioning generation before it can obtain a lease.
+Guest/Designated Guest is an orthogonal actor/session narrowing policy, never an area class. An area generation/class, microphone, occupant, guardian, or endpoint-binding change increments the privacy generation, revokes outstanding claims/leases/admissions/handoffs/replies immediately, and requires new exact-scope approval where applicable. Restart/restore reopens current Phase 2 authority and never resurrects a stale generation. A stale or missing consent reference makes the endpoint ineligible. A person can physically mute any endpoint without authentication. Software unmute is impossible; after the hardware switch is returned to on, the endpoint still needs a current commissioning generation before it can obtain a lease.
 
 No room label sent to a provider contains a person's name or sensitive room nickname. Provider context uses a generic descriptor such as `current_shared_room` only when location is necessary.
 
@@ -263,7 +264,7 @@ The common-room bakeoff uses:
 1. one Home Assistant Voice Preview Edition or its then-current official successor, only after exact SKU/firmware/stock capture; and
 2. one Linux SBC node assembled from an obtainable microphone front end, speaker/audio output, physical microphone cutoff, indicator, stop control, power supply, and enclosure.
 
-The purchased candidate may use replacement firmware or a narrow transport adapter only when the modification is reproducible, reversible, licence-compatible, and preserves the physical mute. Stock Assist behavior is not counted as Tuntun compatibility. The Linux candidate does not receive preference merely because it is more customizable. Acoustic performance, privacy truthfulness, recoverability, ongoing updates, idle power, and owner maintenance decide.
+The purchased candidate is eligible only when its unmodified signed stock firmware exposes a documented or otherwise proved supported transport that a narrow Tuntun adapter can use while preserving the physical mute and keeping policy authority outside Assist. Stock Assist behavior alone is not counted as Tuntun compatibility. Phase 4 owns no replacement/custom-firmware build, flash, signing, update, or rollback target; if replacement firmware is required, proposed, or detected, that branch is ineligible and its adapter, feature, pairing route, and commissioning path remain absent. A future replacement-firmware experiment requires a separately approved design amendment and complete target lifecycle ownership. The Linux candidate does not receive preference merely because it is more customizable. Acoustic performance, privacy truthfulness, recoverability, ongoing updates, idle power, and owner maintenance decide.
 
 Each candidate runs seven days in the same placement and identical test corpus. Neither is deployed to a private room during the bakeoff. The losing candidate is either retained as a developer fixture with synthetic audio or removed; it is not quietly deployed with weaker controls.
 
@@ -334,6 +335,8 @@ The default speech destination is the current lease endpoint. The response canno
 
 If the endpoint cannot speak, Tuntun uses a local nonverbal error signal when possible and offers the answer in the authenticated owner console. It does not route a private answer to the nearest working speaker automatically.
 
+Playback is completion-bound rather than acknowledgement-bound. Each short-lived frame repeats the request/turn/lease/cancellation/privacy/capability authority, has a contiguous byte offset and keyed commitment, and only the final frame declares the exact terminal sequence and total byte count. Core durably stores the minimized final-frame commitment before sending it. A `completed` endpoint receipt must repeat that exact final commitment and totals; a gap, overlap, missing/replaced final record, partial stream, or receipt after cancellation can report only partial/stopped/unverified/error-safe, never complete.
+
 ### 10.3 Explicit handoff
 
 Phase 4 has no passive acoustic “follow me.” A speaker may say a registered command such as “continue in the kitchen.” Tuntun resolves one exact commissioned endpoint, announces a short transfer request at the current endpoint, and creates a single-use handoff token that expires after 30 seconds. The target does not play prior private content. The person must wake Tuntun at the target; current local voice/identity evidence and room policy are evaluated again. Ambiguity, identity conflict, a private-room consent failure, expiry, or a Guest session cancels the handoff and starts a new Guest turn instead.
@@ -379,7 +382,7 @@ An owner may commission only:
 - licensed internet-radio streams with documented source/terms; or
 - a local playback protocol for a household-owned player.
 
-Technical availability is not legal approval. Every provider record contains adapter name/version/source, account owner class, region, entitlement review date, credential store, explicit-content capability, child eligibility, data-egress disclosure, and expiry. Missing, expired, unofficial/scraping, credential-exporting, or legally unclear records leave the provider disabled. Phase 4 does not substitute a different provider/account silently.
+Technical availability is not legal approval. Every provider record has one stable opaque `provider_binding_id` and an independently advancing `provider_generation`, plus adapter name/version/source and generation, account owner class, region, entitlement review date/generation, credential store, explicit-content capability, child eligibility, data-egress disclosure, and expiry. Every request, authorization, envelope, receipt, observation, and result repeats the exact provider-binding ID/generation; a scalar generation without its row identity is never authority. Missing, expired, unofficial/scraping, credential-exporting, legally unclear, replaced, or generation-drifted records leave the provider disabled. Phase 4 does not substitute a different provider/account silently.
 
 Provider enrollment and credentials occur only in the owner-controlled Home Assistant/Music Assistant administration surface. Tuntun receives a stable opaque provider binding and capability digest, never the secret. Provider credentials are excluded from prompts, Tuntun backups, browser application state, logs, and the public repository.
 
@@ -409,19 +412,21 @@ media.seek_absolute.v1        # only when the exact player proves it
 media.play_group_manifest.v1  # adult-confirmed immutable group only
 ```
 
-`toggle`, arbitrary URL, arbitrary provider URI, arbitrary file path, free-form queue mutation, account switching, follow redirects, arbitrary announcement, and caller-supplied Home Assistant service names are invalid. Catalog search returns short-lived opaque item handles bound to provider, account class, item ID, explicit/content classification, adapter version, result generation, and expiry. An ambiguous title produces a short spoken choice; the model cannot invent a handle.
+`toggle`, arbitrary URL, arbitrary provider URI, arbitrary file path, free-form queue mutation, account switching, follow redirects, arbitrary announcement, and caller-supplied Home Assistant service names are invalid. Catalog search accepts a canonical list of exact provider-authority tuples `(provider_binding_id, provider_generation, adapter_generation, entitlement_generation)` and returns short-lived opaque item handles that repeat the selected tuple plus account class, item commitment, explicit/content classification, result generation, and expiry. Any generation drift invalidates the handle before provider access, including after restart. An ambiguous title produces a short spoken choice; the model cannot invent a handle.
 
 An identified adult may immediately execute one unambiguous, reversible, registered single-room transport action under `home_reversible_media_v1`, the same risk-tiered principle introduced for lights. Starting a new item, changing to a different provider, transferring rooms, changing volume by more than the configured small delta, or using a registered group requires an exact confirmation. Provider/account enrollment, group definition, child source/volume/time policy, and adapter changes require an owner passkey. Guest/anonymous playback is disabled by default. A designated Guest request can be enabled only through the Phase 2 exact owner co-approval path and only for an approved common-area source.
 
-Child playback requires an owner-configured, distinct-primary-guardian-consented rule bound to exact rooms, players, providers/content classes, volume ceiling, hours, and policy generation. It grants no catalog outside the rule, explicit/unknown content, purchases, provider/account changes, broad groups, or persistent queue/routine authoring. If the provider cannot provide a trustworthy child/explicit classification, only guardian-selected exact item/playlist handles may play.
+Child playback requires an immutable signed rule version created through `owner prepare/passkey -> distinct current primary guardian one-use approval -> exact-generation activation`. The owner first commits an approval-independent proposal digest. The guardian binds that digest; only then does Tuntun finalize and sign a separate rule digest containing the exact proposal plus approval ID/principal/generation/commitment. This avoids a circular digest/approval dependency. Proposal/final rule bytes bind the expected pre-CAS lifecycle generation; the receipt and downstream authority carry the observed/resulting generation. The lifecycle receipt is total: only `APPLIED draft -> active` may first activate, and an approved edit creates a new immutable version through one atomic `APPLIED active -> active` replacement; rejection reports the unchanged observed state/generation. This makes “one current version” executable without pre-signing a future generation. Revocation is the durable `APPLIED active -> revoked` generation transition and is an immediate safety reduction: it needs no fresh passkey/guardian ceremony, works locally during cloud/auth outage, and completes within two seconds. Its receipt carries a distinct local revocation request/source/time; the current rule version's ceremony commitments are repeated only as provenance, never reused as revoke authority.
+
+The active rule binds child/profile, one exact `(area_id, area_generation)` shared by every canonical player, player binding/capability generations, provider-binding/adapter/entitlement generations, content classes or durable keyed item/playlist identity commitments, volume ceiling, non-overlapping canonical hours, an exact IANA timezone plus approved tzdata version/digest and `instant_to_local_window.v1`, policy generation, issue/expiry, and expected pre-CAS lifecycle generation. Canonical hours are half-open local-minute intervals `[start, end)` with `0 <= start < end <= 1440`; `[1439, 1440)` includes 23:59, adjacent intervals may meet at one endpoint, and an overnight allowance is split across its two weekdays rather than wrapped. Activation resolves the name with `ZoneInfo` from that artifact; invalid/missing zones and artifact drift reject. Authorization maps trusted UTC now to a unique local instant with the bound artifact instead of materializing ambiguous/nonexistent wall-clock slots. It reuses the Phase 2 durable trusted-clock high-water guard: unresolved rollback denies new child playback until reconciliation catches up, preventing an allowed window from replaying after restart. A tzdata update invalidates the old rule. A standing rule never stores an expiring catalog handle. Every execution resolves a fresh single-use handle and matches its provider tuple plus item-identity commitment, or a trustworthy allowed classification, against the current signed rule. Every child allow carries one atomic rule authority tuple—rule ID/version, proposal and final digests, resulting active lifecycle generation, lifecycle-receipt commitment, child/profile generation, and matched content basis—through decision, signed envelope, dispatch receipt, operation result, and the immutable operation row. Authorization and dispatch reopen and exact-compare the current signed rule and applied lifecycle receipt before provider/player I/O. Edit/revoke therefore invalidates already minted but undispatched authority across restart/restore, as well as outstanding approvals, handles, and prepared actions. The rule grants no catalog outside its exact authority, explicit/unknown content without an approved durable identity, purchases, provider/account changes, broad groups, or persistent queue/routine authoring. The child feature/route/action remains absent until this lifecycle and physical child-safe playback gate pass.
 
 ### 12.4 Player and group behavior
 
-Every player binding includes exact protocol/provider, room, capabilities, state freshness, volume semantics, latency, grouping behavior, manual controls, and generation. Before starting audio, Tuntun obtains fresh state and sets an absolute bounded volume if supported. If current volume is unknown and the player cannot safely set an absolute starting value, playback through Tuntun remains disabled.
+Every player binding is activated or retired only through an owner-passkey prepared mutation and exact current-generation CAS. Commissioning evidence binds exact protocol/provider, room, capabilities, firmware/config digest, state freshness, volume semantics, latency, grouping behavior, manual controls, and generation. Before starting audio, Tuntun obtains fresh state and sets an absolute bounded volume if supported. If current volume is unknown and the player cannot safely set an absolute starting value, playback through Tuntun remains disabled. Drift or retirement advances generation and invalidates handles, prepared actions, group memberships, and feature evidence.
 
-A group is an immutable owner-passkey-approved manifest with enumerated player bindings and a maximum volume per member. It is never “all speakers” or a dynamic room query. Group playback requires an adult confirmation that names every room. Private speech, authentication prompts, child disclosures, timers, and security alerts never use media groups.
+A group is an immutable owner-passkey-approved and signed manifest activated through its own prepared-mutation/current-generation CAS, with one to the configured maximum members in canonical ordinal order. Edit creates a new version; retirement never mutates members in place. It binds manifest ID/version/digest and, for every enumerated player, exact player ID, binding generation, capability generation, current `(area_id, area_generation)`, and maximum volume. It is never “all speakers” or a dynamic room query. The signed action repeats that complete authority and the bridge exact-compares it to the compiled current manifest before any player read or I/O. Any member/order/cap/generation/manifest substitution, intervening change, or replay rejects. Group playback requires an adult confirmation that names every canonical area. Private speech, authentication prompts, child disclosures, timers, and security alerts never use media groups. Group routes and action registration remain absent until a separate group gate passes.
 
-Home Assistant/Music Assistant acceptance is not physical playback proof. Results distinguish `VERIFIED_PLAYING`, `ACCEPTED_UNVERIFIED`, `PARTIAL`, `FAILED`, and `UNKNOWN` based on fresh player observations. Timeouts and partial groups are reported truthfully. A failed start is not retried through another protocol or provider automatically.
+Home Assistant/Music Assistant acceptance is not physical playback proof. Results distinguish `VERIFIED_PLAYING`, `ACCEPTED_UNVERIFIED`, `PARTIAL`, `FAILED`, and `UNKNOWN` based on fresh player observations. `ACCEPTED_UNVERIFIED` requires an exact source-receipt commitment for at least an adapter acknowledgement or a stronger non-mirrored observation; dispatch start alone, no evidence, or mirrored optimism remains `UNKNOWN`. `PARTIAL` requires at least one actually verified target and at least one non-verified target. A group containing only acknowledgement-level plus failed/unknown outcomes is `UNKNOWN`, never partial. A verified observation must be sampled after the exact dispatch start, use adequate non-optimistic strength, and carry the action correlation. Play additionally requires the exact keyed item-identity commitment copied from the authorized handle; merely observing `playing`, a pre-existing/manual track, or another group member's item cannot verify the request. Volume must equal the signed absolute value; seek must be within an explicit signed commissioned tolerance; pause/resume/stop require the exact state. An adapter without item identity or action correlation caps play at accepted-unverified/unknown. Every canonical target has exactly one immutable transition record: `not_dispatched` for attempt zero or `dispatch_started` with complete context/effect proof for attempt one. Adapter ingress, observations, and claimed adapter terminal times cannot exceed the signed reconciliation deadline; unresolved attempted work becomes `UNKNOWN` at that boundary only through the verified Core deadline-terminal lineage, never through an adapter-authored unknown and never as late `FAILED` or `EXPIRED`. Timeouts and partial groups are reported truthfully. A failed start is not retried through another protocol or provider automatically.
 
 ## 13. Local teaching and display sessions
 
@@ -437,10 +442,17 @@ manifest_version
 renderer_endpoint_id
 display_endpoint_id
 area_id
+area_generation
 audience_class
+memory_audience_or_none
+presentation_policy
+audience_binding_commitment
 language_mode
 teaching_policy_version
 screen_time_session_ref
+screen_time_session_commitment
+screen_time_session_expires_at
+screen_time_policy_version
 issued_at
 expires_at
 components[]:
@@ -451,17 +463,20 @@ manifest_digest
 signature
 ```
 
-No raw HTML, JavaScript, CSS, iframe, external URL, data URL, file path, SVG script, form, download, WebRTC, extension, or browser permission appears in a manifest. Text and image assets pass the Phase 1 profile/child-safety and DLP gates. The renderer fetches each asset once from the paired local origin using a single-use handle, checks type/length/hash, and caches it only for the session. CSP, sandboxing, MIME validation, decompression limits, and total manifest/asset quotas apply before rendering.
+No raw HTML, JavaScript, CSS, iframe, external URL, data URL, file path, SVG script, form, download, WebRTC, extension, or browser permission appears in a manifest. Text and image assets pass the Phase 1 profile/child-safety and DLP gates. The full manifest digest covers every component and asset descriptor. The `tuntun-display-manifest-v1` signature covers that digest plus the complete non-content authority header; Core durably stores only the digest, authority header, signature/HMAC, and retention metadata—not the manifest body, component text, asset handle, or bytes. This permits restart verification without turning lesson content into durable history. The renderer fetches each asset once from the paired local origin using a single-use handle, checks type/length/hash, and caches it only for the session. CSP, sandboxing, MIME validation, decompression limits, and total manifest/asset quotas apply before rendering.
 
 ### 13.2 Teaching policy
 
 - Adult sessions may display a cited explanation or owner material within the active profile's audience boundary.
 - K2 and N1 sessions use the Phase 1 guarded-learning policy, age/language rules, and child-safe component subset.
+- Every K2/N1 request names exactly one active Phase 2 screen-time session for the same child/profile/area and current guardian/policy generation; non-child requests carry no screen-time session authority. The keyed session commitment, exact deadline, and policy version propagate through authorization and manifest, and the manifest cannot outlive that deadline.
 - Child sessions do not perform live web search. A guardian/owner may preapprove a derived, locally stored teaching pack; its source provenance and expiry are visible.
 - A display receives no private memory records. Tuntun renders only the minimum approved derived text/assets for that session.
 - Guest sessions receive generic material and no personalized progress or memory.
 - An uncertain or changed identity clears personalized content and returns to a neutral locally bundled screen.
 - “Educational” is not inferred from a programme, app, HDMI source, web domain, or model label. A screen-time exception exists only when the exact teaching session/policy/guardian binding qualifies under Phase 2.
+
+Any teaching or reply field that represents durable-memory audience imports the Phase 1 closed type unchanged: `subject_private|guardian_child|household_adults|household_all`. Guest has `memory_audience=None`, performs no memory retrieval, and uses a separate `presentation_policy=generic_guest_public`; public presentation is never encoded as a memory audience. Child `household_all` derivation additionally requires the existing child-safe household approval and exact current guardian generation. `owner_private|adult_private|household|public_only|household_shared` are rejected specifically at every memory-audience boundary (while `adult_private` remains a valid Phase 2 area class).
 
 ### 13.3 Display sequence
 
@@ -473,7 +488,7 @@ No raw HTML, JavaScript, CSS, iframe, external URL, data URL, file path, SVG scr
 6. The renderer validates signature, generation, expiry, quotas, and assets, then reports `READY` with its current HDMI hotplug/status evidence.
 7. If the television is still `DISPLAY_ONLY_MANUAL`, Tuntun asks a person to turn it on/select the labelled HDMI input. If a qualified adapter exists, Tuntun sends one desired-state control sequence under Section 15.
 8. Voice interaction remains at the winning speech endpoint; the television is not used as a microphone or identity source.
-9. Stop, privacy, identity downgrade, expiry, renderer loss, or screen-time end clears private components and cached assets. The renderer returns a signed clear receipt; a missing receipt is reported as unverified and the HDMI source is not assumed blank.
+9. Stop, privacy, identity downgrade, expiry, renderer loss, or screen-time end clears private components and cached assets. Core first durably signs a five-second `DisplayClearRequestV1` under `tuntun-display-clear-request-v1`; a renderer-local owner-stop/error may create only the same bounded request under the exact renderer-local-safety key purpose. The renderer returns a monotonic signed receipt under the separate `tuntun-display-receipt-v1` domain. Core's closed lifecycle ingress verifies both objects, exact manifest authority, current privacy generation, request sequence, and replay state before publishing clear truth. A render receipt must predate manifest expiry; an automatic-expiry clear must be at or after it. A missing or stale receipt is reported as unverified and the HDMI source is not assumed blank.
 
 ## 14. Television inventory and capability states
 
@@ -484,7 +499,14 @@ The initial inventory records two physical units:
 
 These descriptions do not prove a model family, production year, Tizen/Google TV/Android TV/Roku/other operating system, local API, Wake-on-LAN behavior, HDMI-CEC implementation, IR code set, or application-state availability. Serial numbers, MAC addresses, account IDs, and pairing tokens are encrypted deployment data and are not used as stable topology IDs.
 
-Each television moves through one closed state:
+Generic television lifecycle and screen-time power eligibility are separate authorities. The generic Phase 4 binding moves through:
+
+```text
+candidate -> commissioned -> degraded
+any live state -> quarantined -> retired
+```
+
+It may contain individually evidenced input, volume, mute, key, app, or observation capability without gaining any enforcement power. The unchanged Phase 2 `TVPowerEligibilityV1` separately moves through:
 
 ```text
 UNCOMMISSIONED
@@ -496,10 +518,12 @@ any enabled state -> DEGRADED
 ```
 
 - `UNCOMMISSIONED`: exact identity and ports are unknown; no Tuntun display/control claim.
-- `DISPLAY_ONLY_MANUAL`: HDMI teaching pixels work, but power/source remain human-controlled.
-- `OBSERVE_ONLY`: one qualified observation exists; Tuntun may show status but not enforce.
-- `COOPERATIVE_ELIGIBLE`: repeatable desired-state control and trustworthy observation satisfy Phase 2 Cooperative requirements.
-- `STRICT_ELIGIBLE`: control plus independently evidenced observation satisfy the stronger Phase 2 Strict gate.
+- `DISPLAY_ONLY_MANUAL`: paired display pixels may be used with manual power/input, but no standby enforcement route is proved.
+- `OBSERVE_ONLY`: exact fresh power observation exists but no standby control exists.
+- `COOPERATIVE_ELIGIBLE`: exact `tv.set_power.v1(STANDBY)` control and trustworthy power observation exist for the same current binding/generation.
+- `STRICT_ELIGIBLE`: the Cooperative facts additionally carry proved distinct failure domains/common-mode independence.
+
+Only the exact standby-control and power-observation facts can populate this imported Phase 2 authority. A generic control route, `commissioned` lifecycle, playback observation, or HDMI/input evidence never promotes it.
 - `DEGRADED`: previously qualified evidence is stale, changed, or failing; enforcement reverts to Advisory and mutations stop.
 
 Firmware, OS, integration, pairing, network, HDMI port, CEC topology, IR profile, or observation-path changes increment the capability generation and invalidate pending commands and enforcement eligibility.
@@ -530,7 +554,9 @@ tv.send_key.v1        # absent by default; exact finite key allowlist only
 tv.launch_app.v1      # absent unless exact app/state evidence passes
 ```
 
-Screen-time enforcement uses `tv.set_power(STANDBY)` or an exact qualified stop/application operation. It never cuts mains power, invokes a smart-plug relay, guesses a navigation macro, or uses a toggle. A power monitor used for independent observation is registered observation-only; its relay capability, if any, is absent from Tuntun's registry.
+Human control follows one closed assurance matrix. `adult_reversible_immediate` is valid only for desired mute/unmute and the non-committing keys `home|back|up|down|left|right`. Power on or standby, exact input, every absolute volume, `select`, and each commissioned app launch require an exact confirmation; an owner passkey may satisfy that action confirmation as stronger authority. Adults cannot mint owner-passkey authority. Binding, adapter, capability, input, key, or app registration/change is a separate owner-passkey prepared mutation and is never smuggled through an action request. The policy service and `AuthorizedTVRequestV1` both enforce the same matrix before registry reads or signing.
+
+Screen-time enforcement uses only the canonical Phase 2 `tv.set_power.v1(STANDBY)` operation. The exact normalization is raw television `ON -> Phase 2 on` and raw `STANDBY|OFF -> Phase 2 off`: standby is the commanded screen-off terminal state, while a separately observed full-off state is also screen-off. This mapping is fixed and tested per qualified adapter; it is never inferred from an acknowledgement. Enforcement never substitutes a stop/app/key action, cuts mains power, invokes a smart-plug relay, guesses a navigation macro, or uses a toggle. A power monitor used for independent observation is registered observation-only; its relay capability, if any, is absent from Tuntun's registry.
 
 ### 15.3 Observation strength
 
@@ -588,6 +614,7 @@ The ordinary remote and TV buttons are available to anyone holding/reaching them
 SpeechEndpointRegistrationV1
   endpoint_id
   area_id
+  area_generation
   room_class
   hardware_sku_and_revision
   firmware_version_and_digest
@@ -609,40 +636,58 @@ Registration is owner-passkey-approved and stores no recording or biometric temp
 
 ### 17.2 Capture lease and audio frame
 
-`CaptureLeaseV1` binds claim, endpoint, room, turn, conversation slot, session epoch, privacy/capability generations, issue/expiry, allowed formats, duration/byte quotas, and signature. Binary `SpeechFrameV1` binds lease, stream/turn UUID, monotonic sequence, timestamp, format, duration, and payload length under the Phase 1 allocation limits. A stale, duplicate, losing, cancelled, over-quota, muted, or generation-mismatched frame is discarded before provider authorization.
+`CaptureLeaseV1` binds claim, endpoint, canonical `(area_id, area_generation)`, turn, conversation slot, session epoch, privacy/capability generations, issue/expiry, allowed formats, duration/byte quotas, and signature. Binary `SpeechFrameV1` binds lease, stream/turn UUID, monotonic sequence, timestamp, format, duration, and payload length under the Phase 1 allocation limits. A stale, duplicate, losing, cancelled, over-quota, muted, or generation-mismatched frame is discarded before provider authorization.
 
 ### 17.3 Media request and envelope
 
-The internal `AuthorizedMediaRequestV1` contains actor/profile policy data only inside Tuntun. The outbound `SignedMediaEnvelopeV1` contains:
+The internal `AuthorizedMediaRequestV1` contains actor/profile policy data only inside Tuntun. The outbound `SignedMediaEnvelopeV1` carries the complete immutable authorization, including:
 
 ```text
+operation_id
+request_id
 action_id
 action_type
 target_player_or_group_manifest_id
+target_kind
+group_manifest_version_and_digest_when_group
+canonical_ordered_group_members_when_group:
+  ordinal, player_id, player_binding_generation,
+  player_capability_generation, member_cap
 catalog_handle_or_desired_transport_state
+catalog_item_identity_commitment_when_play
 absolute_volume_when_applicable
+seek_position_and_commissioned_tolerance_when_applicable
 controller_epoch
 topology_and_binding_generations
 capability_digest
-provider_and_entitlement_generation
+provider_binding_id_and_provider_generation
+adapter_and_entitlement_generation
 policy_version
+request_binding_commitment
 authorization_commitment
 idempotency_key
 authorized_at
+request_expires_at
+decision_valid_until
 issued_at
 expires_at
+reconciliation_deadline
 signature
 ```
 
-It follows the Phase 2 timing, signature-domain separation, pre-dispatch receipt, reconciliation, and no-blind-retry rules. Actor name, transcript, biometric evidence, and memory content are absent.
+For a group, the signed member tuple is exactly the owner-approved manifest order and is part of the authorization commitment; the bridge byte-compares it with compiled-current membership/caps/generations before receipt persistence or I/O. Player/member/order/cap/generation/manifest substitution, change after authorization or before dispatch, and replay reject. The signature obeys all conjunctive bounds: `authorized_at <= issued_at <= authorized_at + 5s`, `issued_at < expires_at`, `expires_at <= min(request_expires_at, decision_valid_until, authorized_at + 30s, issued_at + 5s)`, and `expires_at <= reconciliation_deadline <= expires_at + 5s`. The immutable operation row binds `(operation_id, request_id, action_id, envelope_digest)`; each target transition record repeats that lineage and is exactly `not_dispatched` for attempt zero or `dispatch_started` with exact context/effect proof for attempt one. Media and TV both import the one Phase 2 bridge-store `advance_to_dispatching_if_fresh(..., begin_after_commit_no_yield)` serialized dispatch-admission primitive. It accepts no caller timestamp, samples dispatch time only after acquiring the shared authority writer, commits proof only while that trusted sample is before expiry, then—after `COMMIT` and writer release—performs no await/yield before resampling trusted actual-call-start time and invoking the synchronous compiled-effect begin capability. Equality or later at either pre-commit sample yields no dispatch; equality or later at the post-commit sample invokes no effect, retains the attempt-one proof, and never redispatches after restart. Adapter `MediaDispatchReceiptV1` has no `unknown` variant. At or after the trusted deadline, Core reloads the immutable operation, signed envelope, and complete attempt-one target-proof set; if no bounded terminal adapter receipt was durably accepted, it atomically persists and separately signs one `MediaDispatchUnknownTerminalV1` under `tuntun-media-dispatch-unknown-terminal-v1`/`core_media_dispatch_unknown_terminal`. That record fixes logical `terminal_at=reconciliation_deadline`, retains actual `materialized_at >= terminal_at`, is idempotent across restart, and cannot be replaced by late adapter evidence. Receipts, terminals, and results are accepted only after reloading the operation, exact provider-binding row, signed envelope, and every target record, deriving the exact target tuple from the envelope, and bounding adapter ingress, observation, and claimed terminal time by the signed reconciliation deadline. An undispatched nonterminal cannot survive envelope expiry; an attempted nonterminal cannot survive the reconciliation deadline. Evidence from a prior same-target operation or after that deadline cannot verify the action. It follows Phase 2 domain separation, pre-dispatch receipt, reconciliation, and no-blind-retry rules. Actor name, transcript, biometric evidence, and memory content are absent.
 
 ### 17.4 Display manifest
 
-`TeachingSessionManifestV1` is defined in Section 13. Its signature domain is `tuntun-display-manifest-v1`. Reusing a session ID with another manifest digest, asset, audience, or display is rejected. A manifest expires no later than the session or two hours after issue, whichever comes first. Child sessions default to 30 minutes unless the current screen-time/guardian policy grants a shorter or longer bounded duration.
+`TeachingSessionManifestV1` is defined in Section 13. Its signature domain is `tuntun-display-manifest-v1`; the signature input is `{domain, full_manifest_digest, complete non-content authority header}`. Reusing a session ID with another manifest digest, asset, audience, or display is rejected. The minimized authority record is immutable, HMAC-bound, and sufficient to verify a later renderer receipt without persisting the body. A manifest expires no later than its signed, request-bounded `maximum_duration_minutes`, the session/screen-time deadline, or two hours after issue, whichever comes first. Child sessions default to 30 minutes unless the current screen-time/guardian policy grants a shorter or longer bounded duration.
+
+`DisplayReceiptV1` uses the distinct `tuntun-display-receipt-v1` domain and a paired-renderer receipt key. It carries a durable monotonic receipt sequence plus the manifest `(session_id, version, digest, issued_at, expires_at)` and repeated display/renderer/area/privacy authority. Core reloads and verifies the minimized immutable manifest-authority record, exact-compares each repetition, and reloads current generations before publishing display state. A `cleared` receipt additionally repeats one immutable `DisplayClearRequestV1`, signed under `tuntun-display-clear-request-v1` with an exact core or renderer-local-safety key purpose. Missing, replaced, stale, cross-domain, old-sequence, or prior-clear evidence remains unverified; it cannot acknowledge current pixels.
 
 ### 17.5 TV action and observation
 
-`SignedTVActionV1` reuses the Phase 2 action lifecycle and binds exact TV endpoint, control adapter, operation, desired state, controller epoch, topology/binding/capability generations, authorization/enforcement generation, idempotency, times, and signature. Phase 4 `WholeHomeTVObservationV1` binds exact endpoint/adapter/generation, observed dimensions, strength, sample/ingest time, freshness, and a source receipt. The screen-time mapper rejects any mismatch before producing the distinct canonical Phase 2 `TVObservationV1`; neither shape accepts a free-form key sequence or attribute map.
+`SignedTVActionV1` uses `tuntun-tv-action-v1`/`tv_action` and binds exact TV endpoint, control adapter, operation, desired state, controller epoch, topology/binding/capability generations, authorization/enforcement generation, idempotency, times, and signature. Adapter `TVActionDispatchReceiptV1` uses `tuntun-tv-dispatch-receipt-v1`/`tv_dispatch_receipt` and has no `unknown` variant; `WholeHomeTVObservationV1` uses `tuntun-tv-observation-v1`/`tv_observation`. Core `TVDispatchUnknownTerminalV1` uses the fourth distinct domain/purpose `tuntun-tv-dispatch-unknown-terminal-v1`/`core_tv_dispatch_unknown_terminal`. All-pairs cross-domain and wrong-purpose replay fails even if one physical key performs multiple roles. Action time authority is conjunctive: `authorized_at <= issued_at <= authorized_at + 5s`, `issued_at < expires_at`, `expires_at <= authorized_at + 30s`, `expires_at <= issued_at + 5s`, and the signed `reconciliation_deadline` lies in `[expires_at, expires_at + 5s]`. TV dispatch uses the same imported Phase 2 serialized admission primitive described above, including writer-owned post-lock time and the post-commit/no-yield resample immediately before synchronous adapter begin. An `expired` adapter receipt is attempt zero, carries no dispatch evidence, and is valid only at/after expiry. A dispatch admitted before expiry may report only through the signed reconciliation deadline; receipt observation later than trusted receiver ingress, or receiver ingress after the deadline, rejects. At or after that trusted Core boundary, the deadline finalizer reloads the signed action and exact immutable attempt-one proof; if no bounded terminal adapter receipt was durably accepted, it atomically persists one Core terminal with fixed logical `terminal_at=reconciliation_deadline` and actual `materialized_at >= terminal_at`. Before the boundary it creates nothing; at equality, one microsecond later, or after crash/restart it returns the same record, never redispatches, and rejects late adapter evidence. The screen-time mapper accepts only the closed adapter-receipt/Core-terminal union, verifies the branch-specific domain/purpose and current imported `TVPowerEligibilityV1`, and maps the Core terminal to `UNKNOWN/possibly_in_flight/OUTCOME_UNKNOWN` before producing the distinct canonical Phase 2 types. Neither shape accepts a free-form key sequence or attribute map. Guardians change screen-time rules through Phase 2; only a committed Phase 2 system enforcement intent can dispatch the standby action, never a direct guardian TV request.
+
+For both media and TV, adapter ingress and its Core deadline finalizer serialize on the same authority writer. Exact-deadline contention therefore commits either one valid bounded adapter terminal or one Core unknown terminal, never both; the losing and every later branch rejects without effect or redispatch. A cryptographically valid definitive adapter receipt that arrives after the Core terminal is retained once in encrypted non-authoritative late-evidence storage, bound to the immutable operation/action, receipt digest, trusted ingress, and winning terminal. It is available only for owner audit and adapter-quality analysis: result/session/UI truth and dispatch admission exclude it, it cannot replace the terminal or authorize replay, and invalid or oversized late payloads retain only bounded rejection metadata plus a keyed digest.
 
 ## 18. End-to-end sequences
 
@@ -684,7 +729,7 @@ The sequence follows Section 16.3 and never exceeds two control attempts. Extens
 - Where the actual router/firmware permits without breaking required discovery, endpoint host firewalls restrict room nodes to Tuntun Core and display agents to Tuntun Core plus required update/time endpoints. Phase 4 does not claim a VLAN that the real AiMesh cannot enforce.
 - A room node has no OpenAI, provider, Home Assistant, Music Assistant, SQLCipher, memory, or biometric key.
 - A display agent has no streaming-provider, television-account, Home Assistant, or family-profile credential.
-- Tuntun keeps no Home Assistant or Music Assistant general token. The Phase 2 signed custom-integration boundary is extended with separate `tuntun-media-v1` and `tuntun-tv-v1` signatures/routes, compiled bindings, idempotency, and system-context translators. Its security-critical TCB grows only by the reviewed closed operations in this specification.
+- Tuntun keeps no Home Assistant or Music Assistant general token. The Phase 2 signed custom-integration boundary is extended with four type-separated media domains/key purposes—`tuntun-media-v1`/`media_action`, `tuntun-media-group-v1`/`media_group_manifest`, `tuntun-child-media-rule-v1`/`child_media_rule`, and Core-only `tuntun-media-dispatch-unknown-terminal-v1`/`core_media_dispatch_unknown_terminal`—plus four type-separated TV domains/key purposes: `tuntun-tv-action-v1`/`tv_action`, `tuntun-tv-dispatch-receipt-v1`/`tv_dispatch_receipt`, `tuntun-tv-observation-v1`/`tv_observation`, and Core-only `tuntun-tv-dispatch-unknown-terminal-v1`/`core_tv_dispatch_unknown_terminal`. Compiled bindings, idempotency, and system-context translators remain closed. Its security-critical TCB grows only by the reviewed operations in this specification.
 - Catalog lookup exposes only configured provider metadata and opaque handles. Private/LAN URLs, redirects, filesystem paths, and caller-selected URIs are invalid.
 - Television credentials/tokens remain in the exact local integration's encrypted configuration. They never enter a prompt or room endpoint.
 - Renderer CSP defaults to `default-src 'none'`; only the paired local origin and hash-validated in-memory assets required by the closed renderer are enabled. There are no third-party analytics, fonts, scripts, or pixels.
@@ -817,7 +862,7 @@ Until every condition passes, configuration values above one are rejected and pa
 - External-network scanning finds no Tuntun, Green, Music Assistant, room-node, renderer, television-control, or debug service exposed through either router.
 - A content scan finds no audio, transcript, biometric vector, family memory, PIN/passkey secret, provider credential, TV credential, display content, or raw catalog query in unauthorized stores/logs/backups.
 - Mac/Green/endpoint/renderer/player/TV/WAN/inner-router/power/disk/update/restore failures are injected at every relevant state transition.
-- A seven-day family soak has no double response, wrong-area/private broadcast, unbounded retry, false playback/display/TV result, silent provider/policy change, or loss of physical mute/remote/manual recovery; ordinary owner work is recorded by subsystem for the single Phase 6 full-system maintenance gate.
+- A seven-day family soak has no double response, wrong-area/private broadcast, unbounded retry, false playback/display/TV result, silent provider/policy change, or loss of physical mute/remote/manual recovery; it binds one complete canonical same-candidate rollover chain, every ordered transition receipt, and zero expired-authority interval. Ordinary owner work is recorded by subsystem for the single Phase 6 full-system maintenance gate; only records within one uninterrupted eligible authority/candidate/steady-state generation may contribute to its 60-/90-day window.
 
 ## 23. Staged commissioning and milestones
 
@@ -835,7 +880,7 @@ Until every condition passes, configuration values above one are rejected and pa
 - Procure one exact purchased voice candidate and one exact DIY candidate after landed quotes/return terms.
 - Run acoustic, privacy, physical mute, indicator, stop, update/rollback, and maintenance tests in the same common area.
 
-**Gate:** select the evidence winner or retain both only if both independently pass. No private-room rollout yet.
+**Gate:** select the evidence winner or retain both only if both independently pass. `NO_ELIGIBLE_CANDIDATE` is a safe failed gate that permits simulator/manual-display learning only; it is not an accepted Phase 4 result and blocks P4-2 and later-phase entry. No private-room rollout yet.
 
 ### P4-2 — Reachy plus one room endpoint
 
@@ -875,7 +920,7 @@ Until every condition passes, configuration values above one are rejected and pa
 
 - Add one room at a time after class-specific consent, acoustic placement, physical mute access, quiet hours, and seven-day room soak.
 
-**Gate:** every room independently passes privacy/routing tests; `prohibited_sensitive` has zero endpoints. Two-conversation mode remains disabled unless Section 22.8 is separately approved.
+**Gate:** every area independently passes privacy/routing tests; canonical `prohibited` areas have zero endpoints. Two-conversation mode remains disabled unless Section 22.8 is separately approved.
 
 ## 24. Effort and operating burden
 

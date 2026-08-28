@@ -49,6 +49,21 @@ Follow the plans in order where their declared dependencies require it. Independ
 22. Cloud STT, reasoning, and TTS each require current purpose-specific consent and a route authorization. Adult subjects consent for themselves; a guardian consents for a child. Guest is offline-only unless a local per-session disclosure and consent succeeds.
 23. Privacy/mute activation may be local voice/edge initiated; disabling either requires an authenticated owner console or a documented physical local-presence ceremony. Voice alone never reduces privacy.
 
+### Safety-critical execution clarifications
+
+- Privacy Shield closes new local media/cloud authority synchronously, then fans out acknowledgements concurrently under one absolute monotonic 500 ms deadline. Its receipt names missing acknowledgements truthfully; reconciliation/audit run idempotently after the response.
+- Profile revocation requires active state, advances a subject-authority generation, and atomically revokes sessions, consent, enrollment/templates, and all unconsumed provider/search/action/memory authority. The SQLCipher writer defines revoke-versus-consume order and restart tests cover every stale authority family.
+- Reachy production authority separates the commissioned reserved numeric inner-Mac IPv4/MAC/port and household-CA leaf IP SAN/generations from the strictly validated local Reachy ingress-interface configuration. mDNS is discovery-only. Edge-initiated mTLS WSS has one-second heartbeats, two-miss failure, bounded reconnect, no replay/resume, and default-deny IPv4/IPv6 firewall tests for reboot, scans, spoofing, and drift.
+- `start_attempted` survives ephemeral erasure. Every terminal path invokes one locked idempotent `finish(turn_id)` and cleanup never masks the primary outcome.
+- Expired provider reservations are reconciled at startup and periodically: release only exact proven-unsent attempts; settle sent, malformed, or ambiguous attempts in their original Singapore month. Crash windows and mark/reconcile races are tested.
+- Memory create/replace writes carry the exact approved proposal/source ID into both the current row and newly materialized immutable revision; a real migrated file-backed SQLCipher close/reopen proves reconstruction.
+- Bilingual gating uses actual candidate prompts and closed expectations for English, Devanagari Hindi, Romanized Hindi, and mixed switching, then independently verifies a signed result report bound to prompt/policy/corpus/scorer/result hashes.
+- Optional experimental search uses a private owner/session parent capability that atomically mints a new single-use route authorization, idempotency key, and budget reservation for every provider attempt. Disabled builds prove config/API/UI/package/runtime absence.
+- Clean install separates host checks from post-initialization verification and provisions purpose roots, SQLCipher, audit genesis, household CA, backup recipient, and recovery ceremony before readiness. Upgrade probes the newly started candidate inside the rollback boundary.
+- Release evidence includes candidate/time/config/target-bound process-tree, DNS, listener/socket, payload-free packet, LAN-scan, and outer-scan receipts. Private-data scanning accepts explicit roots, never skips them, and reads complete bounded files/archive members.
+- Reachy packaging uses a pinned cross-platform deterministic archive writer. On the final frozen commit, a signed nonpublic qualification manifest binds two byte-identical builds; a clean locally commissioned target installs those exact bytes in evidence-pending state before target/LAN/outer evidence, and later candidate assembly consumes the same hashes without rebuilding. Every workflow action is a full commit SHA on fixed runner labels; hosted CI is portability evidence, not target-hardware qualification.
+- Optional LAN administration stays loopback until exact private DNS, matching local-CA TLS/SAN, and all admin-device trust receipts are commissioned. `.home.arpa` is never assumed to resolve; drift revokes LAN sessions and closes port 8443.
+
 ## Definition of Done
 
 A task is complete only when all of these are true:
@@ -260,17 +275,20 @@ Project_TunTun/
 These types are defined before adapters. They are immutable Pydantic v2 models with `extra="forbid"`, aware UTC timestamps, random UUIDs, bounded text/bytes, and explicit schema version `1.0`.
 
 ```python
+import base64
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 
 class ContractModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         frozen=True,
+        strict=True,
+        allow_inf_nan=False,
         validate_assignment=True,
         str_strip_whitespace=True,
     )
@@ -298,7 +316,7 @@ class WakeDetectedPayload(ContractModel):
 class StopRequestedPayload(ContractModel):
     kind: Literal["safety.stop_requested"]
     turn_id: UUID | None
-    source: Literal["edge_keyword", "owner_console", "watchdog"]
+    source: Literal["edge_keyword", "physical_input", "owner_console", "watchdog"]
 
 
 EventPayload = Annotated[
@@ -309,8 +327,19 @@ EventPayload = Annotated[
 
 class Commitment(ContractModel):
     algorithm: Literal["HMAC-SHA-256"]
-    key_id: Annotated[str, Field(min_length=8, max_length=128)]
-    value_b64: Annotated[str, Field(min_length=40, max_length=128)]
+    key_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    value_b64: str = Field(min_length=44, max_length=44, pattern=r"^[A-Za-z0-9+/]{43}=$")
+
+    @field_validator("value_b64")
+    @classmethod
+    def canonical_hmac_sha256(cls, value: str) -> str:
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (ValueError, base64.binascii.Error) as error:
+            raise ValueError("commitment must be canonical base64") from error
+        if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
+            raise ValueError("commitment must encode exactly 32 bytes canonically")
+        return value
 
 
 class AudioFormat(ContractModel):
@@ -337,7 +366,7 @@ class EventEnvelope(ContractModel):
     payload: EventPayload
 ```
 
-The real union contains every registered event payload. A model validator enforces `event_type == payload.kind`. Nested data uses tuples/frozen models, not mutable dictionaries/lists. RFC 8785/JCS canonical UTF-8 bytes, Unicode NFC, and UTC timestamps with exactly six fractional digits are used for signatures and commitments.
+The real union contains every registered event payload. A model validator enforces `event_type == payload.kind`. Nested data uses tuples/frozen models, not mutable dictionaries/lists. RFC 8785/JCS canonical UTF-8 bytes, Unicode NFC, and UTC timestamps with exactly six fractional digits are used for signatures and commitments. Every signed, network, provider-output, or control ingress first calls the shared bounded `parse_contract_json(model_type, raw_bytes, max_bytes=..., require_canonical=...)`, which delegates its first pass to public `parse_bounded_json_value(raw_bytes, max_bytes=..., max_depth<=32, max_containers<=4096, max_structure_tokens<=16384)`. That first pass rejects duplicate keys, non-finite/non-standard numbers, excessive flat scalar members/separators, oversized or invalid UTF-8 input before strict Pydantic JSON validation. Every hostile raw-byte size/UTF-8/syntax/shape/number/schema/canonicality rejection is normalized to the exported `ContractParseError(ValueError)`; invalid parser configuration, a non-contract model type, or another programmer fault is not relabeled. Signed/control frames require byte-for-byte canonical JCS; provider JSON may set `require_canonical=False` but is canonicalized only after the safe parse. Direct `model_validate_json` is forbidden at runtime ingress boundaries; its sole runtime occurrence is inside the shared primitive.
 
 Required port families are `ReachyPort`, `StopInputPort`, `AudioConverterPort`, `SpeechToTextPort`, `TextToSpeechPort`, `LanguageModelPort`, `IdentityFusionPort`, `MemoryRepositoryPort`, `PolicyEnginePort`, `AuthenticationPort`, `ActionProviderPort`, `AuditPort`, `BudgetPort`, `ClockPort`, and `ConversationWorkflow`. Task 02 freezes their exact async signatures in `ports.py`; the execution subplan includes the complete definitions and contract tests. No domain/service/workflow module imports from `adapters`.
 
@@ -359,7 +388,7 @@ class RouteAuthorization(ContractModel):
     max_input_bytes: Annotated[int, Field(ge=1, le=8_388_608)]
     max_input_units: Annotated[int, Field(ge=1)]
     privacy_receipt_id: UUID
-    consent_receipt_ids: tuple[UUID, ...]
+    consent_receipt_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=8)]
     budget_reservation_id: UUID
     maximum_sensitivity: Sensitivity
     expires_at: AwareDatetime
@@ -380,8 +409,8 @@ class SanitizedProviderRequest(ContractModel):
     request_id: UUID
     provider: Literal["openai", "qwen"]
     model: Annotated[str, Field(min_length=1, max_length=128)]
-    messages: tuple[SanitizedProviderMessage, ...]
-    allowed_tools: tuple[SanitizedToolReference, ...]
+    messages: Annotated[tuple[SanitizedProviderMessage, ...], Field(min_length=1, max_length=32)]
+    allowed_tools: Annotated[tuple[SanitizedToolReference, ...], Field(min_length=0, max_length=8)]
     max_output_tokens: Annotated[int, Field(ge=1, le=16_384)]
     store: Literal[False] = False
     redaction_receipt_id: UUID
@@ -396,14 +425,20 @@ class AuthorizedTranscriptionRequest(ContractModel):
     audio_commitment: Commitment
     audio_bytes: Annotated[int, Field(ge=1, le=8_388_608)]
     duration_ms: Annotated[int, Field(ge=1, le=90_000)]
-    language_hints: tuple[Literal["en", "hi"], ...]
+    language_hints: Annotated[tuple[Literal["en", "hi"], ...], Field(min_length=1, max_length=2)]
     route: RouteAuthorization
+
+    @field_validator("language_hints")
+    @classmethod
+    def unique_language_hints(cls, value):
+        if len(set(value)) != len(value): raise ValueError("duplicate language hint")
+        return value
 
 
 class AuthorizedSynthesisRequest(ContractModel):
     request_id: UUID
     turn_id: UUID
-    text: Annotated[str, Field(min_length=1, max_length=8_000)]
+    text: Annotated[str, Field(min_length=1, max_length=4_096)]
     text_commitment: Commitment
     segment_index: Annotated[int, Field(ge=0, le=255)]
     segment_count: Annotated[int, Field(ge=1, le=256)]
@@ -421,7 +456,7 @@ The final Phase 1 encrypted schema and migration ownership have these tables and
 | Table | Required data/invariant |
 |---|---|
 | `households` | UUID, display label, fixed timezone `Asia/Singapore`, created time |
-| `subjects` | UUID, household FK, canonical owner/adult/k2/n1 class, encrypted display data and versioned typed persona envelope, active/version state, timestamps; Guest is never persisted |
+| `subjects` | UUID, household FK, canonical owner/adult/k2/n1 class, encrypted display data and versioned typed persona envelope, active/version state, monotonic authority generation, timestamps; Guest is never persisted |
 | `devices` | UUID, household FK, kind, certificate fingerprint, signing public key/key ID, pairing/revocation, last sequence |
 | `sessions` | UUID, household/device FKs, state, optional speaker, open/activity/close times; partial unique index permits one active household session |
 | `event_receipts` | Event IDs, types, correlations, device-global sequence, keyed commitments, decision; never event payload |
@@ -429,9 +464,9 @@ The final Phase 1 encrypted schema and migration ownership have these tables and
 | `consent_receipts` | Purpose including face/voice/personalization/cloud STT/reasoning/TTS and adult-self-only web search, subject/guardian, grant/revoke state, policy/disclosure version, timestamp; Guest tables retain only the three cloud purposes |
 | `enrollment_sessions` | Subject/purpose/state, auth/consent receipts, create/expiry/close; no source media |
 | `biometric_templates` | Subject/modality/model version, AEAD ciphertext/nonce/wrapped random DEK/root key ID, consent, create/revoke; no media |
-| `memory_proposals` | Typed candidate claim, subject, operation, target/version, closed audience, sensitivity, reasons, source receipt IDs, status, expiry/decision |
-| `memories` | Seven-kind typed content, namespace, closed audience, sensitivity/source/confidence, status/version, validity/expiry, consent and purpose-separated content commitment |
-| `memory_revisions` | Immutable per-memory versions including closed audience, operation, proposal, purpose-separated commitments, timestamp |
+| `memory_proposals` | Typed candidate claim, subject authority generation, operation, target/version, closed audience, sensitivity, reasons, source receipt IDs, status, expiry/decision |
+| `memories` | Seven-kind typed content, namespace, closed audience, sensitivity/source/confidence, status/version, exact non-null approved proposal FK, validity/expiry, consent and purpose-separated content commitment |
+| `memory_revisions` | Immutable newly materialized per-memory versions including closed audience, operation, non-null approved proposal FK, purpose-separated commitments, timestamp |
 | `memory_embeddings` | Memory/model IDs, dimensions, AEAD ciphertext/nonce/wrapped random DEK/root key ID, timestamp; never provider-visible |
 | `auth_credentials` | PIN/recovery hashes or passkey public data/counter, algorithm, use/revoke times |
 | `auth_challenges` | Nonce commitment, subject/session, factor kind, bound action/resource/parameters/policy version, attempts, expiry/consumption |
@@ -440,10 +475,12 @@ The final Phase 1 encrypted schema and migration ownership have these tables and
 | `audit_receipts` | Ordered append-only public SHA-256 chain plus versioned HMAC commitments; update/delete rejected by database triggers |
 | `audit_segments` | Segment UUID, ordinal range/count, first/last HMAC, terminal root/MAC, seal/export state; profile deletion removes pseudonym mapping, not chain integrity |
 | `redaction_receipts` | Purpose-separated keyed input/output commitments, removed categories/counts, policy version, maximum sensitivity; no body |
-| `provider_calls` | Purpose-separated keyed request/response commitments, provider/model, receipt, category, timing/outcome; no body |
+| `provider_calls` | Purpose-separated keyed request/response commitments, provider/model, receipt, category, timing/outcome, exact attempt/reservation, ordering version and durable transport phase; no body |
 | `provider_prices` | Versioned native price units, dated conservative FX-to-SGD, effective/expiry |
-| `budget_reservations` | Atomic worst-case reservation, month/category/provider/model, state/expiry/settlement |
-| `cost_ledger` | Final micro-SGD charge, usage metadata, conservative-use flag; unique reservation settlement |
+| `budget_reservations` | Atomic worst-case reservation, immutable Singapore month/category/provider/model, state/expiry/settlement/reconciliation time, exact attempt, ordering version and durable transport phase |
+| `cost_ledger` | Original reservation month, final micro-SGD charge, usage metadata, conservative-use flag; unique reservation settlement |
+| `reachy_core_tx_sequences` | Content-free reserved core-to-edge transmit high-water mark per commissioned device |
+| `reachy_duplex_correlations` | Content-free signed-frame correlation purpose/direction/state/sequence tombstones |
 | `timers` | Owner/session, label HMAC commitment, due time, state, announcement idempotency key; no transcript |
 | `runtime_settings` | Registry-approved non-secret settings and version; secrets are Keychain references only |
 
@@ -451,12 +488,16 @@ All UUIDs are stored as canonical lowercase strings, booleans as constrained int
 
 **Migration ownership:**
 
-1. `0001_foundation.py`: households, devices, sessions, event/idempotency/audit/audit-segment/redaction/provider/price/budget/cost/runtime tables.
+1. `0001_foundation.py`: households, devices, sessions, event/idempotency/audit/audit-segment/redaction/provider/price/budget/cost/runtime tables plus reserved content-free Reachy core transmit-sequence and duplex-correlation state.
 2. `0002_profiles_consent_enrollment.py`: subjects, consent receipts, enrollment sessions, and modality-neutral biometric templates needed independently by face/voice adapters.
 3. `0003_authentication.py`: auth credentials/challenges/admin sessions/rate limits.
 4. `0004_memory.py`: memory proposals, memories, revisions.
 5. `0005_memory_embeddings.py`: encrypted memory embeddings.
 6. `0006_timers.py`: timers.
+7. `0007_privacy_post_response_jobs.py`: durable privacy finish/reconciliation jobs; it follows `0006_timers`.
+8. `0008_prepared_mutations.py`: prepared owner mutations and their durable execution binding; it follows `0007_privacy_post_response_jobs` and is the sole Phase 1 core head in every artifact.
+
+An experimental-search-enabled artifact independently packages `apps/core/migrations/features/experimental_search/versions/search_0001_experimental_search.py`, whose `down_revision` is `None` and whose dedicated version table is exactly `alembic_version_experimental_search`. It never appears in the core graph, so the Phase 2 core migration remains the sole child of `0008_prepared_mutations`. An absent-search artifact omits that feature namespace, feature version table, tables, facades, configuration, routes, and runtime registration. Enabled-to-absent replacement first uses the still-installed feature manager to withdraw dispatch, drain or conservatively settle work, downgrade the feature graph, remove its empty version table, and verify a signed removal receipt; residue blocks the artifact switch.
 
 ## Standard Commands
 
@@ -510,8 +551,8 @@ Checkpoint taxonomy is explicit: A0, A0.5, A1, B1, and B2 are five Phase 1 engin
 
 - Create `.python-version`, `pyproject.toml`, `uv.lock`, `.gitignore`, `.pre-commit-config.yaml`, `Makefile`.
 - Create `apps/core/pyproject.toml`, `apps/edge/pyproject.toml`, `packages/contracts/pyproject.toml`, `packages/testing/pyproject.toml`.
-- Create `package.json`, `pnpm-workspace.yaml`, `apps/admin/package.json`, `apps/admin/vite.config.ts`, `pnpm-lock.yaml`.
-- Create `apps/admin/index.html`, `tsconfig.json`, `vitest.config.ts`, `playwright.config.ts`, `src/main.tsx`, `src/app.tsx`, `src/app.test.tsx`, and `src/test/setup.ts`.
+- Create `package.json`, `pnpm-workspace.yaml` with `apps/*` and `packages/*`, `apps/admin/package.json`, `apps/admin/vite.config.ts`, and `pnpm-lock.yaml`.
+- Create `apps/admin/index.html`, `tsconfig.json`, `eslint.config.js`, `playwright.config.ts`, `src/main.tsx`, `src/app.tsx`, `src/app.test.tsx`, and `src/test-setup.ts`; create the root Playwright smoke/accessibility specs and a CI sentinel that proves both `tests/e2e` and `tests/ui` have a nonzero discovered test count.
 - Create `apps/core/src/tuntun_core/__init__.py`, `apps/edge/src/tuntun_edge/__init__.py`, `packages/contracts/src/tuntun_contracts/__init__.py`, `packages/testing/src/tuntun_testing/__init__.py`, and `tests/unit/test_package_smoke.py`.
 - Create a minimal Typer CLI at `apps/core/src/tuntun_core/cli/main.py` and register `tuntunctl = "tuntun_core.cli.main:app"` in `apps/core/pyproject.toml`.
 - Create `scripts/verify_private_data.py` and `tests/security/test_private_data_scanner.py`.
@@ -527,7 +568,7 @@ Checkpoint taxonomy is explicit: A0, A0.5, A1, B1, and B2 are five Phase 1 engin
 - [ ] Configure a root `uv` workspace for Python 3.12 and four package members; add Typer and dev dependencies for pytest, pytest-asyncio, Hypothesis, Ruff, mypy, coverage, and respx.
 - [ ] Add the four `src` packages with version `0.1.0.dev0`; make the smoke test pass.
 - [ ] Configure strict mypy, Ruff formatting/lint, pytest markers `live_cloud` and `reachy_hardware`, and branch coverage thresholds.
-- [ ] Configure pnpm/Vite/React/TypeScript, Vitest, Testing Library, ESLint, Playwright, `@axe-core/playwright`, and a minimal non-networked admin entrypoint/smoke test rendering “Tuntun setup in progress.” Add `make web-e2e`.
+- [ ] Configure pnpm/Vite/React/TypeScript, React Router, TanStack Query, React Intl/ICU, Vitest, Testing Library, ESLint, Playwright, `@axe-core/playwright`, and a minimal non-networked admin entrypoint/smoke test rendering “Tuntun setup in progress.” Add `make web-e2e`.
 - [ ] Implement `Makefile` targets listed under Standard Commands. `make check` must exclude paid/hardware markers.
 - [ ] Add `.gitignore` entries for `.env`, `var/`, coverage, Playwright output, model weights, audio/video/image fixtures outside the synthetic fixture allowlist, macOS app data, and local certificates/keys.
 - [ ] Implement a fail-closed private-data scanner for forbidden extensions, sentinel patterns, local paths/host identifiers, credentials/certificates/keys, SQLite/backups, non-synthetic media, and model weights. Add unit fixtures proving detection and allowlisting behavior.
@@ -666,7 +707,7 @@ budget:
 
 - Create `packages/testing/src/tuntun_testing/fake_clock.py`, `fake_providers.py`, `fake_reachy.py`, `scenario.py`.
 - Modify `apps/core/src/tuntun_core/cli/main.py`; create `apps/core/src/tuntun_core/cli/commands/simulate.py`.
-- Create `apps/core/src/tuntun_core/services/models/registry.py`, `installer.py`.
+- Create `apps/core/src/tuntun_core/services/models/fs.py`, `network.py`, `registry.py`, `installer.py`.
 - Create `models/manifest.schema.json`, `models/manifest.yaml`, `scripts/check_model_manifest.py`.
 - Create `tests/security/test_model_governance.py`, `tests/fixtures/scenarios/guest-hinglish.yaml`, and `tests/fixtures/synthetic/README.md` defining the allowed synthetic-fixture contract.
 - Create `tests/unit/testing/test_scenario.py` and `tests/integration/test_deterministic_turn.py`.
@@ -684,9 +725,9 @@ budget:
 - [ ] Support scripted latency, disconnect, timeout, malformed provider result, stale turn, retry, cancellation, and queue saturation.
 - [ ] Map synthetic audio UUIDs to synthetic transcripts without embedding actual speech recordings.
 - [ ] Make the scenario runner capture ordered event/audit/usage summaries and reject unexpected calls.
-- [ ] Implement a JSON-Schema-validated manifest registry. Every model entry includes immutable upstream revision and URL, per-file SHA-256, total size, license/provenance, redistribution decision, approved purpose, architecture/runtime, input/output contract, benchmark/calibration gate, and review date.
-- [ ] Implement `tuntunctl models install|verify|list`: download only on an explicit owner command from an allowlisted immutable URL, stream into a private temporary file, verify size/hash before atomic rename, forbid pickle/remote code in production, and never fetch at service startup.
-- [ ] Require adapters to obtain an `ActivatedModel` handle from this registry; missing/rejected/unverified models produce an explicit disabled capability rather than an implicit download.
+- [ ] Implement a bounded, duplicate/alias-rejecting YAML plus JSON-Schema manifest registry with independent runtime checks. Every model entry includes a closed model ID, immutable upstream revision and exact HTTPS URL, unique bounded file names/sizes/lowercase SHA-256 values, total size, license/provenance, redistribution decision, approved purpose, architecture/runtime, input/output contract, benchmark/calibration gate, and review date. Manifest/root/revision/file opens are descriptor-relative, owner/mode-checked, no-follow, and identity-frozen.
+- [ ] Implement `tuntunctl models install|verify|list`: download only on an explicit owner command through an exact-host, public-IP-pinned HTTPS transport with normal hostname/SNI verification and no redirects/proxies; enforce declared bytes while streaming; fsync every same-descriptor hash; stage the whole revision in a private sibling; publish it read-only with an atomic platform no-replace rename only when complete; serialize concurrent installers; reconcile abandoned private stages; never overwrite a revision; forbid pickle/remote code; and never fetch at service startup.
+- [ ] Require adapters to obtain an `ActivatedModel` containing the exact verified artifact descriptors and to return a signed runtime-loader receipt over the bytes consumed from those descriptors; no adapter receives/reopens a registry path. Missing/rejected/unverified models produce an explicit disabled capability rather than an implicit download.
 - [ ] Add `uv run tuntunctl simulate --scenario tests/fixtures/scenarios/guest-hinglish.yaml --json` with stable output.
 - [ ] Run a scenario twice and byte-compare canonical JSON outputs.
 - [ ] Run `uv run pytest tests/unit/testing tests/integration/test_deterministic_turn.py tests/security/test_model_governance.py -q` and `uv run python scripts/check_model_manifest.py models/manifest.yaml`.
@@ -861,9 +902,9 @@ ACTIVE_STATE → ERROR_SAFE on invariant, key, or safety failure
 **Consumes:** `BudgetPort`, provider usage contracts, provider-price/reservation/ledger tables, clock.
 **Produces:** versioned price catalog, worst-case reservation, exact micro-SGD accounting, S$100 warning, S$150 denial.
 
-**Initial price snapshot:** record the source URL, retrieval date, units, and effective date for each model. The initial official values checked for this plan are GPT-5.6 Sol US$4/M input and US$20/M output, GPT Transcribe estimated US$0.0045/minute, and GPT-4o Mini TTS US$0.60/M text input and US$12/M audio output. Use a conservative `1.50` SGD/USD bootstrap rate expiring after 30 days; the owner must replace it with a dated rate before expiry. A stale or missing rate denies the call.
+**Initial price snapshot:** record the source URL, retrieval date, units, accounting basis, missing-evidence policy, and effective date for each model. The initial official values checked for this plan are GPT-5.6 Sol US$4/M input and US$20/M output, GPT Transcribe estimated US$0.0045/minute, and TTS-1 US$15/M input characters. TTS-1 is request-bound exact accounting: the gateway charges the immutable NFC character count and never invents per-response speech usage. Use a conservative `1.50` SGD/USD bootstrap rate expiring after 30 days; the owner must replace it with a dated rate before expiry. A stale or missing rate denies the call.
 
-**Pinned source records:** GPT-5.6 Sol uses `https://developers.openai.com/api/docs/models/gpt-5.6-sol`; transcription uses `https://developers.openai.com/api/docs/models/gpt-transcribe`; TTS uses `https://developers.openai.com/api/docs/models/gpt-4o-mini-tts`; OpenAI handling/retention uses `https://platform.openai.com/docs/models/default-usage-policies-by-endpoint` plus `https://openai.com/business-data/`. Seed all with `retrieved_at=2026-08-27`, `pricing_version=openai-2026-08-27`, and a SHA-256 of the owner-reviewed captured text/JSON stored outside source control. The `1.50` FX value is an explicit conservative safety factor, not a market-rate claim; record `fx_version=bootstrap-safety-factor-2026-08-27`, source `owner_policy`, and expiry `2026-09-26`. Cloud remains disabled until the owner replaces/accepts these records on the actual install.
+**Pinned source records:** GPT-5.6 Sol uses `https://developers.openai.com/api/docs/models/gpt-5.6-sol`; transcription uses `https://developers.openai.com/api/docs/models/gpt-transcribe`; TTS uses `https://developers.openai.com/api/docs/models/tts-1`; OpenAI handling/retention uses `https://platform.openai.com/docs/models/default-usage-policies-by-endpoint` plus `https://openai.com/business-data/`. Seed all with `retrieved_at=2026-08-27`, `pricing_version=openai-2026-08-27`, and a SHA-256 of the owner-reviewed captured text/JSON stored outside source control. The `1.50` FX value is an explicit conservative safety factor, not a market-rate claim; record `fx_version=bootstrap-safety-factor-2026-08-27`, source `owner_policy`, and expiry `2026-09-26`. Cloud remains disabled until the owner replaces/accepts these records on the actual install; if the TTS-1 request-bound accounting probe fails, only the verified local bilingual TTS activation branch is eligible.
 
 **Steps:**
 
@@ -905,8 +946,8 @@ ACTIVE_STATE → ERROR_SAFE on invariant, key, or safety failure
 class AssistantTurn(ContractModel):
     answer_text: Annotated[str, Field(min_length=1, max_length=8_000)]
     answer_language: Literal["en", "hi", "hinglish"]
-    memory_proposals: tuple[ProviderMemoryIntent, ...]
-    action_proposals: tuple[ProviderActionIntent, ...]
+    memory_proposals: Annotated[tuple[ProviderMemoryIntent, ...], Field(min_length=0, max_length=8)]
+    action_proposals: Annotated[tuple[ProviderActionIntent, ...], Field(min_length=0, max_length=8)]
     uncertainty_micros: Annotated[int, Field(ge=0, le=1_000_000)]
 ```
 
@@ -914,10 +955,10 @@ class AssistantTurn(ContractModel):
 
 **Steps:**
 
-- [ ] Add HTTP-capture tests for completed-turn `gpt-transcribe`, Responses `gpt-5.6-sol`, and streaming `gpt-4o-mini-tts` requests.
+- [ ] Add HTTP-capture tests for completed-turn `gpt-transcribe`, Responses `gpt-5.6-sol`, and binary/streaming `tts-1` requests, including proof that speech responses expose no fabricated usage and that the exact NFC character ceiling is bound before network I/O.
 - [ ] Assert Responses requests contain `store: false`, structured-output schema, bounded output tokens, model allowlist, timeout, and only sanitized messages/tool schemas.
 - [ ] Assert STT accepts only `AuthorizedTranscriptionRequest`, uses an in-memory file object, bounded audio, English/Hindi/code-switch hints, and begins at the recorded wake boundary with no pre-wake bytes.
-- [ ] Assert TTS accepts only `AuthorizedSynthesisRequest`, rejects input above 2,000 tokens before network I/O, runs the second DLP/sensitivity/consent gate, explicitly requests `response_format="pcm"`, segments on sentence boundaries, and supports cancellation between chunks.
+- [ ] Assert TTS accepts only `AuthorizedSynthesisRequest`, rejects non-NFC or input above 4,096 characters before network I/O, binds the exact character count to route/reservation/body, runs the second DLP/sensitivity/consent gate, explicitly requests `response_format="pcm"`, segments on sentence boundaries, persists accounting and settlement before the empty terminal marker, and supports cancellation between PCM chunks.
 - [ ] Add onboarding/Guest tests proving the system discloses that Tuntun uses an AI-generated voice before first cloud TTS use and versions the accepted disclosure with TTS consent.
 - [ ] Run contract tests and confirm adapter imports fail.
 - [ ] Implement one shared `AsyncOpenAI(max_retries=0, timeout=httpx.Timeout(120.0, connect=5.0, read=120.0, write=30.0, pool=5.0))` client loaded from Keychain with TLS verification, at most 20 connections/10 keep-alive connections, and no body logging. Settings may lower these defaults but may not exceed 120 seconds or two application attempts. Provider SDK retries must never bypass budget accounting.
@@ -1050,7 +1091,7 @@ wake → reserve session → collect bounded post-wake audio
 
 - [ ] Write golden-byte protocol tests, RFC 8785/Unicode/timestamp cases, event-type/payload mismatch, wrong commitment/key ID/domain/purpose, constant-time verifier behavior, 24-hour rotation overlap, revoked HMAC identity, persistent device-sequence after reboot, per-stream sequence, malformed-length/overflow/allocation property tests, hard audio/camera window/rate/aggregate limits, authorization expiry/revocation, compression rejection, major-version rejection, minor-version negotiation, invalid signature, revoked cert, replayed event/sequence, stale command, wrong household, oversized message, bootstrap pairing preconditions, and bootstrap-disable-after-passkey cases.
 - [ ] Run protocol/security tests and confirm implementations are absent.
-- [ ] Implement commissioning: create the household CA/server certificate on the Mac; Reachy creates its TLS-client and Ed25519 event private keys locally and returns only a CSR/public keys. Install a random device-specific HMAC commitment secret through the authenticated pairing channel without a temporary file; store it owner-only on Reachy and under its own Mac Keychain ID. Keep the CA signing key in Keychain. Store the Python/Uvicorn Mac leaf TLS key as an owner-only `0600` PEM under FileVault with short validity, rotation, exclusion from data backups, reboot exposure checks, and documented compromise handling.
+- [ ] Implement commissioning: create the household CA/server certificate on the Mac; Reachy creates its TLS-client, Ed25519 event-signing, and ephemeral X25519 agreement private keys locally and returns only a CSR/public keys. Derive the random generation-bound HMAC commitment root independently on Reachy and the Mac with X25519/HKDF, compare only its digest, and never transmit a private or symmetric key through the pairing channel; store each local root owner-only on Reachy and under its own Mac Keychain ID. Keep the CA signing key in Keychain. Store the Python/Uvicorn Mac leaf TLS key as an owner-only `0600` PEM under FileVault with short validity, rotation, exclusion from data backups, reboot exposure checks, and documented compromise handling.
 - [ ] Add `tuntunctl reachy pair --host reachy-mini.local`, `status`, `revoke`, and `rotate-cert`. Use a dedicated pinned SSH known-hosts file, agent/standard SSH key handling, and no temporary private-key files. Before Task 20, first pairing is allowed only from a non-SSH/non-remote interactive Mac console when no owner credential/device exists, the API is loopback-only, and a one-time Reachy-displayed physical-presence code is confirmed; this bootstrap path permanently disables after the first owner passkey is registered. Subsequent pairing/revocation/rotation requires a fresh action-bound owner passkey and local-presence receipt.
 - [ ] Implement the edge-initiated `wss` connection, pinned household CA/server identity, client certificate, signed control envelopes, sequence window, heartbeat, bounded queues, and exponential reconnect with jitter.
 - [ ] Bind the Mac edge gateway only to the configured private interface/port 7443; reject wildcard/public binds in production validation.
@@ -1712,7 +1753,7 @@ For a mutation without sufficient action assurance, the server validates and can
 - [ ] Implement a prominent Privacy Shield with a clear confirmation for turning privacy off, immediate optimistic “requesting” state, server-confirmed safe state, and error handling that never falsely claims completion.
 - [ ] Subscribe to authenticated SSE with backoff, last-event ID, session-expiry handling, and no duplicate toast/state application.
 - [ ] Add `Cache-Control: no-store` expectations and clear in-memory query cache on logout/privacy activation.
-- [ ] Run `pnpm --filter @tuntun/admin exec vitest run`, `pnpm --filter @tuntun/admin exec tsc --noEmit`, `pnpm --filter @tuntun/admin exec vite build`, `pnpm --filter @tuntun/admin exec playwright test`, and axe accessibility checks.
+- [ ] Run `pnpm --filter @tuntun/admin test`, `pnpm --filter @tuntun/admin typecheck`, `pnpm --filter @tuntun/admin build`, `pnpm --filter @tuntun/admin e2e`, and axe accessibility checks.
 - [ ] Commit with `git add apps/admin tests/e2e && git commit -m "feat(admin): add owner overview and Privacy Shield"`.
 
 **Verification evidence:** viewport screenshots, axe report, keyboard trace, Privacy Shield server-confirmed test.
@@ -1755,7 +1796,7 @@ For a mutation without sufficient action assurance, the server validates and can
 - [ ] Mark price, cost, confidence, latency, and wake metrics as measured, estimated, or configured; never mix them visually.
 - [ ] Add WCAG keyboard/focus/label/status support, reduced motion, 320 px minimum width, tablet and desktop layouts, and printable content-minimized audit/export summaries.
 - [ ] Capture approved baseline screenshots with synthetic data only and run visual regression at mobile/tablet/desktop widths.
-- [ ] Run `pnpm --filter @tuntun/admin exec vitest run`, `pnpm --filter @tuntun/admin exec tsc --noEmit`, `pnpm --filter @tuntun/admin exec vite build`, `pnpm --filter @tuntun/admin exec playwright test`, accessibility, and forbidden-browser-storage scans.
+- [ ] Run `pnpm --filter @tuntun/admin test`, `pnpm --filter @tuntun/admin typecheck`, `pnpm --filter @tuntun/admin build`, `pnpm --filter @tuntun/admin e2e`, accessibility, and forbidden-browser-storage scans.
 - [ ] Commit with `git add apps/admin tests/e2e && git commit -m "feat(admin): complete Phase 1 management console"`.
 
 **Verification evidence:** all route-state/duplicate-submit Playwright traces, mobile/tablet/desktop synthetic screenshots, axe report, browser-storage/cache scan, action-bound destructive-flow receipts, and no-camera-stream network capture.
@@ -1892,6 +1933,7 @@ For a mutation without sufficient action assurance, the server validates and can
 - Update `docs/privacy/threat-model.md` and `data-flow-inventory.md`; create `provider-boundaries.md`, `residual-risks.md`.
 - Create `SECURITY.md`, `PRIVACY.md`, `.github/workflows/security.yml`, `.github/workflows/release.yml`.
 - Modify `scripts/verify_private_data.py`; create `scripts/verify_release.sh`.
+- Create the signed qualification-manifest schema and `scripts/qualify_release_artifacts.py`; official qualification remains deferred until every Task 34 implementation file is committed and the commit is frozen.
 - Create `tests/property/test_event_parser_fuzz.py`, `test_media_header_fuzz.py`, `test_model_output_fuzz.py`, `test_memory_proposal_fuzz.py`, `test_backup_parser_fuzz.py`, `test_import_export_fuzz.py`; expand the exact existing security tests referenced by Tasks 01–31.
 
 **Consumes:** complete system, dependency/model manifests, deployment artifacts.
@@ -1991,11 +2033,11 @@ For a mutation without sufficient action assurance, the server validates and can
 - [ ] Write README outcomes, architecture diagram, hardware/software matrix, privacy guarantees/limits, cloud costs, simulator quickstart, physical Reachy commissioning, management UI, and future seams.
 - [ ] Document that software privacy is not a physical mic disconnect, `store=false` is not contractual ZDR, biometrics are personalization evidence, Qwen is disabled, and no NAS/smart-home integration is required.
 - [ ] Make `make bootstrap && make check` and the simulator work without Reachy, cloud credentials, model weights, or household data.
-- [ ] Build locked source archives/wheels/admin assets/Reachy package; attach SHA-256 manifests, CycloneDX SBOM, license inventory, model manifest, test report, and SLSA/GitHub artifact attestation where available.
+- [ ] On the clean frozen commit, reproducibly build locked source archives/wheels/admin assets/Reachy package twice and sign the exact nonpublic qualification manifest. During an owner-approved maintenance window after verified encrypted backup, independently verify the same one physical 2020 Intel Mac has no managed Tuntun runtime/key/listener/journal residue, locally commission it against that manifest, install the same bytes in evidence-pending state, and collect target/LAN/outer evidence before acceptance. Preserve unrelated office data; a VM/hosted runner cannot substitute for this real-host lifecycle receipt. Later candidate assembly consumes those byte-identical role paths plus evidence and never rebuilds.
 - [ ] Run `scripts/verify_release.sh` in a clean temporary checkout with network blocked except the explicit bootstrap dependency phase.
 - [ ] Search release bytes and git history for API keys, local paths/usernames, IP/MAC/serial/hostnames, family data sentinels, audio/image/model weights, `.env`, certificates, private keys, DB/backups, and acceptance raw data.
 - [ ] Install the staged artifact on a clean macOS test account, run simulator, install physical services, complete one synthetic turn, upgrade/rollback, and uninstall-preserve.
-- [ ] Tag signed `v0.1.0-beta.1`, publish release notes with known limitations and compatibility matrix, and enable the documented private vulnerability-reporting path.
+- [ ] Tag signed `v0.1.0-beta.1`; after the manual gate, publish release notes and the canonical Reachy archive/checksum/manifest triple. Re-download all three adjacent, verify the candidate `SHA256SUMS`, and reopen the archive inventory before recording publication; no workflow may publish automatically.
 - [ ] Monitor initial issues for install/security/privacy regressions; do not request user logs containing conversation or biometric data.
 - [ ] Commit with `git add README.md CONTRIBUTING.md LICENSE NOTICE CHANGELOG.md CODE_OF_CONDUCT.md docs .github && git commit -m "docs: prepare Tuntun v0.1.0 beta release"` before the signed tag/release workflow.
 

@@ -55,7 +55,7 @@ The repository currently contains the reviewed six-phase architecture, UI/UX spe
 - Existing encrypted external SSD first; seven-day low-resolution continuous camera retention and 90-day full-resolution native-event retention; NAS decision deferred until measured evidence.
 - Privacy Shield stops Tuntun application processing but truthfully leaves the independently controlled Reolink recorder running unless the owner separately pauses it.
 - Samsung Neo LED 49-inch and TCL 42-inch televisions start as manual HDMI displays; exact-unit control remains evidence-gated.
-- Archer BE800 outer/primary router with the office laptop wired directly; downstream ASUS GT-AX6000 and three AX5400 AiMesh nodes; no public inbound service.
+- Archer BE800 outer/primary router with downstream ASUS GT-AX6000 and three AX5400 AiMesh nodes. The inventoried office Mac is the Tuntun Core host and, for the family-ready baseline, is single-homed on the trusted ASUS/AiMesh LAN with its direct BE800 cable disconnected while Tuntun runs. No public inbound service is allowed; any later dual-homed mode requires its separate fail-closed qualification.
 - LAN-only through Phase 5. Phase 6 may add owner-only Tailscale access, disabled by default and still protected by application authentication.
 - Phase 5 uses staged task-specific local migration; the existing Raspbot and LILYGO hardware remain supervised/optional and gain no model-generated motion authority.
 - S$100 monthly cloud soft warning and S$150 hard stop.

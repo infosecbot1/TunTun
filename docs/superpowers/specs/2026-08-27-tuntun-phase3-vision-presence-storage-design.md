@@ -38,10 +38,12 @@ Reolink media and event metadata never identify a family member. Family personal
 | Privacy controls | Tuntun Privacy Shield and the independent security recorder are separate truthful states; Privacy Shield does not stop recording unless the recorder is separately paused |
 | Security alerts | Local, metadata-only by default, deduplicated, policy-scoped, and owner-only; no automatic greeting or direct device action |
 | Occupancy | Anonymous `occupied`, `vacant`, or `unknown` only where evidence is commissioned; absence of a camera event never proves vacancy |
-| Area and zone identity | Every camera zone is a versioned child of one canonical Phase 2 `area_id` and one camera-binding generation; display names such as “room” never substitute for either identifier |
+| Area and zone identity | Every camera zone is a versioned child of one exact canonical Phase 2 `(area_id, area_generation)` and one camera-binding generation; display names such as “room” never substitute for either identifier |
 | Home Assistant | Receives no media, camera credentials, identity, face vector, or raw camera entity; any later device action still uses Phase 2's closed signed policy/action path |
 | Remote access | No public inbound path, port forwarding, public camera URL, or remote playback; Phase 6 owns VPN access |
 | Open source | Adapter-driven, Apache-2.0-publishable framework with synthetic media fixtures only |
+| Owner-ingress lifecycle | Task 17 creates the sole owner-ingress wheel, signed route manifest, and canonical `phase3.owner_ingress.v1` service row. After later route changes, the Task 26 alert checkpoint refreshes/re-signs and fully lifecycle-qualifies that same row before its seven-day calibration, and Task 32 repeats the protocol for the final route graph. A stale row/receipt can be used only with its complete matching rollback set and cannot support current physical or promotion evidence |
+| Continuous feature authority | Phase 3 reuses Phase 2's externally pre-issued `SignedFeatureManifestRolloverChainV1`, `FeatureManifestLeaseSupervisor`, `FeatureAuthorityLease`, and `FeatureAuthorityCampaignEvidenceV1`/canonical schema unchanged. No Phase 3 process can sign, renew, substitute, extend, or locally redefine authority. Every 48-hour, seven-day, or conditional 30-day campaign requires one frozen-candidate chain covering the complete interval; its counted clock starts only after an index-zero controlled-restart activation receipt exact-matches the live candidate/composition, and every admission/background iteration checks both the half-open wall validity and non-extendable monotonic lease. A changed code, package, service registration, route, policy, configuration, physical binding, firmware, storage volume, or candidate digest requires a newly externally signed chain; a sequential campaign may reuse its documented owner-only path only by atomically replacing the closed prior campaign's file, never by widening, merging, or copying an old chain. Missing/stale initial activation, nonzero initial index, missing, extra, late, reordered, widened, rollback, signature-invalid, candidate-drifted, or expired current/next authority, either exact deadline equality, wall rollback, stale composition, or a missing/substituted rollover/restart receipt closes affected work before preparation or I/O, invalidates the campaign, and enters controlled whole-composition recovery. The shared downstream adversarial harness proves no admission, preparation, provider-call, trigger, or effect counter advances after each injected fault and that a dishonest zero-gap claim is rejected. Evidence binds the chain ID/digest, ordered envelope and transition/restart-receipt digests, admission-sample-log digest, exact interval, and every canonical literal-zero counter |
 
 ## 3. Scope boundaries
 
@@ -107,15 +109,18 @@ flowchart LR
     NORM[EventNormalizer\nschema · dedupe · clock quality]
     CAT[(Encrypted vision catalog\nopaque references only)]
     SSD[(Encrypted external SSD\n7d low-res + 90d event clips)]
-    MEDIA[Owner playback proxy\nshort-lived capabilities]
+    MEDIA[Media proxy\nauthenticated UDS only]
+    INGRESS[Owner-ingress reverse proxy\n127.0.0.1:8787 + optional exact RFC1918:8443]
     HEALTH[Camera/storage health]
     SRC --> REC
     SRC --> NORM
     REC --> SSD
     REC --> CAT
     NORM --> CAT
-    CAT --> MEDIA
+    MEDIA -->|single-use grant claim over authenticated UDS| REC
+    REC -->|opaque storage token + exact range authority| MEDIA
     SSD --> MEDIA
+    INGRESS -->|exact media path over authenticated UDS| MEDIA
     REC --> HEALTH
     SRC --> HEALTH
     SSD --> HEALTH
@@ -132,7 +137,7 @@ flowchart LR
     ALERT --> AUDIT
     PRES --> AUDIT
     UI --> PRIV
-    UI --> MEDIA
+    UI --> INGRESS
     UI --> HEALTH
   end
 
@@ -143,9 +148,9 @@ flowchart LR
   NORM -->|closed Phase 2 event envelope| PRIV
 
   subgraph HA[Home Assistant Green]
-    HAE[Minimized anonymous state/event only\noptional · Recorder excluded]
+    HAE[Future minimized anonymous state seam\nabsent in Phase 3 baseline]
   end
-  PRES -. policy-approved typed event .-> HAE
+  PRES -. contract only · no baseline adapter .-> HAE
 
   subgraph REACHY[Reachy identity boundary]
     RID[Phase 1 IdentityPort\ninteraction-gated · RAM frames]
@@ -158,7 +163,8 @@ flowchart LR
 
 ### 5.1 Process and storage model
 
-- `tuntun-camera-source`, `tuntun-recorder`, and `tuntun-media-proxy` run as separate least-privilege processes from `tuntun-core`.
+- `tuntun-camera-source`, `tuntun-recorder`, `tuntun-media-proxy`, and `tuntun-owner-ingress` run as four separate least-privilege side processes from `tuntun-core` (five closed Phase 3 processes including core).
+- Owner ingress is the sole network-facing HTTP process. It always binds only `127.0.0.1:8787`; port 8787 never binds an interface, wildcard, or IPv6 address. An independently commissioned, enabled, unexpired private-LAN origin may additionally bind its one exact RFC1918 address on `:8443`. It forwards only the exact normalized media path over authenticated UDS to the media proxy and only generated non-media owner routes over a separate authenticated UDS to core. Core never reads or relays media bytes and owns no TCP listener; media proxy never owns any TCP listener.
 - The recorder has access only to camera-stream handles, the dedicated video volume, and its own catalog/keys. It cannot open the Phase 1 database, memory keys, provider keys, Home Assistant action key, or Reachy identity store.
 - Routine ingest uses codec stream-copy; no routine decoding, transcoding, or vision inference is allowed. This keeps the Intel Mac's CPU available for voice and policy work.
 - One bounded on-demand playback transcode may run for the owner when the browser cannot play the native codec. It is paused behind an active voice turn, produces no durable cache, strips audio, and is deleted on completion/cancel/session expiry.
@@ -177,8 +183,9 @@ flowchart LR
 | Area privacy policy | Canonical area/camera-zone sensor, recording, processing, access, alert, and presence rules | Stream credentials or media bytes |
 | Local owner alert service | Durable owner-inbox item, authenticated same-origin SSE to a currently connected paired page, optional foreground browser notification mirror, cooldown/deduplication, delivery/delay result | Media body, identity, arbitrary recipients, service worker/background push, native Companion app, SMS/email, or vendor-cloud delivery |
 | Presence fusion | Anonymous expiring area state from approved signals | Track identity, durable movement history, named-person state |
-| Playback proxy | Owner authorization, opaque clip lookup, byte ranges, short-lived session | Camera URL, reusable token, directory browsing |
-| Home Assistant Green | Optional minimized anonymous state/event and governed device actions | Camera entity, stream, clip, credential, face data, video history |
+| Owner ingress | Loopback-only `127.0.0.1:8787`, optional exact commissioned RFC1918 `:8443`, TLS for LAN, trusted request-context signing, generated non-media route allowlist, exact media-path split, bounded backpressure/cancellation | LAN/wildcard/IPv6 `:8787`, uncommissioned/wildcard `:8443`, media/catalog/credential access, route invention, caching, response-body logging |
+| Playback proxy | Authenticated-UDS media requests, recorder-owned single-use subject claims, one exact byte range, short-lived session | Catalog/database access, LAN listener, camera URL, reusable token, directory browsing, non-media route |
+| Home Assistant Green | Future contract-only minimized anonymous state seam; no Phase 3 baseline adapter/entity/route | Camera entity, stream, clip, credential, face data, video history |
 | Reachy IdentityPort | Phase 1 interaction-gated face/voice personalization | Reolink event/media or passive camera tracking |
 | Owner console | Truthful status, exact approvals, recorder/privacy controls, playback | General filesystem access or reusable stream credential |
 
@@ -254,12 +261,13 @@ Failure disables only the tracking-view recording. The full-resolution wide even
 
 ### 8.1 Canonical area and camera-zone binding
 
-`area_id` is the canonical identifier from the Phase 2 topology registry. A camera-specific zone is a stable nested entity, never a room-name string or an adapter-local alias:
+Phase 3 imports the authoritative Phase 2 `AreaV1` and `CanonicalLocationRefV1` unchanged. Exact `(area_id, area_generation)` is required wherever location authority matters. A camera-specific zone is a stable nested entity, never a room-name string or an adapter-local alias:
 
 ```text
 camera_zone.v1
   zone_id
   area_id
+  area_generation
   camera_binding_id
   camera_binding_generation
   polygon_normalized[]
@@ -269,9 +277,9 @@ camera_zone.v1
   status: commissioned | disabled | retired
 ```
 
-One `zone_id` belongs to exactly one canonical `area_id` and one camera-binding generation. `polygon_normalized` is interpreted only in the commissioned camera/view coordinate space; `exclusion_mask_commitment` binds the reviewed mask without putting an image in policy storage. A display label such as “Hall,” “kitchen,” “room,” or its Hindi translation is presentation metadata only and is never accepted where `area_id` or `zone_id` is required.
+One `zone_id` belongs to exactly one canonical `(area_id, area_generation)` and one camera-binding generation. `polygon_normalized` is interpreted only in the commissioned camera/view coordinate space; `exclusion_mask_commitment` binds the reviewed mask without putting an image in policy storage. A display label such as “Hall,” “kitchen,” “room,” or its Hindi translation is presentation metadata only and is never accepted where `area_id` or `zone_id` is required. Guest is an orthogonal narrowing actor/session policy and is never a room class.
 
-Creating, moving, reshaping, reclassifying, disabling, or rebinding a zone requires an exact owner passkey and compare-and-swap against the current `zone_generation`. The mutation increments `zone_generation` and the affected privacy/source-policy generations, invalidates event, alert, occupancy, playback-selection, and selected-frame bindings, and keeps them disabled until the new geometry and privacy evidence pass. An event whose `area_id`, `zone_id`, `zone_generation`, camera binding, or camera-binding generation does not resolve to the same commissioned record is quarantined.
+Creating, moving, reshaping, reclassifying, disabling, or rebinding a zone requires an exact owner passkey and compare-and-swap against the current `zone_generation`. Phase 2 area reclassification increments `area_generation`. Either change increments affected privacy/source-policy generations, invalidates event, alert, occupancy, playback-selection, and selected-frame bindings, and keeps them disabled until the new geometry and privacy evidence pass. An event whose `area_id`, `area_generation`, `zone_id`, `zone_generation`, camera binding, or camera-binding generation does not resolve to the same commissioned record is quarantined. Restart and restore reopen the current area row; stale common-area authority never resurrects after private/prohibited reclassification.
 
 ### 8.2 Phase 2 event envelope reuse
 
@@ -282,8 +290,11 @@ event_id
 schema_version
 event_type
 source_endpoint_id
+source_generation
+source_sequence
 observed_at
 ingested_at
+expires_at
 correlation_id
 causation_id
 deduplication_key
@@ -291,7 +302,7 @@ sensitivity_class
 payload
 ```
 
-Unknown versions, fields, event types, endpoint generations, excessive clock skew, invalid enum values, oversized payloads, duplicate content under a new key, and payload/type mismatches are quarantined before policy evaluation. Camera events never contain a name, profile/child/guardian ID, face/body vector, conversation ID, memory ID, raw address, IP/MAC address, stream URL, filename, credential, vendor account, or free-form detector label.
+Unknown versions, fields, event types, endpoint generations, excessive clock skew, invalid enum values, oversized payloads, duplicate content under a new key, and payload/type mismatches are quarantined before policy evaluation. The frozen publisher registry maps each accepted `event_type` to exactly one payload schema, publisher/source class, sensitivity, size/lifetime bounds, and consumer route. Phase 3 may register only the narrowed `camera.security_event.v1` and `presence.changed.v1` specializations; it does not add `direction`, `payload_schema_id`, or another routing field to the Phase 2 envelope. Dispatch reopens the current publisher/source/location generation and rejects stale-wrapper/fresh-payload, fresh-wrapper/stale-payload, sequence replay/reorder, and type/payload mismatch before advancing a consumer cursor. Camera events never contain a name, profile/child/guardian ID, face/body vector, conversation ID, memory ID, raw address, IP/MAC address, stream URL, filename, credential, vendor account, or free-form detector label.
 
 ### 8.3 Security event
 
@@ -300,6 +311,7 @@ camera.security_event.v1
   camera_binding_id
   camera_binding_generation
   area_id
+  area_generation
   zone_id
   zone_generation
   event_class: person | vehicle | pet | package | motion | unknown
@@ -315,13 +327,15 @@ camera.security_event.v1
   privacy_policy_version
 ```
 
-`confidence_band` is accepted only after calibration maps the device value to the bounded bands. The recorder never invents a numeric confidence. `clip_ref` is meaningful only to the owner media proxy and is not a URL.
+`confidence_band` is accepted only after calibration maps the device value to the bounded bands. The recorder never invents a numeric confidence. `clip_ref` is meaningful only to the owner media proxy and is not a URL. The event always carries the exact current `area_generation` adjacent to `area_id`.
 
 ### 8.4 Anonymous presence state
 
 ```text
 presence.changed.v1
+  event_id
   area_id
+  area_generation
   state: vacant | occupied | unknown
   count_band: zero | one | multiple | unknown
   source_kinds: bounded enum list
@@ -332,7 +346,7 @@ presence.changed.v1
   transition_reason
 ```
 
-No source may assert `vacant` solely because no camera event arrived. A camera-native person event may set `occupied` for at most five minutes; expiry becomes `unknown`. `vacant` requires an independently commissioned sensor or a closed multi-signal rule whose false-vacant gate passes. `valid_until` may never be extended by replaying the same evidence.
+No source may assert `vacant` solely because no camera event arrived. A camera-native person event may set `occupied` for at most five minutes; expiry becomes `unknown`. `vacant` requires an independently commissioned sensor or a closed multi-signal rule whose false-vacant gate passes. `valid_until` may never be extended by replaying the same evidence. The only governed cross-domain route is the closed `CrossDomainEventV1[PresenceChangedV1]` direction from Phase 3 presence policy to the Phase 2 Home policy consumer. Envelope/payload type and event ID, source generation/sequence, deduplication key, expiry, and current area generation must match; replay, reorder, stale/absent baseline, or mismatch produces no HA/action dispatch.
 
 ### 8.5 Recording health
 
@@ -393,11 +407,13 @@ Paths and filenames are opaque random tokens. No file or directory name contains
 ```text
 media.playback_grant.v1
   grant_id
+  route_token_digest
   owner_subject_id
-  owner_session_id
-  clip_id
-  allowed_view
-  allowed_operation: playback | export | delete
+  owner_session_id / generation / binding commitment
+  subject:
+    event_clip: clip_id / clip_generation / catalog_generation / view
+    continuous_segment: segment_id / catalog_generation / camera binding / low_wide
+  allowed_operation: playback
   allowed_range_bytes
   issued_at / expires_at
   single_use
@@ -405,7 +421,9 @@ media.playback_grant.v1
   parameter_commitment
 ```
 
-Playback grants expire within 60 seconds and are bound to one owner session, clip, view, operation, and range policy. They reveal neither storage path nor camera address. Export and early deletion require a fresh owner passkey and exact clip/destination or clip-set commitment. An authenticated console session alone cannot mint either operation.
+Playback grants expire within 60 seconds and are bound to one current owner session, one exact subject—either a 90-day event clip/view or a seven-day `low_wide` continuous segment—the sole `playback` operation, and one inclusive range of at most 8 MiB. Core registers the signed grant in a recorder-owned durable single-use ledger before returning the opaque route token. The media proxy has read-only code and no catalog/database grant table. For each request it sends a two-second inner claim carrying the route-token digest, exact derived owner-session tuple, ingress-context commitment, and normalized requested range. The recorder validates `claim.issued_at <= trusted_now < claim.expires_at` before ledger/catalog/storage access, atomically consumes the matching live grant, and returns only an opaque storage token plus exact subject/range authority. The proxy exact-compares the receipt and rechecks both claim and grant deadlines at first read. A fresh outer IPC envelope cannot revive a stale inner claim.
+
+The public media route accepts exactly one normalized `Range: bytes=start-end`; missing, multiple, suffix, open-ended, over-8-MiB, or unequal-to-grant ranges reject before any media read. Grants and receipts reveal neither storage path nor camera address. Export and early deletion use distinct five-second, single-use request contracts and require a fresh owner passkey plus exact clip generation/view/destination-or-delete-set, immutable expiry, managed byte/count, canonical request digest, and commitment. Core checks the inner deadline before send and immediately before IPC; the recorder checks it again before command/catalog/media access and inside the first-read or atomic-unlink primitive. Stale-inner/fresh-envelope requests produce zero read/unlink effect. Neither operation is representable in the range-playback proxy grant, and an authenticated console session alone cannot mint either operation.
 
 ## 9. Recorder and retention design
 
@@ -426,7 +444,7 @@ Retention values are owner policy, not storage suggestions. No space-pressure jo
 
 ### 9.2 External SSD layout
 
-The existing physical SSD is inventoried before use. APFS encrypted volumes/quotas separate at least:
+The existing physical SSD is inventoried before use. One immutable expected-volume record binds the APFS container UUID, exact `TUNTUN_VIDEO` volume UUID/root and quota bytes, minimum `HA_BACKUPS` reserve bytes, recorder UID, and volume-qualification generation. APFS encrypted volumes/quotas separate at least:
 
 ```text
 TUNTUN_VIDEO       raw segments, event clips, vision catalog
@@ -435,11 +453,15 @@ HA_BACKUPS         Phase 2 encrypted Home Assistant backup artifacts
 
 The recorder account can access `TUNTUN_VIDEO` only. Green's CIFS account can access `HA_BACKUPS` only. The video volume is not exported over SMB/NFS/FTP and is excluded from normal backups and indexing. The exact SSD model, firmware, nominal/usable capacity, SMART/health visibility, endurance indicator, cable/enclosure, filesystem, encryption state, sustained write rate, temperature, reconnect behavior, and cold-boot unlock are commissioning evidence.
 
-An automatically unlocked volume key may live only in the Mac Keychain, protected by FileVault and owner account controls. A missing key, unencrypted volume, unexpected filesystem, mount-point substitution, wrong volume UUID, read-only mount, or ownership drift blocks recording. The application does not format or erase a disk automatically.
+An automatically unlocked volume key may live only in the Mac Keychain, protected by FileVault and owner account controls. A missing key, unencrypted volume, unexpected filesystem, APFS-container or mount-point substitution, wrong volume UUID/quota, insufficient HA-backup reserve, stale qualification generation, read-only mount, or ownership drift blocks recording. Startup and every disconnect/reconnect revalidate the complete expected record before any catalog/media write. The application does not format or erase a disk automatically.
 
 ### 9.3 Seven-day measured capacity method
 
-The capacity decision uses complete segment bytes, not vendor bitrate marketing. The pilot runs for seven consecutive representative days with the final intended stream settings, all eligible cameras, night modes, event classes, ordinary household traffic, Green backups, and normal Tuntun voice use.
+The capacity decision uses complete segment bytes, not vendor bitrate marketing, and compares the result only with the bound `TUNTUN_VIDEO` quota—not physical-container free space. The pilot runs for seven consecutive representative days with the final intended stream settings, all three expected physical cameras, night modes, event classes, ordinary household traffic, Green backups, and normal Tuntun voice use.
+
+The immutable campaign manifest fixes one generation and the exact three-unit physical-camera snapshot: physical-unit commitment, source endpoint/generation, camera binding/generation, capability, recording profile, source-eligibility, egress, exact area/area-generation, zone/generation, privacy-policy/privacy generation, plus common volume-qualification and catalog generations. Any drift invalidates and restarts the campaign; daily rows must exact-match this snapshot. Its semantic matrix contains exactly one row for each expected camera, each required/selected view, and each day index 1–7. Every eligible unit has `wide`; TrackMix has `tracking` only while its current dual-view gate passes. Every excluded unit still has seven explicit ineligible `wide` rows with zero measured bytes and a reason—never an estimated bitrate or omitted camera. Rows are unique by `(physical camera, view, day_index)` regardless of new measurement IDs, and their 24-hour windows are contiguous and anchored to campaign start. Eligible/ineligible counts and selected views are derived from this matrix, never caller-authored independently. The all-three-ineligible outcome is representable as a truthful blocked/native-only decision with every policy byte component—including otherwise measured catalog/filesystem overhead—projected as zero; signed operational evidence remains attached, and the outcome never fabricates a capacity pass. Projection identity, generation, projected time, validity, reason codes, and derived fields are deterministic functions of the stored signed campaign and operational evidence, so restart recomputes byte-identical authority rather than inventing a fresh UUID/time.
+
+Every daily `StorageMeasurementV1` carries a canonical digest over its full campaign/camera/location/privacy/volume/catalog authority and measured facts. Operational evidence binds the exact qualified video volume/quota, measured filesystem/catalog overhead, voice latency/regression, and one independently signed minimized Green-backup receipt for the same campaign, volume, concurrent-load snapshot, backup-policy/objective generations, and reserve. The projection recomputes and exact-compares campaign manifest, measurement, backup-receipt, and operational-evidence digests before deriving any decision. A failed/cancelled backup, missed objective, substituted volume/quota/reserve/load snapshot, unsigned receipt, stale generation, missing matrix row, or restart-generated identity cannot produce `p3_2_pass`.
 
 For each camera/view:
 
@@ -467,7 +489,7 @@ The measured report records per-stream bytes, daily/event variation, highest 15-
 
 The SSD passes only if:
 
-- `usable_capacity >= required_usable_capacity` under the selected view set;
+- the exact bound `TUNTUN_VIDEO` quota is at least `required_usable_capacity` under the selected view set, while the separate minimum `HA_BACKUPS` reserve remains available and a Green backup succeeds even when video reaches its quota;
 - segment coverage is at least 99.5% per camera across the pilot and every gap longer than five seconds is surfaced within 30 seconds;
 - sustained write, temperature, reconnect, cold boot, and crash recovery pass;
 - the recorder adds no more than 10% to Phase 1 first-audio P95 and does not push it above the Phase 1 four-second target;
@@ -587,7 +609,7 @@ anonymous_visual_observation.v1
 
 The future path is local-only, RAM-only, audio-free, one-purpose, source/zone/model/policy-bound, and closed on result, cancel, timeout, privacy, recorder pause, capability drift, or process failure. It returns one closed typed anonymous observation with confidence/evidence versions. It cannot call or serialize into a language model, return a name/profile candidate, face/body embedding, free-form prose, arbitrary label, memory proposal, Home Assistant action, raw frame, or persistent feature vector.
 
-The response is **advisory evidence only** and remains separate from `camera.security_event.v1` and `presence.changed.v1`. Phase 3 maps `request_id` to the single live request, requires `zone_id` to equal that request's commissioned zone, rechecks the request's exact `area_id`, `zone_generation`, camera-binding generation and privacy generation, and verifies the exact model/calibration commitments. `state`, `approved_class`, and `confidence_band` may be displayed in an owner-only calibration review; model/calibration fields and `reason_codes` may feed content-minimized quality metrics. Phase 3 ignores `count_band` for occupancy and alert policy. No observation field changes `event_class`, `detector_basis`, `verification`, an alert decision, `occupied`, `vacant`, or a count band; the canonical area remains the request's Phase 2 `area_id`, not a model result. Success never promotes the observation into a security event or presence transition. Any gate failure yields no frame and no accepted observation, while native Phase 3 behavior remains unchanged.
+The response is **advisory evidence only** and remains separate from `camera.security_event.v1` and `presence.changed.v1`. Phase 3 maps `request_id` to the single live request, requires `zone_id` to equal that request's commissioned zone, rechecks the request's exact `(area_id, area_generation)`, `zone_generation`, camera-binding generation and privacy generation, and verifies the exact model/calibration commitments. `state`, `approved_class`, and `confidence_band` may be displayed in an owner-only calibration review; model/calibration fields and `reason_codes` may feed content-minimized quality metrics. Phase 3 ignores `count_band` for occupancy and alert policy. No observation field changes `event_class`, `detector_basis`, `verification`, an alert decision, `occupied`, `vacant`, or a count band; the canonical area remains the request's exact Phase 2 location authority, not a model result. Success never promotes the observation into a security event or presence transition. Any gate failure yields no frame and no accepted observation, while native Phase 3 behavior remains unchanged.
 
 ## 12. Owner security alerts
 
@@ -721,8 +743,8 @@ The browser never receives a camera credential, raw stream URL, direct filesyste
 
 - Only the owner profile can list, search, play, export, delete, configure, pause/resume, or receive alerts.
 - The second adult, K2 child, N1 child, Guest, anonymous, Home Assistant users, and Reachy conversational sessions have zero media route.
-- Playback requires a current owner session and single-clip grant. Export/deletion/retention/placement/alert/presence/credential changes require exact-scope fresh passkey grants consumed with the mutation.
-- Replayed, stale, cross-clip, cross-view, edited-range, wrong-session, or wrong-operation grants are rejected.
+- Playback requires a current owner session and one registered single-use event-clip/view or seven-day low-wide-segment grant. Export/deletion/retention/placement/alert/presence/credential changes require exact-scope fresh passkey grants consumed with the mutation.
+- Replayed, stale, cross-subject, cross-clip, cross-segment, cross-view, edited/missing/multiple/suffix/open-ended range, wrong-session, or wrong-operation grants/claims are rejected before media access.
 - No public or cloud CDN/cache is used. Remote owner access remains absent until Phase 6 VPN design.
 
 ## 17. End-to-end flows
@@ -761,23 +783,38 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   participant O as Owner browser
-  participant API as Tuntun owner API
+  participant I as Owner ingress
+  participant API as Core over non-media UDS
   participant Auth as Phase 1 auth/policy
-  participant Cat as Vision catalog
-  participant Proxy as Media proxy
+  participant Cat as Recorder/catalog grant ledger
+  participant Proxy as Media proxy over media UDS
   participant SSD as Encrypted video volume
 
-  O->>API: Select clip by opaque ID
-  API->>Auth: Verify owner session and operation
-  Auth-->>API: Single-clip, 60s playback grant
-  API->>Cat: Resolve authorized opaque token
-  Cat-->>Proxy: Clip/view/checksum/range policy
-  O->>Proxy: Grant + bounded byte range
-  Proxy->>SSD: Open exact file beneath fixed root
+  O->>I: Select event clip/view or 7d low-wide segment
+  I->>API: Pre-session request + exact Phase 1 auth material
+  API->>Auth: Verify/bootstrap owner and derive bounded session tuple
+  Auth-->>I: MACed result with tuple or safe response
+  I->>API: Session-bound generated non-media request
+  API->>Auth: Authorize exact subject + range
+  Auth->>Cat: Register signed 60s grant in recorder ledger
+  Cat-->>Auth: Exact registration receipt
+  Auth-->>I: Opaque route token (no media bytes/path)
+  O->>I: Exact /api/v1/media/{token} + bytes=start-end
+  I->>Proxy: Session-derived MACed media context + exact range
+  Proxy->>Cat: 2s claim over token/session/context/range
+  Cat->>Cat: Trusted-now check + atomic single-use claim
+  Cat-->>Proxy: Receipt + opaque storage token/exact authority
+  Proxy->>SSD: Recorder-authorized first read beneath fixed root
   SSD-->>Proxy: Bytes
-  Proxy-->>O: no-store media response
-  Proxy->>Auth: Consume/expire grant and receipt
+  Proxy-->>I: Bounded partial writes/backpressure
+  I-->>O: no-store media response
 ```
+
+Ingress strips/rejects every `Forwarded`, `X-Forwarded-*`, proxy, and client-nominated hop-by-hop header; rejects duplicate/conflicting Host/Origin/length/range fields, obs-fold, CL/TE ambiguity, absolute-form targets, dot segments, percent/double-decode ambiguity, path smuggling, and every route not in its generated split before either UDS is opened. It parses Host, Origin, path, query, framing, body, and the sole normalized inclusive range once and classifies `loopback_http|commissioned_lan_https`. Before any session-bound dispatch it sends a bounded peer-authenticated pre-session request to core carrying exactly one Phase 1 auth shape: bootstrap, loopback Authorization+DPoP, or commissioned-LAN cookie+CSRF. Core alone verifies/bootstraps that authority and returns either a safe response or a two-second derived owner-session tuple bound to request, listener/source, generated route/generation, query/body digests, optional media range, and current core generation. Ingress then constructs the normal request context only from that tuple; it cannot assert an owner/session itself or mix loopback and LAN credentials.
+
+The session-bound context repeats current listener generation, source peer, generated route ID/generation, destination, sequence, request ID, exact digests/range, and a two-second deadline. Core reconstructs WebAuthn/RP/origin authority only from this chain and atomically rechecks current listener and session/mutation authority; raw client proxy claims and direct network requests are rejected. For media, pre-session request, derived tuple, final context, grant, claim, and claim receipt all exact-compare the same inclusive range. Wrong UDS peer, MAC, generation, route, derivation, range, replay, or inner/outer expiry performs no application dispatch, grant claim, catalog access, or media read.
+
+Range parsing, partial writes, slow clients, cancellation, Privacy Shield changes, and child-process failure are bounded and cancellation-safe. Neither ingress nor proxy caches or logs media bodies/grants. Core cannot receive a media request or byte stream, media proxy cannot receive a non-media request, and process/network tests prove loopback availability without LAN mode, no LAN/wildcard/IPv6 8787, only an exact commissioned RFC1918 8443 when enabled, and no core/media-proxy TCP listener through launch, crash, restart, and disable.
 
 ### 17.3 Anonymous presence
 
@@ -886,17 +923,17 @@ sequenceDiagram
 
 ### P3-6 — Household soak and storage decision
 
-- Complete a seven-day household soak plus accelerated 90-day retention and restore simulations.
+- Complete a seven-day household soak plus accelerated 90-day retention and restore simulations under one complete canonical same-candidate feature-manifest rollover chain.
 - Review privacy/identity/egress sentinels, owner access, alert quality, presence evidence, storage projection, Mac effect, and every failure in Section 18.
 - Produce one signed decision: `retain_external_ssd`, `open_hub_nvr_procurement`, or `open_nas_vms_procurement`, with exact evidence and revisit trigger.
 
-**Gate:** no hidden media copy, false retention claim, false clear/vacant state, duplicate alert, unauthorized playback, identity path, raw-media egress, or unmitigated high/critical security finding.
+**Gate:** no hidden media copy, false retention claim, false clear/vacant state, duplicate alert, unauthorized playback, identity path, raw-media egress, expired-authority interval, or unmitigated high/critical security finding. The receipt binds the rollover-chain ID, ordered signed-envelope and transition-receipt digests, and exact campaign interval.
 
 ### Conditional P3-F — Bridge or recorder migration pilot
 
 - Run only after P3-2 proves a camera path or capacity/reliability requirement cannot be met safely.
 - Procure at most the approved pilot bridge/NVR/NAS and drives/licences after a dated landed-cost and return/warranty review.
-- Add one recoverable camera/view first; prove local protocols, audio-off, native events, dual view, WAN-off, complete outbound control/P2P/DNS/metadata/media blocking, retention, owner playback, backup/restore, power loss, channel licensing, and rollback before migrating the other cameras.
+- Add one recoverable camera/view first; prove local protocols, audio-off, native events, dual view, WAN-off, complete outbound control/P2P/DNS/metadata/media blocking, retention, owner playback, backup/restore, power loss, channel licensing, and rollback before migrating the other cameras. Its 30-day parallel campaign must consume one complete canonical same-candidate rollover chain, verify every wall/monotonic lease and transition, and have zero expired-authority interval.
 
 **Gate:** no bulk migration or decommissioning of the SSD/camera-native path until a 30-day parallel run passes.
 
@@ -936,7 +973,7 @@ Every enabled Phase 3 capability must pass its positive gate. A disabled capabil
 ### 20.4 Access, playback, and operations
 
 - Owner playback/search succeeds locally for complete representative low/event clips, including TrackMix view labels when enabled.
-- Second adult, both child classes, Guest, anonymous, Home Assistant, an inner compromised client, and an outer/office client obtain zero clip list, metadata, bytes, URL, credential, or distinguishing existence response.
+- Second adult, both child classes, Guest, anonymous, Home Assistant, an inner compromised client, and a client on the disabled or separately gated outer interface of the same single Mac obtain zero clip list, metadata, bytes, URL, credential, or distinguishing existence response.
 - Replay, stale, edited range, cross-clip, cross-view, wrong-operation, wrong-session, and expired playback grants are rejected; a valid grant cannot traverse outside the fixed media root.
 - Export and early deletion require fresh exact-scope passkeys, survive before/after-crash injection, verify checksums/counts, and leave truthful content-minimized receipts without claiming exported-copy deletion.
 - Privacy Shield and recorder combinations pass all four Section 14 states; Privacy Shield on with recorder running visibly states that cameras continue recording.

@@ -68,10 +68,14 @@ class SanitizedSearchRequest(ContractModel):
 class SearchRouteAuthorization(ContractModel):
     schema_version: Literal["1.0"]
     route_authorization_id: UUID
+    attempt_id: UUID
     household_id: UUID
     subject_id: UUID
+    subject_authority_generation: Annotated[int, Field(ge=1)]
     session_id: UUID
     turn_id: UUID
+    experimental_parent_capability_id: UUID | None = None
+    pass_number: Annotated[int, Field(ge=1, le=4)]
     consent_receipt_id: UUID
     consent_generation: Annotated[int, Field(ge=1)]
     privacy_generation: Annotated[int, Field(ge=1)]
@@ -91,6 +95,10 @@ class SearchRouteAuthorization(ContractModel):
     def short_lived(self) -> "SearchRouteAuthorization":
         if self.expires_at <= self.issued_at or self.expires_at - self.issued_at > timedelta(seconds=30):
             raise ValueError("search route lifetime must be positive and at most 30 seconds")
+        if self.experimental_parent_capability_id is None and (self.pass_number != 1 or self.pass_cap != 1):
+            raise ValueError("controlled search must be exactly one parentless pass")
+        if self.experimental_parent_capability_id is not None and self.pass_number > self.pass_cap:
+            raise ValueError("experimental pass exceeds parent cap")
         return self
 
 class SearchSourceCandidate(ContractModel):
@@ -165,7 +173,7 @@ class WebModeDecision(ContractModel):
 class SearchReceipt(ContractModel):
     schema_version: Literal["1.0"]
     receipt_id: UUID
-    route_authorization_id: UUID
+    route_authorization_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=4)]
     turn_id: UUID
     mode: Literal["controlled", "experimental_multi_pass"]
     provider_id: Annotated[str, Field(min_length=1, max_length=128)]
@@ -176,11 +184,22 @@ class SearchReceipt(ContractModel):
     request_commitment: Commitment
     source_set_commitment: Commitment
     result_commitment: Commitment
-    budget_reservation_id: UUID
-    budget_settlement_id: UUID
+    budget_reservation_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=4)]
+    budget_settlement_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=4)]
     actual_cost_micro_sgd: Annotated[int, Field(ge=0)]
     decision_code: Annotated[str, Field(min_length=1, max_length=128)]
     occurred_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def one_budget_lifecycle_per_pass(self) -> "SearchReceipt":
+        if not (
+            len(self.route_authorization_ids)
+            == len(self.budget_reservation_ids)
+            == len(self.budget_settlement_ids)
+            == self.pass_count
+        ):
+            raise ValueError("one route and budget lifecycle required per search pass")
+        return self
 
 class SearchModeSummaryV1(ContractModel):
     schema_version: Literal["1.0"]
@@ -316,6 +335,7 @@ CW01 depends on the accepted Phase 1 contract/bootstrap, consent, provider-revie
 
 **Files:**
 - Create: `packages/contracts/src/tuntun_contracts/search.py`
+- Modify: `packages/contracts/src/tuntun_contracts/budget.py`
 - Modify: `packages/contracts/src/tuntun_contracts/ports.py`
 - Create: `schemas/search/v1/sanitized-search-request-v1.schema.json`
 - Create: `schemas/search/v1/search-first-pass-result-v1.schema.json`
@@ -337,6 +357,8 @@ CW01 depends on the accepted Phase 1 contract/bootstrap, consent, provider-revie
 - Modify: `apps/core/src/tuntun_core/services/providers/route_authorization.py`
 - Modify: `apps/core/src/tuntun_core/bootstrap/container.py`
 - Modify: `apps/core/src/tuntun_core/services/budget/pricing.py`
+- Modify: `apps/core/src/tuntun_core/services/budget/catalog.py`
+- Modify: `apps/core/src/tuntun_core/services/providers/gateway.py`
 - Create: `config/providers/search.yaml`
 - Create: `config/policies/web-modes.yaml`
 - Create: `tests/contract/search/test_search_contracts.py`
@@ -346,9 +368,10 @@ CW01 depends on the accepted Phase 1 contract/bootstrap, consent, provider-revie
 - Create: `tests/security/search/test_citation_presentation_compliance.py`
 - Create: `tests/integration/search/test_search_consent_migration.py`
 - Create: `tests/integration/search/test_search_budget.py`
+- Create: `tests/integration/search/test_search_route_persistence.py`
 - Create: `tests/integration/search/test_search_revocation.py`
 
-**Interfaces:** Adds async `SearchPort.search(request: SanitizedSearchRequest) -> SearchFirstPassResult`, `WebModeDecision`, `CitationPresentationComplianceStore.require_current(...)`, and a single-use `SearchRouteAuthorization` bound to household/turn/subject/session, canonical durable `ConsentPurpose.WEB_SEARCH`, its current HMAC-verified subject receipt and generation, privacy/provider-review/policy/pricing/citation-presentation-review versions, source/pass caps, budget reservation, idempotency, issue/expiry, and purpose-separated request commitment. It consumes the amended baseline `ConsentPurpose`, `ConsentActionDraft`, `GrantConsent`/`RevokeConsent`, `consent.grant`/`consent.revoke` exact action bindings, `ConsentService`, revocation cascade, and clean-install `0002_profiles_consent_enrollment` contract. It does not add a second consent store or new action name. Subject receipts admit `web_search` only for `owner|adult`; `guest_disclosure_challenges` and `guest_session_consent_receipts` remain structurally incapable of storing it. Citation-presentation review acceptance reuses the existing high-risk `provider.review` ceremony with an exact provider/purpose/document-hash/behavior/decision binding.
+**Interfaces:** Adds async `SearchPort.search(request: SanitizedSearchRequest) -> SearchFirstPassResult`, `WebModeDecision`, `CitationPresentationComplianceStore.require_current(...)`, and a single-use `SearchRouteAuthorization` bound to one immutable `attempt_id`, household/turn/subject/session, current subject authority generation, canonical durable `ConsentPurpose.WEB_SEARCH`, its current HMAC-verified subject receipt and generation, privacy/provider-review/policy/pricing/citation-presentation-review versions, source/pass caps, one distinct budget reservation, one distinct idempotency key, issue/expiry, and purpose-separated request commitment. The same `attempt_id` is persisted in the closed route envelope, budget reservation, provider-call proof, consumption receipt, and settlement; callers cannot supply or substitute a second attempt identity. Controlled mode mints one parentless pass. The optional experimental feature may mint each route only as a unique child of the current parent session capability defined in CW03; no child/key/reservation may be shared across provider attempts. The sealed shared budget union adds `WebSearchUsageUnits(category="web_search", input_tokens, output_tokens, web_search_calls)`; only `SearchBudgetService.reserve_one_call` constructs a search ceiling and it always inserts literal call count `1`. Neither HTTP/search contracts nor the adapter accept that count from a caller. Current provider/model token rates, the fixed per-call rate, primary `provider_reported_exact` basis, and `conservative_full_reservation` missing-evidence policy are HMAC-bound into the reservation snapshot. It consumes the amended baseline `ConsentPurpose`, `ConsentActionDraft`, `GrantConsent`/`RevokeConsent`, `consent.grant`/`consent.revoke` exact action bindings, `ConsentService`, revocation cascade, and clean-install `0002_profiles_consent_enrollment` contract. It does not add a second consent store or new action name. Subject receipts admit `web_search` only for `owner|adult`; `guest_disclosure_challenges` and `guest_session_consent_receipts` remain structurally incapable of storing it. Citation-presentation review acceptance reuses the existing high-risk `provider.review` ceremony with an exact provider/purpose/document-hash/behavior/decision binding.
 
 - [ ] **Step 1: Write failing closed-contract and mode tests**
 
@@ -364,7 +387,8 @@ def test_sanitized_search_request_has_only_minimal_fields() -> None:
 
 def test_search_route_authorization_is_exact_and_short_lived(clock) -> None:
     assert set(SearchRouteAuthorization.model_fields) == {
-        "schema_version", "route_authorization_id", "household_id", "subject_id", "session_id", "turn_id",
+        "schema_version", "route_authorization_id", "attempt_id", "household_id", "subject_id", "session_id", "turn_id",
+        "subject_authority_generation", "experimental_parent_capability_id", "pass_number",
         "consent_receipt_id", "consent_generation", "privacy_generation",
         "provider_review_version", "policy_version", "pricing_version",
         "citation_review_version", "source_cap", "pass_cap", "budget_reservation_id",
@@ -372,6 +396,17 @@ def test_search_route_authorization_is_exact_and_short_lived(clock) -> None:
     }
     with pytest.raises(ValueError, match="at most 30 seconds"):
         search_route_factory(expires_at=clock.now() + timedelta(seconds=31))
+
+
+def test_search_route_attempt_is_one_closed_persisted_identity(search_route_factory) -> None:
+    route = search_route_factory()
+    restored = SearchRouteAuthorization.model_validate_json(route.model_dump_json())
+    assert restored.attempt_id == route.attempt_id
+    assert restored.attempt_id not in {
+        restored.route_authorization_id,
+        restored.idempotency_key,
+        restored.budget_reservation_id,
+    }
 
 def test_source_contract_does_not_invent_provider_redirect_metadata() -> None:
     fields = set(SearchSourceCandidate.model_fields)
@@ -384,10 +419,10 @@ def test_first_pass_and_durable_receipt_are_content_minimized() -> None:
         "response_commitment", "observed_at",
     }
     assert set(SearchReceipt.model_fields) == {
-        "schema_version", "receipt_id", "route_authorization_id", "turn_id", "mode",
+        "schema_version", "receipt_id", "route_authorization_ids", "turn_id", "mode",
         "provider_id", "provider_review_version", "source_count", "citation_count",
         "pass_count", "request_commitment", "source_set_commitment", "result_commitment",
-        "budget_reservation_id", "budget_settlement_id", "actual_cost_micro_sgd",
+        "budget_reservation_ids", "budget_settlement_ids", "actual_cost_micro_sgd",
         "decision_code", "occurred_at",
     }
     receipt_schema = canonical_json(SearchReceipt.model_json_schema())
@@ -469,11 +504,76 @@ def test_controlled_search_requires_copy_only_provider_compliance(mode_policy, d
     result = mode_policy.decide(adult_fixture(citation_presentation_decision=decision))
     assert result.search_authorization is None
     assert result.reason_code == "citation_presentation_compliance_required"
+
+
+@pytest.mark.asyncio
+async def test_search_call_count_is_server_issued_and_exactly_one(search_budget_service) -> None:
+    assert "web_search_calls" not in inspect.signature(
+        search_budget_service.reserve_one_call,
+    ).parameters
+    reservation=await search_budget_service.reserve_one_call(
+        input_token_ceiling=2_000,output_token_ceiling=1_000,
+    )
+    assert reservation.usage_ceiling==WebSearchUsageUnits(
+        category="web_search",input_tokens=2_000,output_tokens=1_000,
+        web_search_calls=1,
+    )
+    assert reservation.price_snapshot.web_search_micro_usd_per_call>0
+    assert reservation.price_snapshot.primary_accounting_basis=="provider_reported_exact"
+    assert reservation.price_snapshot.missing_evidence_policy=="conservative_full_reservation"
+
+
+@pytest.mark.parametrize("calls",(0,2,-1,17))
+def test_direct_search_reservation_cannot_understate_or_expand_call_ceiling(
+    budget_request_factory,calls,
+) -> None:
+    with pytest.raises(ValidationError):
+        budget_request_factory(
+            category="web_search",
+            usage_ceiling={
+                "category":"web_search","input_tokens":1,"output_tokens":1,
+                "web_search_calls":calls,
+            },
+        )
+
+
+def test_web_search_quote_adds_model_tokens_and_fixed_call_rate(
+    pricing,search_price_record,
+) -> None:
+    quote=pricing.quote("openai","gpt-5.6-sol",WebSearchUsageUnits(
+        category="web_search",input_tokens=1_000_000,output_tokens=1_000_000,
+        web_search_calls=1,
+    ))
+    assert quote.web_search_micro_usd_per_call==10_000
+    assert pricing._native(search_price_record,WebSearchUsageUnits(
+        category="web_search",input_tokens=1_000_000,output_tokens=1_000_000,
+        web_search_calls=1,
+    ))==(
+        search_price_record.input_micro_usd_per_million
+        + search_price_record.output_micro_usd_per_million
+        + search_price_record.web_search_micro_usd_per_call
+    )
+
+
+@pytest.mark.parametrize("missing_rate",("input","output","tool_call"))
+def test_web_search_price_requires_all_model_and_tool_rate_components(
+    search_price_record,missing_rate,
+) -> None:
+    from dataclasses import replace
+
+    with pytest.raises(ValueError,match="invalid provider price"):
+        replace(search_price_record,**{
+            {
+                "input":"input_micro_usd_per_million",
+                "output":"output_micro_usd_per_million",
+                "tool_call":"web_search_micro_usd_per_call",
+            }[missing_rate]:0,
+        })
 ```
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/contract/search/test_search_contracts.py tests/unit/search/test_mode_policy.py tests/unit/search/test_query_minimizer.py tests/security/search/test_search_consent.py tests/security/search/test_citation_presentation_compliance.py tests/integration/search/test_search_consent_migration.py tests/integration/search/test_search_budget.py -q`
+Run: `uv run pytest tests/contract/search/test_search_contracts.py tests/unit/search/test_mode_policy.py tests/unit/search/test_query_minimizer.py tests/security/search/test_search_consent.py tests/security/search/test_citation_presentation_compliance.py tests/integration/search/test_search_consent_migration.py tests/integration/search/test_search_budget.py tests/integration/search/test_search_route_persistence.py -q`
 Expected: FAIL during collection because the search contract and services do not exist.
 
 - [ ] **Step 3: Implement strict contracts, consent, and reservations**
@@ -485,11 +585,137 @@ Consume the accepted baseline contract that already defines canonical `ConsentPu
 Add `web_search` as a purpose-distinct consent checked at route authorization and immediately before adapter I/O. Only the owner/adult subject can grant or revoke their own search consent; even a valid guardian grant for `k2` or `n1` is rejected as `web_search_adult_self_consent_required`. `profile_class` remains the canonical closed `owner | adult | k2 | n1 | guest` axis. Anonymous, uncertain, conflicting, and stale-profile conditions are separate identity states; each is normalized to `profile_class=guest` plus `identity_state=anonymous_restricted | uncertain | conflicting | stale_profile`. The search authorizer classifies child/Guest profile class and restrictive identity state before calling any consent repository method, so deny paths reveal no receipt-existence oracle and `lookup_calls == 0`. Direct-adapter entry still requires the resulting single-use route authorization. CW01 registers `SearchRouteConsentRevocationHandler` in the existing purpose-keyed consent cascade. In the same serialized transaction as the revoke receipt, it deletes every still-unconsumed search authorization for that subject; the after-commit revocation event cancels matching active search tasks. The writer order is explicit: revocation first means zero later adapter calls, while a consumption committed first is already in flight, is cancelled best-effort, and is settled conservatively without claiming provider-side recall.
 
 ```python
+# apps/core/src/tuntun_core/services/search/consent_budget.py
+from tuntun_contracts.budget import BudgetReservationRequest,WebSearchUsageUnits
+
+
+class SearchBudgetService:
+    def __init__(self,budget,clock) -> None:
+        self._budget,self._clock=budget,clock
+
+    async def reserve_one_call(
+        self,*,context,input_token_ceiling:int,output_token_ceiling:int,
+    ):
+        # There is deliberately no call-count argument. The registered request
+        # shape enforces max_tool_calls=1 and this sole constructor injects it.
+        usage=WebSearchUsageUnits(
+            category="web_search",input_tokens=input_token_ceiling,
+            output_tokens=output_token_ceiling,web_search_calls=1,
+        )
+        return await self._budget.reserve(BudgetReservationRequest(
+            household_id=context.household_id,turn_id=context.turn_id,
+            request_id=context.request_id,attempt_id=context.attempt_id,
+            provider="openai",model="gpt-5.6-sol",category="web_search",
+            usage_ceiling=usage,month_key=context.month_key,
+        ))
+```
+
+```yaml
+# config/providers/search.yaml
+provider: openai
+model: gpt-5.6-sol
+category: web_search
+tool_type: web_search
+max_tool_calls: 1
+input_micro_usd_per_million: 4000000
+output_micro_usd_per_million: 20000000
+web_search_micro_usd_per_call: 10000
+primary_accounting_basis: provider_reported_exact
+missing_evidence_policy: conservative_full_reservation
+pricing_version: openai-web-search-2026-08-27
+source_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+```
+
+The seed digest is intentionally non-production. Commissioning hashes the owner-retained current official API pricing/tool-event pages and keeps search disabled until that exact provider/account/model accepts `max_tool_calls=1`, produces stable unique tool-call identifiers, and proves the response token schema. The call rate and token rates are independently bounded integers and become part of the same signed price snapshot; an adapter cannot substitute the ordinary reasoning price row.
+
+```python
 # apps/core/src/tuntun_core/services/search/route_authorization.py
+from uuid import uuid4
+
+from tuntun_contracts.base import canonical_bytes,parse_contract_json
 from tuntun_contracts.search import SearchRouteAuthorization
 
+def _parse_persisted_search_route(raw) -> SearchRouteAuthorization:
+    if type(raw) is not str:
+        raise ValueError("search route JSON encoding invalid")
+    return parse_contract_json(
+        SearchRouteAuthorization,raw.encode("utf-8"),max_bytes=65_536,
+        require_canonical=True,
+    )
 
 class SqlSearchRouteAuthorizations:
+    @staticmethod
+    def _key(route_authorization_id) -> str:
+        return f"search.route.authorization.{route_authorization_id}"
+
+    async def persist_issued_in_uow(self, uow, route: SearchRouteAuthorization) -> None:
+        def persist(db):
+            budget = db.exec_driver_sql(
+                "SELECT attempt_id FROM budget_reservations WHERE id=? AND state='reserved'",
+                (str(route.budget_reservation_id),),
+            ).fetchone()
+            if budget != (str(route.attempt_id),):
+                raise PermissionError("search_route_budget_attempt_mismatch")
+            db.exec_driver_sql(
+                "INSERT INTO runtime_settings(key,value_json,version,updated_at) "
+                "VALUES(?,?,1,?)",
+                (
+                    self._key(route.route_authorization_id),
+                    canonical_bytes(route).decode("utf-8"),
+                    route.issued_at.isoformat(),
+                ),
+            )
+
+        await uow.run_sync(persist)
+
+    async def require_issued_in_uow(self, uow, route_authorization_id) -> SearchRouteAuthorization:
+        def require(db):
+            row = db.exec_driver_sql(
+                "SELECT value_json FROM runtime_settings WHERE key=?",
+                (self._key(route_authorization_id),),
+            ).fetchone()
+            if row is None:
+                raise PermissionError("unknown_search_route_authorization")
+            return _parse_persisted_search_route(row[0])
+
+        return await uow.run_sync(require)
+
+    async def consume_once_in_uow(self, uow, route_authorization_id, now) -> SearchRouteAuthorization:
+        """Recover attempt identity server-side; no caller supplies or substitutes it."""
+        def consume(db):
+            key = self._key(route_authorization_id)
+            row = db.exec_driver_sql(
+                "SELECT value_json FROM runtime_settings WHERE key=?", (key,),
+            ).fetchone()
+            if row is None:
+                raise PermissionError("unknown_search_route_authorization")
+            route = _parse_persisted_search_route(row[0])
+            budget = db.exec_driver_sql(
+                "SELECT attempt_id FROM budget_reservations WHERE id=? AND state='reserved'",
+                (str(route.budget_reservation_id),),
+            ).fetchone()
+            if budget != (str(route.attempt_id),):
+                raise PermissionError("search_route_budget_attempt_mismatch")
+            deleted = db.exec_driver_sql(
+                "DELETE FROM runtime_settings WHERE key=?", (key,),
+            )
+            if deleted.rowcount != 1:
+                raise PermissionError("search_route_consume_race")
+            db.exec_driver_sql(
+                "INSERT INTO idempotency_receipts"
+                "(id,operation,scope,idempotency_key,state,first_seen_at,last_seen_at,expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    str(uuid4()), "search.route.consume",
+                    str(route.route_authorization_id),str(route.attempt_id),
+                    "consumed", now.isoformat(),
+                    now.isoformat(), route.expires_at.isoformat(),
+                ),
+            )
+            return route
+
+        return await uow.run_sync(consume)
+
     async def invalidate_subject_purpose_in_uow(self, uow, subject_id, purpose, now):
         if purpose != "web_search":
             raise ValueError("search revoker received wrong purpose")
@@ -500,12 +726,12 @@ class SqlSearchRouteAuthorizations:
             ).fetchall()
             revoked = []
             for key, value_json in rows:
-                route = SearchRouteAuthorization.model_validate_json(value_json)
+                route = _parse_persisted_search_route(value_json)
                 if route.subject_id != subject_id:
                     continue
                 consumed = db.exec_driver_sql(
                     "SELECT 1 FROM idempotency_receipts WHERE operation='search.route.consume' AND scope=? AND idempotency_key=?",
-                    (str(route.household_id), str(route.route_authorization_id)),
+                    (str(route.route_authorization_id),str(route.attempt_id)),
                 ).fetchone()
                 if consumed is None:
                     db.exec_driver_sql("DELETE FROM runtime_settings WHERE key=?", (key,))
@@ -526,6 +752,72 @@ class SearchRouteConsentRevocationHandler:
 ```
 
 The composition root passes this handler as `search_routes` to the canonical `build_consent_revocation_handlers`; it does not replace the generic cascade or create a second consent service.
+
+```python
+# tests/integration/search/test_search_route_persistence.py
+from uuid import uuid4
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_route_attempt_survives_restart_and_drives_consume_provider_and_settlement(
+    authorized_route, restart_route_repository, uow_factory, clock,
+    provider_call_capture, settlement_capture,
+) -> None:
+    first = restart_route_repository()
+    async with uow_factory() as uow:
+        await first.persist_issued_in_uow(uow, authorized_route)
+        await uow.commit()
+
+    restarted = restart_route_repository()
+    async with uow_factory() as uow:
+        restored = await restarted.require_issued_in_uow(
+            uow, authorized_route.route_authorization_id,
+        )
+        assert restored == authorized_route
+        assert await uow.run_sync(lambda db: db.exec_driver_sql(
+            "SELECT version,updated_at FROM runtime_settings WHERE key=?",
+            (restarted._key(authorized_route.route_authorization_id),),
+        ).fetchone()) == (1, authorized_route.issued_at.isoformat())
+        consumed = await restarted.consume_once_in_uow(
+            uow, authorized_route.route_authorization_id, clock.now(),
+        )
+        await provider_call_capture.begin_in_uow(uow, consumed)
+        await settlement_capture.settle_in_uow(uow, consumed)
+        await uow.commit()
+
+    assert consumed.attempt_id == authorized_route.attempt_id
+    assert provider_call_capture.attempt_ids == [authorized_route.attempt_id]
+    assert settlement_capture.attempt_ids == [authorized_route.attempt_id]
+    async with uow_factory() as uow:
+        assert await uow.run_sync(lambda db:db.exec_driver_sql(
+            "SELECT scope,idempotency_key FROM idempotency_receipts "
+            "WHERE operation='search.route.consume'",
+        ).fetchone())==(
+            str(authorized_route.route_authorization_id),
+            str(authorized_route.attempt_id),
+        )
+        with pytest.raises(PermissionError, match="unknown_search_route_authorization"):
+            await restarted.consume_once_in_uow(
+                uow, authorized_route.route_authorization_id, clock.now(),
+            )
+
+
+@pytest.mark.asyncio
+async def test_persist_rejects_route_budget_attempt_mismatch(
+    authorized_route, replace_reserved_budget_attempt, restart_route_repository,
+    uow_factory,
+) -> None:
+    await replace_reserved_budget_attempt(
+        authorized_route.budget_reservation_id, uuid4(),
+    )
+    async with uow_factory() as uow:
+        with pytest.raises(PermissionError, match="search_route_budget_attempt_mismatch"):
+            await restart_route_repository().persist_issued_in_uow(
+                uow, authorized_route,
+            )
+```
 
 ```python
 # tests/integration/search/test_search_revocation.py
@@ -553,19 +845,19 @@ async def test_consumption_winning_race_is_cancelled_and_conservatively_settled(
     assert claimed_search.conservative_settlements == 1
 ```
 
-Controlled mode uses at most one pass/eight sources. Create a distinct budget price component for model tokens plus per-tool-call charges and reserve it atomically before adapter I/O; equality at the S$150 hard cap remains allowed, above-cap denied.
+Controlled mode uses at most one pass/eight sources. `SearchBudgetService` reserves model-token ceilings plus exactly one fixed tool-call charge atomically before adapter I/O; equality at the S$150 hard cap remains allowed, above-cap denied. On success, the adapter validates one stable unique `web_search_call` event ID and constructs `WebSearchUsageUnits` from the exact response token counts and that one validated event. Zero/missing tool evidence or missing token evidence may produce `missing_within_authorized_ceiling` only because the registered request, provider capability probe, and signed reservation jointly prove one call and complete token ceilings; the gateway then mints `conservative_full_reservation` and charges the full reservation without claiming actual usage. More than one distinct event breaches the enforced one-call provider contract and cannot prove complete billable evidence, so it is unknown overage rather than an exact two-call receipt. A repeated event ID, conflicting duplicate body, malformed/negative/oversized token or event count, an unknown tool action, or any state that cannot prove the one-call ceiling likewise emits `invalid_or_over_ceiling`, leaves the successful call without a receipt, and freezes unknown overage. Cancel/timeout/transport ambiguity after claim follows the ordinary conservative reservation path. No path silently charges only model tokens or accepts a caller-authored tool count.
 
 Mode preflight ordering is: Privacy Shield/full-cloud safety -> WAN/provider-review/pricing/full-turn consent -> `OFFLINE_ONLY`; actor/profile/session/no-web/search-consent -> `no_web`; otherwise controlled search authorization. Cancellation or generation drift consumes/revokes the authorization and reconciles the reservation exactly once.
 
 - [ ] **Step 4: Run green, schema drift, and static checks**
 
-Run: `uv run pytest tests/contract/search/test_search_contracts.py tests/unit/search/test_mode_policy.py tests/unit/search/test_query_minimizer.py tests/security/search/test_search_consent.py tests/security/search/test_citation_presentation_compliance.py tests/integration/search/test_search_consent_migration.py tests/integration/search/test_search_budget.py tests/integration/search/test_search_revocation.py -q && uv run python scripts/generate_schemas.py --check && uv run ruff format --check packages/contracts/src/tuntun_contracts/search.py apps/core/src/tuntun_core/services/search tests/contract/search tests/unit/search tests/security/search tests/integration/search && uv run ruff check packages/contracts/src/tuntun_contracts/search.py apps/core/src/tuntun_core/services/search tests/contract/search tests/unit/search tests/security/search tests/integration/search && uv run mypy packages/contracts/src/tuntun_contracts/search.py apps/core/src/tuntun_core/services/search`
+Run: `uv run pytest tests/contract/search/test_search_contracts.py tests/unit/search/test_mode_policy.py tests/unit/search/test_query_minimizer.py tests/security/search/test_search_consent.py tests/security/search/test_citation_presentation_compliance.py tests/integration/search/test_search_consent_migration.py tests/integration/search/test_search_budget.py tests/integration/search/test_search_route_persistence.py tests/integration/search/test_search_revocation.py -q && uv run python scripts/generate_schemas.py --check && uv run ruff format --check packages/contracts/src/tuntun_contracts/search.py apps/core/src/tuntun_core/services/search tests/contract/search tests/unit/search tests/security/search tests/integration/search && uv run ruff check packages/contracts/src/tuntun_contracts/search.py apps/core/src/tuntun_core/services/search tests/contract/search tests/unit/search tests/security/search tests/integration/search && uv run mypy packages/contracts/src/tuntun_contracts/search.py apps/core/src/tuntun_core/services/search`
 Expected: PASS; child/Guest zero authorization, consent separation, no-web versus `OFFLINE_ONLY`, query minimization, and exact budget boundaries are deterministic.
 
 - [ ] **Step 5: Commit checkpoint**
 
 ```bash
-git add packages/contracts/src/tuntun_contracts/search.py packages/contracts/src/tuntun_contracts/ports.py schemas/search/v1/sanitized-search-request-v1.schema.json schemas/search/v1/search-first-pass-result-v1.schema.json schemas/search/v1/search-route-authorization-v1.schema.json schemas/search/v1/search-source-candidate-v1.schema.json schemas/search/v1/normalized-search-excerpt-v1.schema.json schemas/search/v1/search-answer-v1.schema.json schemas/search/v1/citation-inspection-v1.schema.json schemas/search/v1/web-mode-decision-v1.schema.json schemas/search/v1/search-receipt-v1.schema.json schemas/search/v1/search-mode-summary-v1.schema.json schemas/search/v1/search-status-v1.schema.json apps/core/src/tuntun_core/services/search/mode_policy.py apps/core/src/tuntun_core/services/search/consent_budget.py apps/core/src/tuntun_core/services/search/query_minimizer.py apps/core/src/tuntun_core/services/search/route_authorization.py apps/core/src/tuntun_core/services/search/citation_compliance.py apps/core/src/tuntun_core/services/providers/consent_guard.py apps/core/src/tuntun_core/services/providers/route_authorization.py apps/core/src/tuntun_core/services/budget/pricing.py apps/core/src/tuntun_core/bootstrap/container.py config/providers/search.yaml config/policies/web-modes.yaml tests/contract/search/test_search_contracts.py tests/unit/search/test_mode_policy.py tests/unit/search/test_query_minimizer.py tests/security/search/test_search_consent.py tests/security/search/test_citation_presentation_compliance.py tests/integration/search/test_search_consent_migration.py tests/integration/search/test_search_budget.py tests/integration/search/test_search_revocation.py
+git add packages/contracts/src/tuntun_contracts/search.py packages/contracts/src/tuntun_contracts/budget.py packages/contracts/src/tuntun_contracts/ports.py schemas/search/v1/sanitized-search-request-v1.schema.json schemas/search/v1/search-first-pass-result-v1.schema.json schemas/search/v1/search-route-authorization-v1.schema.json schemas/search/v1/search-source-candidate-v1.schema.json schemas/search/v1/normalized-search-excerpt-v1.schema.json schemas/search/v1/search-answer-v1.schema.json schemas/search/v1/citation-inspection-v1.schema.json schemas/search/v1/web-mode-decision-v1.schema.json schemas/search/v1/search-receipt-v1.schema.json schemas/search/v1/search-mode-summary-v1.schema.json schemas/search/v1/search-status-v1.schema.json apps/core/src/tuntun_core/services/search/mode_policy.py apps/core/src/tuntun_core/services/search/consent_budget.py apps/core/src/tuntun_core/services/search/query_minimizer.py apps/core/src/tuntun_core/services/search/route_authorization.py apps/core/src/tuntun_core/services/search/citation_compliance.py apps/core/src/tuntun_core/services/providers/consent_guard.py apps/core/src/tuntun_core/services/providers/route_authorization.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/services/budget/pricing.py apps/core/src/tuntun_core/services/budget/catalog.py apps/core/src/tuntun_core/bootstrap/container.py config/providers/search.yaml config/policies/web-modes.yaml tests/contract/search/test_search_contracts.py tests/unit/search/test_mode_policy.py tests/unit/search/test_query_minimizer.py tests/security/search/test_search_consent.py tests/security/search/test_citation_presentation_compliance.py tests/integration/search/test_search_budget.py tests/integration/search/test_search_consent_migration.py tests/integration/search/test_search_route_persistence.py tests/integration/search/test_search_revocation.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
@@ -670,6 +962,51 @@ async def test_success_is_copy_only_and_never_remote_navigation(citation_api, re
     assert response.json()["status"] == "validated_copy_only"
     assert "remote_href" not in response.json()
     assert remote_navigator.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("scenario","expected_basis","expected_calls"),(
+    ("one_exact","provider_reported_exact",1),
+    ("zero_events","conservative_full_reservation",1),
+    ("events_absent","conservative_full_reservation",1),
+))
+async def test_search_tool_calls_are_counted_or_conservatively_ceiling_charged(
+    search_accounting_case,scenario,expected_basis,expected_calls,
+) -> None:
+    case=await search_accounting_case(event_scenario=scenario)
+    await case.invoke(); settlement=await case.settle()
+    assert case.receipt.accounting_basis==expected_basis
+    assert case.receipt.billable_usage.web_search_calls==expected_calls
+    if expected_basis=="conservative_full_reservation":
+        assert settlement.charged_micros_sgd==case.reserved_micros_sgd
+        assert settlement.conservative_estimate_used
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario",(
+    "two_distinct","duplicate_id","conflicting_duplicate_id","unknown_tool",
+))
+async def test_over_ceiling_duplicate_conflicting_or_unknown_evidence_freezes(
+    search_accounting_case,scenario,
+) -> None:
+    case=await search_accounting_case(event_scenario=scenario)
+    with pytest.raises(ProviderUsageUnknownError,match="unknown_overage"):
+        await case.invoke()
+    assert case.provider_usage_receipt_id is None
+    assert case.cloud_egress_frozen and case.freeze_receipt.overage_known is False
+
+
+@pytest.mark.asyncio
+async def test_search_missing_token_usage_uses_signed_full_ceiling_not_zero(
+    search_accounting_case,
+) -> None:
+    case=await search_accounting_case(
+        event_scenario="one_exact",response_usage=None,
+    )
+    await case.invoke(); settlement=await case.settle()
+    assert case.receipt.accounting_basis=="conservative_full_reservation"
+    assert settlement.charged_micros_sgd==case.reserved_micros_sgd
+    assert settlement.charged_micros_sgd>case.fixed_tool_only_price
 ```
 
 - [ ] **Step 2: Run red**
@@ -680,6 +1017,63 @@ Expected: FAIL because the adapter, gates, distinct output schema, and citation 
 - [ ] **Step 3: Implement the first-pass adapter and hostile-source gate**
 
 Keep the workflow provider-independent and make the initial OpenAI adapter serialize this exact controlled first-pass shape through the existing attempt runner: model `gpt-5.6-sol`; `store=false`; `tools=[{"type":"web_search", ...registered filters/limits...}]`; `tool_choice="required"` with web search as the only registered tool; `max_tool_calls=1`; and `include=["web_search_call.action.sources"]`. Add the minimized current-question fragment as the only user content, use a bounded research-digest instruction rather than an answer/action instruction, disable SDK retries, and set explicit timeout/cancellation. Controlled mode issues exactly one such request and accepts at most eight consulted sources. Each experimental pass uses the same one-tool-call request shape; the application orchestrator separately enforces at most four provider attempts and 20 unique accepted sources across the isolated experimental session. Reject any provider request/result containing an unknown tool or unregistered field. The adapter never accepts or serializes a profile, memory, transcript history, or internal conversation object.
+
+```python
+# accounting seam inside apps/core/src/tuntun_core/adapters/openai/search.py
+from tuntun_contracts.budget import WebSearchUsageUnits
+from tuntun_core.services.providers.gateway import ProviderUsageObservation
+
+
+def observe_search_accounting(response) -> ProviderUsageObservation:
+    response_id=getattr(response,"id",None)
+    output=getattr(response,"output",None)
+    if not isinstance(output,(list,tuple)):
+        return ProviderUsageObservation(
+            reported_usage=None,provider_response_identifier=response_id,
+            evidence_state="missing_within_authorized_ceiling",
+        )
+    tool_events=[]
+    invalid=False
+    for item in output:
+        item_type=getattr(item,"type",None)
+        if item_type=="web_search_call":
+            action=getattr(item,"action",None)
+            event_id=getattr(item,"id",None)
+            if getattr(action,"type",None)!="search" or not isinstance(event_id,str):
+                invalid=True
+            else:
+                tool_events.append(event_id)
+        elif item_type not in {"message","reasoning"}:
+            invalid=True
+    if len(tool_events)!=len(set(tool_events)) or len(tool_events)>1:
+        invalid=True  # duplicates or >1 distinct call cannot prove the one-call contract
+    usage=getattr(response,"usage",None)
+    input_tokens=getattr(usage,"input_tokens",None)
+    output_tokens=getattr(usage,"output_tokens",None)
+    if invalid:
+        return ProviderUsageObservation(
+            reported_usage=None,provider_response_identifier=response_id,
+            evidence_state="invalid_or_over_ceiling",
+        )
+    if (
+        not tool_events
+        or isinstance(input_tokens,bool) or not isinstance(input_tokens,int)
+        or isinstance(output_tokens,bool) or not isinstance(output_tokens,int)
+    ):
+        return ProviderUsageObservation(
+            reported_usage=None,provider_response_identifier=response_id,
+            evidence_state="missing_within_authorized_ceiling",
+        )
+    return ProviderUsageObservation(
+        reported_usage=WebSearchUsageUnits(
+            category="web_search",input_tokens=input_tokens,
+            output_tokens=output_tokens,web_search_calls=len(tool_events),
+        ),
+        provider_response_identifier=response_id,evidence_state="exact",
+    )
+```
+
+`missing_within_authorized_ceiling` is permitted only for this registered search row. The gateway resolves that policy from the signed reservation; the same observation sent through an LLM/STT row freezes rather than settling. A distinct second event proves provider-contract drift but not complete billable evidence, so it freezes as unknown overage and mints no receipt. Duplicate/conflicting IDs and unknown tool events are not guessed or deduplicated into a cheaper result.
 
 Probe the exact account/project/model capability before adapter registration: the request fields above must be accepted; the completed action must be `search`; `web_search_call.action.sources` must yield consulted URLs; and cited first-pass text must carry usable `url_citation` URL/title/location annotations. Record only capability/version/result codes. A provider `open_page` or `find_in_page` action, missing source inclusion, unusable annotation location, or unsupported request control fails the probe and keeps controlled search disabled. The probe explicitly does **not** require or invent `final_url` or `redirect_chain` fields.
 
@@ -720,6 +1114,13 @@ git commit -m "feat(search): add bounded two-pass search and citations"
 
 **Files:**
 - Modify: `apps/core/src/tuntun_core/services/search/mode_policy.py`
+- Create only in enabled builds: `apps/core/src/tuntun_core/services/search/experimental_capability.py`
+- Create only in enabled builds: `apps/core/src/tuntun_core/adapters/sqlcipher/experimental_search_repository.py`
+- Create only in enabled builds: `apps/core/migrations/features/experimental_search/env.py`
+- Create only in enabled builds: `apps/core/migrations/features/experimental_search/versions/search_0001_experimental_search.py`
+- Create only in enabled builds: `apps/core/src/tuntun_core/bootstrap/experimental_search_schema.py`
+- Modify only in enabled builds: `apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py`
+- Modify only in enabled builds: `apps/core/src/tuntun_core/bootstrap/container.py`
 - Create: `apps/core/src/tuntun_core/api/search_dtos.py`
 - Create: `apps/core/src/tuntun_core/api/routes/search.py`
 - Modify: `apps/core/src/tuntun_core/api/app.py`
@@ -734,14 +1135,20 @@ git commit -m "feat(search): add bounded two-pass search and citations"
 - Create: `tests/security/search/test_search_admin_api.py`
 - Create: `tests/security/search/test_experimental_mode.py`
 - Create: `tests/security/search/test_experimental_absence.py`
+- Create only in enabled builds: `tests/integration/search/test_experimental_persistence.py`
+- Create only in enabled builds: `tests/integration/search/test_experimental_migration_graph.py`
+- Create only in enabled builds: `tests/integration/search/test_experimental_removal.py`
 - Create: `tests/privacy/search/test_search_console_minimization.py`
 - Create: `tests/e2e/search-modes.spec.ts`
 
-**Interfaces:** Adds owner-safe `SearchStatusV1`, `SearchModeSummaryV1`, and prepared actions `search.profile_mode.change` and `search.experimental.activate`; citation-presentation acceptance consumes the existing exact high-risk `provider.review` action rather than inventing a parallel review action. The browser receives state/reason/freshness/caps/cost/expiry/receipt metadata only. It never receives a query, page body, raw excerpt, redirect token, provider body, or citation registry.
+**Interfaces:** Adds owner-safe `SearchStatusV1`, `SearchModeSummaryV1`, and prepared actions `search.profile_mode.change` and `search.experimental.activate`; citation-presentation acceptance consumes the existing exact high-risk `provider.review` action rather than inventing a parallel review action. Mandatory core migrations remain one graph whose Phase 1 head is `0008_prepared_mutations` (after mandatory `0007_privacy_post_response_jobs`) in both artifacts. The enabled artifact alone carries an independent Alembic feature graph, version table `alembic_version_experimental_search`, and head `search_0001_experimental_search`; that migration owns exactly `experimental_search_capabilities|experimental_search_attempts`. It never appears as a child/head/branch label in the core graph, so a later mandatory core migration can descend from `0008_prepared_mutations` without a fork. The SQLCipher UoW exposes typed `experimental_search_capabilities|experimental_search_attempts` facades only after both graphs and their exact version tables pass startup verification. The absent artifact omits the feature graph/config/migrator/facades/routes. The browser receives state/reason/freshness/caps/cost/expiry/receipt metadata only. It never receives a query, page body, raw excerpt, redirect token, provider body, or citation registry.
 
 - [ ] **Step 1: Write failing mode-authority, API-minimization, and absence tests**
 
 ```python
+import asyncio
+import pytest
+
 def test_offline_only_is_not_a_selectable_preference(search_api) -> None:
     response = search_api.prepare_profile_mode("OFFLINE_ONLY")
     assert response.status_code == 422
@@ -758,6 +1165,154 @@ def test_experimental_requires_fresh_owner_passkey_and_exact_session(search_api)
 def test_search_status_contains_no_query_or_content(search_status) -> None:
     text = canonical_json(search_status)
     assert all(token not in text for token in ("query_fragment", "excerpt", "page_body", "source_url", "answer_text"))
+
+
+@pytest.mark.asyncio
+async def test_experimental_parent_mints_unique_single_use_authority_and_budget_per_attempt(
+    experimental_service, active_experimental_parent,
+):
+    attempts = [
+        await experimental_service.mint_attempt(active_experimental_parent.capability_id)
+        for _ in range(4)
+    ]
+    assert [item.pass_number for item in attempts] == [1, 2, 3, 4]
+    assert len({item.route_authorization_id for item in attempts}) == 4
+    assert len({item.idempotency_key for item in attempts}) == 4
+    assert len({item.budget_reservation_id for item in attempts}) == 4
+    assert all(item.experimental_parent_capability_id == active_experimental_parent.capability_id for item in attempts)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_fourth_and_fifth_mint_have_exactly_one_winner(
+    experimental_service, parent_with_three_attempts,
+):
+    results = await asyncio.gather(
+        experimental_service.mint_attempt(parent_with_three_attempts.capability_id),
+        experimental_service.mint_attempt(parent_with_three_attempts.capability_id),
+        return_exceptions=True,
+    )
+    assert sum(not isinstance(item, Exception) for item in results) == 1
+    assert sum(isinstance(item, PermissionError) for item in results) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [
+    "replayed_child", "cross_session_child", "shared_idempotency_key",
+    "shared_budget_reservation", "privacy_generation_drift", "policy_generation_drift",
+    "provider_review_drift", "pricing_drift", "owner_revoked", "session_ended", "expired",
+])
+async def test_experimental_child_mint_or_consume_fails_closed_on_reuse_or_drift(
+    experimental_scenario, case, network_capture,
+):
+    with pytest.raises(PermissionError):
+        await experimental_scenario.run(case)
+    assert network_capture.calls == []
+
+
+def test_controlled_search_is_one_parentless_pass(controlled_search_authorization) -> None:
+    route = controlled_search_authorization
+    assert route.experimental_parent_capability_id is None
+    assert route.pass_number == route.pass_cap == 1
+
+
+def test_absent_experimental_feature_has_no_reachable_module_or_registration(absent_feature_probe) -> None:
+    assert absent_feature_probe.config_schema_key("experimental_search") is False
+    assert absent_feature_probe.environment_key("TUNTUN_EXPERIMENTAL_SEARCH") is False
+    assert absent_feature_probe.openapi_paths(prefix="/v1/search/experimental") == ()
+    assert absent_feature_probe.prepared_action("search.experimental.activate") is None
+    assert absent_feature_probe.python_module("tuntun_core.services.search.experimental_capability") is None
+    assert absent_feature_probe.provider_registration("experimental_multi_pass") is None
+    assert absent_feature_probe.database_tables(prefix="experimental_search_") == ()
+    assert absent_feature_probe.database_table("alembic_version_experimental_search") is None
+    assert absent_feature_probe.feature_migration_config("experimental_search") is None
+    assert absent_feature_probe.uow_repository("experimental_search_capabilities") is None
+    assert absent_feature_probe.uow_repository("experimental_search_attempts") is None
+    assert absent_feature_probe.runtime_dispatch("experimental_multi_pass") is None
+    assert absent_feature_probe.production_chunks(containing="experimental-search") == ()
+
+
+def test_optional_feature_graph_never_changes_or_forks_the_core_graph(
+    build_artifact_probe,phase2_migration_probe,
+) -> None:
+    absent = build_artifact_probe.experimental_search_absent()
+    enabled = build_artifact_probe.experimental_search_enabled()
+    assert absent.core_alembic_heads()==enabled.core_alembic_heads()==(
+        "0008_prepared_mutations",
+    )
+    assert enabled.core_down_revision("0008_prepared_mutations")==(
+        "0007_privacy_post_response_jobs"
+    )
+    assert enabled.core_down_revision("0007_privacy_post_response_jobs")=="0006_timers"
+    assert absent.feature_alembic_graph("experimental_search") is None
+    feature=enabled.feature_alembic_graph("experimental_search")
+    assert feature.version_table=="alembic_version_experimental_search"
+    assert feature.heads==("search_0001_experimental_search",)
+    assert feature.down_revision("search_0001_experimental_search") is None
+    assert set(feature.revisions).isdisjoint(enabled.core_alembic_revisions())
+    assert phase2_migration_probe.core_down_revision(
+        "0009_home_topology_policy",
+    )=="0008_prepared_mutations"
+    assert phase2_migration_probe.core_heads_with_feature_enabled()==(
+        "0009_home_topology_policy",
+    )
+    assert phase2_migration_probe.feature_heads()==(
+        "search_0001_experimental_search",
+    )
+
+
+@pytest.mark.asyncio
+async def test_enabled_parent_and_four_children_reopen_from_real_migrated_sqlcipher(
+    enabled_experimental_runtime_factory, migrated_file_sqlcipher_path,
+    active_experimental_parent,
+):
+    first=await enabled_experimental_runtime_factory.open(migrated_file_sqlcipher_path)
+    routes=[await first.experimental.mint_attempt(active_experimental_parent.capability_id) for _ in range(4)]
+    await first.checkpoint_and_close()
+    restarted=await enabled_experimental_runtime_factory.open(migrated_file_sqlcipher_path)
+    parent=await restarted.experimental_search_capabilities.require(active_experimental_parent.capability_id)
+    attempts=await restarted.experimental_search_attempts.for_parent(parent.capability_id)
+    assert parent.passes_minted == 4
+    assert [item.route_authorization_id for item in attempts] == [item.route_authorization_id for item in routes]
+    assert len({item.attempt_id for item in attempts}) == 4
+    assert len({item.idempotency_key for item in attempts}) == 4
+    assert len({item.budget_reservation_id for item in attempts}) == 4
+
+
+@pytest.mark.asyncio
+async def test_enabled_to_absent_switch_requires_safe_drain_and_feature_downgrade(
+    enabled_to_absent_deployment_case,fresh_local_owner_proof,
+) -> None:
+    case=await enabled_to_absent_deployment_case(
+        active_parent=True,unconsumed_children=2,begun_child=True,
+    )
+    with pytest.raises(RuntimeError,match="undeclared_feature_schema_residue"):
+        await case.install_absent_artifact_directly()
+    await case.enabled_schema.prepare_absent_artifact(fresh_local_owner_proof)
+    assert case.experimental_dispatch_reachable is False
+    assert case.parent_state=="revoked"
+    assert case.unconsumed_children_open==0
+    assert case.begun_child_conservatively_settled_once
+    assert case.database_tables(prefix="experimental_search_")==()
+    assert case.database_table("alembic_version_experimental_search") is None
+    assert case.signed_content_minimal_feature_removal_receipt
+    await case.install_absent_artifact()
+    assert case.absent_runtime_ready
+    assert case.experimental_api_or_dispatch_reachable is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",("withdraw_dispatch","drain_children","feature_downgrade","drop_version_table"),
+)
+async def test_failed_enabled_to_absent_removal_never_authorizes_artifact_switch(
+    enabled_to_absent_deployment_case,fresh_local_owner_proof,failure,
+) -> None:
+    case=await enabled_to_absent_deployment_case(fail_at=failure)
+    with pytest.raises(RuntimeError,match="experimental_search_removal_incomplete"):
+        await case.enabled_schema.prepare_absent_artifact(fresh_local_owner_proof)
+    assert case.absent_artifact_install_authorized is False
+    assert case.experimental_dispatch_reachable is False
+    assert case.no_unsettled_provider_attempt_was_dropped
 ```
 
 ```ts
@@ -771,16 +1326,327 @@ test("experimental controls and chunks are absent when the feature is absent", a
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/contract/api/test_search_openapi.py tests/security/search/test_search_admin_api.py tests/security/search/test_experimental_mode.py tests/security/search/test_experimental_absence.py tests/privacy/search/test_search_console_minimization.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/search-modes.spec.ts`
+Run: `uv run pytest tests/contract/api/test_search_openapi.py tests/security/search/test_search_admin_api.py tests/security/search/test_experimental_mode.py tests/security/search/test_experimental_absence.py tests/privacy/search/test_search_console_minimization.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/search-modes.spec.ts`
 Expected: FAIL because the API/read models, exact prepared actions, console section, and experimental negative-reachability registration do not exist.
 
 - [ ] **Step 3: Implement the complete mode policy**
 
 `controlled` is the adult default only when current `web_search` consent, provider review, pricing, budget, privacy, and feature gates pass. `no_web` is selectable per adult profile and current session; it never revokes separately consented STT/reasoning/TTS. Children and Guest are hard policy `no_web` with no UI/API/prepared-action override. `OFFLINE_ONLY` is read-only presentation of the authoritative full-cloud safety state and its exact reason; no setting can select or dismiss it.
 
-Register `search.experimental.activate` as a high-risk owner action. The server prepares an immutable summary with owner subject/session, no-memory/no-authenticated-site/no-files/no-tools disclosure, pass/source/time caps, policy/provider/pricing/privacy generations, and <=30-minute expiry. A fresh owner passkey consumes it once. Session end, expiry, privacy, review/price/policy drift, owner session revocation, attempted forbidden tool/login/download/form/file/LAN route, or cancel ends the experimental context. Re-entry needs a new ceremony. It never changes another profile's consent or default mode.
+Register `search.experimental.activate` as a high-risk owner action. The server prepares an immutable summary with owner subject/session, no-memory/no-authenticated-site/no-files/no-tools disclosure, pass/source/time caps, policy/provider/pricing/privacy generations, and <=30-minute expiry. A fresh owner passkey consumes it once and creates the private parent record below; only `mint_attempt` can derive provider-call authority from it.
 
-Controlled search is a required FB0 feature registration only after CW01–CW02 positive evidence. Experimental is separately registered and disabled by default. If experimental is absent, prove configuration schema, environment parsing, API/OpenAPI, prepared-action issuance, console direct route/control, dynamic import/chunk, provider tool registration, and runtime dispatch absence.
+```python
+# apps/core/src/tuntun_core/services/search/experimental_capability.py
+from datetime import timedelta
+from typing import Literal
+from uuid import UUID, uuid4
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+
+class ExperimentalSearchSessionCapabilityV1(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    schema_version: Literal["1.0"]
+    capability_id: UUID
+    household_id: UUID
+    owner_subject_id: UUID
+    subject_authority_generation: int = Field(ge=1)
+    session_id: UUID
+    consent_receipt_id: UUID
+    consent_generation: int = Field(ge=1)
+    privacy_generation: int = Field(ge=1)
+    provider_review_version: str
+    policy_version: str
+    pricing_version: str
+    citation_review_version: str
+    pass_cap: Literal[4]
+    total_source_cap: Literal[20]
+    passes_minted: int = Field(ge=0, le=4)
+    accepted_source_count: int = Field(ge=0, le=20)
+    state: Literal["active", "revoked", "expired"]
+    version: int = Field(ge=1)
+    issued_at: AwareDatetime
+    expires_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def bounded_lifetime(self):
+        if self.expires_at <= self.issued_at or self.expires_at - self.issued_at > timedelta(minutes=30):
+            raise ValueError("experimental capability lifetime must be positive and at most 30 minutes")
+        return self
+
+class ExperimentalAttemptAuthorityService:
+    async def mint_attempt(self, capability_id):
+        async with self._mutation_scope.open() as uow:
+            parent = await uow.experimental_search_capabilities.lock(capability_id)
+            await self._guards.require_current_exact_in_uow(uow, parent, self._clock.now())
+            if parent.passes_minted >= parent.pass_cap or parent.accepted_source_count >= parent.total_source_cap:
+                raise PermissionError("experimental_search_cap_exhausted")
+            pass_number = parent.passes_minted + 1
+            attempt_id, route_id, idempotency_key = uuid4(), uuid4(), uuid4()
+            reservation = await self._budget.reserve_in_uow(
+                uow, attempt_id=attempt_id, idempotency_key=idempotency_key,
+                purpose="experimental_web_search",
+            )
+            route = self._route_factory.experimental_child(
+                parent=parent, route_authorization_id=route_id,
+                attempt_id=attempt_id, pass_number=pass_number,
+                source_cap=min(8, parent.total_source_cap - parent.accepted_source_count),
+                idempotency_key=idempotency_key,
+                budget_reservation_id=reservation.reservation_id,
+            )
+            await uow.experimental_search_attempts.insert_unique_child(route)
+            await uow.experimental_search_capabilities.advance_minted_expected_version(parent)
+            await uow.commit()
+            return route
+```
+
+```python
+# apps/core/src/tuntun_core/adapters/sqlcipher/experimental_search_repository.py
+from tuntun_contracts.base import canonical_bytes,parse_contract_json
+from tuntun_contracts.search import SearchRouteAuthorization
+from tuntun_core.services.search.experimental_capability import ExperimentalSearchSessionCapabilityV1
+
+class ExperimentalSearchCapabilityFacade:
+    def __init__(self, bound_uow): self._uow=bound_uow
+    async def insert(self, parent):
+        return await self._uow.run_sync(lambda tx: ExperimentalSearchRepository(tx).insert_parent(parent))
+    async def lock(self, capability_id):
+        return await self._uow.run_sync(lambda tx: ExperimentalSearchRepository(tx).lock_parent(capability_id))
+    async def require(self, capability_id):
+        return await self._uow.run_sync(lambda tx: ExperimentalSearchRepository(tx).require_parent(capability_id))
+    async def advance_minted_expected_version(self, parent):
+        return await self._uow.run_sync(lambda tx: ExperimentalSearchRepository(tx).advance_parent(parent))
+
+class ExperimentalSearchAttemptFacade:
+    def __init__(self, bound_uow): self._uow=bound_uow
+    async def insert_unique_child(self, route):
+        return await self._uow.run_sync(lambda tx: ExperimentalSearchRepository(tx).insert_child(route))
+    async def for_parent(self, capability_id):
+        return await self._uow.run_sync(lambda tx: ExperimentalSearchRepository(tx).children(capability_id))
+
+class ExperimentalSearchRepository:
+    def __init__(self, transaction): self._tx=transaction
+    def insert_parent(self, parent):
+        self._tx.exec_driver_sql(
+            "INSERT INTO experimental_search_capabilities "
+            "(capability_id,household_id,owner_subject_id,subject_authority_generation,session_id,"
+            "consent_receipt_id,consent_generation,privacy_generation,provider_review_version,"
+            "policy_version,pricing_version,citation_review_version,passes_minted,accepted_source_count,"
+            "pass_cap,total_source_cap,state,issued_at,expires_at,version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (str(parent.capability_id),str(parent.household_id),str(parent.owner_subject_id),
+             parent.subject_authority_generation,str(parent.session_id),str(parent.consent_receipt_id),
+             parent.consent_generation,parent.privacy_generation,parent.provider_review_version,
+             parent.policy_version,parent.pricing_version,parent.citation_review_version,
+             parent.passes_minted,parent.accepted_source_count,parent.pass_cap,parent.total_source_cap,
+             parent.state,parent.issued_at.isoformat(),parent.expires_at.isoformat(),parent.version),
+        )
+        return parent
+    def lock_parent(self, capability_id):
+        return self.require_parent(capability_id)  # BEGIN IMMEDIATE already owns the writer
+    def require_parent(self, capability_id):
+        row=self._tx.exec_driver_sql(
+            "SELECT * FROM experimental_search_capabilities WHERE capability_id=?",
+            (str(capability_id),),
+        ).mappings().fetchone()
+        if row is None: raise PermissionError("unknown_experimental_parent")
+        return ExperimentalSearchSessionCapabilityV1(
+            schema_version="1.0",**dict(row),
+        )
+    def advance_parent(self, parent):
+        cursor=self._tx.exec_driver_sql(
+            "UPDATE experimental_search_capabilities SET passes_minted=passes_minted+1,version=version+1 "
+            "WHERE capability_id=? AND version=? AND state='active' AND passes_minted<pass_cap",
+            (str(parent.capability_id),parent.version),
+        )
+        if cursor.rowcount!=1: raise PermissionError("experimental_parent_cas_failed")
+    def insert_child(self, route):
+        self._tx.exec_driver_sql(
+            "INSERT INTO experimental_search_attempts "
+            "(route_authorization_id,parent_capability_id,attempt_id,idempotency_key,budget_reservation_id,"
+            "pass_number,source_cap,state,envelope_json,version) VALUES (?,?,?,?,?,?,?,?,?,1)",
+            (str(route.route_authorization_id),str(route.experimental_parent_capability_id),
+             str(route.attempt_id),str(route.idempotency_key),str(route.budget_reservation_id),
+             route.pass_number,route.source_cap,"issued",
+             canonical_bytes(route).decode("utf-8")),
+        )
+        return route
+    def children(self, capability_id):
+        rows=self._tx.exec_driver_sql(
+            "SELECT envelope_json FROM experimental_search_attempts "
+            "WHERE parent_capability_id=? ORDER BY pass_number",
+            (str(capability_id),),
+        ).fetchall()
+        return tuple(
+            parse_contract_json(
+                SearchRouteAuthorization,
+                row[0].encode("utf-8") if type(row[0]) is str else b"",
+                max_bytes=65_536,require_canonical=True,
+            )
+            for row in rows
+        )
+```
+
+```python
+# apps/core/migrations/features/experimental_search/env.py (enabled artifact only)
+from alembic import context
+
+
+FEATURE_VERSION_TABLE="alembic_version_experimental_search"
+
+
+def run_migrations_online() -> None:
+    # The enabled schema manager supplies the already-open serialized
+    # SQLCipher connection. This feature graph never writes `alembic_version`.
+    connection=context.config.attributes.get("connection")
+    if connection is None:
+        raise RuntimeError("experimental_search_sqlcipher_connection_required")
+    context.configure(
+        connection=connection,target_metadata=None,
+        version_table=FEATURE_VERSION_TABLE,
+        transaction_per_migration=True,compare_type=True,
+    )
+    with context.begin_transaction(): context.run_migrations()
+
+
+run_migrations_online()
+```
+
+```python
+# apps/core/migrations/features/experimental_search/versions/search_0001_experimental_search.py
+# Enabled artifact only; this is a root in its own version table/graph.
+from alembic import op
+import sqlalchemy as sa
+
+revision="search_0001_experimental_search"
+down_revision=None
+branch_labels=None
+depends_on=None
+
+def upgrade() -> None:
+    bind=op.get_bind()
+    core_heads=tuple(row[0] for row in bind.exec_driver_sql(
+        "SELECT version_num FROM alembic_version ORDER BY version_num",
+    ).fetchall())
+    if core_heads!=("0008_prepared_mutations",):
+        raise RuntimeError("experimental_search_incompatible_core_schema")
+    op.create_table(
+        "experimental_search_capabilities",
+        sa.Column("capability_id",sa.String(36),primary_key=True),
+        sa.Column("household_id",sa.String(36),sa.ForeignKey("households.id"),nullable=False),
+        sa.Column("owner_subject_id",sa.String(36),sa.ForeignKey("subjects.id"),nullable=False),
+        sa.Column("subject_authority_generation",sa.Integer,nullable=False),
+        sa.Column("session_id",sa.String(36),sa.ForeignKey("sessions.id"),nullable=False),
+        sa.Column("consent_receipt_id",sa.String(36),sa.ForeignKey("consent_receipts.id"),nullable=False),
+        sa.Column("consent_generation",sa.Integer,nullable=False),
+        sa.Column("privacy_generation",sa.Integer,nullable=False),
+        sa.Column("provider_review_version",sa.String(128),nullable=False),
+        sa.Column("policy_version",sa.String(128),nullable=False),
+        sa.Column("pricing_version",sa.String(128),nullable=False),
+        sa.Column("citation_review_version",sa.String(128),nullable=False),
+        sa.Column("passes_minted",sa.Integer,nullable=False),
+        sa.Column("accepted_source_count",sa.Integer,nullable=False),
+        sa.Column("pass_cap",sa.Integer,nullable=False),
+        sa.Column("total_source_cap",sa.Integer,nullable=False),
+        sa.Column("state",sa.String(16),nullable=False),
+        sa.Column("issued_at",sa.String(27),nullable=False),
+        sa.Column("expires_at",sa.String(27),nullable=False),
+        sa.Column("version",sa.Integer,nullable=False),
+        sa.CheckConstraint("subject_authority_generation>=1 AND consent_generation>=1 AND privacy_generation>=1 AND version>=1"),
+        sa.CheckConstraint("passes_minted BETWEEN 0 AND pass_cap AND pass_cap=4"),
+        sa.CheckConstraint("accepted_source_count BETWEEN 0 AND total_source_cap AND total_source_cap=20"),
+        sa.CheckConstraint("state IN ('active','revoked','expired')"),
+    )
+    op.create_table(
+        "experimental_search_attempts",
+        sa.Column("route_authorization_id",sa.String(36),primary_key=True),
+        sa.Column("parent_capability_id",sa.String(36),sa.ForeignKey("experimental_search_capabilities.capability_id"),nullable=False),
+        sa.Column("attempt_id",sa.String(36),nullable=False,unique=True),
+        sa.Column("idempotency_key",sa.String(36),nullable=False,unique=True),
+        sa.Column("budget_reservation_id",sa.String(36),sa.ForeignKey("budget_reservations.id"),nullable=False,unique=True),
+        sa.Column("pass_number",sa.Integer,nullable=False),
+        sa.Column("source_cap",sa.Integer,nullable=False),
+        sa.Column("state",sa.String(16),nullable=False),
+        sa.Column("envelope_json",sa.Text,nullable=False),
+        sa.Column("version",sa.Integer,nullable=False),
+        sa.UniqueConstraint("parent_capability_id","pass_number"),
+        sa.CheckConstraint("pass_number BETWEEN 1 AND 4 AND source_cap BETWEEN 1 AND 8"),
+        sa.CheckConstraint("state IN ('issued','begun','settled','revoked','expired') AND version>=1"),
+        sa.CheckConstraint("json_valid(envelope_json)"),
+    )
+
+def downgrade() -> None:
+    op.drop_table("experimental_search_attempts")
+    op.drop_table("experimental_search_capabilities")
+```
+
+```python
+# apps/core/src/tuntun_core/bootstrap/experimental_search_schema.py
+from alembic import command
+
+
+CORE_PHASE1_HEAD="0008_prepared_mutations"
+FEATURE_HEAD="search_0001_experimental_search"
+FEATURE_VERSION_TABLE="alembic_version_experimental_search"
+
+
+class ExperimentalSearchSchemaManager:
+    """Enabled-artifact-only migrator; runs under the sole SQLCipher writer."""
+    def __init__(self,connection,feature_config,removal,manifest_guard) -> None:
+        self._connection,self._config=connection,feature_config
+        self._removal,self._manifest_guard=removal,manifest_guard
+
+    def _heads(self,table:str) -> tuple[str,...]:
+        if table not in {"alembic_version",FEATURE_VERSION_TABLE}:
+            raise ValueError("unexpected_alembic_version_table")
+        exists=self._connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,),
+        ).fetchone()
+        if exists is None: return ()
+        return tuple(row[0] for row in self._connection.exec_driver_sql(
+            f"SELECT version_num FROM {table} ORDER BY version_num",
+        ).fetchall())
+
+    def upgrade_and_verify_before_facades(self) -> None:
+        core_before=self._heads("alembic_version")
+        if core_before!=(CORE_PHASE1_HEAD,):
+            raise RuntimeError("experimental_search_incompatible_core_schema")
+        self._config.attributes["connection"]=self._connection
+        command.upgrade(self._config,"head")
+        if (
+            self._heads("alembic_version")!=core_before
+            or self._heads(FEATURE_VERSION_TABLE)!=(FEATURE_HEAD,)
+        ):
+            raise RuntimeError("experimental_search_schema_head_mismatch")
+        self._manifest_guard.require_exact_feature_tables_and_columns(
+            "experimental_search",FEATURE_HEAD,
+        )
+
+    async def prepare_absent_artifact(self,fresh_local_owner_proof) -> None:
+        # The current enabled binary must perform this ceremony. Dispatch is
+        # withdrawn first and remains withdrawn after any failure.
+        try:
+            self._manifest_guard.withdraw_feature_dispatch("experimental_search")
+            await self._removal.require_fresh_local_owner_and_revoke_drain_settle(
+                fresh_local_owner_proof,
+            )
+            self._removal.require_no_active_parent_child_or_provider_attempt()
+            self._config.attributes["connection"]=self._connection
+            command.downgrade(self._config,"base")
+            self._removal.drop_empty_feature_version_table_exact(
+                FEATURE_VERSION_TABLE,
+            )
+            self._removal.write_signed_content_minimal_receipt(
+                feature="experimental_search",removed_head=FEATURE_HEAD,
+            )
+        except BaseException as error:
+            raise RuntimeError("experimental_search_removal_incomplete") from error
+```
+
+The enabled composition root first verifies the mandatory core graph has exactly the release-manifest head `0008_prepared_mutations`, then runs the feature-only Alembic config against the same serialized SQLCipher connection and the distinct `alembic_version_experimental_search` table. It verifies that the core head did not change, the feature graph has exactly `search_0001_experimental_search`, and the exact feature tables/columns exist before registering either UoW facade or dispatch. The enabled feature-manifest projection records `{feature: experimental_search, core_schema_revision: 0008_prepared_mutations, feature_schema_revision: search_0001_experimental_search, feature_version_table: alembic_version_experimental_search, dispatch: experimental_multi_pass}`. Missing/extra core or feature head, table, facade, projection, or dispatch binding is a startup failure. A future mandatory core revision (including Phase 2 `0009_home_topology_policy`) remains a child of core `0008_prepared_mutations`; it never sees the feature revision and therefore cannot create a multiple-head fork.
+
+Enabled-to-absent is a deployment ceremony, not a package overwrite. While the current enabled artifact and its feature migrator are still installed, a fresh local owner proof withdraws dispatch, revokes active parents/unconsumed children, waits for or cancels begun work, conservatively settles every begun provider attempt once, and verifies that no active parent/child/provider authority remains. Only then does the feature graph downgrade to base, drop its now-empty dedicated version table, and issue a signed content-minimal removal receipt. The deployer verifies that receipt and the absence of both feature tables and the feature version table before installing the absent artifact. Every step is idempotent; a crash/failure keeps dispatch withdrawn and blocks the switch until the enabled migrator resumes. The generic signed-build schema allowlist in every artifact rejects undeclared tables/version tables, so bypassing the ceremony causes absent startup to fail with `undeclared_feature_schema_residue`; residue is never silently ignored or reachable. The absent artifact itself omits the service, adapter, feature Alembic config/revisions, facade mapping, feature projection, prepared action and dispatch branch, while its mandatory core head remains `0008_prepared_mutations`.
+
+The parent row, its monotonic pass/source counters, each child route, its closed `attempt_id`, its unique idempotency key, and its distinct budget reservation are updated under the single SQLCipher writer. Child consume locks both rows and rechecks owner/profile authority generation, exact session, consent, privacy, provider-review, policy, pricing, citation-review, deadline, pass number, source remainder, unused child, and exact route-envelope/attempt-row/budget-attempt equality before the gateway marks that child's separate budget attempt as begun. Settlement uses that same attempt identity, records accepted unique-source count against the parent, and clips the final pass to the remaining total; it cannot reuse or substitute a child route, attempt, key, or reservation. Session end, expiry, Privacy Shield, any generation/version drift, profile/owner revocation, attempted forbidden tool/login/download/form/file/LAN route, or cancel transactionally closes the parent and all unconsumed children. An already-begun child is cancelled best-effort and conservatively settled once, never replayed. Re-entry needs a new ceremony. Controlled mode never creates a parent: it has `experimental_parent_capability_id=None`, `pass_number=pass_cap=1`, a freshly minted `attempt_id`, and its own single-use route/key/reservation. Its ordinary encrypted route repository persists and restores the entire closed envelope before consume; a JSON round-trip that drops or changes `attempt_id` is a startup/consume failure.
+
+Controlled search is a required FB0 feature registration only after CW01–CW02 positive evidence. Experimental is separately registered and disabled by default. Its module is included only in the enabled build manifest and the parent DTO never crosses the API/browser boundary. If experimental is absent, prove configuration schema, environment parsing, API/OpenAPI, prepared-action issuance, console direct route/control, Python module/package registration, dynamic import/chunk, provider tool registration, database/runtime repository registration, and runtime dispatch absence.
 
 - [ ] **Step 4: Implement truthful console presentation**
 
@@ -788,11 +1654,11 @@ Extend AI & budget with separate cards for profile/session mode, own-consent hea
 
 - [ ] **Step 5: Run green, production absence, and commit**
 
-Run: `uv run pytest tests/contract/api/test_search_openapi.py tests/security/search/test_search_admin_api.py tests/security/search/test_experimental_mode.py tests/security/search/test_experimental_absence.py tests/privacy/search/test_search_console_minimization.py -q && sh scripts/generate_openapi_client.sh && git diff --exit-code -- packages/contracts/openapi/admin-v1.yaml apps/admin/src/api/generated/admin-v1.ts && pnpm --filter @tuntun/admin exec vitest run && pnpm --filter @tuntun/admin exec lint && pnpm --filter @tuntun/admin exec tsc --noEmit && pnpm --filter @tuntun/admin exec vite build && pnpm --filter @tuntun/admin exec playwright test tests/e2e/search-modes.spec.ts`
-Expected: PASS; mode/consent/`OFFLINE_ONLY` truth is unambiguous, experimental authority is owner/session/passkey-bound, and an absent experimental route has no config/API/UI/bundle/runtime reachability.
+Run: `uv run pytest tests/contract/api/test_search_openapi.py tests/security/search/test_search_admin_api.py tests/security/search/test_experimental_mode.py tests/security/search/test_experimental_absence.py tests/integration/search/test_experimental_persistence.py tests/integration/search/test_experimental_migration_graph.py tests/integration/search/test_experimental_removal.py tests/privacy/search/test_search_console_minimization.py -q && sh scripts/generate_openapi_client.sh && git diff --exit-code -- packages/contracts/openapi/admin-v1.yaml apps/admin/src/api/generated/admin-v1.ts && pnpm --filter @tuntun/admin test && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/admin e2e -- tests/e2e/search-modes.spec.ts`
+Expected: PASS; mode/consent/`OFFLINE_ONLY` truth is unambiguous; experimental authority is owner/session/passkey-bound; enabled and absent builds keep the same one-head mandatory core graph while the enabled feature uses only its separate version table/head; a Phase 2 core child of `0008_prepared_mutations` creates no fork; persistence reopens the same child attempt identities; failed enabled-to-absent removal blocks artifact switch without dropping unsettled work; and an absent experimental route has no schema residue or config/API/UI/bundle/runtime reachability.
 
 ```bash
-git add apps/core/src/tuntun_core/services/search/mode_policy.py apps/core/src/tuntun_core/api/search_dtos.py apps/core/src/tuntun_core/api/routes/search.py apps/core/src/tuntun_core/api/app.py apps/core/src/tuntun_core/services/policy/action_registry.py apps/core/src/tuntun_core/services/features/registry.py packages/contracts/openapi/admin-v1.yaml apps/admin/src/api/generated/admin-v1.ts apps/admin/src/features/providers/search.tsx apps/admin/src/routes/ai-budget.tsx apps/admin/src/app/feature-registry.ts tests/contract/api/test_search_openapi.py tests/security/search/test_search_admin_api.py tests/security/search/test_experimental_mode.py tests/security/search/test_experimental_absence.py tests/privacy/search/test_search_console_minimization.py tests/e2e/search-modes.spec.ts
+git add apps/core/src/tuntun_core/services/search/mode_policy.py apps/core/src/tuntun_core/services/search/experimental_capability.py apps/core/src/tuntun_core/adapters/sqlcipher/experimental_search_repository.py apps/core/migrations/features/experimental_search/env.py apps/core/migrations/features/experimental_search/versions/search_0001_experimental_search.py apps/core/src/tuntun_core/bootstrap/experimental_search_schema.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/api/search_dtos.py apps/core/src/tuntun_core/api/routes/search.py apps/core/src/tuntun_core/api/app.py apps/core/src/tuntun_core/services/policy/action_registry.py apps/core/src/tuntun_core/services/features/registry.py packages/contracts/openapi/admin-v1.yaml apps/admin/src/api/generated/admin-v1.ts apps/admin/src/features/providers/search.tsx apps/admin/src/routes/ai-budget.tsx apps/admin/src/app/feature-registry.ts tests/contract/api/test_search_openapi.py tests/security/search/test_search_admin_api.py tests/security/search/test_experimental_mode.py tests/security/search/test_experimental_absence.py tests/integration/search/test_experimental_persistence.py tests/integration/search/test_experimental_migration_graph.py tests/integration/search/test_experimental_removal.py tests/privacy/search/test_search_console_minimization.py tests/e2e/search-modes.spec.ts
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
@@ -925,6 +1791,7 @@ This slice is part of the Phase 1 FB0 critical path. It is not an experimental b
 - [ ] The Phase 1 anchor retains Tasks 01–34 unchanged and links this CW01–CW04 supplement.
 - [ ] Cloud-egress state is exactly `ONLINE_ALLOWED | OFFLINE_ONLY`; web-mode identifiers are independently exactly `controlled | no_web | experimental_multi_pass`.
 - [ ] `web_search` consent and search/tool budget are purpose-distinct and consumed once.
+- [ ] Every controlled or experimental route carries one immutable unique `attempt_id`; restart persistence, consume, provider-call proof, and settlement recover that same server-side identity and reject substitution or replay.
 - [ ] `web_search` is `ConsentPurpose.WEB_SEARCH` in the durable subject receipt/action/migration contract; there is no search-local consent enum or store.
 - [ ] The subject consent table admits adult `web_search`; both Guest disclosure/consent tables reject it by database constraint; `k2`, `n1`, Guest, and `profile_class=guest` plus `identity_state=anonymous_restricted` denial occurs before any consent lookup.
 - [ ] Child and Guest have zero search authorization, adapter call, console enable control, or experimental path.

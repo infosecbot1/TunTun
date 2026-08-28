@@ -134,7 +134,7 @@ class LocalActionProviderPort(Protocol):
 class MemoryRepositoryPort(Protocol):
     async def create(self, memory: ApprovedMemory, expected_absent: bool = True) -> MemoryRecord: raise NotImplementedError
     async def replace(self, memory_id: UUID, expected_version: int, memory: ApprovedMemory) -> MemoryRecord: raise NotImplementedError
-    async def delete(self, memory_id: UUID, expected_version: int, auth: AuthContext) -> None: raise NotImplementedError
+    async def delete(self, memory_id: UUID, expected_version: int, auth: AuthContext, approved_proposal_id: UUID) -> None: raise NotImplementedError
     async def query(self, query: MemoryQuery) -> tuple[MemoryRecord, ...]: raise NotImplementedError
 
 class MemoryProposalServicePort(Protocol):
@@ -182,17 +182,29 @@ apps/core/src/tuntun_core/services/providers/token_counter.py
 - Create: `apps/core/src/tuntun_core/domain/profile.py`
 - Create: `apps/core/src/tuntun_core/services/identity/profiles.py`
 - Create: `apps/core/src/tuntun_core/services/identity/consent.py`
-- Create: `apps/core/src/tuntun_core/services/actions/parameter_binding.py`
+- Create: `apps/core/src/tuntun_core/services/identity/subject_revocation.py`
+- Create: `apps/core/src/tuntun_core/services/identity/subject_revocation_processor.py`
+- Create: `apps/core/src/tuntun_core/services/identity/subject_revocation_handlers.py`
+- Create: `apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_effect_repository.py`
+- Create: `apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_outbox_repository.py`
+- Create: `apps/core/src/tuntun_core/workers/subject_revocation_worker.py`
+- Modify: `apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py`
+- Modify: `apps/core/src/tuntun_core/bootstrap/container.py`
+- Modify: `apps/core/src/tuntun_core/bootstrap/lifecycle.py`
+- Create: `apps/core/src/tuntun_core/services/actions/parameter_binding.py` (own the initial profile-parameter builders)
 - Create: `apps/core/src/tuntun_core/services/transactions/identity_uow.py`
 - Create: `apps/core/migrations/versions/0002_profiles_consent_enrollment.py`
 - Create: `tests/unit/identity/test_profiles.py`
 - Create: `tests/unit/identity/test_consent.py`
 - Create: `tests/unit/identity/test_current_owner_repository.py`
 - Create: `tests/integration/identity/test_profile_consent_migration.py`
+- Create: `tests/integration/identity/test_profile_revocation.py`
+- Create: `tests/unit/identity/test_subject_revocation_worker.py`
+- Create: `tests/integration/identity/test_subject_revocation_handlers.py`
 
 **Interfaces:**
 - Consumes: foundation `AsyncUnitOfWork`, `await AsyncAuditLedger.append(uow: AsyncUnitOfWork, draft: AuditDraft) -> AuditReceipt`, `AuthContext(subject_id: UUID, assurance: AssuranceLevel)`, `ClockPort.now() -> datetime`, purpose-separated receipt HMAC signer/verifier, and active foundation `sessions`; callers never construct or append an `AuditReceipt`. The console/action preparation path and mutation services share the pure closed-payload builders in `services/actions/parameter_binding.py`; the server independently verifies action/resource/actor scope and the HMAC before domain-state access.
-- Produces: typed `IdentityUnitOfWork`, whose profile facade explicitly implements `get_optional_scoped(household_id, subject_id) -> Profile | None` in addition to strict `get_scoped`; `ProfileService.create/get_projection/get_persona_projection/current_policy_class/current_policy_class_in_uow/require_current_active_in_uow/update_persona_traits/revoke`; a typed `current_owner_authority` repository storing exactly one `(household_id, subject_id, owner_generation)` pointer; `ConsentService.grant/revoke/require_current/require_current_hmac_valid/is_current`; `GuestSessionConsentService.issue_challenge/accept_challenge/revoke/require_current/require_current_hmac_valid`; and immutable migration `0002` for subjects, current-owner authority, consent, enrollment, and modality-neutral biometric templates. Only the optional method maps an absent row to `None`; SQLCipher/worker failures propagate.
+- Produces: typed `IdentityUnitOfWork`, whose profile facade explicitly implements `get_optional_scoped(household_id, subject_id) -> Profile | None` in addition to strict `get_scoped`; `ProfileService.create/get_projection/get_persona_projection/current_policy_class/current_policy_class_in_uow/require_current_active_in_uow/update_persona_traits/revoke`; monotonic `subjects.authority_generation`; the complete `SubjectAuthorityRevocationCascade`; production `SubjectRevocationOutboxRepository`, renewable and fenced `SubjectRevocationEffectRepository`, concrete Task-1 provider/search handlers, sealed `action_authorities|memory_authorities` not-yet-installed handlers, and a startup/periodic-drained `SubjectRevocationWorker`; a typed `current_owner_authority` repository storing exactly one `(household_id, subject_id, owner_generation)` pointer; `ConsentService.grant/revoke/require_current/require_current_hmac_valid/is_current`; `GuestSessionConsentService.issue_challenge/accept_challenge/revoke/require_current/require_current_hmac_valid`; and immutable migration `0002` for subjects, current-owner authority, consent, enrollment, modality-neutral biometric templates, the subject-revocation outbox, and per-family effect claims. The Task-1 sealed handlers may emit `not_installed_no_authority` only while their owning migration/facade is provably absent; Task 8 replaces action and Task 10 replaces memory after their migrations and repositories are registered. Only the optional profile method maps an absent row to `None`; SQLCipher/worker failures propagate.
 
 Persona replace/clear is an optimistic-versioned `profile.edit`: owner/adult subjects act only for self, while a current-generation primary guardian acts only for K2/N1 and only with the closed child-safe shape. Replace requires current personalization consent; clear remains available after revocation. Missing/revoked personalization consent suppresses encrypted custom traits but preserves the resolved policy class: owner/adult use neutral defaults, K2/N1 retain guarded defaults, and only absent/inactive/revoked/unresolved identity projects as Guest. The encrypted envelope and five-field projection contain no subject ID or arbitrary text.
 
@@ -374,6 +386,23 @@ async def test_guest_web_search_is_denied_before_session_or_receipt_lookup(guest
         await guest_consent_service.require_current(active_session.household_id, active_session.id, ConsentPurpose.WEB_SEARCH, now)
     assert guest_repository_spies.session_reads == 0
     assert guest_repository_spies.receipt_reads == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["grant", "revoke", "require_current"])
+@pytest.mark.parametrize("state", ["inactive", "revoked"])
+async def test_subject_consent_operations_require_current_active_profile_before_receipt_access(
+    consent_service, subject_in_state_factory, consent_command_factory,
+    actor_auth_factory, consent_repository_spy, now, operation, state,
+):
+    subject = subject_in_state_factory(state)
+    with pytest.raises(ConsentDenied, match="current_active_subject_required"):
+        if operation == "require_current":
+            await consent_service.require_current(subject.id, ConsentPurpose.CLOUD_REASONING, now)
+        else:
+            command = consent_command_factory(subject, operation=operation)
+            await getattr(consent_service, operation)(command, actor_auth_factory(command.action_binding))
+    assert consent_repository_spy.read_count == 0
 ```
 
 ```python
@@ -415,6 +444,48 @@ async def test_subject_schema_has_encrypted_optimistic_persona_storage(migrated_
 
 
 @pytest.mark.asyncio
+async def test_revocation_outbox_is_durable_leased_and_idempotent(migrated_sqlcipher_engine):
+    async with migrated_sqlcipher_engine.connect() as connection:
+        columns, uniques, checks = await connection.run_sync(
+            lambda sync: (
+                {item["name"]: item for item in sa.inspect(sync).get_columns("subject_revocation_outbox")},
+                sa.inspect(sync).get_unique_constraints("subject_revocation_outbox"),
+                _checks(sync, "subject_revocation_outbox"),
+            )
+        )
+    assert set(columns) == {
+        "id", "event_key", "subject_id", "new_authority_generation", "state",
+        "occurred_at", "claimed_at", "lease_owner", "lease_expires_at",
+        "fencing_token", "completed_at", "attempt_count", "last_error",
+        "reconciliation_receipt_id",
+    }
+    assert any(item["column_names"] == ["event_key"] for item in uniques)
+    assert "state IN ('pending','processing','completed')" in checks
+    assert "attempt_count >= 0 AND fencing_token >= 0" in checks
+
+
+@pytest.mark.asyncio
+async def test_revocation_effect_claims_are_durable_leased_and_idempotent(migrated_sqlcipher_engine):
+    async with migrated_sqlcipher_engine.connect() as connection:
+        columns,uniques,checks=await connection.run_sync(
+            lambda sync:(
+                {item["name"]:item for item in sa.inspect(sync).get_columns("subject_revocation_effects")},
+                sa.inspect(sync).get_unique_constraints("subject_revocation_effects"),
+                _checks(sync,"subject_revocation_effects"),
+            )
+        )
+    assert set(columns)=={
+        "id","event_id","family","idempotency_key","state","lease_owner",
+        "leased_until","fencing_token","attempt_count","downstream_receipt_id","disposition",
+        "last_error","created_at","completed_at",
+    }
+    assert any(item["column_names"]==["idempotency_key"] for item in uniques)
+    assert any(item["column_names"]==["event_id","family"] for item in uniques)
+    assert "state IN ('pending','applying','completed')" in checks
+    assert "attempt_count >= 0 AND fencing_token >= 0" in checks
+
+
+@pytest.mark.asyncio
 async def test_current_owner_authority_has_one_generation_bound_subject_per_household(migrated_sqlcipher_engine):
     async with migrated_sqlcipher_engine.connect() as connection:
         columns, uniques = await connection.run_sync(
@@ -433,7 +504,366 @@ async def test_web_search_subject_receipt_invariant_survives_downgrade_reupgrade
     await migration_runner.upgrade("0002")
     checks = await migration_runner.check_constraints("consent_receipts")
     assert "purpose!='web_search' OR (actor_id=subject_id AND guardian_id IS NULL AND guardian_generation IS NULL)" in checks
+
+
+@pytest.mark.asyncio
+async def test_subject_authority_generation_is_non_null_monotonic_state(migrated_sqlcipher_engine):
+    async with migrated_sqlcipher_engine.connect() as connection:
+        columns, checks = await connection.run_sync(
+            lambda sync: (
+                {item["name"]: item for item in sa.inspect(sync).get_columns("subjects")},
+                _checks(sync, "subjects"),
+            )
+        )
+    assert columns["authority_generation"]["nullable"] is False
+    assert "authority_generation >= 1" in checks
 ```
+
+```python
+# tests/integration/identity/test_profile_revocation.py
+import pytest
+
+from tuntun_core.adapters.sqlcipher.subject_revocation_outbox_repository import (
+    SubjectRevocationOutboxRepository,
+)
+from tuntun_core.services.identity.subject_revocation_processor import SubjectRevocationProcessor
+from tuntun_core.workers.subject_revocation_worker import SubjectRevocationWorker
+
+AUTHORITY_FAMILIES = frozenset({
+    "sessions", "consents", "enrollments", "biometric_templates",
+    "provider_routes", "search_capabilities", "action_authorities", "memory_authorities",
+})
+
+
+@pytest.mark.asyncio
+async def test_profile_revocation_advances_generation_and_revokes_every_authority_in_one_commit(
+    identity_mutations, active_subject_with_task1_authorities, revoke_profile_grant,
+    subject_authority_snapshot,
+):
+    subject = active_subject_with_task1_authorities
+    before = await subject_authority_snapshot(subject.id)
+    revoked = await identity_mutations.revoke_profile(subject.revoke_command, revoke_profile_grant.id)
+    after = await subject_authority_snapshot(subject.id)
+    event = await subject_authority_snapshot.revocation_outbox_event(
+        subject.id, revoked.authority_generation,
+    )
+    assert revoked.authority_generation == before.authority_generation + 1
+    assert revoked.active is False and revoked.revoked_at is not None
+    assert after.invalidated_families == AUTHORITY_FAMILIES
+    assert event.event_key == f"subject-revoked:{subject.id}:{revoked.authority_generation}"
+    assert event.subject_id == subject.id
+    assert event.new_authority_generation == revoked.authority_generation
+    assert event.state == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault_after", [
+    "sessions", "consents", "enrollments", "biometric_templates",
+    "provider_routes", "search_capabilities", "action_authorities",
+    "memory_authorities", "outbox", "audit",
+])
+async def test_revocation_fault_rolls_back_profile_authorities_and_outbox_together(
+    identity_mutations, active_subject_with_task1_authorities, revoke_profile_grant,
+    subject_authority_snapshot, revocation_faults, fault_after,
+):
+    subject=active_subject_with_task1_authorities
+    before=await subject_authority_snapshot(subject.id)
+    revocation_faults.raise_after(fault_after)
+    with pytest.raises(RuntimeError, match="injected_revocation_fault"):
+        await identity_mutations.revoke_profile(subject.revoke_command,revoke_profile_grant.id)
+    after=await subject_authority_snapshot(subject.id)
+    assert after.profile == before.profile
+    assert after.active_authorities == before.active_authorities
+    assert await subject_authority_snapshot.revocation_outbox_events(subject.id) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("winner", ["revoke", "consume"])
+async def test_revoke_vs_consume_has_one_sqlcipher_linearization_point(
+    revoke_consume_race, network_capture, effect_capture, winner,
+):
+    result = await revoke_consume_race.run(first=winner)
+    if winner == "revoke":
+        assert result.consume_error == "current_subject_authority_required"
+        assert network_capture == [] and effect_capture == []
+    else:
+        assert result.claim_committed_before_revocation is True
+        assert result.post_commit_disposition in {"cancelled", "conservatively_settled", "completed_once"}
+        assert result.replay_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_restart_rejects_every_pre_revocation_authority_generation(
+    restarted_identity_runtime, revoked_subject_fixture,
+):
+    stale = revoked_subject_fixture.pre_revocation_authorities
+    outcomes = await restarted_identity_runtime.try_each(stale)
+    assert set(outcomes) == AUTHORITY_FAMILIES
+    assert all(item.error == "current_subject_authority_required" for item in outcomes.values())
+    assert restarted_identity_runtime.network_capture == []
+
+
+@pytest.mark.asyncio
+async def test_revocation_outbox_reconciles_started_work_once_after_restart(
+    crash_after_profile_revocation_commit, restarted_identity_runtime,
+):
+    assert isinstance(restarted_identity_runtime.revocation_outbox, SubjectRevocationOutboxRepository)
+    assert isinstance(restarted_identity_runtime.revocation_worker, SubjectRevocationWorker)
+    event_id = await crash_after_profile_revocation_commit()
+    first = await restarted_identity_runtime.drain_subject_revocations()
+    second = await restarted_identity_runtime.drain_subject_revocations()
+    assert first.completed_event_ids == (event_id,)
+    assert second.completed_event_ids == ()
+    assert restarted_identity_runtime.audit_count(event_id) == 1
+```
+
+```python
+# tests/unit/identity/test_subject_revocation_worker.py
+import asyncio
+import pytest
+
+from tuntun_core.adapters.sqlcipher.subject_revocation_outbox_repository import (
+    SubjectRevocationOutboxRepository,
+)
+from tuntun_core.services.identity.subject_revocation_processor import SubjectRevocationProcessor
+from tuntun_core.workers.subject_revocation_worker import SubjectRevocationWorker
+
+
+@pytest.mark.asyncio
+async def test_immediate_restart_defers_live_claim_nonfatally_then_becomes_ready_at_expiry(
+    file_backed_revocation_outbox_uow_factory, processing_event_factory,
+    revocation_processor, clock,
+):
+    event=processing_event_factory("unexpired",seconds_remaining=30)
+    repository = SubjectRevocationOutboxRepository(file_backed_revocation_outbox_uow_factory)
+    worker = SubjectRevocationWorker(repository,revocation_processor,clock.heartbeats,clock)
+    recovery=asyncio.create_task(worker.recover_and_drain_before_ready())
+    await clock.advance_and_flush(seconds=29)
+    assert not recovery.done()
+    assert await repository.state(event.id)=="processing"
+    assert repository.takeover_count(event.id)==0
+    await clock.advance_and_flush(seconds=1)
+    await recovery
+    assert await repository.state(event.id) == "completed"
+    assert revocation_processor.receipts_for(event.id) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_workers_do_not_steal_seventy_five_second_call_with_heartbeats(
+    two_revocation_workers,long_running_downstream,clock,
+):
+    first,second=two_revocation_workers
+    event=await long_running_downstream.enqueue(duration_seconds=75)
+    first_run=asyncio.create_task(first.run_one_periodic_drain())
+    for seconds in (11,20,20,20):
+        await clock.advance_and_flush(seconds=seconds)
+        await second.run_one_periodic_drain()
+    await clock.advance_and_flush(seconds=4); await first_run
+    assert long_running_downstream.keys==(
+        long_running_downstream.fixed_key(event.id,"provider_routes"),
+    )
+    assert long_running_downstream.side_effect_count==1
+    assert two_revocation_workers.stale_fence_completions==0
+
+
+@pytest.mark.asyncio
+async def test_crashed_worker_expires_then_second_worker_reopens_exact_receipt_and_fences_late_completion(
+    two_revocation_workers,crash_after_downstream_commit,clock,
+):
+    first,second=two_revocation_workers
+    event,old_claim,receipt=await crash_after_downstream_commit(first)
+    await second.run_one_periodic_drain()
+    assert second.completed_event_ids==()
+    await clock.advance_and_flush(seconds=30)
+    await second.run_one_periodic_drain()
+    assert second.completed_event_ids==(event.id,)
+    assert crash_after_downstream_commit.effect_count(receipt.idempotency_key)==1
+    with pytest.raises(RuntimeError,match="subject_revocation_claim_lost"):
+        await first.complete_with_stale_fence(old_claim,receipt)
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_report_ready_when_revocation_drain_fails(
+    task1_identity_bootstrap, revocation_processor, clock,
+):
+    revocation_processor.fail(RuntimeError("reconciliation unavailable"))
+    with pytest.raises(RuntimeError, match="reconciliation unavailable"):
+        await task1_identity_bootstrap.start()
+    assert task1_identity_bootstrap.ready is False
+
+
+@pytest.mark.asyncio
+async def test_committed_revocation_live_kick_completes_without_process_restart(
+    task1_identity_runtime,active_subject_with_task1_started_authorities,
+    revoke_profile_grant,
+):
+    runtime=await task1_identity_runtime.start()
+    assert isinstance(runtime.revocation_worker,SubjectRevocationWorker)
+    assert isinstance(runtime.revocation_processor,SubjectRevocationProcessor)
+    event=await runtime.revoke_profile(
+        active_subject_with_task1_started_authorities,revoke_profile_grant,
+    )
+    await runtime.revocation_worker.wait_until_idle()
+    assert await runtime.revocation_outbox.state(event.id)=="completed"
+    assert runtime.process_restart_count==0
+    assert runtime.revocation_processor.receipts_for(event.id)==1
+
+
+@pytest.mark.asyncio
+async def test_live_processor_error_requeues_event_and_fails_runtime_readiness(
+    task1_identity_runtime,active_subject_with_task1_started_authorities,
+    revoke_profile_grant,
+):
+    runtime=await task1_identity_runtime.start()
+    runtime.revocation_processor.fail_family(
+        "search_capabilities",RuntimeError("search cancellation unavailable"),
+    )
+    event=await runtime.revoke_profile(
+        active_subject_with_task1_started_authorities,revoke_profile_grant,
+    )
+    with pytest.raises(RuntimeError,match="search cancellation unavailable"):
+        await runtime.wait_for_revocation_worker_failure()
+    assert runtime.ready is False
+    assert await runtime.revocation_outbox.state(event.id)=="pending"
+    assert await runtime.revocation_outbox.last_error(event.id)=="processor_error:RuntimeError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe_state",("worker_unavailable","backlog_over_limit"))
+async def test_identity_readiness_fails_for_unavailable_worker_or_unsafe_backlog(
+    task1_identity_bootstrap,unsafe_state,
+):
+    task1_identity_bootstrap.configure_revocation_state(unsafe_state)
+    with pytest.raises(RuntimeError,match="subject revocation worker unavailable|subject revocation backlog unsafe"):
+        await task1_identity_bootstrap.start()
+    assert task1_identity_bootstrap.ready is False
+```
+
+```python
+# tests/integration/identity/test_subject_revocation_handlers.py
+import pytest
+from uuid import uuid5
+
+from tuntun_core.services.identity.subject_revocation_handlers import (
+    NotInstalledAuthorityRevocationHandler,
+    ProviderRouteRevocationHandler,SearchAuthorityRevocationHandler,
+)
+from tuntun_core.services.identity.subject_revocation import NotInstalledSubjectAuthorityHandler
+
+EXPECTED_HANDLER_TYPES={
+    "provider_routes":ProviderRouteRevocationHandler,
+    "search_capabilities":SearchAuthorityRevocationHandler,
+    "action_authorities":NotInstalledAuthorityRevocationHandler,
+    "memory_authorities":NotInstalledAuthorityRevocationHandler,
+}
+
+
+def test_task1_container_composes_exact_schema_stage_handlers(
+    task1_identity_container,
+):
+    handlers=task1_identity_container.post_commit_revocation_handlers
+    assert set(handlers)==set(EXPECTED_HANDLER_TYPES)
+    assert all(type(handlers[name]) is kind for name,kind in EXPECTED_HANDLER_TYPES.items())
+    assert handlers["action_authorities"].owning_revision=="0003_authentication"
+    assert handlers["memory_authorities"].owning_revision=="0004_memory"
+    assert task1_identity_container.revocation_processor.handlers is handlers
+
+
+@pytest.mark.asyncio
+async def test_live_worker_runs_task1_handlers_once_without_later_schema_access(
+    task1_identity_runtime,subject_with_task1_started_authorities,
+    revoke_profile_grant,
+):
+    runtime=await task1_identity_runtime.start()
+    event=await runtime.revoke_profile(
+        subject_with_task1_started_authorities,revoke_profile_grant,
+    )
+    await runtime.revocation_worker.wait_until_idle()
+    assert await runtime.revocation_outbox.state(event.id)=="completed"
+    assert runtime.process_restart_count==0
+    assert runtime.revocation_effects.counts(event.id)=={
+        "provider_routes":1,"search_capabilities":1,
+        "action_authorities":1,"memory_authorities":1,
+    }
+    assert runtime.revocation_effects.dispositions(event.id)=={
+        "provider_routes":"conservatively_settled",
+        "search_capabilities":"cancelled",
+        "action_authorities":"not_installed_no_authority",
+        "memory_authorities":"not_installed_no_authority",
+    }
+    await runtime.revocation_worker.recover_and_drain_before_ready()
+    assert all(value==1 for value in runtime.revocation_effects.counts(event.id).values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "crash_after",("effect_claim_commit","downstream_effect_commit","effect_complete_commit"),
+)
+async def test_effect_crash_boundaries_reuse_one_key_receipt_and_side_effect(
+    task1_file_backed_identity_runtime,subject_with_task1_started_authorities,
+    revoke_profile_grant,revocation_effect_faults,clock,crash_after,
+):
+    runtime=await task1_file_backed_identity_runtime.start()
+    revocation_effect_faults.crash_after(crash_after,family="provider_routes")
+    event=await runtime.revoke_profile(
+        subject_with_task1_started_authorities,revoke_profile_grant,
+    )
+    with pytest.raises(BaseException,match="simulated_process_crash"):
+        await runtime.revocation_worker.wait_for_crash()
+    key=runtime.revocation_effects.fixed_key(event.id,"provider_routes")
+    assert key==uuid5(event.id,"provider_routes")
+    first_receipt=runtime.downstream_effects.receipt_for_key(key)
+    clock.advance(seconds=31)
+    restarted=await task1_file_backed_identity_runtime.restart()
+    await restarted.revocation_worker.recover_and_drain_before_ready()
+    completed=await restarted.revocation_effects.completed(key)
+    assert completed is not None
+    assert completed.idempotency_key==key
+    assert restarted.downstream_effects.effect_count(key)==1
+    if first_receipt is not None:
+        assert completed.id==first_receipt.id
+        assert restarted.downstream_effects.receipt_for_key(key).id==first_receipt.id
+
+
+@pytest.mark.asyncio
+async def test_periodic_drain_takes_expired_effect_but_not_live_effect(
+    task1_identity_runtime,stale_and_live_effect_claims,clock,
+):
+    runtime=await task1_identity_runtime.start_without_initial_drain()
+    stale,live=stale_and_live_effect_claims
+    await runtime.revocation_worker.run_one_periodic_drain()
+    assert await runtime.revocation_effects.state(stale.id)=="completed"
+    assert await runtime.revocation_effects.lease_owner(stale.id)!=stale.lease_owner
+    assert await runtime.revocation_effects.state(live.id)=="applying"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed",(
+    "idempotency_key","event_id","family","subject_id","through_generation",
+))
+async def test_fenced_effect_completion_rejects_exact_scope_substitution(
+    claimed_revocation_effect,revocation_effects,downstream_receipt_variant,changed,
+):
+    claim,receipt=claimed_revocation_effect
+    with pytest.raises(RuntimeError,match="revocation_downstream_receipt_scope_mismatch"):
+        await revocation_effects.complete(
+            claim.idempotency_key,claim.lease_owner,claim.fencing_token,
+            downstream_receipt_variant(receipt,changed),claim.now,
+        )
+    assert await revocation_effects.state(claim.id)=="applying"
+
+
+def test_absent_search_build_uses_closed_concrete_no_authority_handler(
+    absent_search_identity_container,
+):
+    handler=absent_search_identity_container.post_commit_revocation_handlers[
+        "search_capabilities"
+    ]
+    assert type(handler) is SearchAuthorityRevocationHandler
+    assert handler.feature_state=="absent"
+```
+
+`subject_authority_snapshot` and its outbox methods query the migrated file-backed SQLCipher tables through a new connection; they do not project transaction metadata onto the frozen `Profile` DTO. The fault fixture raises after each concrete handler/outbox/audit boundary before commit, proving that profile generation, all eight authority families, and the persisted outbox row roll back together.
 
 ```python
 # tests/unit/identity/test_current_owner_repository.py
@@ -475,6 +905,13 @@ from tuntun_contracts.identity import PersonaTraits
 from tuntun_core.domain.profile import ProfileClass, UpdatePersonaTraits
 from tuntun_core.services.identity.consent import ConsentDenied
 from tuntun_core.services.identity.profiles import StaleProfileVersion
+
+def test_profile_consent_receipt_inventory_is_bounded_and_unique(profile_factory):
+    schema=profile_factory.model_type.model_json_schema()["properties"]["current_consent_receipt_ids"]
+    assert schema["maxItems"]==8
+    with pytest.raises(ValueError): profile_factory(current_consent_receipt_ids=profile_factory.nine_receipt_ids())
+    receipt=profile_factory.receipt_id()
+    with pytest.raises(ValueError): profile_factory(current_consent_receipt_ids=(receipt,receipt))
 
 @pytest.mark.asyncio
 async def test_guest_is_projection_not_persisted(profile_service, profile_repository, household_id):
@@ -644,20 +1081,20 @@ async def test_replace_requires_personalization_consent_but_authorized_clear_rem
 
 - [ ] **Step 2: Run the tests and observe the intended failure**
 
-Run: `uv run pytest tests/unit/identity/test_profiles.py tests/unit/identity/test_consent.py tests/unit/identity/test_current_owner_repository.py -q`
+Run: `uv run pytest tests/unit/identity/test_profiles.py tests/unit/identity/test_consent.py tests/unit/identity/test_current_owner_repository.py tests/unit/identity/test_subject_revocation_worker.py tests/integration/identity/test_subject_revocation_handlers.py tests/integration/identity/test_profile_consent_migration.py tests/integration/identity/test_profile_revocation.py -q`
 Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_core.domain.profile'`.
 
 - [ ] **Step 3: Implement the domain rules and encrypted migration**
 
-In `identity_uow.py`, declare `IdentityUnitOfWork` as a structural protocol over the foundation transaction methods plus exact repository protocols—never placeholder `Any` protocols. Task 1 owns typed `profiles`, `consent_receipts`, `guest_session_consents`, `guest_disclosure_challenges`, and `sessions` properties; the sessions facade includes `invalidate_identity_subject(subject_id, reason, now)` for biometric-consent revocation. Each later task adds its exact method-bearing repository protocol and property in the same commit that introduces that repository. Every facade implementation is registered with the foundation `AsyncUnitOfWorkFactory`, contains no connection, and implements each async method solely by calling its bound unit's `run_sync`; the strict-mypy gate therefore rejects missing or dynamically dispatched repository methods. Purpose-specific consent side effects are injected as typed `ConsentRevocationHandlerPort.apply_in_uow(uow, receipt, auth, now)` implementations. Task 1 registers biometric and cloud-route handlers; the controlled-web supplement registers its search-route handler when that typed repository exists; Task 10 registers the child-memory handler when `memory_proposals` exists. Personalization has no identity-session invalidation: every persona projection and recall path rechecks its current receipt, so revocation suppresses only encrypted custom traits and private recall while preserving the canonical role and safe defaults.
+In `identity_uow.py`, declare `IdentityUnitOfWork` as a structural protocol over the foundation transaction methods plus exact repository protocols—never placeholder `Any` protocols. Task 1 owns typed `profiles`, `consent_receipts`, `guest_session_consents`, `guest_disclosure_challenges`, `sessions`, `subject_revocation_outbox`, and `subject_revocation_effects` properties; the sessions facade includes `invalidate_identity_subject(subject_id, reason, now)` for biometric-consent revocation. The production `AsyncUnitOfWorkFactory` registers the outbox/effect facades under those exact properties, and the cascade/container accepts no alternative in-memory implementation outside tests. Each later task adds its exact method-bearing repository protocol and property in the same commit that introduces that repository. Every facade implementation is registered with the foundation `AsyncUnitOfWorkFactory`, contains no connection, and implements each async method solely by calling its bound unit's `run_sync`; the strict-mypy gate therefore rejects missing or dynamically dispatched repository methods. Purpose-specific consent side effects are injected as typed `ConsentRevocationHandlerPort.apply_in_uow(uow, receipt, auth, now)` implementations. Task 1 registers biometric and cloud-route handlers; the controlled-web supplement registers its search-route handler when that typed repository exists; Task 10 registers the child-memory handler when `memory_proposals` exists. Personalization has no identity-session invalidation: every persona projection and recall path rechecks its current receipt, so revocation suppresses only encrypted custom traits and private recall while preserving the canonical role and safe defaults.
 
 ```python
 # apps/core/src/tuntun_core/domain/profile.py
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from tuntun_contracts.actions import ActionBinding
 from tuntun_contracts.identity import PersonaProjection, PersonaTraits
 
@@ -681,7 +1118,7 @@ class Modality(StrEnum):
     def consent_purpose(self) -> ConsentPurpose: return ConsentPurpose(self.value)
 
 class DomainModel(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
 class CreateProfile(DomainModel):
     household_id: UUID; subject_id: UUID; profile_class: ProfileClass; guardian_id: UUID|None=None
@@ -718,7 +1155,7 @@ class EnrollmentSession(DomainModel):
     next_reenrollment_reminder_at: AwareDatetime|None=None; biometric_hard_expires_at: AwareDatetime|None=None
 
 class Profile(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
     id: UUID
     household_id: UUID
     guardian_id: UUID | None
@@ -726,8 +1163,9 @@ class Profile(BaseModel):
     profile_class: ProfileClass
     encrypted_display_label: bytes = Field(min_length=28, max_length=1024)
     encrypted_persona_traits: bytes | None = Field(default=None, min_length=28, max_length=4096)
-    current_consent_receipt_ids: tuple[UUID, ...] = ()
+    current_consent_receipt_ids: Annotated[tuple[UUID,...],Field(min_length=0,max_length=8)] = ()
     active: bool
+    authority_generation: int = Field(ge=1)
     version: int = Field(ge=1)
     next_reenrollment_reminder_at: AwareDatetime | None
     created_at: AwareDatetime
@@ -744,8 +1182,14 @@ class Profile(BaseModel):
             raise ValueError("guardian_generation_required_exactly_for_child")
         return self
 
+    @field_validator("current_consent_receipt_ids")
+    @classmethod
+    def unique_current_consents(cls,value):
+        if len(set(value))!=len(value): raise ValueError("duplicate current consent receipt")
+        return value
+
 class ProfileProjection(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
     subject_id: UUID | None
     profile_class: ProfileClass
     may_retrieve_private_memory: bool
@@ -877,7 +1321,7 @@ class ActionBindingVerifier:
 
 ```python
 # apps/core/src/tuntun_core/services/identity/profiles.py
-from datetime import timedelta
+from datetime import UTC, timedelta
 from tuntun_contracts.identity import PersonaProjection, PersonaTraits
 from tuntun_core.domain.profile import ConsentPurpose, GUEST_PERSONA_PROJECTION, GUEST_PROJECTION, Profile, ProfileClass, ProfileProjection
 from tuntun_core.services.identity.consent import ConsentDenied
@@ -901,10 +1345,10 @@ def require_fresh_passkey(auth, binding, now, binding_verifier, max_age_seconds=
         raise PermissionError("fresh_passkey_required")
 
 class ProfileService:
-    def __init__(self, uow_factory, mutation_scope, audit_ledger, consent_service, profile_crypto, parameter_verifier: ActionParameterBindingVerifier, action_binding_verifier: ActionBindingVerifier, clock):
+    def __init__(self, uow_factory, mutation_scope, audit_ledger, consent_service, subject_revocations, profile_crypto, parameter_verifier: ActionParameterBindingVerifier, action_binding_verifier: ActionBindingVerifier, clock):
         self._uow_factory, self._scope, self._audit, self._clock = uow_factory, mutation_scope, audit_ledger, clock
         self._consents, self._profile_crypto, self._parameters = consent_service, profile_crypto, parameter_verifier
-        self._bindings = action_binding_verifier
+        self._bindings, self._subject_revocations = action_binding_verifier, subject_revocations
 
     async def create(self, command, auth):
         if command.profile_class not in {ProfileClass.ADULT, ProfileClass.K2, ProfileClass.N1}:
@@ -919,7 +1363,7 @@ class ProfileService:
             raise PermissionError("profile_create_household_mismatch")
         now = self._clock.now()
         encrypted_display_label = self._profile_crypto.seal_display_label(command.subject_id, 1, command.display_label)
-        profile = Profile(id=command.subject_id, household_id=command.household_id, guardian_id=command.guardian_id, guardian_generation=1 if command.guardian_id is not None else 0, profile_class=command.profile_class, encrypted_display_label=encrypted_display_label, encrypted_persona_traits=None, current_consent_receipt_ids=(), active=True, version=1, next_reenrollment_reminder_at=None, created_at=now, updated_at=now)
+        profile = Profile(id=command.subject_id, household_id=command.household_id, guardian_id=command.guardian_id, guardian_generation=1 if command.guardian_id is not None else 0, profile_class=command.profile_class, encrypted_display_label=encrypted_display_label, encrypted_persona_traits=None, current_consent_receipt_ids=(), active=True, authority_generation=1, version=1, next_reenrollment_reminder_at=None, created_at=now, updated_at=now)
         uow = self._scope.require_active_uow()
         await uow.profiles.insert(profile)
         await self._audit.append(uow, uow.profiles.created_audit(profile, auth))
@@ -1040,7 +1484,15 @@ class ProfileService:
         current = await uow.profiles.get(command.subject_id)
         if current.household_id != command.action_binding.household_id:
             raise PermissionError("profile_revoke_household_mismatch")
-        revoked = await uow.profiles.revoke_expected_version(command.subject_id, command.expected_version, self._clock.now())
+        if not current.active or current.revoked_at is not None:
+            raise PermissionError("current_active_subject_required")
+        if current.profile_class is ProfileClass.OWNER:
+            raise PermissionError("current_owner_replacement_transaction_required")
+        now = self._clock.now()
+        revoked = await uow.profiles.revoke_and_advance_authority_generation_expected_version(
+            command.subject_id, command.expected_version, current.authority_generation, now
+        )
+        await self._subject_revocations.apply_in_uow(uow, current, revoked, auth, now)
         await self._audit.append(uow, uow.profiles.revoked_audit(revoked, auth))
         return revoked
 
@@ -1049,6 +1501,805 @@ class ProfileService:
             raise RuntimeError("profile_uow_scope_mismatch")
         return await self.revoke(command, auth)
 ```
+
+The ordinary `profile.revoke` path cannot revoke the current owner. Recovery-driven owner replacement uses its own transaction: it installs the next `current_owner_authority` pointer, advances the owner generation, and invokes the same subject-revocation cascade for the former owner before committing.
+
+```python
+# apps/core/src/tuntun_core/services/identity/subject_revocation.py
+from typing import Protocol
+
+REQUIRED_SUBJECT_AUTHORITY_FAMILIES = (
+    "sessions", "consents", "enrollments", "biometric_templates",
+    "provider_routes", "search_capabilities", "action_authorities", "memory_authorities",
+)
+
+
+class SubjectAuthorityRevocationHandler(Protocol):
+    async def revoke_in_uow(
+        self, uow, *, household_id, subject_id, through_generation, reason, now
+    ) -> None: ...
+
+class NotInstalledSubjectAuthorityHandler:
+    _ALLOWED={"action_authorities":"0003_authentication","memory_authorities":"0004_memory"}
+    def __init__(self,capability_stage,*,family,owning_revision):
+        if self._ALLOWED.get(family)!=owning_revision:
+            raise ValueError("closed not-installed authority family required")
+        self._stage,self.family,self.owning_revision=capability_stage,family,owning_revision
+    async def revoke_in_uow(self,uow,**scope):
+        self._stage.require_schema_and_facade_absent_in_uow(
+            uow,self.family,self.owning_revision,
+        )
+
+
+class SubjectAuthorityRevocationCascade:
+    def __init__(self, handlers, outbox):
+        if len(handlers) != len(REQUIRED_SUBJECT_AUTHORITY_FAMILIES) or set(handlers) != set(REQUIRED_SUBJECT_AUTHORITY_FAMILIES):
+            raise RuntimeError("complete_subject_revocation_handlers_required")
+        self._handlers, self._outbox = handlers, outbox
+
+    async def apply_in_uow(self, uow, current, revoked, auth, now):
+        if revoked.authority_generation != current.authority_generation + 1:
+            raise RuntimeError("subject_authority_generation_not_advanced")
+        for family in REQUIRED_SUBJECT_AUTHORITY_FAMILIES:
+            await self._handlers[family].revoke_in_uow(
+                uow,
+                household_id=current.household_id,
+                subject_id=current.id,
+                through_generation=current.authority_generation,
+                reason="profile_revoked",
+                now=now,
+            )
+        await self._outbox.enqueue_in_uow(
+            uow,
+            event_key=f"subject-revoked:{current.id}:{revoked.authority_generation}",
+            subject_id=current.id,
+            new_authority_generation=revoked.authority_generation,
+            occurred_at=now,
+        )
+        # Fixed-name signal is discarded on rollback and offered only after
+        # the SQLCipher commit containing profile, authorities, and outbox.
+        uow.signal_after_commit("subject_revocation")
+```
+
+```python
+# apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_outbox_repository.py
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
+
+@dataclass(frozen=True,slots=True)
+class OutboxClaim:
+    event: object
+    lease_owner: UUID
+    fencing_token: int
+    leased_until: datetime
+
+
+class SubjectRevocationOutboxRepository:
+    """Async facade; every operation executes on the foundation SQLCipher worker."""
+
+    def __init__(self, uow_factory):
+        self._uow_factory = uow_factory
+
+    @staticmethod
+    def _utc(value):
+        return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    async def enqueue_in_uow(
+        self, uow, *, event_key: str, subject_id: UUID,
+        new_authority_generation: int, occurred_at,
+    ):
+        return await uow.run_sync(
+            lambda connection: connection.exec_driver_sql(
+                """INSERT INTO subject_revocation_outbox
+                   (id,event_key,subject_id,new_authority_generation,state,occurred_at,attempt_count,fencing_token)
+                   VALUES (?,?,?,?, 'pending', ?,0,0)
+                   ON CONFLICT(event_key) DO NOTHING""",
+                (str(uuid4()), event_key, str(subject_id), new_authority_generation, self._utc(occurred_at)),
+            )
+        )
+
+    async def recover_expired(self, now) -> int:
+        async with self._uow_factory() as uow:
+            changed=await uow.run_sync(
+                lambda connection: connection.exec_driver_sql(
+                    """UPDATE subject_revocation_outbox
+                       SET state='pending',claimed_at=NULL,lease_owner=NULL,
+                           lease_expires_at=NULL,last_error='expired_lease_recovered'
+                       WHERE state='processing' AND lease_expires_at<=?""",
+                    (self._utc(now),),
+                ).rowcount
+            )
+            await uow.commit()
+            return changed
+
+    async def claim_next(self, now, lease_owner):
+        lease_expires_at = now + timedelta(seconds=30)
+        async with self._uow_factory() as uow:
+            event = await uow.run_sync(
+                lambda connection: connection.exec_driver_sql(
+                    """UPDATE subject_revocation_outbox
+                       SET state='processing',claimed_at=?,lease_owner=?,lease_expires_at=?,
+                           attempt_count=attempt_count+1,fencing_token=fencing_token+1,last_error=NULL
+                       WHERE id=(SELECT id FROM subject_revocation_outbox
+                                 WHERE state='pending' ORDER BY occurred_at,id LIMIT 1)
+                       RETURNING *""",
+                    (self._utc(now),str(lease_owner),self._utc(lease_expires_at)),
+                ).fetchone()
+            )
+            await uow.commit()
+            if event is None: return None
+            return OutboxClaim(event,lease_owner,int(event.fencing_token),lease_expires_at)
+
+    async def renew(self,event_id,lease_owner,fencing_token,now) -> bool:
+        leased_until=now+timedelta(seconds=30)
+        async with self._uow_factory() as uow:
+            changed=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """UPDATE subject_revocation_outbox SET lease_expires_at=?
+                   WHERE id=? AND state='processing' AND lease_owner=?
+                   AND fencing_token=? AND lease_expires_at>?""",
+                (self._utc(leased_until),str(event_id),str(lease_owner),fencing_token,self._utc(now)),
+            ).rowcount)
+            await uow.commit(); return changed==1
+
+    async def complete(self,event_id,receipt_id,lease_owner,fencing_token,now) -> None:
+        async with self._uow_factory() as uow:
+            changed = await uow.run_sync(
+                lambda connection: connection.exec_driver_sql(
+                    """UPDATE subject_revocation_outbox
+                       SET state='completed',completed_at=?,lease_owner=NULL,lease_expires_at=NULL,
+                           reconciliation_receipt_id=?,last_error=NULL
+                       WHERE id=? AND state='processing' AND lease_owner=?
+                       AND fencing_token=? AND lease_expires_at>?""",
+                    (self._utc(now),str(receipt_id),str(event_id),str(lease_owner),
+                     fencing_token,self._utc(now)),
+                ).rowcount
+            )
+            if changed != 1:
+                raise RuntimeError("subject_revocation_claim_lost")
+            await uow.commit()
+
+    async def retry_pending(self,event_id,lease_owner,fencing_token,reason_code,now) -> None:
+        if len(reason_code)>128: raise ValueError("revocation reason code too long")
+        async with self._uow_factory() as uow:
+            changed=await uow.run_sync(
+                lambda connection: connection.exec_driver_sql(
+                    """UPDATE subject_revocation_outbox
+                       SET state='pending',claimed_at=NULL,lease_owner=NULL,lease_expires_at=NULL,
+                           last_error=? WHERE id=? AND state='processing'
+                           AND lease_owner=? AND fencing_token=? AND lease_expires_at>?""",
+                    (reason_code,str(event_id),str(lease_owner),fencing_token,self._utc(now)),
+                ).rowcount
+            )
+            if changed!=1: raise RuntimeError("subject_revocation_claim_lost")
+            await uow.commit()
+
+    async def defer_until(self,event_id,lease_owner,fencing_token,leased_until,now) -> None:
+        async with self._uow_factory() as uow:
+            changed=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """UPDATE subject_revocation_outbox
+                   SET lease_expires_at=?,last_error='deferred_live_effect_lease'
+                   WHERE id=? AND state='processing' AND lease_owner=?
+                   AND fencing_token=? AND lease_expires_at>?""",
+                (self._utc(leased_until),str(event_id),str(lease_owner),fencing_token,
+                 self._utc(now)),
+            ).rowcount)
+            if changed!=1: raise RuntimeError("subject_revocation_claim_lost")
+            await uow.commit()
+
+    async def earliest_live_expiry(self):
+        async with self._uow_factory() as uow:
+            value=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                "SELECT min(lease_expires_at) FROM subject_revocation_outbox WHERE state='processing'"
+            ).scalar_one_or_none())
+            await uow.rollback()
+        return None if value is None else datetime.fromisoformat(str(value).replace("Z","+00:00"))
+
+    async def pending_count(self) -> int:
+        async with self._uow_factory() as uow:
+            value=await uow.run_sync(
+                lambda connection: connection.exec_driver_sql(
+                    "SELECT count(*) FROM subject_revocation_outbox WHERE state!='completed'"
+                ).scalar_one()
+            )
+            await uow.rollback(); return int(value)
+
+    async def state(self, event_id) -> str:
+        async with self._uow_factory() as uow:
+            row = await uow.run_sync(
+                lambda connection: connection.exec_driver_sql(
+                    "SELECT state FROM subject_revocation_outbox WHERE id=?", (str(event_id),)
+                ).fetchone()
+            )
+            if row is None:
+                raise KeyError(event_id)
+            return str(row[0])
+
+    async def last_error(self,event_id) -> str | None:
+        async with self._uow_factory() as uow:
+            row=await uow.run_sync(
+                lambda connection: connection.exec_driver_sql(
+                    "SELECT last_error FROM subject_revocation_outbox WHERE id=?",
+                    (str(event_id),),
+                ).fetchone()
+            )
+            await uow.rollback()
+            if row is None: raise KeyError(event_id)
+            return None if row[0] is None else str(row[0])
+```
+
+```python
+# apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_effect_repository.py
+from dataclasses import dataclass
+from datetime import UTC,datetime,timedelta
+from typing import Literal
+from uuid import UUID,uuid5
+
+@dataclass(frozen=True,slots=True)
+class DownstreamEffectReceipt:
+    id:UUID; idempotency_key:UUID; event_id:UUID; family:str
+    subject_id:UUID; through_generation:int; disposition:str
+
+@dataclass(frozen=True,slots=True)
+class EffectClaim:
+    status:Literal["acquired","busy","completed"]
+    id:UUID; idempotency_key:UUID
+    fencing_token:int|None; leased_until:object|None
+    downstream:DownstreamEffectReceipt|None=None
+
+class SubjectRevocationEffectRepository:
+    """Durable per-event/family lease and downstream receipt; no subject content."""
+    def __init__(self,uow_factory): self._uow_factory=uow_factory
+
+    @staticmethod
+    def _utc(value): return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    async def claim(
+        self,idempotency_key,*,event_id,family,subject_id,through_generation,
+        lease_owner,now,
+    ):
+        row_id=uuid5(idempotency_key,"effect-row"); leased_until=now+timedelta(seconds=30)
+        async with self._uow_factory() as uow:
+            await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """INSERT INTO subject_revocation_effects
+                   (id,event_id,family,idempotency_key,state,attempt_count,fencing_token,created_at)
+                   VALUES (?,?,?,?, 'pending',0,0,?) ON CONFLICT(idempotency_key) DO NOTHING""",
+                (str(row_id),str(event_id),family,str(idempotency_key),self._utc(now)),
+            ))
+            acquired=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """UPDATE subject_revocation_effects
+                   SET state='applying',lease_owner=?,leased_until=?,
+                       attempt_count=attempt_count+1,fencing_token=fencing_token+1,last_error=NULL
+                   WHERE idempotency_key=? AND
+                     (state='pending' OR (state='applying' AND leased_until<=?))
+                   RETURNING id,fencing_token""",
+                (str(lease_owner),self._utc(leased_until),str(idempotency_key),self._utc(now)),
+            ).fetchone())
+            row=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """SELECT effect.id,effect.event_id,effect.family,effect.state,
+                          effect.fencing_token,effect.leased_until,
+                          effect.downstream_receipt_id,effect.disposition,
+                          event.subject_id,event.new_authority_generation
+                   FROM subject_revocation_effects AS effect
+                   JOIN subject_revocation_outbox AS event ON event.id=effect.event_id
+                   WHERE effect.idempotency_key=?""",
+                (str(idempotency_key),),
+            ).fetchone())
+            if (
+                row is None or str(row.event_id)!=str(event_id) or row.family!=family
+                or str(row.subject_id)!=str(subject_id)
+                or int(row.new_authority_generation)-1!=through_generation
+            ):
+                raise RuntimeError("revocation_effect_idempotency_scope_mismatch")
+            await uow.commit()
+        if acquired is not None:
+            return EffectClaim(
+                "acquired",UUID(row.id),idempotency_key,
+                int(acquired.fencing_token),leased_until,
+            )
+        if row.state=="completed":
+            receipt=DownstreamEffectReceipt(
+                UUID(row.downstream_receipt_id),idempotency_key,UUID(row.event_id),
+                row.family,UUID(row.subject_id),int(row.new_authority_generation)-1,
+                row.disposition,
+            )
+            return EffectClaim("completed",UUID(row.id),idempotency_key,None,None,receipt)
+        return EffectClaim(
+            "busy",UUID(row.id),idempotency_key,None,
+            datetime.fromisoformat(str(row.leased_until).replace("Z","+00:00")),
+        )
+
+    async def completed(self,idempotency_key):
+        async with self._uow_factory() as uow:
+            row=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """SELECT effect.downstream_receipt_id,effect.disposition,effect.event_id,
+                          effect.family,event.subject_id,event.new_authority_generation
+                   FROM subject_revocation_effects AS effect
+                   JOIN subject_revocation_outbox AS event ON event.id=effect.event_id
+                   WHERE effect.idempotency_key=? AND effect.state='completed'""",
+                (str(idempotency_key),),
+            ).fetchone())
+            await uow.rollback()
+        return None if row is None else DownstreamEffectReceipt(
+            UUID(row.downstream_receipt_id),idempotency_key,UUID(row.event_id),
+            row.family,UUID(row.subject_id),int(row.new_authority_generation)-1,
+            row.disposition,
+        )
+
+    async def renew(self,idempotency_key,lease_owner,fencing_token,now) -> bool:
+        leased_until=now+timedelta(seconds=30)
+        async with self._uow_factory() as uow:
+            changed=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """UPDATE subject_revocation_effects SET leased_until=?
+                   WHERE idempotency_key=? AND state='applying' AND lease_owner=?
+                   AND fencing_token=? AND leased_until>?""",
+                (self._utc(leased_until),str(idempotency_key),str(lease_owner),
+                 fencing_token,self._utc(now)),
+            ).rowcount)
+            await uow.commit(); return changed==1
+
+    async def complete(self,idempotency_key,lease_owner,fencing_token,downstream,now):
+        async with self._uow_factory() as uow:
+            scope=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """SELECT effect.event_id,effect.family,event.subject_id,
+                          event.new_authority_generation
+                   FROM subject_revocation_effects AS effect
+                   JOIN subject_revocation_outbox AS event ON event.id=effect.event_id
+                   WHERE effect.idempotency_key=?""",
+                (str(idempotency_key),),
+            ).fetchone())
+            expected=(
+                str(idempotency_key),str(scope.event_id),scope.family,
+                str(scope.subject_id),int(scope.new_authority_generation)-1,
+            )
+            actual=(
+                str(downstream.idempotency_key),str(downstream.event_id),downstream.family,
+                str(downstream.subject_id),downstream.through_generation,
+            )
+            if actual!=expected: raise RuntimeError("revocation_downstream_receipt_scope_mismatch")
+            changed=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """UPDATE subject_revocation_effects SET state='completed',lease_owner=NULL,
+                   leased_until=NULL,downstream_receipt_id=?,disposition=?,completed_at=?
+                   WHERE idempotency_key=? AND state='applying' AND lease_owner=?
+                   AND fencing_token=? AND leased_until>?""",
+                (str(downstream.id),downstream.disposition,self._utc(now),
+                 str(idempotency_key),str(lease_owner),fencing_token,self._utc(now)),
+            ).rowcount)
+            if changed!=1: raise RuntimeError("revocation_effect_claim_lost")
+            await uow.commit()
+
+    async def abandon(self,idempotency_key,lease_owner,fencing_token,reason_code,now):
+        async with self._uow_factory() as uow:
+            changed=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """UPDATE subject_revocation_effects SET state='pending',lease_owner=NULL,
+                   leased_until=NULL,last_error=? WHERE idempotency_key=?
+                   AND state='applying' AND lease_owner=? AND fencing_token=?
+                   AND leased_until>?""",
+                (reason_code,str(idempotency_key),str(lease_owner),fencing_token,
+                 self._utc(now)),
+            ).rowcount)
+            if changed!=1: raise RuntimeError("revocation_effect_claim_lost")
+            await uow.commit()
+
+    async def recover_stale(self,now) -> int:
+        async with self._uow_factory() as uow:
+            changed=await uow.run_sync(lambda connection:connection.exec_driver_sql(
+                """UPDATE subject_revocation_effects SET state='pending',lease_owner=NULL,
+                   leased_until=NULL,last_error='stale_lease_recovered'
+                   WHERE state='applying' AND leased_until<=?""",
+                (self._utc(now),),
+            ).rowcount)
+            await uow.commit(); return changed
+```
+
+```python
+# apps/core/src/tuntun_core/services/identity/subject_revocation_handlers.py
+import asyncio
+from dataclasses import dataclass
+from datetime import timedelta
+from uuid import uuid5
+from tuntun_core.adapters.sqlcipher.subject_revocation_effect_repository import DownstreamEffectReceipt
+
+@dataclass(frozen=True,slots=True)
+class DeferredEffect:
+    leased_until:object
+
+class LeaseFenceLost(RuntimeError): pass
+
+class LeaseHeartbeatRunner:
+    def __init__(self,clock): self._clock=clock
+    def now(self): return self._clock.now()
+    async def run(self,operation,*,renew,interval_seconds):
+        task=asyncio.create_task(operation())
+        tick=None
+        try:
+            while True:
+                tick=asyncio.create_task(self._clock.sleep_until(
+                    self._clock.now()+timedelta(seconds=interval_seconds),
+                ))
+                done,_=await asyncio.wait(
+                    {task,tick},return_when=asyncio.FIRST_COMPLETED,
+                )
+                if task in done:
+                    tick.cancel(); await asyncio.gather(tick,return_exceptions=True)
+                    return task.result()
+                if not await renew(self._clock.now()):
+                    task.cancel(); await asyncio.gather(task,return_exceptions=True)
+                    raise LeaseFenceLost("revocation_lease_fence_lost")
+        except BaseException:
+            if tick is not None and not tick.done():
+                tick.cancel(); await asyncio.gather(tick,return_exceptions=True)
+            if not task.done():
+                task.cancel(); await asyncio.gather(task,return_exceptions=True)
+            raise
+
+class _OnceHandler:
+    family:str
+    def __init__(self,effects,heartbeats):
+        self._effects,self._heartbeats=effects,heartbeats
+    def require_stage_match(self): return None
+    async def reconcile_started_once(
+        self,*,event_id,subject_id,through_generation,idempotency_key,
+        lease_owner,now,
+    ):
+        claim=await self._effects.claim(
+            idempotency_key,event_id=event_id,family=self.family,
+            subject_id=subject_id,through_generation=through_generation,
+            lease_owner=lease_owner,now=now,
+        )
+        if claim.status=="completed": return claim.downstream.disposition
+        if claim.status=="busy": return DeferredEffect(claim.leased_until)
+        try:
+            downstream=await self._heartbeats.run(
+                lambda:self._apply(event_id,subject_id,through_generation,idempotency_key),
+                renew=lambda heartbeat_now:self._effects.renew(
+                    idempotency_key,lease_owner,claim.fencing_token,heartbeat_now,
+                ),
+                interval_seconds=10,
+            )
+            expected=(event_id,self.family,subject_id,through_generation,idempotency_key)
+            actual=(downstream.event_id,downstream.family,downstream.subject_id,
+                    downstream.through_generation,downstream.idempotency_key)
+            if actual!=expected: raise RuntimeError("revocation_downstream_receipt_scope_mismatch")
+        except LeaseFenceLost:
+            raise
+        except Exception as error:
+            await self._effects.abandon(
+                idempotency_key,lease_owner,claim.fencing_token,
+                f"handler_error:{type(error).__name__}",self._heartbeats.now(),
+            )
+            raise
+        # BaseException models process death and deliberately leaves APPLYING;
+        # startup/periodic stale-lease recovery reuses this exact key.
+        await self._effects.complete(
+            idempotency_key,lease_owner,claim.fencing_token,downstream,
+            self._heartbeats.now(),
+        )
+        return downstream.disposition
+
+class ProviderRouteRevocationHandler(_OnceHandler):
+    family="provider_routes"
+    def __init__(self,effects,heartbeats,uow_factory):
+        super().__init__(effects,heartbeats); self._uow=uow_factory
+    async def _apply(self,event_id,subject_id,through_generation,key):
+        async with self._uow() as uow:
+            summary=await uow.provider_calls.reconcile_revoked_subject_once(
+                event_id=event_id,family=self.family,subject_id=subject_id,
+                through_generation=through_generation,
+                idempotency_key=key,
+            )
+            await uow.budget_reservations.settle_conservative_once(
+                summary.network_started_reservation_ids,idempotency_key=key,
+            )
+            await uow.commit()
+        return summary.downstream_effect_receipt
+
+class SearchAuthorityRevocationHandler(_OnceHandler):
+    family="search_capabilities"
+    def __init__(self,effects,heartbeats,uow_factory,feature_state):
+        super().__init__(effects,heartbeats); self._uow=uow_factory; self.feature_state=feature_state
+    async def _apply(self,event_id,subject_id,through_generation,key):
+        if self.feature_state=="absent":
+            # No optional-search authority exists. The deterministic no-op
+            # receipt is durably stored by the outer effect completion; a
+            # crash before it simply regenerates this exact ID.
+            return DownstreamEffectReceipt(
+                uuid5(key,"absent-search-noop"),key,event_id,self.family,
+                subject_id,through_generation,"none_open",
+            )
+        async with self._uow() as uow:
+            receipt=await uow.experimental_search_attempts.reconcile_revocation_once(
+                event_id=event_id,family=self.family,subject_id=subject_id,
+                through_generation=through_generation,
+                idempotency_key=key,
+            )
+            await uow.commit()
+        return receipt
+
+class ActionAuthorityRevocationHandler(_OnceHandler):
+    family="action_authorities"
+    def __init__(self,effects,heartbeats,claims,provider_registry):
+        super().__init__(effects,heartbeats); self._claims=claims; self._providers=provider_registry
+    async def _apply(self,event_id,subject_id,through_generation,key):
+        return await self._claims.reconcile_subject_revocation_once(
+            event_id=event_id,family=self.family,subject_id=subject_id,
+            through_generation=through_generation,
+            idempotency_key=key,provider_registry=self._providers,
+        )
+
+class MemoryAuthorityRevocationHandler(_OnceHandler):
+    family="memory_authorities"
+    def __init__(self,effects,heartbeats,uow_factory):
+        super().__init__(effects,heartbeats); self._uow=uow_factory
+    async def _apply(self,event_id,subject_id,through_generation,key):
+        async with self._uow() as uow:
+            receipt=await uow.memory_proposals.reconcile_subject_revocation_once(
+                event_id=event_id,family=self.family,subject_id=subject_id,
+                through_generation=through_generation,
+                idempotency_key=key,
+            )
+            await uow.commit()
+        return receipt
+
+class NotInstalledAuthorityRevocationHandler(_OnceHandler):
+    _ALLOWED={"action_authorities":"0003_authentication","memory_authorities":"0004_memory"}
+    def __init__(self,effects,heartbeats,capability_stage,*,family,owning_revision):
+        if self._ALLOWED.get(family)!=owning_revision:
+            raise ValueError("closed not-installed revocation family required")
+        super().__init__(effects,heartbeats)
+        self.family,self._stage,self.owning_revision=family,capability_stage,owning_revision
+    async def _apply(self,event_id,subject_id,through_generation,key):
+        self._stage.require_schema_and_facade_absent(self.family,self.owning_revision)
+        return DownstreamEffectReceipt(
+            uuid5(key,"not-installed-no-authority"),key,event_id,self.family,
+            subject_id,through_generation,"not_installed_no_authority",
+        )
+    def require_stage_match(self):
+        self._stage.require_schema_and_facade_absent(self.family,self.owning_revision)
+```
+
+```python
+# apps/core/src/tuntun_core/services/identity/subject_revocation_processor.py
+from dataclasses import dataclass
+from uuid import UUID,uuid5
+from tuntun_core.services.identity.subject_revocation_handlers import DeferredEffect
+
+POST_COMMIT_FAMILIES=(
+    "provider_routes","search_capabilities","action_authorities","memory_authorities",
+)
+ALLOWED_DISPOSITIONS=frozenset({
+    "none_open","cancelled","conservatively_settled","completed_once",
+    "not_installed_no_authority",
+})
+
+@dataclass(frozen=True,slots=True)
+class SubjectRevocationProcessingReceipt:
+    id: UUID
+    dispositions: tuple[tuple[str,str],...]
+
+@dataclass(frozen=True,slots=True)
+class DeferredRevocationProcessing:
+    leased_until:object
+
+class SubjectRevocationProcessor:
+    def __init__(self,handlers):
+        if set(handlers)!=set(POST_COMMIT_FAMILIES):
+            raise RuntimeError("complete_post_commit_revocation_handlers_required")
+        if len({id(handler._effects) for handler in handlers.values()})!=1:
+            raise RuntimeError("one_revocation_effect_repository_required")
+        self._handlers=handlers
+        self._effects=next(iter(handlers.values()))._effects
+
+    @property
+    def available(self) -> bool:
+        if set(self._handlers)!=set(POST_COMMIT_FAMILIES): return False
+        for handler in self._handlers.values(): handler.require_stage_match()
+        return True
+
+    @property
+    def handlers(self): return self._handlers
+
+    async def recover_stale_effect_claims(self,now) -> int:
+        return await self._effects.recover_stale(now)
+
+    async def reconcile_once(self,event,*,idempotency_key,lease_owner,now):
+        event_id=UUID(str(event.id))
+        if UUID(str(idempotency_key))!=event_id:
+            raise PermissionError("subject_revocation_idempotency_mismatch")
+        dispositions=[]
+        for family in POST_COMMIT_FAMILIES:
+            disposition=await self._handlers[family].reconcile_started_once(
+                event_id=event_id,
+                subject_id=UUID(str(event.subject_id)),
+                through_generation=int(event.new_authority_generation)-1,
+                idempotency_key=uuid5(event_id,family),
+                lease_owner=lease_owner,now=now,
+            )
+            if isinstance(disposition,DeferredEffect):
+                return DeferredRevocationProcessing(disposition.leased_until)
+            if disposition not in ALLOWED_DISPOSITIONS:
+                raise RuntimeError("invalid_subject_revocation_disposition")
+            dispositions.append((family,disposition))
+        return SubjectRevocationProcessingReceipt(
+            id=uuid5(event_id,"aggregate"),dispositions=tuple(dispositions),
+        )
+```
+
+```python
+# apps/core/src/tuntun_core/workers/subject_revocation_worker.py
+import asyncio
+from datetime import timedelta
+from uuid import uuid4
+from tuntun_core.services.identity.subject_revocation_processor import DeferredRevocationProcessing
+from tuntun_core.services.identity.subject_revocation_handlers import LeaseFenceLost
+
+MAX_SAFE_STARTUP_BACKLOG=10_000
+PERIODIC_DRAIN_SECONDS=30
+STARTUP_RECOVERY_WAIT_SECONDS=31
+
+class SubjectRevocationWorker:
+    def __init__(self,repository,processor,heartbeats,clock):
+        self._repository,self._processor=repository,processor
+        self._heartbeats,self._clock=heartbeats,clock
+        self._kick=asyncio.Event(); self._running=asyncio.Event()
+
+    @property
+    def available(self): return bool(self._processor.available)
+
+    def offer_nowait(self):
+        self._kick.set()
+
+    async def _drain_available(self) -> int:
+        processed=0
+        await self._repository.recover_expired(self._clock.now())
+        await self._processor.recover_stale_effect_claims(self._clock.now())
+        while claim := await self._repository.claim_next(self._clock.now(),uuid4()):
+            event=claim.event
+            try:
+                result=await self._heartbeats.run(
+                    lambda:self._processor.reconcile_once(
+                        event,idempotency_key=event.id,
+                        lease_owner=claim.lease_owner,now=self._clock.now(),
+                    ),
+                    renew=lambda heartbeat_now:self._repository.renew(
+                        event.id,claim.lease_owner,claim.fencing_token,heartbeat_now,
+                    ),
+                    interval_seconds=10,
+                )
+                if isinstance(result,DeferredRevocationProcessing):
+                    await self._repository.defer_until(
+                        event.id,claim.lease_owner,claim.fencing_token,
+                        result.leased_until,self._clock.now(),
+                    )
+                    continue
+                await self._repository.complete(
+                    event.id,result.id,claim.lease_owner,claim.fencing_token,
+                    self._clock.now(),
+                )
+            except LeaseFenceLost:
+                raise
+            except Exception as error:
+                await asyncio.shield(self._repository.retry_pending(
+                    event.id,claim.lease_owner,claim.fencing_token,
+                    f"processor_error:{type(error).__name__}",self._clock.now(),
+                ))
+                raise
+            processed+=1
+        return processed
+
+    async def recover_and_drain_before_ready(self) -> None:
+        if not self.available:
+            raise RuntimeError("subject revocation worker unavailable")
+        if await self._repository.pending_count()>MAX_SAFE_STARTUP_BACKLOG:
+            raise RuntimeError("subject revocation backlog unsafe")
+        deadline=self._clock.now()+timedelta(seconds=STARTUP_RECOVERY_WAIT_SECONDS)
+        while await self._repository.pending_count()!=0:
+            await self._drain_available()
+            if await self._repository.pending_count()==0: break
+            expiry=await self._repository.earliest_live_expiry()
+            if expiry is None or expiry>deadline:
+                raise RuntimeError("subject revocation backlog unsafe")
+            # A previous process may have died after claim commit. Its live
+            # lease is deferred, not treated as a fatal startup error or stolen.
+            await self._clock.sleep_until(expiry)
+
+    async def run_periodically(self,stop,on_fatal) -> None:
+        if not self.available:
+            raise RuntimeError("subject revocation worker unavailable")
+        self._running.set()
+        try:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._kick.wait(),timeout=PERIODIC_DRAIN_SECONDS,
+                    )
+                except TimeoutError:
+                    pass
+                self._kick.clear()
+                await self._drain_available()
+        except BaseException as error:
+            on_fatal(error)
+            raise
+
+    async def wait_running(self) -> None: await self._running.wait()
+
+    async def wait_until_idle(self) -> None:
+        while self._kick.is_set() or await self._repository.pending_count():
+            await asyncio.sleep(0)
+```
+
+```python
+# apps/core/src/tuntun_core/bootstrap/container.py (revocation composition)
+from tuntun_core.adapters.sqlcipher.subject_revocation_effect_repository import (
+    SubjectRevocationEffectRepository,
+)
+from tuntun_core.services.identity.subject_revocation_handlers import (
+    LeaseHeartbeatRunner,NotInstalledAuthorityRevocationHandler,
+    ProviderRouteRevocationHandler,SearchAuthorityRevocationHandler,
+)
+
+revocation_outbox=SubjectRevocationOutboxRepository(async_uow_factory)
+revocation_effects=SubjectRevocationEffectRepository(async_uow_factory)
+revocation_heartbeats=LeaseHeartbeatRunner(clock)
+transactional_subject_revocation_handlers.update({
+    "action_authorities":NotInstalledSubjectAuthorityHandler(
+        capability_stage,family="action_authorities",owning_revision="0003_authentication",
+    ),
+    "memory_authorities":NotInstalledSubjectAuthorityHandler(
+        capability_stage,family="memory_authorities",owning_revision="0004_memory",
+    ),
+})
+post_commit_revocation_handlers={
+    "provider_routes":ProviderRouteRevocationHandler(
+        revocation_effects,revocation_heartbeats,async_uow_factory,
+    ),
+    "search_capabilities":SearchAuthorityRevocationHandler(
+        revocation_effects,revocation_heartbeats,async_uow_factory,
+        feature_state=feature_registry.require_closed_state("experimental_search"),
+    ),
+    "action_authorities":NotInstalledAuthorityRevocationHandler(
+        revocation_effects,revocation_heartbeats,capability_stage,
+        family="action_authorities",owning_revision="0003_authentication",
+    ),
+    "memory_authorities":NotInstalledAuthorityRevocationHandler(
+        revocation_effects,revocation_heartbeats,capability_stage,
+        family="memory_authorities",owning_revision="0004_memory",
+    ),
+}
+revocation_processor=SubjectRevocationProcessor(post_commit_revocation_handlers)
+revocation_worker=SubjectRevocationWorker(
+    revocation_outbox,revocation_processor,revocation_heartbeats,clock,
+)
+async_uow_factory.register_commit_signal("subject_revocation",revocation_worker)
+```
+
+```python
+# apps/core/src/tuntun_core/bootstrap/lifecycle.py (identity startup projection)
+async def start_identity_runtime(
+    handler_registry,revocation_worker,readiness,task_group,stop,
+) -> None:
+    if set(handler_registry) != set(REQUIRED_SUBJECT_AUTHORITY_FAMILIES):
+        raise RuntimeError("complete_subject_revocation_handlers_required")
+    readiness.clear()
+    if revocation_worker is None or not revocation_worker.available:
+        raise RuntimeError("subject revocation worker unavailable")
+    await revocation_worker.recover_and_drain_before_ready()
+    task_group.create_task(
+        revocation_worker.run_periodically(
+            stop,lambda _error:readiness.clear(),
+        )
+    )
+    await revocation_worker.wait_running()
+    readiness.set()
+```
+
+Every independently consumable provider-route, search, action, authentication-grant, and pending-memory authority row stores the `subject_authority_generation` read from the locked active subject when it is minted. Sessions, consent, enrollment, and biometric-template handlers instead close their complete subject scope transactionally, and every later use still locks and requires the active subject before reading those authorities. Every claim/consume path requires `active=1`, `revoked_at IS NULL`, and, where stored, an exact generation match before it changes state. The single SQLCipher writer is the linearization point: if revocation commits first, consume fails before network or local effect; if a consume claim commits first, revocation records the already-started claim in the durable outbox.
+
+Task-1 composition constructs exactly four closed post-commit handlers—concrete provider/search plus sealed action/memory not-installed handlers—and matching transactional placeholders; it never imports repositories introduced by `0003_authentication` or `0004_memory`. Each placeholder verifies that its owning schema and typed facade are absent before it can return deterministic `not_installed_no_authority`; startup fails if a placeholder remains after that capability is installed. Task 8 atomically installs and registers the real action handlers only after `0003`; Task 10 does the same for memory only after `0004`, and the final composition test requires all real handlers. Optional search follows the same rule in its owning supplement.
+
+`SubjectRevocationEffectRepository` owns one durable `subject_revocation_effects` row per `(event_id,family)` with the exact UUIDv5 `(event_id,family)` idempotency key, `pending|applying|completed` state, lease owner/deadline, monotonically incremented fencing token, attempt count, downstream receipt ID/disposition, bounded error, and completion time. The outbox has the same renewable 30-second lease and fencing shape. Both heartbeats renew every 10 seconds while work is live, so a call longer than 30 seconds is not stolen; every renew, abandon, defer, and completion CAS-binds row, owner, and fencing token. Each authoritative downstream receipt/reopen operation binds event ID, family, subject ID, through-generation, exact idempotency key, receipt ID, and disposition, and substitution is rejected before outer completion. A crash after the durable downstream effect stops both heartbeats; only after expiry may another worker increment the fence and replay the same key, which reopens the same receipt. A late old-fence completion cannot complete the new attempt.
+
+The revocation transaction marks the fixed UoW post-commit signal; only a successful commit offers the worker's nonblocking live kick. Kick loss is safe because the supervised worker also drains every 30 seconds and at startup. Startup and periodic recovery reset only expired claims. An immediate restart that finds a prior process's live outbox/effect lease records a nonfatal deferred state, waits only until the persisted expiry, retries, and reaches readiness within the 31-second startup bound; it never resets an unexpired row. A genuinely live worker continues to heartbeat, and another periodic worker cannot steal it. Ordinary processor/handler errors use the exact current fence to requeue/abandon and clear readiness; `BaseException` models hard death and deliberately leaves both claims to expire. Startup validates the exact eight transactional families, exact stage-matching post-commit class identities, fencing columns/repositories, downstream receipt facades, and closed search feature state. Missing/duplicate/fixture or schema-stage-mismatched handlers, unsafe backlog, renewal loss, startup processing error, or later worker death is a readiness failure.
 
 ```python
 # apps/core/src/tuntun_core/services/identity/consent.py
@@ -1094,6 +2345,8 @@ class ConsentService:
             raise ConsentDenied("authenticated_actor_mismatch")
         uow = self._scope.require_active_uow()
         subject = await uow.profiles.get(command.subject_id)
+        if not subject.active or subject.revoked_at is not None:
+            raise ConsentDenied("current_active_subject_required")
         if subject.household_id != command.action_binding.household_id:
             raise ConsentDenied("consent_household_mismatch")
         if command.purpose is ConsentPurpose.WEB_SEARCH and (subject.profile_class not in ADULT_PROFILE_CLASSES or command.actor_id != subject.id):
@@ -1140,6 +2393,8 @@ class ConsentService:
             raise ConsentDenied("authenticated_actor_mismatch")
         uow = self._scope.require_active_uow()
         subject = await uow.profiles.get(command.subject_id)
+        if not subject.active or subject.revoked_at is not None:
+            raise ConsentDenied("current_active_subject_required")
         if subject.household_id != command.action_binding.household_id:
             raise ConsentDenied("consent_household_mismatch")
         if command.purpose is ConsentPurpose.WEB_SEARCH and (subject.profile_class not in ADULT_PROFILE_CLASSES or command.actor_id != subject.id):
@@ -1183,6 +2438,8 @@ class ConsentService:
 
     async def require_current_in_uow(self, uow, subject_id, purpose, now):
         subject = await uow.profiles.get(subject_id)
+        if not subject.active or subject.revoked_at is not None:
+            raise ConsentDenied("current_active_subject_required")
         if purpose is ConsentPurpose.WEB_SEARCH and subject.profile_class not in ADULT_PROFILE_CLASSES:
             raise ConsentDenied("web_search_adult_self_consent_required")
         if purpose is ConsentPurpose.CHILD_DURABLE_MEMORY and subject.profile_class not in CHILD_PROFILE_CLASSES:
@@ -1356,7 +2613,9 @@ down_revision = "0001_foundation"
 
 def upgrade() -> None:
     utc = "GLOB '????-??-??T??:??:??.??????Z'"
-    op.create_table("subjects", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("guardian_id", sa.String(36), sa.ForeignKey("subjects.id")), sa.Column("guardian_generation", sa.Integer, nullable=False), sa.Column("profile_class", sa.String(16), nullable=False), sa.Column("encrypted_display_label", sa.LargeBinary, nullable=False), sa.Column("encrypted_persona_traits", sa.LargeBinary), sa.Column("current_consent_receipt_ids", sa.LargeBinary, nullable=False), sa.Column("active", sa.Integer, nullable=False), sa.Column("version", sa.Integer, nullable=False), sa.Column("next_reenrollment_reminder_at", sa.String(27)), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("updated_at", sa.String(27), nullable=False), sa.Column("revoked_at", sa.String(27)), sa.CheckConstraint("profile_class IN ('owner','adult','k2','n1')"), sa.CheckConstraint("active IN (0,1)"), sa.CheckConstraint("version >= 1"), sa.CheckConstraint(f"created_at {utc} AND updated_at {utc}"), sa.CheckConstraint("(profile_class IN ('k2','n1') AND guardian_id IS NOT NULL AND guardian_generation >= 1) OR (profile_class IN ('owner','adult') AND guardian_id IS NULL AND guardian_generation = 0)"), sa.CheckConstraint("(active=1 AND revoked_at IS NULL) OR active=0"))
+    op.create_table("subjects", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("guardian_id", sa.String(36), sa.ForeignKey("subjects.id")), sa.Column("guardian_generation", sa.Integer, nullable=False), sa.Column("profile_class", sa.String(16), nullable=False), sa.Column("encrypted_display_label", sa.LargeBinary, nullable=False), sa.Column("encrypted_persona_traits", sa.LargeBinary), sa.Column("current_consent_receipt_ids", sa.LargeBinary, nullable=False), sa.Column("active", sa.Integer, nullable=False), sa.Column("authority_generation", sa.Integer, nullable=False), sa.Column("version", sa.Integer, nullable=False), sa.Column("next_reenrollment_reminder_at", sa.String(27)), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("updated_at", sa.String(27), nullable=False), sa.Column("revoked_at", sa.String(27)), sa.CheckConstraint("profile_class IN ('owner','adult','k2','n1')"), sa.CheckConstraint("active IN (0,1)"), sa.CheckConstraint("authority_generation >= 1"), sa.CheckConstraint("version >= 1"), sa.CheckConstraint(f"created_at {utc} AND updated_at {utc}"), sa.CheckConstraint("(profile_class IN ('k2','n1') AND guardian_id IS NOT NULL AND guardian_generation >= 1) OR (profile_class IN ('owner','adult') AND guardian_id IS NULL AND guardian_generation = 0)"), sa.CheckConstraint("(active=1 AND revoked_at IS NULL) OR active=0"))
+    op.create_table("subject_revocation_outbox", sa.Column("id", sa.String(36), primary_key=True), sa.Column("event_key", sa.String(160), nullable=False, unique=True), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("new_authority_generation", sa.Integer, nullable=False), sa.Column("state", sa.String(16), nullable=False), sa.Column("occurred_at", sa.String(27), nullable=False), sa.Column("claimed_at", sa.String(27)), sa.Column("lease_owner", sa.String(36)), sa.Column("lease_expires_at", sa.String(27)), sa.Column("fencing_token", sa.Integer, nullable=False), sa.Column("completed_at", sa.String(27)), sa.Column("attempt_count", sa.Integer, nullable=False), sa.Column("last_error", sa.String(512)), sa.Column("reconciliation_receipt_id", sa.String(36), unique=True), sa.CheckConstraint("new_authority_generation >= 2"), sa.CheckConstraint("state IN ('pending','processing','completed')"), sa.CheckConstraint("attempt_count >= 0 AND fencing_token >= 0"), sa.CheckConstraint(f"occurred_at {utc} AND (claimed_at IS NULL OR claimed_at {utc}) AND (lease_expires_at IS NULL OR lease_expires_at {utc}) AND (completed_at IS NULL OR completed_at {utc})"), sa.CheckConstraint("(state='pending' AND claimed_at IS NULL AND lease_owner IS NULL AND lease_expires_at IS NULL AND completed_at IS NULL) OR (state='processing' AND claimed_at IS NOT NULL AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL AND completed_at IS NULL) OR (state='completed' AND claimed_at IS NOT NULL AND lease_owner IS NULL AND lease_expires_at IS NULL AND completed_at IS NOT NULL AND reconciliation_receipt_id IS NOT NULL)"))
+    op.create_table("subject_revocation_effects", sa.Column("id",sa.String(36),primary_key=True),sa.Column("event_id",sa.String(36),sa.ForeignKey("subject_revocation_outbox.id",ondelete="CASCADE"),nullable=False),sa.Column("family",sa.String(32),nullable=False),sa.Column("idempotency_key",sa.String(36),nullable=False,unique=True),sa.Column("state",sa.String(16),nullable=False),sa.Column("lease_owner",sa.String(36)),sa.Column("leased_until",sa.String(27)),sa.Column("fencing_token",sa.Integer,nullable=False),sa.Column("attempt_count",sa.Integer,nullable=False),sa.Column("downstream_receipt_id",sa.String(36)),sa.Column("disposition",sa.String(32)),sa.Column("last_error",sa.String(128)),sa.Column("created_at",sa.String(27),nullable=False),sa.Column("completed_at",sa.String(27)),sa.UniqueConstraint("event_id","family",name="uq_subject_revocation_effect_event_family"),sa.CheckConstraint("family IN ('provider_routes','search_capabilities','action_authorities','memory_authorities')"),sa.CheckConstraint("state IN ('pending','applying','completed')"),sa.CheckConstraint("attempt_count >= 0 AND fencing_token >= 0"),sa.CheckConstraint(f"created_at {utc} AND (leased_until IS NULL OR leased_until {utc}) AND (completed_at IS NULL OR completed_at {utc})"),sa.CheckConstraint("(state='pending' AND lease_owner IS NULL AND leased_until IS NULL AND completed_at IS NULL) OR (state='applying' AND lease_owner IS NOT NULL AND leased_until IS NOT NULL AND completed_at IS NULL) OR (state='completed' AND lease_owner IS NULL AND leased_until IS NULL AND completed_at IS NOT NULL AND downstream_receipt_id IS NOT NULL AND disposition IS NOT NULL)"))
     op.create_table("current_owner_authority", sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), primary_key=True), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False, unique=True), sa.Column("owner_generation", sa.Integer, nullable=False), sa.Column("changed_at", sa.String(27), nullable=False), sa.CheckConstraint("owner_generation >= 1"), sa.CheckConstraint(f"changed_at {utc}"))
     op.create_table("consent_receipts", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("actor_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("guardian_id", sa.String(36), sa.ForeignKey("subjects.id")), sa.Column("guardian_generation", sa.Integer), sa.Column("purpose", sa.String(32), nullable=False), sa.Column("granted", sa.Integer, nullable=False), sa.Column("policy_version", sa.String(64), nullable=False), sa.Column("disclosure_version", sa.String(64), nullable=False), sa.Column("commitment_key_id", sa.String(128), nullable=False), sa.Column("receipt_hmac", sa.LargeBinary, nullable=False), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("expires_at", sa.String(27)), sa.CheckConstraint("purpose IN ('face','voice','personalization','cloud_stt','cloud_reasoning','cloud_tts','web_search','child_durable_memory_v1')"), sa.CheckConstraint("purpose!='web_search' OR (actor_id=subject_id AND guardian_id IS NULL AND guardian_generation IS NULL)"), sa.CheckConstraint("purpose!='child_durable_memory_v1' OR (guardian_id IS NOT NULL AND guardian_generation >= 1 AND actor_id=guardian_id AND expires_at IS NOT NULL)"), sa.CheckConstraint("(guardian_id IS NULL AND guardian_generation IS NULL) OR (guardian_id IS NOT NULL AND guardian_generation >= 1)"), sa.CheckConstraint("granted IN (0,1)"), sa.CheckConstraint(f"created_at {utc} AND (expires_at IS NULL OR expires_at {utc})"), sa.UniqueConstraint("household_id", "subject_id", "purpose", "created_at"))
     op.create_table("guest_disclosure_challenges", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("session_id", sa.String(36), sa.ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False), sa.Column("purpose", sa.String(32), nullable=False), sa.Column("disclosure_version", sa.String(64), nullable=False), sa.Column("presentation_receipt_id", sa.String(36), sa.ForeignKey("event_receipts.id"), nullable=False), sa.Column("state", sa.String(16), nullable=False), sa.Column("issued_at", sa.String(27), nullable=False), sa.Column("expires_at", sa.String(27), nullable=False), sa.Column("consumed_at", sa.String(27)), sa.Column("commitment_key_id", sa.String(128), nullable=False), sa.Column("challenge_hmac", sa.LargeBinary, nullable=False), sa.CheckConstraint("purpose IN ('cloud_stt','cloud_reasoning','cloud_tts')"), sa.CheckConstraint("state IN ('open','accepted','denied')"), sa.CheckConstraint(f"issued_at {utc} AND expires_at {utc} AND (consumed_at IS NULL OR consumed_at {utc})"), sa.CheckConstraint("expires_at > issued_at"), sa.CheckConstraint("(state='open' AND consumed_at IS NULL) OR (state IN ('accepted','denied') AND consumed_at IS NOT NULL)"), sa.UniqueConstraint("presentation_receipt_id"), sa.UniqueConstraint("household_id", "session_id", "purpose", "disclosure_version", "issued_at"))
@@ -1364,6 +2623,8 @@ def upgrade() -> None:
     op.create_table("enrollment_sessions", sa.Column("id", sa.String(36), primary_key=True), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("modality", sa.String(16), nullable=False), sa.Column("state", sa.String(16), nullable=False), sa.Column("auth_receipt_id", sa.String(36), nullable=False), sa.Column("consent_receipt_id", sa.String(36), sa.ForeignKey("consent_receipts.id"), nullable=False), sa.Column("reenrollment_days", sa.Integer, nullable=False), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("expires_at", sa.String(27), nullable=False), sa.Column("closed_at", sa.String(27)), sa.CheckConstraint("modality IN ('face','voice')"), sa.CheckConstraint("state IN ('requested','capturing','calibrating','approved','cancelled','expired')"), sa.CheckConstraint("reenrollment_days BETWEEN 30 AND 365"), sa.CheckConstraint(f"created_at {utc} AND expires_at {utc}"))
     op.create_table("biometric_templates", sa.Column("id", sa.String(36), primary_key=True), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("modality", sa.String(16), nullable=False), sa.Column("model_version", sa.String(128), nullable=False), sa.Column("ciphertext", sa.LargeBinary, nullable=False), sa.Column("nonce", sa.LargeBinary, nullable=False), sa.Column("wrapped_dek", sa.LargeBinary, nullable=False), sa.Column("root_key_id", sa.String(128), nullable=False), sa.Column("consent_receipt_id", sa.String(36), sa.ForeignKey("consent_receipts.id"), nullable=False), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("expires_at", sa.String(27)), sa.Column("revoked_at", sa.String(27)), sa.CheckConstraint("modality IN ('face','voice')"), sa.CheckConstraint(f"created_at {utc}"), sa.CheckConstraint("revoked_at IS NULL OR expires_at IS NOT NULL"))
     op.create_index("ux_subjects_one_owner", "subjects", ["household_id"], unique=True, sqlite_where=sa.text("profile_class='owner' AND active=1"))
+    op.create_index("ix_subject_revocation_outbox_drain", "subject_revocation_outbox", ["state", "occurred_at", "id"])
+    op.create_index("ix_subject_revocation_effect_lease", "subject_revocation_effects", ["state", "leased_until", "id"])
     op.create_index("ix_consent_subject_purpose_time", "consent_receipts", ["subject_id", "purpose", "created_at"])
     op.create_index("ix_guest_disclosure_session_purpose_state", "guest_disclosure_challenges", ["household_id", "session_id", "purpose", "state", "expires_at"])
     op.create_index("ix_guest_consent_session_purpose_time", "guest_session_consent_receipts", ["household_id", "session_id", "purpose", "issued_at"])
@@ -1380,6 +2641,10 @@ def downgrade() -> None:
     op.drop_index("ix_consent_subject_purpose_time", table_name="consent_receipts")
     op.drop_table("consent_receipts")
     op.drop_table("current_owner_authority")
+    op.drop_index("ix_subject_revocation_effect_lease", table_name="subject_revocation_effects")
+    op.drop_table("subject_revocation_effects")
+    op.drop_index("ix_subject_revocation_outbox_drain", table_name="subject_revocation_outbox")
+    op.drop_table("subject_revocation_outbox")
     op.drop_index("ux_subjects_one_owner", table_name="subjects")
     op.drop_table("subjects")
 ```
@@ -1388,16 +2653,16 @@ def downgrade() -> None:
 
 - [ ] **Step 4: Run the narrow and migration tests**
 
-Run: `uv run pytest tests/unit/identity/test_profiles.py tests/unit/identity/test_consent.py tests/unit/identity/test_current_owner_repository.py tests/integration/identity/test_profile_consent_migration.py -q`
-Expected: PASS with exit code 0; schema inspection finds all seven owned tables, the one-row current-owner authority pointer, encrypted optimistic-version persona storage, and exactly eight durable subject purposes. Adult-only `web_search` requires a self actor and null guardian, while `child_durable_memory_v1` requires K2/N1 plus the current guardian ID and generation; use-time HMAC validation rejects validly signed cross-adult, wrong-profile, stale-guardian, and legacy-restored receipts. Both Guest checks remain exactly the three cloud speech/reasoning/TTS purposes; K2/N1 and Guest search paths deny before receipt lookup; adult self/owner self/current-guardian persona authority is exact; downgrade removes all seven tables and re-upgrade recreates the invariants; and no plaintext display-label, persona trait, disclosure body, or biometric sentinel appears in the database scan.
+Run: `uv run pytest tests/unit/identity/test_profiles.py tests/unit/identity/test_consent.py tests/unit/identity/test_current_owner_repository.py tests/unit/identity/test_subject_revocation_worker.py tests/integration/identity/test_subject_revocation_handlers.py tests/integration/identity/test_profile_consent_migration.py tests/integration/identity/test_profile_revocation.py -q`
+Expected: PASS with exit code 0; schema inspection finds all seven owned tables, the one-row current-owner authority pointer, non-null monotonic subject authority generation, encrypted optimistic-version persona storage, and exactly eight durable subject purposes. Every consent operation rejects an inactive/revoked subject before receipt access. Revocation advances the generation and atomically invalidates all eight authority families; revoke-vs-consume, restart, and idempotent post-commit reconciliation tests prove no stale authority can create a new network call or effect. Adult-only `web_search`, child durable memory, and Guest purpose boundaries remain unchanged; downgrade/re-upgrade recreates the invariants; and no plaintext sentinel appears in the database scan.
 
 - [ ] **Step 5: Run static checks and commit exact paths**
 
-Run: `uv run ruff format --check apps/core/src/tuntun_core/domain/profile.py apps/core/src/tuntun_core/services/identity/profiles.py apps/core/src/tuntun_core/services/identity/consent.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/transactions/identity_uow.py tests/unit/identity/test_profiles.py tests/unit/identity/test_consent.py tests/unit/identity/test_current_owner_repository.py tests/integration/identity/test_profile_consent_migration.py && uv run ruff check apps/core/src/tuntun_core/domain/profile.py apps/core/src/tuntun_core/services/identity/profiles.py apps/core/src/tuntun_core/services/identity/consent.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/transactions/identity_uow.py tests/unit/identity/test_profiles.py tests/unit/identity/test_consent.py tests/unit/identity/test_current_owner_repository.py tests/integration/identity/test_profile_consent_migration.py && uv run mypy apps/core/src/tuntun_core/domain/profile.py apps/core/src/tuntun_core/services/identity/profiles.py apps/core/src/tuntun_core/services/identity/consent.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/transactions/identity_uow.py`
+Run: `uv run ruff format --check apps/core/src/tuntun_core/domain/profile.py apps/core/src/tuntun_core/services/identity apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_outbox_repository.py apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_effect_repository.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/workers/subject_revocation_worker.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/transactions/identity_uow.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/bootstrap/lifecycle.py tests/unit/identity tests/integration/identity && uv run ruff check apps/core/src/tuntun_core/domain/profile.py apps/core/src/tuntun_core/services/identity apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_outbox_repository.py apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_effect_repository.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/workers/subject_revocation_worker.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/transactions/identity_uow.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/bootstrap/lifecycle.py tests/unit/identity tests/integration/identity && uv run mypy apps/core/src/tuntun_core/domain/profile.py apps/core/src/tuntun_core/services/identity apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_outbox_repository.py apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_effect_repository.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/workers/subject_revocation_worker.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/transactions/identity_uow.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/bootstrap/lifecycle.py`
 Expected: PASS with exit code 0.
 
 ```bash
-git add apps/core/src/tuntun_core/domain/profile.py apps/core/src/tuntun_core/services/identity/profiles.py apps/core/src/tuntun_core/services/identity/consent.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/transactions/identity_uow.py apps/core/migrations/versions/0002_profiles_consent_enrollment.py tests/unit/identity/test_profiles.py tests/unit/identity/test_consent.py tests/unit/identity/test_current_owner_repository.py tests/integration/identity/test_profile_consent_migration.py
+git add apps/core/src/tuntun_core/domain/profile.py apps/core/src/tuntun_core/services/identity/profiles.py apps/core/src/tuntun_core/services/identity/consent.py apps/core/src/tuntun_core/services/identity/subject_revocation.py apps/core/src/tuntun_core/services/identity/subject_revocation_processor.py apps/core/src/tuntun_core/services/identity/subject_revocation_handlers.py apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_outbox_repository.py apps/core/src/tuntun_core/adapters/sqlcipher/subject_revocation_effect_repository.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/workers/subject_revocation_worker.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/bootstrap/lifecycle.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/transactions/identity_uow.py apps/core/migrations/versions/0002_profiles_consent_enrollment.py tests/unit/identity/test_profiles.py tests/unit/identity/test_consent.py tests/unit/identity/test_current_owner_repository.py tests/unit/identity/test_subject_revocation_worker.py tests/integration/identity/test_subject_revocation_handlers.py tests/integration/identity/test_profile_consent_migration.py tests/integration/identity/test_profile_revocation.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(identity): add profiles and self-consent rules"
@@ -3137,12 +4402,12 @@ def upgrade() -> None:
     utc = "GLOB '????-??-??T??:??:??.??????Z'"
     op.create_table("auth_credentials", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("factor", sa.String(16), nullable=False), sa.Column("capability", sa.String(32), nullable=False), sa.Column("owner_generation", sa.Integer), sa.Column("profile_version", sa.Integer, nullable=False), sa.Column("credential_version", sa.Integer, nullable=False), sa.Column("credential_id", sa.LargeBinary), sa.Column("public_key", sa.LargeBinary), sa.Column("secret_hash", sa.LargeBinary), sa.Column("transports_json", sa.Text), sa.Column("sign_count", sa.Integer), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("used_at", sa.String(27)), sa.Column("revoked_at", sa.String(27)), sa.CheckConstraint("factor IN ('pin','passkey','recovery')"), sa.CheckConstraint("capability IN ('owner_admin','adult_self_consent','profile_persona')"), sa.CheckConstraint("profile_version >= 1 AND credential_version >= 1 AND (owner_generation IS NULL OR owner_generation >= 1)"), sa.CheckConstraint("(capability='owner_admin') = (owner_generation IS NOT NULL)"), sa.CheckConstraint("sign_count IS NULL OR sign_count >= 0"), sa.CheckConstraint("(factor='passkey' AND credential_id IS NOT NULL AND public_key IS NOT NULL AND secret_hash IS NULL) OR (factor IN ('pin','recovery') AND credential_id IS NULL AND public_key IS NULL AND secret_hash IS NOT NULL)"), sa.CheckConstraint(f"created_at {utc}"))
     op.create_table("auth_challenges", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), nullable=False), sa.Column("proposal_id", sa.String(36), nullable=False), sa.Column("turn_id", sa.String(36), nullable=False), sa.Column("idempotency_key", sa.String(36), nullable=False), sa.Column("subject_id", sa.String(36), nullable=False), sa.Column("session_id", sa.String(36), nullable=False), sa.Column("source_bucket", sa.String(128), nullable=False), sa.Column("factor", sa.String(16), nullable=False), sa.Column("state", sa.String(16), nullable=False), sa.Column("action_name", sa.String(128), nullable=False), sa.Column("resource_type", sa.String(64), nullable=False), sa.Column("resource_id", sa.String(36)), sa.Column("parameter_commitment_key_id", sa.String(128), nullable=False), sa.Column("parameter_commitment_hmac", sa.LargeBinary, nullable=False), sa.Column("policy_version", sa.String(128), nullable=False), sa.Column("nonce_commitment", sa.LargeBinary, nullable=False), sa.Column("webauthn_challenge", sa.LargeBinary), sa.Column("snapshot_commitment_key_id", sa.String(128), nullable=False), sa.Column("snapshot_commitment_hmac", sa.LargeBinary, nullable=False), sa.Column("failures", sa.Integer, nullable=False), sa.Column("issued_at", sa.String(27), nullable=False), sa.Column("expires_at", sa.String(27), nullable=False), sa.Column("consumed_at", sa.String(27)), sa.CheckConstraint("factor IN ('confirmation','pin','passkey')"), sa.CheckConstraint("state IN ('open','succeeded','failed','expired')"), sa.CheckConstraint("failures BETWEEN 0 AND 3"), sa.CheckConstraint("(factor='passkey') = (webauthn_challenge IS NOT NULL)"), sa.CheckConstraint("(state='open' AND consumed_at IS NULL) OR (state!='open' AND consumed_at IS NOT NULL)"), sa.UniqueConstraint("proposal_id", "factor"))
-    op.create_table("auth_grants", sa.Column("id", sa.String(36), primary_key=True), sa.Column("subject_id", sa.String(36), nullable=False), sa.Column("assurance", sa.String(32), nullable=False), sa.Column("assurance_source", sa.String(32), nullable=False), sa.Column("binding_ciphertext", sa.LargeBinary, nullable=False), sa.Column("issued_at", sa.String(32), nullable=False), sa.Column("expires_at", sa.String(32), nullable=False), sa.Column("consumed_at", sa.String(32)))
+    op.create_table("auth_grants", sa.Column("id", sa.String(36), primary_key=True), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("subject_authority_generation", sa.Integer, nullable=False), sa.Column("assurance", sa.String(32), nullable=False), sa.Column("assurance_source", sa.String(32), nullable=False), sa.Column("binding_ciphertext", sa.LargeBinary, nullable=False), sa.Column("issued_at", sa.String(32), nullable=False), sa.Column("expires_at", sa.String(32), nullable=False), sa.Column("consumed_at", sa.String(32)), sa.CheckConstraint("subject_authority_generation >= 1"))
     op.create_table("credential_invitations", sa.Column("id", sa.String(36), primary_key=True), sa.Column("subject_id", sa.String(36), nullable=False), sa.Column("capability", sa.String(32), nullable=False), sa.Column("nonce_commitment", sa.LargeBinary, nullable=False), sa.Column("expires_at", sa.String(32), nullable=False), sa.Column("consumed_at", sa.String(32)), sa.CheckConstraint("capability IN ('adult_self_consent','profile_persona')"))
     op.create_table("local_presence_receipts", sa.Column("id", sa.String(36), primary_key=True), sa.Column("binding_commitment", sa.LargeBinary, nullable=False), sa.Column("purpose_id", sa.String(64), nullable=False), sa.Column("key_id", sa.String(128), nullable=False), sa.Column("signature", sa.LargeBinary, nullable=False), sa.Column("issued_at", sa.String(32), nullable=False), sa.Column("expires_at", sa.String(32), nullable=False), sa.Column("consumed_at", sa.String(32)))
-    op.create_table("action_proposals", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("subject_id", sa.String(36)), sa.Column("session_id", sa.String(36), nullable=False), sa.Column("turn_id", sa.String(36), nullable=False), sa.Column("origin", sa.String(16), nullable=False), sa.Column("schema_version", sa.String(16), nullable=False), sa.Column("action_name", sa.String(128), nullable=False), sa.Column("resource_type", sa.String(64), nullable=False), sa.Column("resource_id", sa.String(36)), sa.Column("resource_scope", sa.String(64), nullable=False), sa.Column("draft_ciphertext", sa.LargeBinary, nullable=False), sa.Column("draft_nonce", sa.LargeBinary, nullable=False), sa.Column("wrapped_dek", sa.LargeBinary, nullable=False), sa.Column("root_key_id", sa.String(128), nullable=False), sa.Column("parameter_commitment_key_id", sa.String(128), nullable=False), sa.Column("parameter_commitment_hmac", sa.LargeBinary, nullable=False), sa.Column("draft_commitment_key_id", sa.String(128), nullable=False), sa.Column("draft_commitment_hmac", sa.LargeBinary, nullable=False), sa.Column("provenance_receipt_id", sa.String(36), nullable=False), sa.Column("provenance_commitment_key_id", sa.String(128), nullable=False), sa.Column("provenance_commitment_hmac", sa.LargeBinary, nullable=False), sa.Column("uncertainty_micros", sa.Integer, nullable=False), sa.Column("idempotency_key", sa.String(36), nullable=False), sa.Column("policy_version", sa.String(128), nullable=False), sa.Column("required_assurance", sa.String(32), nullable=False), sa.Column("status", sa.String(16), nullable=False), sa.Column("execution_receipt_id", sa.String(36)), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("expires_at", sa.String(27), nullable=False), sa.CheckConstraint("origin IN ('provider','admin','local')"), sa.CheckConstraint("schema_version='1.0'"), sa.CheckConstraint("uncertainty_micros BETWEEN 0 AND 1000000"), sa.CheckConstraint("required_assurance IN ('guest','identified','confirmed','pin_verified','passkey_verified','recovery_verified')"), sa.CheckConstraint("status IN ('pending','executed','expired')"), sa.CheckConstraint("(status='executed') = (execution_receipt_id IS NOT NULL)"), sa.UniqueConstraint("household_id", "action_name", "resource_scope", "idempotency_key", name="uq_action_proposal_scope"))
+    op.create_table("action_proposals", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("subject_id", sa.String(36)), sa.Column("subject_authority_generation", sa.Integer), sa.Column("session_id", sa.String(36), nullable=False), sa.Column("turn_id", sa.String(36), nullable=False), sa.Column("origin", sa.String(16), nullable=False), sa.Column("schema_version", sa.String(16), nullable=False), sa.Column("action_name", sa.String(128), nullable=False), sa.Column("resource_type", sa.String(64), nullable=False), sa.Column("resource_id", sa.String(36)), sa.Column("resource_scope", sa.String(64), nullable=False), sa.Column("draft_ciphertext", sa.LargeBinary, nullable=False), sa.Column("draft_nonce", sa.LargeBinary, nullable=False), sa.Column("wrapped_dek", sa.LargeBinary, nullable=False), sa.Column("root_key_id", sa.String(128), nullable=False), sa.Column("parameter_commitment_key_id", sa.String(128), nullable=False), sa.Column("parameter_commitment_hmac", sa.LargeBinary, nullable=False), sa.Column("draft_commitment_key_id", sa.String(128), nullable=False), sa.Column("draft_commitment_hmac", sa.LargeBinary, nullable=False), sa.Column("provenance_receipt_id", sa.String(36), nullable=False), sa.Column("provenance_commitment_key_id", sa.String(128), nullable=False), sa.Column("provenance_commitment_hmac", sa.LargeBinary, nullable=False), sa.Column("uncertainty_micros", sa.Integer, nullable=False), sa.Column("idempotency_key", sa.String(36), nullable=False), sa.Column("policy_version", sa.String(128), nullable=False), sa.Column("required_assurance", sa.String(32), nullable=False), sa.Column("status", sa.String(16), nullable=False), sa.Column("execution_receipt_id", sa.String(36)), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("expires_at", sa.String(27), nullable=False), sa.CheckConstraint("origin IN ('provider','admin','local')"), sa.CheckConstraint("schema_version='1.0'"), sa.CheckConstraint("uncertainty_micros BETWEEN 0 AND 1000000"), sa.CheckConstraint("required_assurance IN ('guest','identified','confirmed','pin_verified','passkey_verified','recovery_verified')"), sa.CheckConstraint("status IN ('pending','executed','expired')"), sa.CheckConstraint("(subject_id IS NULL AND subject_authority_generation IS NULL) OR (subject_id IS NOT NULL AND subject_authority_generation >= 1)"), sa.CheckConstraint("(status='executed') = (execution_receipt_id IS NOT NULL)"), sa.UniqueConstraint("household_id", "action_name", "resource_scope", "idempotency_key", name="uq_action_proposal_scope"))
     op.create_table("action_receipts", sa.Column("id", sa.String(36), primary_key=True), sa.Column("proposal_id", sa.String(36), sa.ForeignKey("action_proposals.id"), nullable=False, unique=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("action_name", sa.String(128), nullable=False), sa.Column("resource_scope", sa.String(64), nullable=False), sa.Column("resource_id", sa.String(36)), sa.Column("idempotency_key", sa.String(36), nullable=False), sa.Column("outcome", sa.String(16), nullable=False), sa.Column("reason_code", sa.String(128), nullable=False), sa.Column("receipt_hmac_key_id", sa.String(128), nullable=False), sa.Column("receipt_hmac", sa.LargeBinary, nullable=False), sa.Column("occurred_at", sa.String(27), nullable=False), sa.CheckConstraint("outcome IN ('executed','denied','duplicate','failed')"), sa.UniqueConstraint("household_id", "action_name", "resource_scope", "idempotency_key", name="uq_action_receipt_scope"))
-    op.create_table("action_execution_claims", sa.Column("id", sa.String(36), primary_key=True), sa.Column("proposal_id", sa.String(36), sa.ForeignKey("action_proposals.id"), nullable=False, unique=True), sa.Column("grant_id", sa.String(36), sa.ForeignKey("auth_grants.id"), nullable=False), sa.Column("provider_name", sa.String(128), nullable=False), sa.Column("state", sa.String(16), nullable=False), sa.Column("receipt_id", sa.String(36), sa.ForeignKey("action_receipts.id")), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("sent_at", sa.String(27)), sa.Column("finished_at", sa.String(27)), sa.CheckConstraint("state IN ('pending','sent','succeeded','ambiguous')"), sa.CheckConstraint("(state='succeeded' AND receipt_id IS NOT NULL AND finished_at IS NOT NULL) OR (state!='succeeded' AND receipt_id IS NULL)"))
+    op.create_table("action_execution_claims", sa.Column("id", sa.String(36), primary_key=True), sa.Column("proposal_id", sa.String(36), sa.ForeignKey("action_proposals.id"), nullable=False, unique=True), sa.Column("grant_id", sa.String(36), sa.ForeignKey("auth_grants.id"), nullable=False), sa.Column("provider_name", sa.String(128), nullable=False), sa.Column("state", sa.String(32), nullable=False), sa.Column("receipt_id", sa.String(36), sa.ForeignKey("action_receipts.id")), sa.Column("created_at", sa.String(27), nullable=False), sa.Column("sent_at", sa.String(27)), sa.Column("finished_at", sa.String(27)), sa.CheckConstraint("state IN ('pending','sent','succeeded','ambiguous','cancelled_subject_revoked','settled_subject_revoked')"), sa.CheckConstraint("(state='succeeded' AND receipt_id IS NOT NULL AND finished_at IS NOT NULL) OR (state!='succeeded' AND receipt_id IS NULL)"))
     op.create_table("admin_sessions", sa.Column("id_commitment", sa.LargeBinary, primary_key=True), sa.Column("admin_session_id", sa.String(36), nullable=False, unique=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("owner_generation", sa.Integer, nullable=False), sa.Column("profile_version", sa.Integer, nullable=False), sa.Column("session_version", sa.Integer, nullable=False), sa.Column("access_mode", sa.String(16), nullable=False), sa.Column("authenticated_at", sa.String(27), nullable=False), sa.Column("idle_expires_at", sa.String(27), nullable=False), sa.Column("absolute_expires_at", sa.String(27), nullable=False), sa.Column("revoked_at", sa.String(27)), sa.CheckConstraint("owner_generation >= 1 AND profile_version >= 1 AND session_version >= 1"), sa.CheckConstraint("access_mode IN ('loopback','lan_https')"), sa.CheckConstraint(f"authenticated_at {utc} AND idle_expires_at {utc} AND absolute_expires_at {utc}"))
     op.create_table("auth_rate_limits", sa.Column("subject_id", sa.String(36), nullable=False), sa.Column("source_bucket", sa.String(128), nullable=False), sa.Column("failure_count", sa.Integer, nullable=False), sa.Column("window_started_at", sa.String(32), nullable=False), sa.Column("locked_until", sa.String(32)), sa.PrimaryKeyConstraint("subject_id", "source_bucket"))
 
@@ -3458,19 +4723,20 @@ Owner-passkey registration uses the same repository method but must first call `
 # apps/core/src/tuntun_core/services/auth/local_presence.py
 from datetime import datetime, timedelta
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict
+from typing import Annotated
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import rfc8785
 from tuntun_contracts.actions import ActionBinding
 
 class LocalPresencePayload(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
     binding: ActionBinding
     issued_at: datetime
     expires_at: datetime
     nonce: bytes
 
 class LocalPresenceReceipt(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
     receipt_id: UUID
     payload: LocalPresencePayload
     purpose_id: str
@@ -3562,6 +4828,7 @@ class RecoveryService:
 
 ```python
 # apps/core/src/tuntun_core/services/auth/service.py
+from tuntun_contracts.base import parse_contract_json
 from tuntun_contracts.policy import AuthContext
 
 class AuthenticationResponseAdapter(Protocol):
@@ -3581,7 +4848,13 @@ class PasskeyResponseAdapter:
     def __init__(self, uow_factory, passkeys, clock):
         self._uow_factory, self._passkeys, self._clock = uow_factory, passkeys, clock
     async def verify_response(self, response):
-        assertion = PasskeyAssertion.model_validate_json(response.response)
+        raw=response.response
+        if not isinstance(raw,(str,bytes)):
+            raise PermissionError("passkey_response_encoding_invalid")
+        assertion=parse_contract_json(
+            PasskeyAssertion,raw.encode("utf-8") if isinstance(raw,str) else raw,
+            max_bytes=65_536,require_canonical=False,
+        )
         if assertion.challenge_id != response.challenge_id:
             raise PermissionError("passkey_response_challenge_mismatch")
         async with self._uow_factory() as uow:
@@ -3619,6 +4892,13 @@ class AuthenticationService:
     async def consume_in_uow(self, uow, grant_id, binding):
         now = self._clock.now()
         grant = await uow.auth_grants.lock_open(grant_id, now)
+        subject = await uow.profiles.lock(grant.subject_id)
+        if (
+            not subject.active
+            or subject.revoked_at is not None
+            or subject.authority_generation != grant.subject_authority_generation
+        ):
+            raise PermissionError("current_subject_authority_required")
         self._binding_verifier.require_exact(grant.binding, binding)
         await uow.auth_grants.mark_consumed(grant_id, now)
         context = AuthContext(grant_id=grant.grant_id, subject_id=grant.subject_id, binding=grant.binding, assurance=grant.assurance, assurance_source=grant.assurance_source, consumed_at=now)
@@ -3653,23 +4933,30 @@ git commit -m "feat(auth): add passkey recovery and local presence"
 - Create: `apps/core/src/tuntun_core/services/actions/proposals.py`
 - Create: `apps/core/src/tuntun_core/services/actions/validator.py`
 - Create: `apps/core/src/tuntun_core/services/actions/executor.py`
-- Create: `apps/core/src/tuntun_core/services/actions/parameter_binding.py`
+- Modify: `apps/core/src/tuntun_core/services/actions/parameter_binding.py` (extend Task 1's profile-parameter builders; do not replace them)
 - Create: `apps/core/src/tuntun_core/services/actions/policy_requests.py`
 - Create: `apps/core/src/tuntun_core/services/actions/receipt_audit.py`
 - Create: `apps/core/src/tuntun_core/services/actions/provider_registry.py`
 - Create: `apps/core/src/tuntun_core/services/actions/providers/identity.py`
 - Create: `apps/core/src/tuntun_core/services/actions/providers/search.py`
+- Modify: `apps/core/src/tuntun_core/services/identity/subject_revocation.py` (replace Task-1 action placeholder after `0003`)
+- Modify: `apps/core/src/tuntun_core/services/identity/subject_revocation_handlers.py` (register real action reconciliation)
+- Modify: `apps/core/src/tuntun_core/bootstrap/container.py`
+- Modify: `apps/core/src/tuntun_core/bootstrap/lifecycle.py`
 - Create: `tests/security/test_action_proposal_boundary.py`
 - Create: `tests/integration/test_action_idempotency.py`
 - Create: `tests/unit/actions/test_action_validator.py`
 - Create: `tests/unit/actions/test_parameter_binding.py`
 - Create: `tests/unit/actions/test_provider_registry.py`
+- Modify: `tests/integration/identity/test_subject_revocation_handlers.py`
 
 **Interfaces:**
 - Consumes: the closed discriminated `ProviderActionIntent` union already owned and validated by the Task 15 conversation output validator, or typed admin/local request DTOs; those upstream mappers—not this task—supply a locally constructed `ActionProposalDraft`. No `dict[str, object]`, arbitrary arguments, or provider-supplied internal UUID/HMAC field crosses this boundary. Also consumes policy registry, `PolicyEnginePort`, `AuthenticationPort`, `AsyncUnitOfWork`, foundation `AsyncAuditLedger`, the explicit binding/policy/audit mappers from this task, and registered external or database-local action providers.
-- Produces: `ActionProposalService.stage(draft, context) -> ActionProposal`; durable encrypted `action_proposals`, `action_execution_claims`, and authenticated `action_receipts`; internal non-committing `ActionExecutor.prepare_in_uow(uow, proposal: ValidatedActionProposal, auth: AuthContext) -> ActionReceipt | PreparedExternalExecution`; and the one cross-plan signature `ActionMutationCoordinator.execute_in_uow(uow: IdentityUnitOfWork, proposal_id: UUID, grant_id: UUID) -> ActionReceipt | PreparedExternalExecution`. `ActionMutationCoordinator.complete_post_commit(claim_id: UUID) -> ActionReceipt` is the only external completion entry point and may run only after the claim transaction commits. That authoritative coordinator owns proposal lock, exact grant consumption, dynamic policy recheck, local receipt/audits or durable external claim, but never commits in `execute_in_uow`. `ActionProviderPort.execute(proposal, auth)` is external/post-commit only; the separate internal `LocalActionProviderPort.execute_in_uow(uow, proposal, auth)` may perform only bounded repository mutations. The public `execute(proposal_id, grant_id) -> ActionReceipt` orchestrates commits and delegates external work to `complete_post_commit`. Unique proposal and receipt idempotency scope is `(household_id, action_name, resource_scope, idempotency_key)`; neither table has a global idempotency-key uniqueness rule, and no existing receipt is returned until a fresh exact grant has been consumed in the caller's transaction.
+- Produces: `ActionProposalService.stage(draft, context) -> ActionProposal`; durable encrypted `action_proposals`, `action_execution_claims`, and authenticated `action_receipts`; internal non-committing `ActionExecutor.prepare_in_uow(uow, proposal: ValidatedActionProposal, auth: AuthContext) -> ActionReceipt | PreparedExternalExecution`; and the one cross-plan signature `ActionMutationCoordinator.execute_in_uow(uow: IdentityUnitOfWork, proposal_id: UUID, grant_id: UUID) -> ActionReceipt | PreparedExternalExecution`. Subject-scoped proposals and grants carry the locked active subject's authority generation; `require_pending_current` and grant consumption re-lock the subject and require the same current generation before a local effect or external claim. `ActionMutationCoordinator.complete_post_commit(claim_id: UUID) -> ActionReceipt` is the only external completion entry point and may run only after the claim transaction commits. That authoritative coordinator owns proposal lock, exact grant consumption, dynamic policy recheck, local receipt/audits or durable external claim, but never commits in `execute_in_uow`. `ActionProviderPort.execute(proposal, auth)` is external/post-commit only; the separate internal `LocalActionProviderPort.execute_in_uow(uow, proposal, auth)` may perform only bounded repository mutations. The public `execute(proposal_id, grant_id) -> ActionReceipt` orchestrates commits and delegates external work to `complete_post_commit`. Unique proposal and receipt idempotency scope is `(household_id, action_name, resource_scope, idempotency_key)`; neither table has a global idempotency-key uniqueness rule, and no existing receipt is returned until a fresh exact grant has been consumed in the caller's transaction.
 
 The closed database-local registry is assembled from concrete adapters, never action-name conditionals in the executor. `IdentityLocalActionProvider` wraps only the non-committing `ProfileService`, `ConsentService`, and `EnrollmentService` methods; Task 10 registers `MemoryLocalActionProvider`, C03 registers `TimerLocalActionProvider`, and the controlled-web supplement injects its service into the `SearchLocalActionProvider` declared here for `search.profile_mode.change|search.experimental.activate`. Until a required adapter is composed, the action is unregistered and execution fails `action_provider_not_registered`. Registration is exact and duplicate-safe. Each adapter first checks its closed draft type and exact `action_name`, then reconstructs the domain command from every typed draft field before the first domain read; operation substitution, missing fields, and unimplemented actions therefore fail closed.
+
+After migration `0003_authentication` is at head and the action proposal/claim repositories plus provider registry are registered, Task 8 replaces both Task-1 `action_authorities` placeholders with `ActionSubjectAuthorityHandler` and `ActionAuthorityRevocationHandler`. The transactional handler closes pending proposals and unsent claims through the old subject generation in the profile-revocation UoW. The post-commit handler reconciles already-started claims through `reconcile_subject_revocation_once`, passing the exact revocation UUIDv5 key into each provider and reopening its exact scoped receipt. Bootstrap rejects a real handler before schema/facade registration and rejects a placeholder after `0003` is active.
 
 - [ ] **Step 1: Write failing boundary and idempotency tests**
 
@@ -3832,6 +5119,23 @@ async def test_identity_provider_rejects_ordinary_owner_create_before_profile_re
 def test_unregistered_or_unimplemented_action_fails_closed(action_providers, validated_unknown_or_external_local_proposal):
     with pytest.raises(PermissionError, match="action_provider_not_registered"):
         action_providers.get(validated_unknown_or_external_local_proposal.draft.action_name)
+
+
+def test_0003_bootstrap_replaces_action_revocation_placeholders_only_after_facades_exist(
+    task8_identity_container,
+):
+    assert task8_identity_container.migration_head_at_least("0003_authentication")
+    assert type(task8_identity_container.transactional_revocations["action_authorities"]).__name__=="ActionSubjectAuthorityHandler"
+    assert type(task8_identity_container.post_commit_revocations["action_authorities"]).__name__=="ActionAuthorityRevocationHandler"
+    assert task8_identity_container.external_action_claims.registered
+
+
+@pytest.mark.parametrize("mismatch",("real_before_0003","placeholder_after_0003"))
+def test_action_revocation_schema_stage_mismatch_blocks_startup(
+    task8_container_factory,mismatch,
+):
+    with pytest.raises(RuntimeError,match="revocation handler schema stage mismatch"):
+        task8_container_factory(mismatch=mismatch).start()
 ```
 
 ```python
@@ -3862,6 +5166,7 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 ```python
 # apps/core/src/tuntun_core/services/actions/proposals.py
 from tuntun_contracts.actions import ValidatedActionProposal
+from tuntun_contracts.base import canonical_bytes,parse_contract_json
 
 class ActionProposalService:
     def __init__(self, validator, provenance, crypto, binding_verifier, uow_factory, audit_ledger):
@@ -3877,15 +5182,22 @@ class ActionProposalService:
     async def stage_in_uow(self, uow, draft, context):
         attestation = self._provenance.require_exact_draft(draft, context)
         validated = self._validator.validate(draft, context)
-        draft_commitment = self._crypto.commit(validated.model_dump_json().encode(), purpose="action_proposal_frozen_draft")
-        encrypted = self._crypto.encrypt_record(validated.model_dump_json().encode(), purpose="action_proposal", aad=draft_commitment)
+        subject_authority_generation = None
+        if validated.binding.subject_id is not None:
+            subject = await uow.profiles.lock(validated.binding.subject_id)
+            if not subject.active or subject.revoked_at is not None:
+                raise PermissionError("current_subject_authority_required")
+            subject_authority_generation = subject.authority_generation
+        frozen_draft=canonical_bytes(validated)
+        draft_commitment = self._crypto.commit(frozen_draft, purpose="action_proposal_frozen_draft")
+        encrypted = self._crypto.encrypt_record(frozen_draft, purpose="action_proposal", aad=draft_commitment)
         scope_key = (validated.binding.household_id, draft.action_name, validated.resource_scope, draft.idempotency_key)
         existing = await uow.action_proposals.find_scope_locked(scope_key)
         if existing is not None:
             if not self._crypto.constant_time_equal(existing.draft_commitment, draft_commitment):
                 raise PermissionError("action_proposal_idempotency_conflict")
             return existing
-        proposal = await uow.action_proposals.insert(validated, encrypted=encrypted, draft_commitment=draft_commitment, provenance=attestation, status="pending")
+        proposal = await uow.action_proposals.insert(validated, encrypted=encrypted, draft_commitment=draft_commitment, provenance=attestation, subject_authority_generation=subject_authority_generation, status="pending")
         await self._audit.append(uow, uow.action_proposals.staged_audit_draft(proposal))
         return proposal
 
@@ -3894,7 +5206,10 @@ class ActionProposalService:
         plaintext = self._crypto.decrypt_record(row.encrypted_draft, purpose="action_proposal", aad=row.draft_commitment)
         if not self._crypto.constant_time_equal(self._crypto.commit(plaintext, purpose="action_proposal_frozen_draft"), row.draft_commitment):
             raise PermissionError("action_proposal_draft_commitment_mismatch")
-        validated = ValidatedActionProposal.model_validate_json(plaintext)
+        validated=parse_contract_json(
+            ValidatedActionProposal,plaintext,max_bytes=131_072,
+            require_canonical=True,
+        )
         self._bindings.require_exact(row.binding_projection(), validated.binding)
         if validated.resource_scope != row.resource_scope:
             raise PermissionError("action_proposal_resource_scope_mismatch")
@@ -3927,7 +5242,8 @@ class ActionValidator:
 
 ```python
 # apps/core/src/tuntun_core/services/actions/parameter_binding.py
-import hmac
+# Extend the Task-1 module below its existing imports and profile parameter
+# builders; those builders remain the canonical console/identity boundary.
 from tuntun_contracts.actions import ActionBinding
 
 class ActionBindingVerifier:
@@ -4137,6 +5453,37 @@ class SearchLocalActionProvider:
 ```
 
 ```python
+# apps/core/src/tuntun_core/bootstrap/container.py (Task-8 revocation replacement)
+class ActionSubjectAuthorityHandler:
+    def __init__(self,claims): self._claims=claims
+    async def revoke_in_uow(
+        self,uow,*,household_id,subject_id,through_generation,reason,now,
+    ):
+        await uow.action_proposals.cancel_pending_through_generation(
+            household_id,subject_id,through_generation,reason=reason,now=now,
+        )
+        await self._claims.cancel_unsent_in_uow(
+            uow,household_id=household_id,subject_id=subject_id,
+            through_generation=through_generation,reason=reason,now=now,
+        )
+
+def install_action_revocation_handlers(
+    transactional,post_commit,*,capability_stage,effects,heartbeats,
+    action_claims,action_provider_registry,
+):
+    capability_stage.require_schema_and_facades_installed(
+        "action_authorities","0003_authentication",
+        (action_claims,action_provider_registry),
+    )
+    transactional["action_authorities"]=ActionSubjectAuthorityHandler(action_claims)
+    post_commit["action_authorities"]=ActionAuthorityRevocationHandler(
+        effects,heartbeats,action_claims,action_provider_registry,
+    )
+    if isinstance(post_commit["action_authorities"],NotInstalledAuthorityRevocationHandler):
+        raise RuntimeError("revocation handler schema stage mismatch")
+```
+
+```python
 # apps/core/src/tuntun_core/services/actions/executor.py
 from dataclasses import dataclass
 from typing import Protocol
@@ -4244,7 +5591,22 @@ class ActionMutationCoordinator(ActionMutationCoordinatorPort):
                 if claim.state == "succeeded":
                     return await uow.action_receipts.get_by_proposal(claim.proposal_id)
                 proposal = (await uow.action_proposals.lock(claim.proposal_id)).validated
+                grant = await uow.auth_grants.require_consumed(claim.grant_id)
                 auth = await uow.auth_grants.reconstruct_consumed_context(claim.grant_id)
+                subject = await uow.profiles.lock(auth.subject_id)
+                if (
+                    not subject.active
+                    or subject.revoked_at is not None
+                    or subject.authority_generation != grant.subject_authority_generation
+                ):
+                    await uow.action_execution_claims.dispose_subject_revoked(
+                        claim.id,
+                        unsent_state="cancelled_subject_revoked",
+                        sent_state="settled_subject_revoked",
+                        now=self._executor.now(),
+                    )
+                    await uow.commit()
+                    raise PermissionError("current_subject_authority_required")
                 prepared = PreparedExternalExecution(claim.id, claim.proposal_id, claim.provider_name)
                 registration = self._providers.get(proposal.draft.action_name)
                 if registration.effect_kind != "external_post_commit" or registration.provider_name != prepared.provider_name:
@@ -4282,8 +5644,8 @@ class ActionMutationCoordinator(ActionMutationCoordinatorPort):
 
 - [ ] **Step 4: Run green and policy tests**
 
-Run: `uv run pytest tests/security/test_action_proposal_boundary.py tests/integration/test_action_idempotency.py tests/unit/actions/test_action_validator.py tests/unit/actions/test_parameter_binding.py tests/unit/actions/test_provider_registry.py tests/unit/policy/test_risk_matrix.py tests/integration/storage/test_migrations.py -q`
-Expected: PASS; model output never calls a provider, stale/unknown/replayed proposals deny, and duplicate execution produces one side effect.
+Run: `uv run pytest tests/security/test_action_proposal_boundary.py tests/integration/test_action_idempotency.py tests/unit/actions/test_action_validator.py tests/unit/actions/test_parameter_binding.py tests/unit/actions/test_provider_registry.py tests/integration/identity/test_subject_revocation_handlers.py tests/unit/policy/test_risk_matrix.py tests/integration/storage/test_migrations.py -q`
+Expected: PASS; model output never calls a provider, stale/unknown/replayed proposals deny, duplicate execution produces one side effect, and `0003` startup replaces both action revocation placeholders only after the exact typed facades are registered.
 
 - [ ] **Step 5: Check and commit**
 
@@ -4291,7 +5653,7 @@ Run: `uv run ruff format --check apps/core/src/tuntun_core/services/actions test
 Expected: PASS with exit code 0.
 
 ```bash
-git add apps/core/src/tuntun_core/services/actions/proposals.py apps/core/src/tuntun_core/services/actions/validator.py apps/core/src/tuntun_core/services/actions/executor.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/actions/policy_requests.py apps/core/src/tuntun_core/services/actions/receipt_audit.py apps/core/src/tuntun_core/services/actions/provider_registry.py apps/core/src/tuntun_core/services/actions/providers/identity.py apps/core/src/tuntun_core/services/actions/providers/search.py tests/security/test_action_proposal_boundary.py tests/integration/test_action_idempotency.py tests/unit/actions/test_action_validator.py tests/unit/actions/test_parameter_binding.py tests/unit/actions/test_provider_registry.py
+git add apps/core/src/tuntun_core/services/actions/proposals.py apps/core/src/tuntun_core/services/actions/validator.py apps/core/src/tuntun_core/services/actions/executor.py apps/core/src/tuntun_core/services/actions/parameter_binding.py apps/core/src/tuntun_core/services/actions/policy_requests.py apps/core/src/tuntun_core/services/actions/receipt_audit.py apps/core/src/tuntun_core/services/actions/provider_registry.py apps/core/src/tuntun_core/services/actions/providers/identity.py apps/core/src/tuntun_core/services/actions/providers/search.py apps/core/src/tuntun_core/services/identity/subject_revocation.py apps/core/src/tuntun_core/services/identity/subject_revocation_handlers.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/bootstrap/lifecycle.py tests/security/test_action_proposal_boundary.py tests/integration/test_action_idempotency.py tests/unit/actions/test_action_validator.py tests/unit/actions/test_parameter_binding.py tests/unit/actions/test_provider_registry.py tests/integration/identity/test_subject_revocation_handlers.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(actions): enforce typed idempotent proposals"
@@ -4322,7 +5684,7 @@ git commit -m "feat(actions): enforce typed idempotent proposals"
 
 **Interfaces:**
 - Consumes: typed seven-kind payloads, `AsyncUnitOfWork`, current consent/profile state, `PolicyEnginePort`, record AEAD/HMAC services, and the exact current `child_durable_memory_v1` receipt for every durable K2/N1 record.
-- Produces: exact `MemoryRepositoryPort` baseline as an internal bounded-context port; explicit `MemoryPersistenceMapper` from encrypted persistence rows to the exact frozen `MemoryRecord` and explicit `MemoryAuditDraftMapper` to `AuditDraft`; immutable `memory_revisions`; mandatory household/subject scope; no conversational `list_all` operation; and `MemoryProjectionPolicy` that decides body visibility from subject identity, stored closed audience, current child-memory consent receipt, exact guardian generation, and explicit child-safe audience approval before decryption. No persistence row supplies a convenience `to_contract` or `to_audit` method. The composition root exposes its mutators only to `MemoryMutationCoordinator`; `create/replace/delete` require the caller's active `AtomicMutationScope`, never consume an already-created `AuthContext` in a second transaction, and never commit.
+- Produces: exact `MemoryRepositoryPort` baseline as an internal bounded-context port; explicit `MemoryPersistenceMapper` from encrypted persistence rows to the exact frozen `MemoryRecord` and explicit `MemoryAuditDraftMapper` to `AuditDraft`; immutable `memory_revisions`; mandatory non-null approved-proposal provenance on current and revision rows; mandatory household/subject scope; no conversational `list_all` operation; and `MemoryProjectionPolicy` that decides body visibility from subject identity, stored closed audience, current child-memory consent receipt, exact guardian generation, and explicit child-safe audience approval before decryption. No persistence row supplies a convenience `to_contract` or `to_audit` method. The composition root exposes its mutators only to `MemoryMutationCoordinator`; `create/replace/delete` require the caller's active `AtomicMutationScope`, validate the exact approved source proposal before writing, never consume an already-created `AuthContext` in a second transaction, and never commit.
 
 - [ ] **Step 1: Write failing type, scope, lifecycle, and concurrency tests**
 
@@ -4351,6 +5713,69 @@ async def test_create_and_replace_return_exact_frozen_contracts(memory_mutations
     assert set(created.model_fields) == {"memory_id", "household_id", "subject_id", "version", "content", "audience", "sensitivity", "valid_until"}
     assert replaced.memory_id == created.memory_id and replaced.version == created.version + 1
     assert replaced.content == approved_memory.with_value("new").content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [
+    "missing", "pending", "rejected", "wrong_operation", "wrong_target",
+    "wrong_expected_version", "wrong_subject", "wrong_source_receipts",
+])
+async def test_create_or_replace_requires_exact_approved_source_proposal_before_write(
+    memory_mutations, approved_memory_case_factory, memory_write_spy, case,
+):
+    command = approved_memory_case_factory(case)
+    with pytest.raises(PermissionError, match="exact_approved_memory_proposal_required"):
+        await memory_mutations.apply_approved_for_test(command)
+    assert memory_write_spy.current_writes == 0
+    assert memory_write_spy.revision_writes == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_outer_action_proposal_id_before_tombstone(
+    memory_mutations, approved_delete, outer_action_proposal_id, memory_write_spy,
+):
+    with pytest.raises(PermissionError, match="exact_approved_memory_proposal_required"):
+        await memory_mutations.delete_approved_for_test(
+            approved_delete, approved_proposal_id=outer_action_proposal_id,
+        )
+    assert memory_write_spy.current_writes == 0
+    assert memory_write_spy.revision_writes == 0
+```
+
+```python
+# tests/integration/memory/test_revisions.py
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_real_migrated_sqlcipher_reopens_with_complete_create_replace_provenance(
+    migrated_file_sqlcipher_path, sqlcipher_memory_runtime_factory, approved_create, approved_replace,
+):
+    first = await sqlcipher_memory_runtime_factory.open(migrated_file_sqlcipher_path)
+    created = await first.apply(approved_create)
+    replaced = await first.apply(approved_replace.for_target(created.memory_id, created.version))
+    await first.checkpoint_and_close()
+
+    restarted = await sqlcipher_memory_runtime_factory.open(migrated_file_sqlcipher_path)
+    current = await restarted.memories.require(created.memory_id)
+    revisions = await restarted.memory_revisions.for_memory(created.memory_id)
+    assert current.approved_proposal_id == approved_replace.approved_proposal_id
+    assert [(item.version, item.operation, item.proposal_id) for item in revisions] == [
+        (1, "create", approved_create.approved_proposal_id),
+        (2, "replace", approved_replace.approved_proposal_id),
+    ]
+    assert restarted.reconstruct(current).content == replaced.content
+
+
+@pytest.mark.asyncio
+async def test_migrated_schema_enforces_non_null_proposal_fks(migrated_file_sqlcipher):
+    memories = await migrated_file_sqlcipher.columns("memories")
+    revisions = await migrated_file_sqlcipher.columns("memory_revisions")
+    foreign_keys = await migrated_file_sqlcipher.foreign_keys()
+    assert memories["approved_proposal_id"].nullable is False
+    assert revisions["proposal_id"].nullable is False
+    assert ("memories", "approved_proposal_id", "memory_proposals", "id") in foreign_keys
+    assert ("memory_revisions", "proposal_id", "memory_proposals", "id") in foreign_keys
 ```
 
 ```python
@@ -4623,17 +6048,25 @@ from tuntun_core.domain.profile import ConsentPurpose, ProfileClass
 from tuntun_core.services.identity.consent import ConsentDenied
 
 class SqlCipherMemoryRepository:
-    def __init__(self, mutation_scope, uow_factory, consents, row_mapper, audit_mapper, binding_verifier, binding_builder, audit_ledger, clock):
+    def __init__(self, mutation_scope, uow_factory, consents, proposal_validator, row_mapper, audit_mapper, binding_verifier, binding_builder, audit_ledger, clock):
         self._scope, self._uow_factory, self._consents = mutation_scope, uow_factory, consents
-        self._row_mapper, self._audit_mapper = row_mapper, audit_mapper
+        self._proposal_validator, self._row_mapper, self._audit_mapper = proposal_validator, row_mapper, audit_mapper
         self._binding_verifier, self._binding_builder = binding_verifier, binding_builder
         self._audit, self._clock = audit_ledger, clock
 
     async def create(self, memory, expected_absent=True):
         uow = self._scope.require_active_uow()
+        proposal = await uow.memory_proposals.lock(memory.approved_proposal_id)
+        self._proposal_validator.require_exact_approved(
+            proposal, operation="create", approved_memory=memory,
+            target_memory_id=None, expected_version=None,
+        )
         if expected_absent and await uow.memories.exists(memory.memory_id): raise MemoryAlreadyExists(memory.memory_id)
-        created = await uow.memories.insert(self._encrypt_and_validate(memory), version=1)
-        await uow.memory_revisions.append(created, operation="create")
+        created = await uow.memories.insert(
+            self._encrypt_and_validate(memory), version=1,
+            approved_proposal_id=proposal.id,
+        )
+        await uow.memory_revisions.append(created, proposal_id=proposal.id, operation="create")
         record = self._row_mapper.to_contract(created, memory.content)
         await self._audit.append(uow, self._audit_mapper.created(created, self._scope.require_auth()))
         return record
@@ -4686,18 +6119,34 @@ class SqlCipherMemoryRepository:
         uow = self._scope.require_active_uow()
         current = await uow.memories.lock(memory_id)
         if current.version != expected_version: raise StaleMemoryVersion(memory_id)
-        revision = await uow.memory_revisions.append(current)
-        updated = await uow.memories.replace(current, memory, version=expected_version + 1)
+        proposal = await uow.memory_proposals.lock(memory.approved_proposal_id)
+        self._proposal_validator.require_exact_approved(
+            proposal, operation="replace", approved_memory=memory,
+            target_memory_id=memory_id, expected_version=expected_version,
+        )
+        previous_revision = await uow.memory_revisions.require_version(memory_id, expected_version)
+        updated = await uow.memories.replace(
+            current, memory, version=expected_version + 1,
+            approved_proposal_id=proposal.id,
+        )
+        await uow.memory_revisions.append(updated, proposal_id=proposal.id, operation="replace")
         record = self._row_mapper.to_contract(updated, memory.content)
-        await self._audit.append(uow, self._audit_mapper.replaced(updated, self._scope.require_auth(), revision.id))
+        await self._audit.append(uow, self._audit_mapper.replaced(updated, self._scope.require_auth(), previous_revision.id))
         return record
 
-    async def delete(self, memory_id, expected_version, auth):
+    async def delete(self, memory_id, expected_version, auth, approved_proposal_id):
         uow = self._scope.require_active_uow()
         current = await uow.memories.lock(memory_id)
         if current.version != expected_version: raise StaleMemoryVersion(memory_id)
         self._binding_verifier.require_exact(self._binding_builder.memory_delete(current), auth.binding)
-        await uow.memory_revisions.append_tombstone(current.metadata_only(), operation="delete")
+        proposal = await uow.memory_proposals.lock(approved_proposal_id)
+        self._proposal_validator.require_exact_approved(
+            proposal, operation="delete", approved_memory=None,
+            target_memory_id=memory_id, expected_version=expected_version,
+        )
+        await uow.memory_revisions.append_tombstone(
+            current.metadata_only(), proposal_id=proposal.id, operation="delete"
+        )
         await uow.memories.delete_row_with_wrapped_dek(memory_id)
         await uow.memory_revisions.authorized_crypto_shred_content(memory_id)
         await self._audit.append(
@@ -4706,6 +6155,8 @@ class SqlCipherMemoryRepository:
         )
         await self._audit.append(uow, self._audit_mapper.tombstoned(current, auth))
 ```
+
+`MemoryProposalWriteValidator.require_exact_approved` accepts only `status='approved'` and compares the proposal ID, operation, household, subject, kind, audience, sensitivity, decrypted typed content commitment, exact source-receipt set, target ID, and expected version to the requested mutation. A mismatch is `exact_approved_memory_proposal_required` before either the current row or its revision is written. Create and replace revisions record the newly materialized version—not a second copy of the prior version—and both the current row and immutable revision carry the same approving proposal FK. Delete receives the finalized memory proposal ID separately from the outer action authorization, then validates that approved delete proposal before appending its tombstone. Confusing the outer action proposal ID with the approved memory proposal ID fails before any tombstone or current-row write. These checks run in the mutation's single SQLCipher transaction.
 
 ```python
 # apps/core/migrations/versions/0004_memory.py
@@ -4722,6 +6173,7 @@ def upgrade() -> None:
         sa.Column("schema_version", sa.String(16), nullable=False),
         sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False),
         sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False),
+        sa.Column("subject_authority_generation", sa.Integer, nullable=False),
         sa.Column("session_id", sa.String(36), sa.ForeignKey("sessions.id"), nullable=False),
         sa.Column("turn_id", sa.String(36), nullable=False),
         sa.Column("idempotency_key", sa.String(36), nullable=False),
@@ -4761,13 +6213,14 @@ def upgrade() -> None:
         sa.CheckConstraint("required_factor IS NULL OR required_factor IN ('pin','passkey')"),
         sa.CheckConstraint("status IN ('pending','approved','rejected','expired')"),
         sa.CheckConstraint("confidence_micros BETWEEN 0 AND 1000000"),
+        sa.CheckConstraint("subject_authority_generation >= 1"),
         sa.CheckConstraint("(child_consent_receipt_id IS NULL AND guardian_id IS NULL AND guardian_generation IS NULL) OR (child_consent_receipt_id IS NOT NULL AND guardian_id IS NOT NULL AND guardian_generation >= 1 AND audience IN ('guardian_child','household_all'))"),
         sa.CheckConstraint("(operation='create' AND target_memory_id IS NULL AND expected_version IS NULL AND kind IS NOT NULL AND audience IS NOT NULL AND ciphertext IS NOT NULL AND nonce IS NOT NULL) OR (operation='replace' AND target_memory_id IS NOT NULL AND expected_version >= 1 AND kind IS NOT NULL AND audience IS NOT NULL AND ciphertext IS NOT NULL AND nonce IS NOT NULL) OR (operation='delete' AND target_memory_id IS NOT NULL AND expected_version >= 1 AND kind IS NULL AND audience IS NULL AND ciphertext IS NULL AND nonce IS NULL)"),
         sa.CheckConstraint("(status='pending' AND decision_source IS NULL AND decision_receipt_id IS NULL AND decided_at IS NULL) OR (status='approved' AND decision_source IN ('auth_grant','system_working_summary') AND decision_receipt_id IS NOT NULL AND decided_at IS NOT NULL) OR (status='rejected' AND decision_source='auth_grant' AND decision_receipt_id IS NOT NULL AND decided_at IS NOT NULL) OR (status='expired' AND decision_source='system_expiry' AND decision_receipt_id IS NOT NULL AND decided_at IS NOT NULL)"),
         sa.UniqueConstraint("household_id", "session_id", "idempotency_key", name="uq_memory_proposal_idempotency"),
         sa.UniqueConstraint("household_id", "turn_id", "commitment_key_id", "claim_commitment_hmac", name="uq_memory_proposal_turn_claim"),
     )
-    op.create_table("memories", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("kind", sa.String(16), nullable=False), sa.Column("audience", sa.String(32), nullable=False), sa.Column("sensitivity", sa.String(16), nullable=False), sa.Column("ciphertext", sa.LargeBinary, nullable=False), sa.Column("nonce", sa.LargeBinary, nullable=False), sa.Column("wrapped_dek", sa.LargeBinary, nullable=False), sa.Column("root_key_id", sa.String(128), nullable=False), sa.Column("status", sa.String(16), nullable=False), sa.Column("version", sa.Integer, nullable=False), sa.Column("confidence_micros", sa.Integer, nullable=False), sa.Column("source_kind", sa.String(32), nullable=False), sa.Column("valid_from", sa.String(27), nullable=False), sa.Column("valid_until", sa.String(27)), sa.Column("next_review_at", sa.String(27)), sa.Column("approved_at", sa.String(27), nullable=False), sa.Column("approval_source", sa.String(32), nullable=False), sa.Column("approved_by_grant_id", sa.String(36)), sa.Column("approved_by_system_receipt_id", sa.String(36)), sa.Column("consent_receipt_id", sa.String(36), sa.ForeignKey("consent_receipts.id")), sa.Column("child_consent_receipt_id", sa.String(36), sa.ForeignKey("consent_receipts.id")), sa.Column("guardian_id", sa.String(36), sa.ForeignKey("subjects.id")), sa.Column("guardian_generation", sa.Integer), sa.Column("child_safe_audience_approval_grant_id", sa.String(36), sa.ForeignKey("auth_grants.id")), sa.Column("source_receipt_ids", sa.LargeBinary, nullable=False), sa.Column("commitment_key_id", sa.String(128), nullable=False), sa.Column("content_commitment_hmac", sa.LargeBinary, nullable=False), sa.CheckConstraint("kind IN ('working','episodic','semantic','preference','procedural','relational','policy')"), sa.CheckConstraint("audience IN ('subject_private','guardian_child','household_adults','household_all')"), sa.CheckConstraint("sensitivity IN ('public','household','personal','sensitive','restricted')"), sa.CheckConstraint("status IN ('approved','superseded','revoked','quarantined')"), sa.CheckConstraint("approval_source IN ('auth_grant','system_working_summary')"), sa.CheckConstraint("(approval_source='auth_grant' AND approved_by_grant_id IS NOT NULL AND approved_by_system_receipt_id IS NULL) OR (approval_source='system_working_summary' AND kind='working' AND approved_by_grant_id IS NULL AND approved_by_system_receipt_id IS NOT NULL)"), sa.CheckConstraint("(child_consent_receipt_id IS NULL AND guardian_id IS NULL AND guardian_generation IS NULL AND child_safe_audience_approval_grant_id IS NULL) OR (child_consent_receipt_id IS NOT NULL AND guardian_id IS NOT NULL AND guardian_generation >= 1 AND audience IN ('guardian_child','household_all') AND approval_source='auth_grant' AND (audience!='household_all' OR child_safe_audience_approval_grant_id IS NOT NULL))"), sa.CheckConstraint("version >= 1"), sa.CheckConstraint("confidence_micros BETWEEN 0 AND 1000000"))
+    op.create_table("memories", sa.Column("id", sa.String(36), primary_key=True), sa.Column("household_id", sa.String(36), sa.ForeignKey("households.id"), nullable=False), sa.Column("subject_id", sa.String(36), sa.ForeignKey("subjects.id"), nullable=False), sa.Column("approved_proposal_id", sa.String(36), sa.ForeignKey("memory_proposals.id"), nullable=False), sa.Column("kind", sa.String(16), nullable=False), sa.Column("audience", sa.String(32), nullable=False), sa.Column("sensitivity", sa.String(16), nullable=False), sa.Column("ciphertext", sa.LargeBinary, nullable=False), sa.Column("nonce", sa.LargeBinary, nullable=False), sa.Column("wrapped_dek", sa.LargeBinary, nullable=False), sa.Column("root_key_id", sa.String(128), nullable=False), sa.Column("status", sa.String(16), nullable=False), sa.Column("version", sa.Integer, nullable=False), sa.Column("confidence_micros", sa.Integer, nullable=False), sa.Column("source_kind", sa.String(32), nullable=False), sa.Column("valid_from", sa.String(27), nullable=False), sa.Column("valid_until", sa.String(27)), sa.Column("next_review_at", sa.String(27)), sa.Column("approved_at", sa.String(27), nullable=False), sa.Column("approval_source", sa.String(32), nullable=False), sa.Column("approved_by_grant_id", sa.String(36)), sa.Column("approved_by_system_receipt_id", sa.String(36)), sa.Column("consent_receipt_id", sa.String(36), sa.ForeignKey("consent_receipts.id")), sa.Column("child_consent_receipt_id", sa.String(36), sa.ForeignKey("consent_receipts.id")), sa.Column("guardian_id", sa.String(36), sa.ForeignKey("subjects.id")), sa.Column("guardian_generation", sa.Integer), sa.Column("child_safe_audience_approval_grant_id", sa.String(36), sa.ForeignKey("auth_grants.id")), sa.Column("source_receipt_ids", sa.LargeBinary, nullable=False), sa.Column("commitment_key_id", sa.String(128), nullable=False), sa.Column("content_commitment_hmac", sa.LargeBinary, nullable=False), sa.CheckConstraint("kind IN ('working','episodic','semantic','preference','procedural','relational','policy')"), sa.CheckConstraint("audience IN ('subject_private','guardian_child','household_adults','household_all')"), sa.CheckConstraint("sensitivity IN ('public','household','personal','sensitive','restricted')"), sa.CheckConstraint("status IN ('approved','superseded','revoked','quarantined')"), sa.CheckConstraint("approval_source IN ('auth_grant','system_working_summary')"), sa.CheckConstraint("(approval_source='auth_grant' AND approved_by_grant_id IS NOT NULL AND approved_by_system_receipt_id IS NULL) OR (approval_source='system_working_summary' AND kind='working' AND approved_by_grant_id IS NULL AND approved_by_system_receipt_id IS NOT NULL)"), sa.CheckConstraint("(child_consent_receipt_id IS NULL AND guardian_id IS NULL AND guardian_generation IS NULL AND child_safe_audience_approval_grant_id IS NULL) OR (child_consent_receipt_id IS NOT NULL AND guardian_id IS NOT NULL AND guardian_generation >= 1 AND audience IN ('guardian_child','household_all') AND approval_source='auth_grant' AND (audience!='household_all' OR child_safe_audience_approval_grant_id IS NOT NULL))"), sa.CheckConstraint("version >= 1"), sa.CheckConstraint("confidence_micros BETWEEN 0 AND 1000000"))
     op.create_index("ix_memories_scope_recall", "memories", ["household_id", "subject_id", "status", "kind", "valid_until"])
     op.create_table("memory_revisions", sa.Column("id", sa.String(36), primary_key=True), sa.Column("memory_id", sa.String(36), nullable=False), sa.Column("proposal_id", sa.String(36), sa.ForeignKey("memory_proposals.id"), nullable=False), sa.Column("version", sa.Integer, nullable=False), sa.Column("operation", sa.String(16), nullable=False), sa.Column("kind", sa.String(16), nullable=False), sa.Column("audience", sa.String(32), nullable=False), sa.Column("ciphertext", sa.LargeBinary), sa.Column("nonce", sa.LargeBinary), sa.Column("wrapped_dek", sa.LargeBinary), sa.Column("root_key_id", sa.String(128)), sa.Column("commitment_key_id", sa.String(128), nullable=False), sa.Column("content_commitment_hmac", sa.LargeBinary, nullable=False), sa.Column("source_receipt_ids", sa.LargeBinary, nullable=False), sa.Column("confidence_micros", sa.Integer, nullable=False), sa.Column("valid_from", sa.String(27), nullable=False), sa.Column("valid_until", sa.String(27)), sa.Column("next_review_at", sa.String(27)), sa.Column("approved_at", sa.String(27), nullable=False), sa.Column("approval_source", sa.String(32), nullable=False), sa.Column("approved_by_grant_id", sa.String(36)), sa.Column("approved_by_system_receipt_id", sa.String(36)), sa.Column("child_consent_receipt_id", sa.String(36)), sa.Column("guardian_id", sa.String(36)), sa.Column("guardian_generation", sa.Integer), sa.Column("child_safe_audience_approval_grant_id", sa.String(36)), sa.Column("created_at", sa.String(27), nullable=False), sa.CheckConstraint("operation IN ('create','replace','delete','crypto_shred')"), sa.CheckConstraint("kind IN ('working','episodic','semantic','preference','procedural','relational','policy')"), sa.CheckConstraint("audience IN ('subject_private','guardian_child','household_adults','household_all')"), sa.CheckConstraint("approval_source IN ('auth_grant','system_working_summary')"), sa.CheckConstraint("(approval_source='auth_grant' AND approved_by_grant_id IS NOT NULL AND approved_by_system_receipt_id IS NULL) OR (approval_source='system_working_summary' AND kind='working' AND approved_by_grant_id IS NULL AND approved_by_system_receipt_id IS NOT NULL)"), sa.CheckConstraint("(child_consent_receipt_id IS NULL AND guardian_id IS NULL AND guardian_generation IS NULL AND child_safe_audience_approval_grant_id IS NULL) OR (child_consent_receipt_id IS NOT NULL AND guardian_id IS NOT NULL AND guardian_generation >= 1 AND audience IN ('guardian_child','household_all'))"), sa.CheckConstraint("(operation IN ('delete','crypto_shred') AND ciphertext IS NULL AND wrapped_dek IS NULL) OR (operation IN ('create','replace') AND ciphertext IS NOT NULL AND wrapped_dek IS NOT NULL)"), sa.UniqueConstraint("memory_id", "version"))
     op.execute("CREATE TRIGGER memory_revisions_no_update BEFORE UPDATE ON memory_revisions WHEN tuntun_crypto_shred_authorized() != 1 BEGIN SELECT RAISE(ABORT,'memory_revisions_append_only'); END")
@@ -4784,12 +6237,12 @@ def downgrade() -> None:
 
 `memory_proposals` is the lossless encrypted persistence projection of the foundation `MemoryProposalDraft`: it keeps the exact schema/proposal/household/subject/session/turn/idempotency/operation/target/version/audience/sensitivity/confidence/provenance/claim/expiry fields, encrypts both typed content and the bounded reason under the proposal DEK, and separates the mapper draft-validity expiry from the 30-day pending lifecycle expiry. The local mapper assigns ordinary adult creates `subject_private`; a provider cannot nominate a broader audience. A durable child proposal is valid only as `guardian_child` or as explicitly child-safe `household_all`, stores the exact current `child_durable_memory_v1` receipt, guardian ID, and guardian generation before persistence, and can never take the working-summary auto-apply route. Its separate exact guardian approval is rechecked against those values immediately before mutation; `household_all` additionally persists the approving grant ID as its child-safe-audience proof. Child `subject_private` and `household_adults` fail before persistence, and invalid legacy/restore rows are marked `quarantined` before any candidate lookup until guardian conversion or deletion. Reassignment never rewrites authority: it cancels pending proposals and existing rows remain hidden until an explicitly authorized reapproval creates a new revision. Any later audience expansion is a separately prepared exact approval bound to the target record/version and new audience. The full-draft HMAC detects an idempotency-key collision with changed input; the claim HMAC suppresses same-turn re-proposal without storing low-entropy plaintext.
 
-`system_approval_receipts` is a typed facade over foundation `idempotency_receipts` with operation `memory.working_summary.auto_apply`, exact household/subject/session/turn/proposal scope, the content commitment, and the short expiry. It is not an `AuthGrant`; the mutually exclusive approval-source checks on both current records and immutable revisions restrict this source to `kind='working'` and prevent it from masquerading as one.
+`system_approval_receipts` is a typed facade over foundation `idempotency_receipts` with operation `memory.working_summary.auto_apply`, exact household/subject/session/turn/proposal scope, the content commitment, and the short expiry. It is not an `AuthGrant`; the mutually exclusive approval-source checks on both current records and immutable revisions restrict this source to `kind='working'` and prevent it from masquerading as one. The single internal `apply_system_approved_working_summary` operation revalidates that exact receipt and approved proposal, then writes the current row and version-1 revision with the same non-null proposal ID in the staging transaction; it cannot accept any other memory kind or approval source.
 
 - [ ] **Step 4: Run green, isolation, and migration tests**
 
 Run: `uv run pytest tests/integration/memory/test_repository.py tests/unit/memory/test_persistence_mappers.py tests/integration/memory/test_revisions.py tests/integration/memory/test_concurrency.py tests/security/test_memory_isolation.py tests/security/test_memory_admin_visibility.py tests/security/test_procedural_memory.py tests/benchmark/test_memory_repository_10k.py tests/integration/storage/test_migrations.py -q`
-Expected: PASS; 1,000 randomized isolation examples produce zero unauthorized records; child `subject_private`/`household_adults` proposals and restored rows are rejected/quarantined; owner-not-subject, stale-guardian, other-profile, and Guest projections omit bodies and content-derived length hints; and migration `0004_memory` upgrades/downgrades cleanly.
+Expected: PASS; 1,000 randomized isolation examples produce zero unauthorized records; child `subject_private`/`household_adults` proposals and restored rows are rejected/quarantined; owner-not-subject, stale-guardian, other-profile, and Guest projections omit bodies and content-derived length hints. Forged, pending, wrong-operation/target/version/source proposals fail before writes, the non-null current/revision proposal FKs survive a real file-backed SQLCipher close/reopen, versions reconstruct as create then replace, and migration `0004_memory` upgrades/downgrades cleanly.
 
 - [ ] **Step 5: Check and commit**
 
@@ -4815,17 +6268,23 @@ git commit -m "feat(memory): add scoped seven-kind repository"
 - Create: `apps/core/src/tuntun_core/services/memory/write_policy.py`
 - Create: `apps/core/src/tuntun_core/services/memory/approval.py`
 - Create: `apps/core/src/tuntun_core/services/actions/providers/memory.py`
-- Modify: `apps/core/src/tuntun_core/bootstrap/container.py` (complete consent-revocation handler registry)
+- Modify: `apps/core/src/tuntun_core/services/identity/subject_revocation.py` (replace Task-1 memory placeholder after `0004`)
+- Modify: `apps/core/src/tuntun_core/services/identity/subject_revocation_handlers.py` (register real memory reconciliation)
+- Modify: `apps/core/src/tuntun_core/bootstrap/container.py` (complete consent and subject-revocation handler registries)
+- Modify: `apps/core/src/tuntun_core/bootstrap/lifecycle.py`
 - Create: `prompts/memory/proposal-schema.json`
 - Create: `tests/unit/memory/test_write_policy.py`
 - Create: `tests/security/test_memory_write_policy.py`
 - Create: `tests/security/test_memory_deletion.py`
 - Create: `tests/integration/memory/test_memory_approval.py`
 - Create: `tests/unit/actions/test_memory_action_provider.py`
+- Modify: `tests/integration/identity/test_subject_revocation_handlers.py`
 
 **Interfaces:**
 - Consumes: strict provider-facing `ProviderMemoryIntent` with pseudonymous references only, local `ProposalContext`, `PolicyEnginePort`, `AuthenticationPort`, `MemoryRepositoryPort`, `AsyncUnitOfWork`, and foundation `AsyncAuditLedger`.
 - Produces: an identity-layer `ProposalMapper.map_memory` facade over the conversation-owned mapper. It resolves the pseudonymous subject to a current server-loaded profile and fixes `audience=guardian_child` for K2/N1 or `subject_private` for owner/adult; a provider has no audience field and cannot choose or broaden it. `MemoryProposalService` explicitly receives `ConsentService`, implements `stage`, non-committing `stage_in_uow`, and the exact fail-closed two-argument `MemoryProposalServicePort.decide`. `stage` independently verifies the complete frozen draft—proposal/schema/household/subject/session/turn/idempotency identifiers, operation and typed content or target/version, audience, sensitivity, bounded reason/confidence, expiry, source receipt set, and purpose-separated claim commitment—against the exact `ProposalContext` and signed mapper attestation before persistence. The persistence projection losslessly round-trips every draft field, encrypts content and reason, and stores separate scope/full-draft/claim HMAC commitments; no premature decision binding is stored. Also produces non-committing `MemoryApprovalService.decide_in_uow`, `MemoryLocalActionProvider`, and the sole standalone decision entry point `MemoryMutationCoordinator.decide(command, decision_context, grant_id)`; the coordinator deterministically rebuilds the complete decision-specific binding (`memory.approve|memory.edit_approve|memory.reject|memory.delete`) before consuming the grant. The action provider receives an already-consumed `AuthContext` from `ActionMutationCoordinator` and calls `decide_in_uow` directly—never a second grant consume. Status is `pending|approved|rejected|expired`; grant consumption, proposal disposition, revision, memory mutation, and authorization/mutation audit outbox share one transaction.
+
+After `0004_memory` is applied and the typed memory proposal repository is registered, Task 10 replaces both Task-1 `memory_authorities` placeholders with the real transactional and post-commit memory handlers. Final Phase-1 bootstrap reads the actual core and feature-version rows and enumerates both packaged migration namespaces before it registers a facade or constructs a handler. Every artifact contains exactly the linear core revisions `0001_foundation` through `0008_prepared_mutations`, with every declared parent equal to the preceding frozen ID and with no branch label, dependency, extra base, fork, merge, or orphan; the sole core `alembic_version` head is always `0008_prepared_mutations`. The absent-search artifact omits the experimental-search migration namespace and its `alembic_version_experimental_search` table. The enabled artifact independently packages exactly one feature base/head, `search_0001_experimental_search` with `down_revision=None`, no graph metadata, and that exact sole feature-version-table row. Core and feature IDs can therefore never fork or collide. Wrong, forked, multiple, feature-mismatched, missing, or extra packaged revisions/tables/heads fail before recovery/readiness. Only after that gate does bootstrap register all typed facades/providers, construct exact stage-matching handlers, and run bounded revocation recovery. Startup proves action and memory handlers are real, search is either its concrete enabled handler or the closed absent handler, and no installed capability retains a placeholder.
 
 - [ ] **Step 1: Write failing write-matrix and transcript-sentinel tests**
 
@@ -4964,6 +6423,210 @@ async def test_memory_operation_substitution_fails_before_proposal_read(memory_a
     with pytest.raises(PermissionError, match="action_provider_operation_mismatch"):
         await memory_action_provider.execute_in_uow(uow, forged_memory_operation, auth)
     assert memory_repository_spy.read_count == 0
+
+
+@pytest.mark.parametrize("search_enabled",(False,True))
+def test_final_composition_reads_one_exact_database_head_before_real_handlers(
+    final_phase1_container_factory,search_enabled,
+):
+    container=final_phase1_container_factory(
+        search_enabled=search_enabled,database_heads=("0008_prepared_mutations",),
+        search_database_heads=(
+            ("search_0001_experimental_search",) if search_enabled else ()
+        ),
+        search_version_table_present=search_enabled,
+        optional_search_namespace_present=search_enabled,
+        optional_search_revision_present=search_enabled,
+        optional_search_down_revision=None,
+    )
+    container.start()
+    assert container.observed_database_heads==("0008_prepared_mutations",)
+    assert container.observed_search_database_heads==(
+        ("search_0001_experimental_search",) if search_enabled else ()
+    )
+    assert type(container.transactional_revocations["action_authorities"]).__name__=="ActionSubjectAuthorityHandler"
+    assert type(container.post_commit_revocations["action_authorities"]).__name__=="ActionAuthorityRevocationHandler"
+    assert type(container.transactional_revocations["memory_authorities"]).__name__=="MemorySubjectAuthorityHandler"
+    assert type(container.post_commit_revocations["memory_authorities"]).__name__=="MemoryAuthorityRevocationHandler"
+    assert all(type(item).__name__!="NotInstalledAuthorityRevocationHandler" for item in container.post_commit_revocations.values())
+    assert container.startup_order==(
+        "migrate","register_typed_facades","compose_stage_handlers",
+        "recover_revocations","ready",
+    )
+
+
+@pytest.mark.parametrize(("search_enabled","database_heads"),(
+    (False,("0007_privacy_post_response_jobs",)),
+    (False,("0007_privacy_post_response_jobs","0008_prepared_mutations")),
+    (True,("0007_privacy_post_response_jobs",)),
+    (True,("0007_privacy_post_response_jobs","0008_prepared_mutations")),
+))
+def test_wrong_or_multiple_core_heads_block_before_composition(
+    final_phase1_container_factory,search_enabled,database_heads,
+):
+    container=final_phase1_container_factory(
+        search_enabled=search_enabled,database_heads=database_heads,
+        search_database_heads=(
+            ("search_0001_experimental_search",) if search_enabled else ()
+        ),
+        search_version_table_present=search_enabled,
+        optional_search_namespace_present=search_enabled,
+        optional_search_revision_present=search_enabled,
+        optional_search_down_revision=None,
+    )
+    with pytest.raises(RuntimeError,match="phase1 migration head mismatch"):
+        container.start()
+    assert container.typed_facade_registration_count==0
+    assert container.revocation_handler_composition_count==0
+    assert container.ready is False
+
+
+@pytest.mark.parametrize((
+    "search_enabled","namespace_present","revision_present","down_revision",
+),(
+    (False,True,True,None),
+    (False,False,True,None),
+    (True,False,False,None),
+    (True,True,False,None),
+    (True,True,True,"0008_prepared_mutations"),
+))
+def test_search_migration_namespace_must_match_closed_feature_state(
+    final_phase1_container_factory,search_enabled,namespace_present,
+    revision_present,down_revision,
+):
+    container=final_phase1_container_factory(
+        search_enabled=search_enabled,
+        database_heads=("0008_prepared_mutations",),
+        search_database_heads=(
+            ("search_0001_experimental_search",) if search_enabled else ()
+        ),
+        search_version_table_present=search_enabled,
+        optional_search_namespace_present=namespace_present,
+        optional_search_revision_present=revision_present,
+        optional_search_down_revision=down_revision,
+    )
+    with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
+        container.start()
+    assert container.revocation_handler_composition_count==0
+
+
+@pytest.mark.parametrize(("search_enabled","table_present","search_heads"),(
+    (False,True,()),
+    (False,True,("search_0001_experimental_search",)),
+    (True,False,()),
+    (True,True,()),
+    (True,True,("search_wrong",)),
+    (True,True,("search_0001_experimental_search","search_extra")),
+))
+def test_search_feature_version_table_and_head_are_exact(
+    final_phase1_container_factory,search_enabled,table_present,search_heads,
+):
+    container=final_phase1_container_factory(
+        search_enabled=search_enabled,database_heads=("0008_prepared_mutations",),
+        search_version_table_present=table_present,
+        search_database_heads=search_heads,
+        optional_search_namespace_present=search_enabled,
+        optional_search_revision_present=search_enabled,
+        optional_search_down_revision=None,
+    )
+    with pytest.raises(RuntimeError,match="phase1 migration head mismatch"):
+        container.start()
+    assert container.typed_facade_registration_count==0
+    assert container.revocation_handler_composition_count==0
+
+
+@pytest.mark.parametrize("mutation",(
+    "extra_feature_revision","duplicate_feature_revision",
+    "feature_branch_label","feature_depends_on",
+))
+def test_search_feature_graph_inventory_and_metadata_are_exact(
+    final_phase1_container_factory,mutation,
+):
+    container=final_phase1_container_factory(
+        search_enabled=True,database_heads=("0008_prepared_mutations",),
+        search_version_table_present=True,
+        search_database_heads=("search_0001_experimental_search",),
+        optional_search_namespace_present=True,
+        optional_search_revision_present=True,
+        optional_search_down_revision=None,
+        optional_search_graph_mutation=mutation,
+    )
+    with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
+        container.start()
+    assert container.typed_facade_registration_count==0
+    assert container.revocation_handler_composition_count==0
+
+
+@pytest.mark.parametrize(("mandatory_down_revision","privacy_down_revision"),(
+    ("0006_timers","0006_timers"),
+    ("0007_privacy_post_response_jobs","0005_memory_embeddings"),
+))
+def test_mandatory_phase1_tail_must_keep_0008_to_0007_to_0006_edges(
+    final_phase1_container_factory,mandatory_down_revision,privacy_down_revision,
+):
+    container=final_phase1_container_factory(
+        search_enabled=False,database_heads=("0008_prepared_mutations",),
+        optional_search_revision_present=False,
+        mandatory_phase1_down_revision=mandatory_down_revision,
+        privacy_jobs_down_revision=privacy_down_revision,
+    )
+    with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
+        container.start()
+    assert container.typed_facade_registration_count==0
+    assert container.revocation_handler_composition_count==0
+
+
+@pytest.mark.parametrize("mutation",(
+    "hidden_branch_and_merge","extra_orphan_revision","0003_wrong_parent",
+    "branch_label","depends_on",
+))
+def test_packaged_phase1_revision_inventory_and_every_edge_are_exact(
+    final_phase1_container_factory,mutation,
+):
+    container=final_phase1_container_factory(
+        search_enabled=False,database_heads=("0008_prepared_mutations",),
+        optional_search_revision_present=False,
+        migration_graph_mutation=mutation,
+    )
+    with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
+        container.start()
+    assert container.typed_facade_registration_count==0
+    assert container.revocation_handler_composition_count==0
+
+
+@pytest.mark.parametrize("mismatch",("real_without_0004","placeholder_after_0004"))
+def test_memory_revocation_schema_stage_mismatch_blocks_startup(
+    final_phase1_container_factory,mismatch,
+):
+    with pytest.raises(RuntimeError,match="revocation handler schema stage mismatch"):
+        final_phase1_container_factory(mismatch=mismatch).start()
+```
+
+```python
+# tests/integration/identity/test_subject_revocation_handlers.py (Task-10 additions)
+import pytest
+from uuid import uuid5
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family",(
+    "provider_routes","search_capabilities","action_authorities","memory_authorities",
+))
+async def test_final_handler_replay_uses_one_exact_scoped_downstream_key_and_receipt(
+    final_phase1_identity_runtime,started_authority_factory,revoke_profile_grant,family,
+):
+    runtime=await final_phase1_identity_runtime.start()
+    subject=started_authority_factory(family)
+    event=await runtime.revoke_profile(subject,revoke_profile_grant)
+    await runtime.revocation_worker.wait_until_idle()
+    key=uuid5(event.id,family)
+    first=runtime.downstream_effects.receipt_for_key(key)
+    await runtime.revocation_worker.run_one_periodic_drain()
+    reopened=runtime.downstream_effects.receipt_for_key(key)
+    assert reopened==first
+    assert (first.event_id,first.family,first.subject_id,first.through_generation)==(
+        event.id,family,subject.id,event.new_authority_generation-1,
+    )
+    assert runtime.downstream_effects.effect_count(key)==1
 ```
 
 - [ ] **Step 2: Run red tests**
@@ -5015,9 +6678,10 @@ from tuntun_core.domain.profile import ConsentPurpose, ProfileClass
 from tuntun_core.services.identity.consent import ConsentDenied
 
 class MemoryProposalService:
-    def __init__(self, validator, write_policy, provenance, consent_service, uow_factory, crypto, clock, audit_ledger):
+    def __init__(self, validator, write_policy, provenance, consent_service, memory_repository, approved_mapper, uow_factory, crypto, clock, audit_ledger):
         self._validator, self._write_policy, self._uow_factory = validator, write_policy, uow_factory
         self._provenance, self._consents = provenance, consent_service
+        self._memory, self._approved_mapper = memory_repository, approved_mapper
         self._crypto, self._clock, self._audit = crypto, clock, audit_ledger
 
     async def stage(self, draft, context):
@@ -5069,11 +6733,16 @@ class MemoryProposalService:
             return existing
         duplicate = await uow.memory_proposals.get_turn_claim(draft.household_id, draft.turn_id, draft.claim_commitment)
         if duplicate is not None: return duplicate
-        proposal = await uow.memory_proposals.insert(draft=draft, encrypted=encrypted, scope_commitment=scope_commitment, draft_commitment=draft_commitment, claim_commitment=draft.claim_commitment, content_commitment=content_commitment, child_authority=child_authority, status="pending", draft_expires_at=draft.expires_at, expires_at=now + timedelta(days=30), required_factor=decision.required_factor)
+        proposal = await uow.memory_proposals.insert(draft=draft, encrypted=encrypted, scope_commitment=scope_commitment, draft_commitment=draft_commitment, claim_commitment=draft.claim_commitment, content_commitment=content_commitment, child_authority=child_authority, subject_authority_generation=profile.authority_generation, status="pending", draft_expires_at=draft.expires_at, expires_at=now + timedelta(days=30), required_factor=decision.required_factor)
         if decision.outcome == "auto_apply":
             working_expires_at = await uow.sessions.working_memory_deadline(context.session_id, grace=timedelta(minutes=30))
             system_receipt = await uow.system_approval_receipts.issue_working_summary(household_id=draft.household_id, subject_id=draft.subject_id, session_id=draft.session_id, turn_id=draft.turn_id, proposal_id=draft.proposal_id, content_commitment=content_commitment, expires_at=now + timedelta(minutes=5))
-            await uow.memory_proposals.apply_working_summary(proposal.id, expires_at=working_expires_at, system_approval_receipt_id=system_receipt.id, approval_source="system_working_summary", decided_at=now)
+            approved = await uow.memory_proposals.apply_working_summary(proposal.id, expires_at=working_expires_at, system_approval_receipt_id=system_receipt.id, approval_source="system_working_summary", decided_at=now)
+            await uow.memories.apply_system_approved_working_summary(
+                approved,
+                approved_proposal_id=approved.id,
+                system_approval_receipt_id=system_receipt.id,
+            )
             await self._audit.append(uow, uow.system_approval_receipts.audit_draft(system_receipt))
         await self._audit.append(uow, uow.memory_proposals.staged_audit_draft(proposal))
         return proposal
@@ -5105,8 +6774,9 @@ class MemoryWritePolicy:
 ```python
 # apps/core/src/tuntun_core/services/memory/approval.py
 class MemoryApprovalService:
-    def __init__(self, mutation_scope, consent_service, binding_verifier, decision_audits, audit_ledger, clock):
+    def __init__(self, mutation_scope, consent_service, memory_repository, approved_mapper, binding_verifier, decision_audits, audit_ledger, clock):
         self._scope, self._consents, self._bindings = mutation_scope, consent_service, binding_verifier
+        self._memory, self._approved_mapper = memory_repository, approved_mapper
         self._decision_audits, self._audit, self._clock = decision_audits, audit_ledger, clock
 
     async def decide(self, command, auth):
@@ -5147,13 +6817,26 @@ class MemoryApprovalService:
                     raise PermissionError("child_memory_current_guardian_consent_required")
                 if proposal.audience == "household_all":
                     child_safe_audience_approval_grant_id = auth.grant_id
-            await uow.memories.apply_proposal(
-                proposal,
+            approved = await uow.memory_proposals.approve_with_final_content(
+                proposal.id,
                 edited_content=command.edited_content,
                 child_authority=child_authority,
                 child_safe_audience_approval_grant_id=child_safe_audience_approval_grant_id,
+                decision_receipt_id=auth.grant_id,
+                decided_at=self._clock.now(),
             )
-            await uow.memory_proposals.approve(proposal.id, auth.grant_id)
+            if approved.operation == "create":
+                await self._memory.create(self._approved_mapper.from_proposal(approved))
+            elif approved.operation == "replace":
+                await self._memory.replace(
+                    approved.target_memory_id,
+                    approved.expected_version,
+                    self._approved_mapper.from_proposal(approved),
+                )
+            else:
+                await self._memory.delete(
+                    approved.target_memory_id, approved.expected_version, auth, approved.id
+                )
         await self._audit.append(uow, self._decision_audits.disposition(proposal, command, auth))
         return await uow.memory_proposals.get(proposal.id)
 
@@ -5207,12 +6890,120 @@ class MemoryLocalActionProvider:
         elif draft.action_name == "memory.expire":
             await uow.memory_proposals.expire_exact(command.proposal_id, command.expected_version, self._clock.now())
         elif draft.action_name == "memory.delete":
-            await self._repository.delete(command.memory_id, command.expected_version, auth)
+            await self._approval.decide_in_uow(uow, command.decision, auth, proposal.binding)
         else:
             raise PermissionError("action_provider_operation_mismatch")
         return self._receipts.executed(proposal, provider_name=self.provider_name)
 
 # apps/core/src/tuntun_core/bootstrap/container.py
+from alembic.util.exc import CommandError
+from dataclasses import dataclass
+
+SEARCH_FEATURE_HEAD="search_0001_experimental_search"
+SEARCH_VERSION_TABLE="alembic_version_experimental_search"
+MANDATORY_PHASE1_REVISIONS=(
+    "0001_foundation",
+    "0002_profiles_consent_enrollment",
+    "0003_authentication",
+    "0004_memory",
+    "0005_memory_embeddings",
+    "0006_timers",
+    "0007_privacy_post_response_jobs",
+    "0008_prepared_mutations",
+)
+
+
+@dataclass(frozen=True,slots=True)
+class Phase1MigrationState:
+    actual_heads:tuple[str,...]
+    search_heads:tuple[str,...]
+    search_enabled:bool
+
+
+def require_final_phase1_migration_state(
+    connection,script_directory,search_script_directory,*,search_enabled:bool,
+) -> Phase1MigrationState:
+    try: revisions=tuple(script_directory.walk_revisions())
+    except CommandError as error:
+        raise RuntimeError("phase1 migration graph mismatch") from error
+    by_id={revision.revision:revision for revision in revisions}
+    if len(by_id)!=len(revisions) or set(by_id)!=set(MANDATORY_PHASE1_REVISIONS):
+        raise RuntimeError("phase1 migration graph mismatch")
+    for index,revision_id in enumerate(MANDATORY_PHASE1_REVISIONS):
+        revision=by_id[revision_id]
+        expected_parent=None if index==0 else MANDATORY_PHASE1_REVISIONS[index-1]
+        dependencies=getattr(
+            revision,"dependencies",getattr(revision,"depends_on",None),
+        )
+        if (revision.down_revision!=expected_parent
+            or bool(getattr(revision,"branch_labels",None))
+            or bool(dependencies)):
+            raise RuntimeError("phase1 migration graph mismatch")
+    actual=tuple(connection.exec_driver_sql(
+        "SELECT version_num FROM alembic_version ORDER BY version_num"
+    ).scalars())
+    expected_heads=(MANDATORY_PHASE1_REVISIONS[-1],)
+    if actual!=expected_heads:
+        raise RuntimeError(
+            f"phase1 migration head mismatch: expected={expected_heads!r} actual={actual!r}"
+        )
+    table_present=connection.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        f"AND name='{SEARCH_VERSION_TABLE}'"
+    ).scalar_one_or_none() is not None
+    if not search_enabled:
+        if search_script_directory is not None:
+            raise RuntimeError("phase1 migration graph mismatch")
+        if table_present:
+            raise RuntimeError("phase1 migration head mismatch: absent search version table")
+        search_heads=()
+    else:
+        if search_script_directory is None:
+            raise RuntimeError("phase1 migration graph mismatch")
+        try: search_revisions=tuple(search_script_directory.walk_revisions())
+        except CommandError as error:
+            raise RuntimeError("phase1 migration graph mismatch") from error
+        if len(search_revisions)!=1 or search_revisions[0].revision!=SEARCH_FEATURE_HEAD:
+            raise RuntimeError("phase1 migration graph mismatch")
+        search_revision=search_revisions[0]
+        search_dependencies=getattr(
+            search_revision,"dependencies",getattr(search_revision,"depends_on",None),
+        )
+        if (search_revision.down_revision is not None
+            or bool(getattr(search_revision,"branch_labels",None))
+            or bool(search_dependencies)):
+            raise RuntimeError("phase1 migration graph mismatch")
+        if not table_present:
+            raise RuntimeError("phase1 migration head mismatch: search version table absent")
+        search_heads=tuple(connection.exec_driver_sql(
+            f"SELECT version_num FROM {SEARCH_VERSION_TABLE} ORDER BY version_num"
+        ).scalars())
+        if search_heads!=(SEARCH_FEATURE_HEAD,):
+            raise RuntimeError("phase1 migration head mismatch: search feature head")
+    return Phase1MigrationState(actual,search_heads,search_enabled)
+
+
+class MemorySubjectAuthorityHandler:
+    async def revoke_in_uow(
+        self,uow,*,household_id,subject_id,through_generation,reason,now,
+    ):
+        await uow.memory_proposals.cancel_pending_through_generation(
+            household_id,subject_id,through_generation,reason=reason,now=now,
+        )
+
+def install_memory_revocation_handlers(
+    transactional,post_commit,*,capability_stage,effects,heartbeats,uow_factory,
+):
+    capability_stage.require_schema_and_facades_installed(
+        "memory_authorities","0004_memory",(uow_factory.memory_proposals,),
+    )
+    transactional["memory_authorities"]=MemorySubjectAuthorityHandler()
+    post_commit["memory_authorities"]=MemoryAuthorityRevocationHandler(
+        effects,heartbeats,uow_factory,
+    )
+    if isinstance(post_commit["memory_authorities"],NotInstalledAuthorityRevocationHandler):
+        raise RuntimeError("revocation handler schema stage mismatch")
+
 def register_phase1_local_action_providers(registry, *, identity, memory, timer, search):
     for provider in (identity, memory, timer, search):
         registry.register_local(provider)
@@ -5234,18 +7025,48 @@ def build_consent_revocation_handlers(*, biometric, cloud_routes, search_routes,
     }
 ```
 
+```python
+# apps/core/src/tuntun_core/bootstrap/lifecycle.py (final Phase-1 bootstrap)
+async def bootstrap_final_phase1_identity(
+    *,migration_connection,script_directory,search_script_directory,
+    feature_registry,facades,
+    handler_composer,revocation_worker,readiness,task_group,stop,
+):
+    readiness.clear()
+    search_enabled=feature_registry.require_closed_state("experimental_search")=="enabled"
+    migration_state=require_final_phase1_migration_state(
+        migration_connection,script_directory,search_script_directory,
+        search_enabled=search_enabled,
+    )
+    # No typed facade, real handler, recovery task, or readiness side effect is
+    # constructed until the exact core plus absent/enabled feature namespaces pass.
+    registered=facades.register_all_for_phase1(migration_state)
+    transactional,post_commit=handler_composer.compose_exact(
+        migration_state=migration_state,facades=registered,
+    )
+    if any(type(item).__name__.startswith("NotInstalled") for item in (
+        transactional["action_authorities"],transactional["memory_authorities"],
+        post_commit["action_authorities"],post_commit["memory_authorities"],
+    )):
+        raise RuntimeError("revocation handler schema stage mismatch")
+    await start_identity_runtime(
+        transactional,revocation_worker,readiness,task_group,stop,
+    )
+    return migration_state
+```
+
 - [ ] **Step 4: Run green and repository tests**
 
-Run: `uv run pytest tests/unit/memory/test_write_policy.py tests/security/test_memory_write_policy.py tests/security/test_memory_deletion.py tests/integration/memory/test_memory_approval.py tests/unit/actions/test_memory_action_provider.py tests/integration/memory/test_repository.py -q`
-Expected: PASS; pending/rejected claims are never recalled, rejection destroys the wrapped DEK, and approval is idempotent.
+Run: `uv run pytest tests/unit/memory/test_write_policy.py tests/security/test_memory_write_policy.py tests/security/test_memory_deletion.py tests/integration/memory/test_memory_approval.py tests/unit/actions/test_memory_action_provider.py tests/integration/memory/test_repository.py tests/integration/identity/test_subject_revocation_handlers.py tests/integration/storage/test_migrations.py -q`
+Expected: PASS; pending/rejected claims are never recalled, rejection destroys the wrapped DEK, approval is idempotent, and final startup always requires the exact linear core `0001_foundation` through sole head `0008_prepared_mutations`, plus either no search namespace/version table or the independent exact `search_0001_experimental_search` namespace and sole feature-table head, with no hidden graph metadata or revision before registering facades or composing exact real action/memory revocation handlers.
 
 - [ ] **Step 5: Check and commit**
 
-Run: `uv run ruff format --check apps/core/src/tuntun_core/services/memory/proposal_mapper.py apps/core/src/tuntun_core/services/memory/proposals.py apps/core/src/tuntun_core/services/memory/write_policy.py apps/core/src/tuntun_core/services/memory/approval.py apps/core/src/tuntun_core/services/actions/providers/memory.py apps/core/src/tuntun_core/bootstrap/container.py tests/unit/memory/test_write_policy.py tests/security/test_memory_write_policy.py tests/security/test_memory_deletion.py tests/integration/memory/test_memory_approval.py tests/unit/actions/test_memory_action_provider.py && uv run ruff check apps/core/src/tuntun_core/services/memory/proposal_mapper.py apps/core/src/tuntun_core/services/memory/proposals.py apps/core/src/tuntun_core/services/memory/write_policy.py apps/core/src/tuntun_core/services/memory/approval.py apps/core/src/tuntun_core/services/actions/providers/memory.py apps/core/src/tuntun_core/bootstrap/container.py tests/unit/memory/test_write_policy.py tests/security/test_memory_write_policy.py tests/security/test_memory_deletion.py tests/integration/memory/test_memory_approval.py tests/unit/actions/test_memory_action_provider.py && uv run mypy apps/core/src/tuntun_core/services/memory apps/core/src/tuntun_core/services/actions/providers/memory.py apps/core/src/tuntun_core/bootstrap/container.py`
+Run: `uv run ruff format --check apps/core/src/tuntun_core/services/memory/proposal_mapper.py apps/core/src/tuntun_core/services/memory/proposals.py apps/core/src/tuntun_core/services/memory/write_policy.py apps/core/src/tuntun_core/services/memory/approval.py apps/core/src/tuntun_core/services/actions/providers/memory.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/bootstrap/lifecycle.py tests/unit/memory/test_write_policy.py tests/security/test_memory_write_policy.py tests/security/test_memory_deletion.py tests/integration/memory/test_memory_approval.py tests/unit/actions/test_memory_action_provider.py && uv run ruff check apps/core/src/tuntun_core/services/memory/proposal_mapper.py apps/core/src/tuntun_core/services/memory/proposals.py apps/core/src/tuntun_core/services/memory/write_policy.py apps/core/src/tuntun_core/services/memory/approval.py apps/core/src/tuntun_core/services/actions/providers/memory.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/bootstrap/lifecycle.py tests/unit/memory/test_write_policy.py tests/security/test_memory_write_policy.py tests/security/test_memory_deletion.py tests/integration/memory/test_memory_approval.py tests/unit/actions/test_memory_action_provider.py && uv run mypy apps/core/src/tuntun_core/services/memory apps/core/src/tuntun_core/services/actions/providers/memory.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/bootstrap/lifecycle.py`
 Expected: PASS with exit code 0.
 
 ```bash
-git add apps/core/src/tuntun_core/services/memory/proposal_mapper.py apps/core/src/tuntun_core/services/memory/proposals.py apps/core/src/tuntun_core/services/memory/write_policy.py apps/core/src/tuntun_core/services/memory/approval.py apps/core/src/tuntun_core/services/actions/providers/memory.py apps/core/src/tuntun_core/bootstrap/container.py prompts/memory/proposal-schema.json tests/unit/memory/test_write_policy.py tests/security/test_memory_write_policy.py tests/security/test_memory_deletion.py tests/integration/memory/test_memory_approval.py tests/unit/actions/test_memory_action_provider.py
+git add apps/core/src/tuntun_core/services/memory/proposal_mapper.py apps/core/src/tuntun_core/services/memory/proposals.py apps/core/src/tuntun_core/services/memory/write_policy.py apps/core/src/tuntun_core/services/memory/approval.py apps/core/src/tuntun_core/services/actions/providers/memory.py apps/core/src/tuntun_core/services/identity/subject_revocation.py apps/core/src/tuntun_core/services/identity/subject_revocation_handlers.py apps/core/src/tuntun_core/bootstrap/container.py apps/core/src/tuntun_core/bootstrap/lifecycle.py prompts/memory/proposal-schema.json tests/unit/memory/test_write_policy.py tests/security/test_memory_write_policy.py tests/security/test_memory_deletion.py tests/integration/memory/test_memory_approval.py tests/unit/actions/test_memory_action_provider.py tests/integration/identity/test_subject_revocation_handlers.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(memory): govern proposal approval lifecycle"
@@ -5284,6 +7105,18 @@ git commit -m "feat(memory): govern proposal approval lifecycle"
 
 ```python
 # tests/unit/memory/test_retrieval.py
+from tuntun_core.services.memory.context import ProviderDraft
+from tuntun_core.services.memory.retrieval import RetrievalResult,ScopedRecallQuery
+
+def test_retrieval_and_provider_context_collections_have_schema_caps():
+    expected={
+        (ScopedRecallQuery,"tags"):16,(ScopedRecallQuery,"kinds"):7,
+        (RetrievalResult,"memories"):6,(ProviderDraft,"messages_without_memory"):32,
+        (ProviderDraft,"memory_claims"):6,
+    }
+    for (model,field),maximum in expected.items():
+        assert model.model_json_schema()["properties"][field]["maxItems"]==maximum
+
 import pytest
 
 @pytest.mark.asyncio
@@ -5406,19 +7239,33 @@ from tuntun_core.domain.profile import ConsentPurpose, ProfileClass
 from tuntun_core.services.identity.consent import ConsentDenied
 
 class SelectedMemory(BaseModel):
-    model_config=ConfigDict(frozen=True)
+    model_config=ConfigDict(frozen=True,extra="forbid",strict=True)
     memory_id: UUID; score_micros: int; recency_micros: int; minimal_claim: str; local_reason_code: str
     content_commitment: Commitment; recall_authorization_id: UUID
     def to_provider_claim(self): return {"claim": self.minimal_claim}
 
 class ScopedRecallQuery(BaseModel):
-    model_config=ConfigDict(frozen=True)
-    household_id: UUID; subject_id: UUID|None; session_id: UUID; identity_decision: IdentityDecision; recall_policy: PolicyDecision; text: str; tags: tuple[str,...]; kinds: tuple[MemoryKind,...]; maximum_sensitivity: Sensitivity; provider_draft: ProviderDraft
+    model_config=ConfigDict(frozen=True,extra="forbid",strict=True)
+    household_id: UUID; subject_id: UUID|None; session_id: UUID; identity_decision: IdentityDecision; recall_policy: PolicyDecision; text: str
+    tags: Annotated[tuple[Annotated[str,Field(min_length=1,max_length=64)],...],Field(min_length=0,max_length=16)]
+    kinds: Annotated[tuple[MemoryKind,...],Field(min_length=1,max_length=7)]
+    maximum_sensitivity: Sensitivity; provider_draft: ProviderDraft
+    @field_validator("tags","kinds")
+    @classmethod
+    def unique_recall_filters(cls,value):
+        if len(set(value))!=len(value): raise ValueError("duplicate recall filter")
+        return value
     def to_memory_query(self,limit): return MemoryQuery(household_id=self.household_id,subject_id=self.subject_id,kinds=self.kinds,maximum_sensitivity=self.maximum_sensitivity,limit=min(limit,6))
 
 class RetrievalResult(BaseModel):
-    model_config=ConfigDict(frozen=True)
-    memories: tuple[SelectedMemory,...]; serialized_context_tokens: int; degraded: bool; route: str
+    model_config=ConfigDict(frozen=True,extra="forbid",strict=True)
+    memories: Annotated[tuple[SelectedMemory,...],Field(min_length=0,max_length=6)]
+    serialized_context_tokens: int; degraded: bool; route: str
+    @field_validator("memories")
+    @classmethod
+    def unique_memories(cls,value):
+        if len({item.memory_id for item in value})!=len(value): raise ValueError("duplicate retrieved memory")
+        return value
     @classmethod
     def empty(cls,route): return cls(memories=(),serialized_context_tokens=0,degraded=False,route=route)
 
@@ -5563,15 +7410,21 @@ class RecallAuthorizationService:
 
 ```python
 # apps/core/src/tuntun_core/services/memory/context.py
-from pydantic import BaseModel, ConfigDict
+from typing import Annotated,Literal
+from pydantic import BaseModel, ConfigDict, Field
+from tuntun_contracts.provider import SanitizedProviderMessage
 from tuntun_core.services.memory.recall_authorization import RecallAuthorizationDenied
 
+class ProviderMemoryClaim(BaseModel):
+    model_config=ConfigDict(frozen=True,extra="forbid",strict=True)
+    claim:Annotated[str,Field(min_length=1,max_length=2_000)]
+
 class ProviderDraft(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-    provider: str
-    model: str
-    messages_without_memory: tuple[dict[str, str], ...]
-    memory_claims: tuple[dict[str, str], ...] = ()
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    provider:Literal["openai","qwen"]
+    model:Annotated[str,Field(min_length=1,max_length=128)]
+    messages_without_memory:Annotated[tuple[SanitizedProviderMessage,...],Field(min_length=1,max_length=32)]
+    memory_claims:Annotated[tuple[ProviderMemoryClaim,...],Field(min_length=0,max_length=6)]=()
 
 class MemoryContextBuilder:
     def __init__(self, sanitizer, token_counter, recall_authorizations, clock):
@@ -5585,7 +7438,14 @@ class MemoryContextBuilder:
                 await self._recall_authorizations.require_current_exact(tuple(bounded), now=self._clock.now())
             except RecallAuthorizationDenied:
                 bounded.clear()
-            unsanitized = provider_draft.model_copy(update={"memory_claims": tuple(item.to_provider_claim() for item in bounded)})
+            unsanitized=ProviderDraft(
+                provider=provider_draft.provider,model=provider_draft.model,
+                messages_without_memory=provider_draft.messages_without_memory,
+                memory_claims=tuple(
+                    ProviderMemoryClaim.model_validate(item.to_provider_claim())
+                    for item in bounded
+                ),
+            )
             request = self._sanitizer.sanitize_and_commit_route(unsanitized)
             if self._token_counter.count_serialized(request) <= maximum_tokens:
                 return tuple(bounded), request, self._token_counter.count_serialized(request)
@@ -5726,7 +7586,7 @@ The owner signs B1 only when:
 - adult self-consent and guardian-child consent tests pass;
 - passive/background discovery and unknown-candidate storage are absent across contracts, configuration, migrations, routes, feature manifests, UI projections, and runtime consumers;
 - face and voice models have immutable hashes, accepted licenses/provenance, target-Mac calibration, and accepted presentation/replay results;
-- unavailable or failed liveness produces personalization-only identity and cannot authorize an action;
+- unavailable or failed liveness produces Guest and cannot authorize an action; explicit non-biometric identity selection remains a separate personalization-only path;
 - conflict, ambiguity, expiry, revocation, or a child template past its 365-day hard expiry produces Guest;
 - every model action remains a pending typed proposal until local policy/auth/idempotency execution;
 - seven memory kinds, approval rules, immutable revisions, 1,000-case isolation, six-item limit, and 8,000-token ceiling pass;

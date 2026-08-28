@@ -22,7 +22,7 @@
 8. Every sensitive body is reveal-on-demand, never prefetched, and returned only after server-side object/audience/subject/guardian/assurance checks. Opaque administration never becomes a body/title/source/provenance/commitment/search/count oracle. Anonymous and Designated Guests receive no memory object at all.
 9. Every mutation follows `prepare -> render immutable server summary -> satisfy exact principal slots -> consume once -> render correlated result`. Editing, expiry, replay, resource/policy/privacy/guardian-generation drift, idempotency mismatch, subject substitution, or slot substitution invalidates the action.
 10. Multi-principal actions use `all_named_distinct_principals`; each required slot is named `owner`, `subject_adult`, or `current_primary_guardian`, and distinctness is enforced by the server against one immutable prepared commitment. The browser cannot collapse or satisfy slots.
-11. Operation results are complete and manifest-ordered. `partial` requires at least two targets with mixed terminal outcomes. `verified` requires every target to be freshly verified at the required strength. Unknown or unobserved physical state never appears as success.
+11. Operation results are complete and manifest-ordered. `verified` requires every target to be freshly verified at the required strength. A result kind that means partial success requires at least two targets with mixed terminal outcomes and at least one freshly verified successful effect; accepted-unverified, failed, expired, and unknown mixtures without a verified effect remain non-success/unknown according to the domain contract. Unknown or unobserved physical state never appears as success.
 12. Signed feature registration controls backend route, OpenAPI operation, prepared-action issuance, console navigation/direct URL, dynamic import, client chunk, display variant, Reachy intent/prompt, configuration, IPC/listener, and runtime dispatch. A disabled control or hidden navigation link is not absence.
 13. Unknown schema major versions, enum members, discriminators, decision types, action names, plane IDs, result kinds, observation states, or display variants fail closed to a localized safe incompatibility surface and never mutate or render untrusted content.
 14. Private payload responses use `Cache-Control: no-store`. No service worker, analytics SDK, error body telemetry, browser persistent private storage, IndexedDB, local/session storage, background push, reusable media URL, secret in query strings, or private history entry is permitted.
@@ -37,7 +37,7 @@
 23. The Phase 3 owner alert path is a durable local inbox plus authenticated same-origin SSE with `Last-Event-ID` replay/deduplication. Browser Notifications exist only while an active paired page has permission. Closed/asleep pages create local unread state, never an immediate-delivery claim.
 24. The Phase 4 room-node UI always separates hardware mute, local wake listening, leased capture/network transmission, and indicator evidence. Purchased and DIY candidates use one bakeoff contract; an unevidenced endpoint is quarantined/absent.
 25. Music Assistant is optional and absent unless its exact deployment, legal-provider, least-privilege, resource, backup, playback, reboot, WAN, and credential-revocation gates pass. Media controls use only closed handles/actions and truthful player observations.
-26. The household televisions are the exact Samsung Neo LED 49-inch and TCL 42-inch units. Each begins `DISPLAY_ONLY_MANUAL`; no generic brand/model promise, control route, screen-time strength, or strict enforcement appears until exact physical adapter and observation evidence passes.
+26. The household televisions are the exact Samsung Neo LED 49-inch and TCL 42-inch units. Each begins `UNCOMMISSIONED`; exact-unit identity plus successful manual-HDMI evidence may promote only that unit to `DISPLAY_ONLY_MANUAL`. No generic brand/model promise, control route, screen-time strength, or strict enforcement appears until the matching exact physical evidence passes.
 27. The Phase 4 guarded-child teaching UI renders the canonical wire value `web_mode=no_web` as a fixed, read-only policy fact. It exposes no enable-web/search control or API/prepared-action mutation and produces zero child search calls. Its end summary is RAM-only and expires within five minutes. It is not memory, audit content, progress history, or a durable learning profile. Any durable learning item is a separate proposal and guardian ceremony.
 28. Corpus import, native picker, corpus administration, desktop grants/jobs/output, selected-frame perception administration/calibration views, and robot supervision are owner-only. The locked Phase 5 selected-frame runtime may still be invoked by its commissioned native-event broker or explicit owner calibration path; this grants no child, Guest, other-adult, or remote UI/control authority. For unauthorized actors and absent features, the picker/API/prepared action/route/chunk is absent rather than hidden.
 29. Desktop execution-network authority and model-egress authority are separate. The UI shows exact roots/files/content/output commitments, provider/model, purpose, sensitivity, disclosure/policy, writes, limits, expiry, and rollback; neither grant implies the other.
@@ -146,7 +146,7 @@ apps/edge/src/tuntun_edge/presentation/
 apps/display-agent/src-ui/
 ├── main.tsx
 ├── projection-validator.ts
-├── expiry-supervisor.ts
+├── expiry-supervisor.tsx
 ├── neutral-screen.tsx
 └── components/
 
@@ -171,7 +171,7 @@ Existing phase-owned paths remain canonical where their plans already create the
 | U5 Phase 4 surfaces | U17–U19 | Room voice, media, signed display/teaching, exact TVs and real screen time pass physical gates |
 | U6 Phase 5 surfaces | U20–U22 | Local AI/corpus, desktop/egress, advisory CV, and supervised robot boundaries pass |
 | U7 Phase 6 surfaces | U23–U25 | Tailscale, exact plugins, recovery/update/release/incident surfaces pass |
-| U8 whole-system assurance | U26–U28 | Security/no-store/negative reachability, accessibility/visual/performance, fault/maintenance/release evidence pass |
+| U8 whole-system assurance | U26–U28 | U8A commits security/accessibility/fault/release-verifier tooling before the final Phase 6 build; U8B later accepts maintenance/release evidence on that exact frozen candidate without a tracked or artifact change |
 
 ---
 
@@ -182,7 +182,7 @@ Existing phase-owned paths remain canonical where their plans already create the
 **Estimated effort:** 2 person-days.
 
 **Files:**
-- Modify: `packages/contracts/src/tuntun_contracts/ui.py`
+- Create: `packages/contracts/src/tuntun_contracts/ui.py`
 - Create: `schemas/ui/v1/household-posture-v1.schema.json`
 - Create: `schemas/ui/v1/plane-fact-v1.schema.json`
 - Create: `schemas/ui/v1/privacy-effect-status-v1.schema.json`
@@ -194,7 +194,13 @@ Existing phase-owned paths remain canonical where their plans already create the
 - Create: `schemas/ui/v1/display-projection-v1.schema.json`
 - Modify: `packages/contracts/openapi/admin-v1.yaml`
 - Create: `packages/contracts/openapi/subject-privacy-v1.yaml`
+- Modify: `apps/admin/package.json`
+- Modify: `pnpm-lock.yaml`
 - Create: `packages/ui-contracts/package.json`
+- Create: `packages/ui-contracts/tsconfig.json`
+- Create: `packages/ui-contracts/tsconfig.build.json`
+- Create: `packages/ui-contracts/vitest.config.ts`
+- Create: `packages/ui-contracts/eslint.config.js`
 - Create: `packages/ui-contracts/src/generated/ui-v1.ts`
 - Create: `packages/ui-contracts/src/strict-decoders.ts`
 - Modify: `apps/admin/src/api/generated/admin-v1.ts`
@@ -205,6 +211,130 @@ Existing phase-owned paths remain canonical where their plans already create the
 - Test: `packages/ui-contracts/tests/unknown-values.test.ts`
 
 **Interfaces:** Produces the nine frozen UI DTO families above, strict `additionalProperties: false` schemas, deterministic JSON Schema/OpenAPI/TypeScript artifacts, and decoders that return a safe incompatible result without rendering an unknown payload.
+
+```python
+UiPlane = Literal[
+    "reachy_mic", "reachy_identity_camera", "room_mic", "reolink_recorder",
+    "camera_outcomes", "selected_frame_perception", "cloud_egress", "durable_memory",
+    "home_action_dispatch", "home_assistant_independent", "media_control",
+    "independent_media", "display_projection", "local_inference", "desktop",
+    "robot", "plugin", "lan_admin", "vpn_remote",
+]
+UiFactState = Literal[
+    "healthy", "active", "disabled", "absent", "degraded", "stale", "unknown",
+    "suspended", "quarantined", "error_safe",
+]
+RegisteredUiController = Literal[
+    "core", "reachy", "room_endpoint", "reolink_recorder", "home_assistant",
+    "media_controller", "display_agent", "model_proxy", "desktop_helper",
+    "robot_safety", "plugin_supervisor", "vpn_adapter",
+]
+RegisteredUiEvidenceSource = Literal[
+    "local_process", "paired_endpoint", "home_assistant", "camera_source", "recorder",
+    "player_adapter", "display_agent", "model_proxy", "desktop_helper", "robot_safety",
+    "plugin_supervisor", "vpn_adapter",
+]
+RegisteredOwnerRoute = Literal[
+    "overview", "people_identity", "privacy", "cameras", "areas", "routines",
+    "media_learning", "ai_workspace", "system", "remote_access",
+]
+UiPrivacyShieldAuthorityState = Literal[
+    "inactive", "activating", "active_authority_revoked",
+    "active_with_unverified_stops", "error_safe_unconfirmed",
+]
+UiPrivacyEffectId = Literal[
+    "p1.conversation_capture", "p2.tuntun_home_dispatch", "p3.camera_outcomes",
+    "p4.room_media_display", "p5.private_ai_desktop_robot", "p6.remote_plugin",
+    "shared_display_projection",
+]
+
+class UiAttentionCountsV1(StrictUiContract):
+    critical: Annotated[int, Field(ge=0, le=1_000_000)]
+    warning: Annotated[int, Field(ge=0, le=1_000_000)]
+    info: Annotated[int, Field(ge=0, le=1_000_000)]
+
+class PrivacyEffectStatusV1(StrictUiContract):
+    schema_id: Literal["ui.privacy_effect_status.v1"] = "ui.privacy_effect_status.v1"
+    effect_id: UiPrivacyEffectId
+    privacy_generation: Annotated[int, Field(ge=1)]
+    state: Literal["authority_revoked", "stop_requested", "acknowledged", "physically_verified", "unverified"]
+    authority_revoked_at: AwareDatetime
+    stop_requested_at: AwareDatetime | None
+    acknowledged_at: AwareDatetime | None
+    physically_verified_at: AwareDatetime | None
+    deadline_at: AwareDatetime | None
+    controller: RegisteredUiController
+    reason_code: SafeReasonCode
+
+    @model_validator(mode="after")
+    def monotonic_privacy_effect_evidence(self) -> "PrivacyEffectStatusV1":
+        ordered = tuple(value for value in (
+            self.authority_revoked_at, self.stop_requested_at,
+            self.acknowledged_at, self.physically_verified_at,
+        ) if value is not None)
+        if ordered != tuple(sorted(ordered)):
+            raise ValueError("privacy_effect_timestamps_reordered")
+        required = {
+            "authority_revoked": (False, False, False),
+            "stop_requested": (True, False, False),
+            "acknowledged": (True, True, False),
+            "physically_verified": (True, True, True),
+        }.get(self.state)
+        present = tuple(value is not None for value in (
+            self.stop_requested_at, self.acknowledged_at, self.physically_verified_at,
+        ))
+        if required is not None and present != required:
+            raise ValueError("privacy_effect_state_evidence_mismatch")
+        if self.deadline_at is not None and self.deadline_at < self.authority_revoked_at:
+            raise ValueError("privacy_effect_deadline_precedes_revocation")
+        return self
+
+class PlaneFactV1(StrictUiContract):
+    schema_id: Literal["ui.plane_fact.v1"] = "ui.plane_fact.v1"
+    fact_id: UUID
+    plane: UiPlane
+    state: UiFactState
+    controller: RegisteredUiController
+    evidence_source: RegisteredUiEvidenceSource
+    source_generation: Annotated[int, Field(ge=1)]
+    verification_strength: Literal["authoritative", "corroborated", "acknowledged_unverified", "none"]
+    reason_code: SafeReasonCode
+    safe_summary_message_id: RegisteredMessageId
+    evidence_observed_at: AwareDatetime
+    valid_until: AwareDatetime
+    evidence_commitment: HmacCommitment
+    owner_route: RegisteredOwnerRoute
+
+    @model_validator(mode="after")
+    def positive_source_window(self) -> "PlaneFactV1":
+        if self.evidence_observed_at >= self.valid_until:
+            raise ValueError("plane_fact_source_window_invalid")
+        return self
+
+class HouseholdPostureV1(StrictUiContract):
+    schema_id: Literal["ui.household_posture.v1"] = "ui.household_posture.v1"
+    generated_at: AwareDatetime
+    valid_until: AwareDatetime
+    feature_manifest_version: Annotated[int, Field(ge=1)]
+    route_origin_class: Literal["localhost", "paired_lan", "owner_vpn"]
+    facts: Annotated[tuple[PlaneFactV1, ...], Field(max_length=32)]
+    attention_counts_by_severity: UiAttentionCountsV1
+    privacy_shield_generation: Annotated[int, Field(ge=1)]
+    privacy_shield_authority_state: UiPrivacyShieldAuthorityState
+    privacy_effects: Annotated[tuple[PrivacyEffectStatusV1, ...], Field(max_length=16)]
+
+    @model_validator(mode="after")
+    def wrapper_never_freshens_source_fact(self) -> "HouseholdPostureV1":
+        if not self.generated_at < self.valid_until <= self.generated_at + timedelta(seconds=30):
+            raise ValueError("household_posture_window_invalid")
+        if any(fact.valid_until <= self.generated_at and fact.state != "stale" for fact in self.facts):
+            raise ValueError("plane_fact_source_stale")
+        if any(fact.state != "stale" and self.valid_until > fact.valid_until for fact in self.facts):
+            raise ValueError("household_wrapper_extends_source_validity")
+        if len({fact.fact_id for fact in self.facts}) != len(self.facts):
+            raise ValueError("duplicate_plane_fact")
+        return self
+```
 
 - [ ] **Step 1: Write the failing schema and decoder tests**
 
@@ -238,6 +368,24 @@ def test_subject_privacy_openapi_has_only_exact_persona_ceremonies(subject_priva
 def test_operation_result_cannot_invent_verified(result_factory) -> None:
     with pytest.raises(ValidationError):
         result_factory(outcome="verified", target_results=[{"outcome": "unknown"}])
+
+def test_fresh_wrapper_cannot_freshen_stale_plane_fact(plane_fact_factory, household_posture_factory, now) -> None:
+    stale = plane_fact_factory(source_generation=7, evidence_observed_at=now - timedelta(minutes=5), valid_until=now - timedelta(minutes=4))
+    with pytest.raises(ValidationError, match="plane_fact_source_stale"):
+        household_posture_factory(generated_at=now, facts=(stale,))
+
+def test_household_posture_schema_resolves_only_closed_defined_types() -> None:
+    schema = HouseholdPostureV1.model_json_schema()
+    assert set(TypeAdapter(UiPlane).json_schema()["enum"]) == EXPECTED_UI_PLANES
+    assert set(TypeAdapter(UiFactState).json_schema()["enum"]) == EXPECTED_UI_FACT_STATES
+    assert set(TypeAdapter(UiPrivacyEffectId).json_schema()["enum"]) == EXPECTED_PRIVACY_EFFECT_IDS
+    assert set(UiAttentionCountsV1.model_fields) == {"critical", "warning", "info"}
+    assert schema["properties"]["facts"] and schema["properties"]["privacy_effects"]
+
+def test_wrapper_validity_cannot_outlive_nonstale_fact(plane_fact_factory, household_posture_factory, now) -> None:
+    fact = plane_fact_factory(evidence_observed_at=now, valid_until=now + timedelta(seconds=5))
+    with pytest.raises(ValidationError, match="household_wrapper_extends_source_validity"):
+        household_posture_factory(generated_at=now, valid_until=now + timedelta(seconds=6), facts=(fact,))
 ```
 
 ```ts
@@ -248,22 +396,42 @@ it.each(["new_plane", "new_decision", "html_card"])("fails closed for %s", (valu
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/contract/ui/test_ui_contracts.py -q && pnpm --dir packages/ui-contracts exec vitest run`
+Run: `uv run pytest tests/contract/ui/test_ui_contracts.py -q && pnpm --filter @tuntun/ui-contracts test`
 Expected: FAIL because the UI schema module, generated package, and strict decoders do not exist.
 
 - [ ] **Step 3: Implement and generate**
 
-Define every field and exact enum from UI/UX Section 21. Add Pydantic validators for complete ordered target results, legal aggregate outcomes, one matching closed display payload, slot distinctness shape, per-fact expiry, and `area_id`-only location. Generate schemas and clients in byte-stable sorted order. Keep canonical entities out of public DTO modules.
+Define every field and exact enum from UI/UX Section 21. Add Pydantic validators for complete ordered target results, legal aggregate outcomes, one matching closed display payload, slot distinctness shape, and `area_id`-only location. Each `ui.plane_fact.v1` carries its own source generation, observation time, validity deadline, and evidence commitment; wrapper generation time can only shorten, never extend, source validity. Generate schemas and clients in byte-stable sorted order. Keep canonical entities out of public DTO modules.
+
+The package owns its command and dependency surface rather than relying on an ambient workspace executable:
+
+```json
+{
+  "name": "@tuntun/ui-contracts",
+  "private": true,
+  "type": "module",
+  "exports": {".": "./src/strict-decoders.ts", "./generated": "./src/generated/ui-v1.ts"},
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {"@eslint/js":"9.34.0","eslint":"9.34.0","globals":"16.3.0","typescript":"5.9.2","typescript-eslint":"8.41.0","vitest":"3.2.4"}
+}
+```
+
+`tsconfig.json` uses strict `ES2022`/`ESNext`/`Bundler` settings, `noEmit`, `skipLibCheck`, and includes only `src` and `tests`; `tsconfig.build.json` extends it, excludes tests, and emits declarations to `dist`; `vitest.config.ts` includes exactly `tests/**/*.test.ts`; and the flat ESLint config covers `src/**/*.ts` and `tests/**/*.ts`. Add `"@tuntun/ui-contracts":"workspace:*"` to admin dependencies, then regenerate `pnpm-lock.yaml` with `pnpm install --lockfile-only`. No command may depend on a binary absent from its package manifest.
 
 - [ ] **Step 4: Run green and drift checks**
 
-Run: `uv run python scripts/ui/generate_contracts.py --check && uv run pytest tests/contract/ui/test_ui_contracts.py -q && pnpm --dir packages/ui-contracts exec vitest run && pnpm --dir packages/ui-contracts exec tsc --noEmit && git diff --exit-code -- schemas/ui/v1 packages/ui-contracts/src/generated packages/contracts/openapi apps/admin/src/api/generated/admin-v1.ts apps/subject-privacy/src/api/generated/subject-privacy-v1.ts`
+Run: `pnpm install --lockfile-only && pnpm install --frozen-lockfile && uv run python scripts/ui/generate_contracts.py --check && uv run pytest tests/contract/ui/test_ui_contracts.py -q && pnpm --filter @tuntun/ui-contracts test && pnpm --filter @tuntun/ui-contracts lint && pnpm --filter @tuntun/ui-contracts typecheck && pnpm --filter @tuntun/ui-contracts build && git diff --exit-code -- schemas/ui/v1 packages/ui-contracts/src/generated packages/contracts/openapi apps/admin/src/api/generated/admin-v1.ts apps/subject-privacy/src/api/generated/subject-privacy-v1.ts`
 Expected: PASS; regeneration is empty, exact enums match, unknown values fail closed, and no generated artifact contains `room_id`.
 
 - [ ] **Step 5: Commit checkpoint**
 
 ```bash
-git add packages/contracts/src/tuntun_contracts/ui.py schemas/ui/v1 packages/contracts/openapi/admin-v1.yaml packages/contracts/openapi/subject-privacy-v1.yaml packages/ui-contracts apps/admin/src/api/generated/admin-v1.ts apps/subject-privacy/src/api/generated/subject-privacy-v1.ts scripts/ui/generate_contracts.py tests/contract/ui/test_ui_contracts.py
+git add packages/contracts/src/tuntun_contracts/ui.py schemas/ui/v1 packages/contracts/openapi/admin-v1.yaml packages/contracts/openapi/subject-privacy-v1.yaml packages/ui-contracts apps/admin/package.json pnpm-lock.yaml apps/admin/src/api/generated/admin-v1.ts apps/subject-privacy/src/api/generated/subject-privacy-v1.ts scripts/ui/generate_contracts.py tests/contract/ui/test_ui_contracts.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
@@ -287,11 +455,19 @@ git commit -m "feat(ui-contracts): freeze strict six-phase presentation schemas"
 - Create: `fixtures/synthetic/ui/features/no-d4.json`
 - Create: `fixtures/adversarial/ui/invalid-contracts.jsonl`
 - Create: `packages/testing/src/tuntun_testing/ui_fake.py`
+- Modify: `pnpm-lock.yaml`
 - Create: `apps/subject-privacy/package.json`
+- Create: `apps/subject-privacy/index.html`
 - Create: `apps/subject-privacy/tsconfig.json`
+- Create: `apps/subject-privacy/vite.config.ts`
 - Create: `apps/subject-privacy/vitest.config.ts`
+- Create: `apps/subject-privacy/eslint.config.js`
+- Create: `apps/subject-privacy/playwright.config.ts`
+- Create: `apps/subject-privacy/src/test/setup.ts`
 - Create: `apps/admin/src/test/ui-server.ts`
+- Test: `apps/admin/src/test/ui-server.test.ts`
 - Create: `apps/subject-privacy/src/test/ceremony-server.ts`
+- Test: `apps/subject-privacy/src/test/ceremony-server.test.ts`
 - Create: `scripts/ui/validate_fixtures.py`
 - Create: `scripts/ui/scan_browser_artifacts.py`
 - Test: `tests/contract/ui/test_ui_fixtures.py`
@@ -320,15 +496,35 @@ Expected: FAIL because the fixture index and UI fake do not exist.
 
 Use visibly synthetic labels, monotonic fake time, deterministic SSE IDs, single-use capabilities, and explicit server outcomes. Include stale/unknown/error-safe/Privacy Shield, subject/guardian drift, duplicate submit, closed/asleep console, disk pressure, split recorder/camera, display disconnect, VPN drift, audit break, and every feature-absence fixture.
 
+Create `@tuntun/subject-privacy` with owned `dev`, `lint`, `typecheck`, `test`, `build`, and `e2e` scripts. Pin React, React DOM, `@tuntun/ui-contracts`, Vite, Vitest, Testing Library, TypeScript, ESLint, Playwright, and `@axe-core/playwright` in this package; do not rely on admin's dependency tree. Its strict TypeScript/Vite/Vitest/flat-ESLint configs include `src` and `tests`. Its Playwright config uses `testDir: "../../tests"`, matches `**/e2e/ui/subject-*.spec.ts` and `**/ui/subject-*.spec.ts`, launches only `127.0.0.1:4174` through the package `dev` script, and declares one Chromium project. The package exists under the foundation-owned `apps/*` workspace glob before any filtered invocation; regenerate and freeze-check `pnpm-lock.yaml` after adding it. `ui-server.test.ts` and `ceremony-server.test.ts` are nonzero U02 Vitest sentinels and prove the two synthetic servers' fake-clock and single-use behavior.
+
+```json
+{
+  "name": "@tuntun/subject-privacy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 4174",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "pnpm run typecheck && vite build",
+    "e2e": "playwright test"
+  },
+  "dependencies": {"@tanstack/react-query":"5.85.5","@tuntun/ui-contracts":"workspace:*","react":"19.1.1","react-dom":"19.1.1","react-intl":"7.1.11","react-router-dom":"7.8.2"},
+  "devDependencies": {"@axe-core/playwright":"4.10.2","@eslint/js":"9.34.0","@playwright/test":"1.55.0","@testing-library/jest-dom":"6.8.0","@testing-library/react":"16.3.0","@types/react":"19.1.10","@types/react-dom":"19.1.7","@vitejs/plugin-react":"5.0.2","eslint":"9.34.0","eslint-plugin-react-hooks":"5.2.0","eslint-plugin-react-refresh":"0.4.20","globals":"16.3.0","jsdom":"26.1.0","typescript":"5.9.2","typescript-eslint":"8.41.0","vite":"7.1.3","vitest":"3.2.4"}
+}
+```
+
 - [ ] **Step 4: Run green**
 
-Run: `uv run python scripts/ui/validate_fixtures.py && uv run pytest tests/contract/ui/test_ui_fixtures.py tests/privacy/ui/test_fixture_sentinel.py -q && pnpm --filter @tuntun/admin exec vitest run src/test && pnpm --filter @tuntun/subject-privacy exec vitest run src/test`
+Run: `pnpm install --lockfile-only && pnpm install --frozen-lockfile && uv run python scripts/ui/validate_fixtures.py && uv run pytest tests/contract/ui/test_ui_fixtures.py tests/privacy/ui/test_fixture_sentinel.py -q && pnpm --filter @tuntun/admin test -- src/test && pnpm --filter @tuntun/subject-privacy test -- src/test && pnpm --filter @tuntun/subject-privacy lint && pnpm --filter @tuntun/subject-privacy typecheck`
 Expected: PASS with complete deterministic fixture coverage and zero sentinel findings.
 
 - [ ] **Step 5: Commit checkpoint**
 
 ```bash
-git add fixtures/synthetic/ui fixtures/adversarial/ui packages/testing/src/tuntun_testing/ui_fake.py apps/subject-privacy/package.json apps/subject-privacy/tsconfig.json apps/subject-privacy/vitest.config.ts apps/admin/src/test/ui-server.ts apps/subject-privacy/src/test/ceremony-server.ts scripts/ui/validate_fixtures.py scripts/ui/scan_browser_artifacts.py tests/contract/ui/test_ui_fixtures.py tests/privacy/ui/test_fixture_sentinel.py
+git add fixtures/synthetic/ui fixtures/adversarial/ui packages/testing/src/tuntun_testing/ui_fake.py pnpm-lock.yaml apps/subject-privacy/package.json apps/subject-privacy/index.html apps/subject-privacy/tsconfig.json apps/subject-privacy/vite.config.ts apps/subject-privacy/vitest.config.ts apps/subject-privacy/eslint.config.js apps/subject-privacy/playwright.config.ts apps/subject-privacy/src/test/setup.ts apps/subject-privacy/src/test/ceremony-server.ts apps/subject-privacy/src/test/ceremony-server.test.ts apps/admin/src/test/ui-server.ts apps/admin/src/test/ui-server.test.ts scripts/ui/validate_fixtures.py scripts/ui/scan_browser_artifacts.py tests/contract/ui/test_ui_fixtures.py tests/privacy/ui/test_fixture_sentinel.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
@@ -353,7 +549,7 @@ git commit -m "test(ui): add deterministic six-phase presentation fixtures"
 - Test: `apps/admin/src/app/feature-registry.test.ts`
 - Test: `tests/e2e/ui/feature-absence.spec.ts`
 
-**Interfaces:** Consumes the signed feature manifest and registers only features whose backend, policy, migration, API, tests, and evidence digests match. Produces manifest-keyed dynamic imports and content-safe unavailable/not-found pages; no client-side entitlement override exists.
+**Interfaces:** Consumes the current verified signed feature manifest and registers only features whose backend, policy, migration, API, tests, and evidence digests match. This task is a registration/presentation adapter, not a feature-authority owner: Phase 1 may exercise one short-lived accepted manifest, while every Phase 2–6 runtime and campaign imports Phase 2's exact `SignedFeatureManifestV1`, `SignedFeatureManifestRolloverChainV1`, `FeatureManifestLeaseSupervisor`, and per-admission `FeatureAuthorityLease`. It adds no signer, renewal, grace, fallback manifest, rollover type, or competing lease. Produces manifest-keyed dynamic imports and content-safe unavailable/not-found pages; no client-side entitlement override exists.
 
 - [ ] **Step 1: Write failing negative-reachability tests**
 
@@ -373,16 +569,16 @@ it("does not register or import an absent feature", async () => {
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/contract/ui/test_feature_manifest.py tests/security/ui/test_feature_absence.py -q && pnpm --filter @tuntun/admin exec vitest run src/app/feature-registry.test.ts`
+Run: `uv run pytest tests/contract/ui/test_feature_manifest.py tests/security/ui/test_feature_absence.py -q && pnpm --filter @tuntun/admin test -- src/app/feature-registry.test.ts`
 Expected: FAIL because the existing registry does not yet prove the full server/OpenAPI/prepared-action/route/chunk absence chain.
 
 - [ ] **Step 3: Implement fail-closed registration**
 
-Verify manifest signature, candidate/build digest, policy/schema/migration generations, feature dependencies, evidence expiry, route origin, and exact loader ID before registration. Keep the production manifest minimal. Make each phase feature a literal dynamic import selected only after verified registration. Unknown/expired/mismatched entries remain absent.
+Verify manifest signature, candidate/build digest, policy/schema/migration generations, feature dependencies, evidence expiry, route origin, and exact loader ID before registration. From Phase 2 onward, obtain the active immutable composition only from the canonical Phase 2 supervisor and require its non-extendable wall/monotonic lease again before each route admission, preparation/consume, SSE reconnect, refresh/background iteration, or dynamic import. Equality with either deadline is expired; missing/late/reordered/drifted rollover closes admission and recomposes the feature absent. Keep the production manifest minimal. Make each phase feature a literal dynamic import selected only after verified registration. Unknown/expired/mismatched entries remain absent.
 
 - [ ] **Step 4: Run green and inspect production chunks**
 
-Run: `uv run pytest tests/contract/ui/test_feature_manifest.py tests/security/ui/test_feature_absence.py -q && pnpm --filter @tuntun/admin exec vitest run src/app/feature-registry.test.ts && pnpm --filter @tuntun/admin exec vite build && uv run python scripts/ui/check_feature_absence.py --dist apps/admin/dist --manifest fixtures/synthetic/ui/features/absent-all.json && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/feature-absence.spec.ts`
+Run: `uv run pytest tests/contract/ui/test_feature_manifest.py tests/security/ui/test_feature_absence.py -q && pnpm --filter @tuntun/admin test -- src/app/feature-registry.test.ts && pnpm --filter @tuntun/admin build && uv run python scripts/ui/check_feature_absence.py --dist apps/admin/dist --manifest fixtures/synthetic/ui/features/absent-all.json && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/feature-absence.spec.ts`
 Expected: PASS; absent features are absent from navigation, direct URL, API/OpenAPI, preparation, configuration, registration, and emitted chunks.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -402,7 +598,15 @@ git commit -m "feat(ui): gate routes and bundles with the signed feature manifes
 **Estimated effort:** 2.5 person-days.
 
 **Files:**
+- Modify: `apps/admin/package.json`
+- Modify: `pnpm-lock.yaml`
 - Create: `packages/design-system/package.json`
+- Create: `packages/design-system/tsconfig.json`
+- Create: `packages/design-system/tsconfig.build.json`
+- Create: `packages/design-system/vitest.config.ts`
+- Create: `packages/design-system/eslint.config.js`
+- Create: `packages/design-system/src/test-setup.ts`
+- Create: `packages/design-system/src/index.ts`
 - Create: `packages/design-system/src/tokens.ts`
 - Create: `packages/design-system/src/tokens.css`
 - Create: `packages/design-system/src/theme.tsx`
@@ -430,7 +634,9 @@ git commit -m "feat(ui): gate routes and bundles with the signed feature manifes
 
 - [ ] **Step 1: Write failing semantic and accessibility tests**
 
-```ts
+```tsx
+import axe from "axe-core";
+
 it.each(TRUTH_STATES)("renders %s with text, icon, and non-color meaning", (state) => {
   const view = render(<StateFact state={state} messageId={`state.${state}`} />);
   expect(view.getByRole("status")).toHaveAccessibleName();
@@ -439,28 +645,48 @@ it.each(TRUTH_STATES)("renders %s with text, icon, and non-color meaning", (stat
 
 it("keeps destructive confirmation focus trapped and cancellable", async () => {
   const view = render(<PreparedActionDialog fixture="delete-one" />);
-  expect(await axe(view.container)).toHaveNoViolations();
+  const result = await axe.run(view.container);
+  expect(result.violations.filter(({impact}) => impact === "serious" || impact === "critical")).toHaveLength(0);
 });
 ```
 
 - [ ] **Step 2: Run red**
 
-Run: `pnpm --dir packages/design-system exec vitest run && pnpm --filter @tuntun/admin exec playwright test tests/ui/design-system-accessibility.spec.ts`
+Run: `pnpm --filter @tuntun/design-system test && pnpm --filter @tuntun/admin e2e -- tests/ui/design-system-accessibility.spec.ts`
 Expected: FAIL because the shared package and primitives do not exist.
 
 - [ ] **Step 3: Implement tokens and primitives**
 
 Use system fonts with Devanagari coverage, 4px spacing, visible focus, 44px targets, reduced-motion media queries, non-color semantics, high contrast, and light/dark themes. Keep motion short and optional. Components accept already-authorized DTOs and stable message IDs only.
 
+Create `@tuntun/design-system` with owned `lint`, `typecheck`, `test`, and declaration-only `build` scripts and explicit React, React DOM, Testing Library, axe, TypeScript, ESLint, and Vitest dependencies. Add `"@tuntun/design-system":"workspace:*"` to admin dependencies and regenerate/freeze-check `pnpm-lock.yaml`. Its strict TS configs include `src`/`tests`, its Vitest config uses jsdom plus `src/test-setup.ts`, and its flat ESLint config covers all TS/TSX source and tests. It is selected through the foundation-owned `packages/*` workspace glob; no task invokes an unowned `tsc` or `vitest` binary.
+
+```json
+{
+  "name": "@tuntun/design-system",
+  "private": true,
+  "type": "module",
+  "exports": {".": "./src/index.ts"},
+  "scripts": {
+    "lint": "eslint src tests --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {"@tuntun/ui-contracts":"workspace:*","react":"19.1.1","react-dom":"19.1.1"},
+  "devDependencies": {"@eslint/js":"9.34.0","@testing-library/jest-dom":"6.8.0","@testing-library/react":"16.3.0","@types/react":"19.1.10","@types/react-dom":"19.1.7","axe-core":"4.10.3","eslint":"9.34.0","eslint-plugin-react-hooks":"5.2.0","globals":"16.3.0","jsdom":"26.1.0","typescript":"5.9.2","typescript-eslint":"8.41.0","vitest":"3.2.4"}
+}
+```
+
 - [ ] **Step 4: Run green and visual review**
 
-Run: `pnpm --dir packages/design-system exec vitest run && pnpm --dir packages/design-system exec tsc --noEmit && pnpm --filter @tuntun/admin exec playwright test tests/ui/design-system-accessibility.spec.ts tests/ui/design-system-visual.spec.ts`
+Run: `pnpm install --lockfile-only && pnpm install --frozen-lockfile && pnpm --filter @tuntun/design-system test && pnpm --filter @tuntun/design-system lint && pnpm --filter @tuntun/design-system typecheck && pnpm --filter @tuntun/design-system build && pnpm --filter @tuntun/admin e2e -- tests/ui/design-system-accessibility.spec.ts tests/ui/design-system-visual.spec.ts`
 Expected: PASS; axe reports zero serious/critical violations and reference images cover every truth state in both themes and contrast modes.
 
 - [ ] **Step 5: Commit checkpoint**
 
 ```bash
-git add packages/design-system apps/admin/src/styles/tokens.css apps/admin/src/styles/global.css tests/ui/design-system-accessibility.spec.ts tests/ui/design-system-visual.spec.ts
+git add packages/design-system apps/admin/package.json pnpm-lock.yaml apps/admin/src/styles/tokens.css apps/admin/src/styles/global.css tests/ui/design-system-accessibility.spec.ts tests/ui/design-system-visual.spec.ts
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
@@ -505,7 +731,7 @@ for (const locale of ["en", "hi", "mixed-script"]) {
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run python scripts/ui/check_message_catalogs.py && pnpm --filter @tuntun/admin exec playwright test tests/ui/accessibility-matrix.spec.ts tests/ui/localization-matrix.spec.ts`
+Run: `uv run python scripts/ui/check_message_catalogs.py && pnpm --filter @tuntun/admin e2e -- tests/ui/accessibility-matrix.spec.ts tests/ui/localization-matrix.spec.ts`
 Expected: FAIL because catalogs, review metadata, and the matrix harness do not exist.
 
 - [ ] **Step 3: Implement catalogs and matrix runner**
@@ -514,7 +740,7 @@ Define stable IDs for shell, truth states, every prepared action/consequence, ev
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run python scripts/ui/check_message_catalogs.py && pnpm --filter @tuntun/admin exec playwright test tests/ui/accessibility-matrix.spec.ts tests/ui/localization-matrix.spec.ts && pnpm --filter @tuntun/admin exec lint && pnpm --filter @tuntun/admin exec tsc --noEmit`
+Run: `uv run python scripts/ui/check_message_catalogs.py && pnpm --filter @tuntun/admin e2e -- tests/ui/accessibility-matrix.spec.ts tests/ui/localization-matrix.spec.ts && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck`
 Expected: PASS across English/Hindi, mixed-script, light/dark, normal/high contrast, reduced motion, narrow/wide, 200% zoom, and keyboard-only smoke paths.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -567,7 +793,7 @@ it("does not persist an authenticated or private query", async () => {
 
 - [ ] **Step 2: Run red**
 
-Run: `pnpm --filter @tuntun/admin exec vitest run src/app/shell.test.tsx && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/shell-auth.spec.ts && uv run pytest tests/security/ui/test_admin_browser_boundary.py -q`
+Run: `pnpm --filter @tuntun/admin test -- src/app/shell.test.tsx && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/shell-auth.spec.ts && uv run pytest tests/security/ui/test_admin_browser_boundary.py -q`
 Expected: FAIL because the manifest-aware shell, origin presentation, safe search, and storage guard are incomplete.
 
 - [ ] **Step 3: Implement shell and auth presentation**
@@ -576,7 +802,7 @@ Keep access proof/cookies memory-only or HttpOnly as designed; disable query per
 
 - [ ] **Step 4: Run green**
 
-Run: `pnpm --filter @tuntun/admin exec vitest run src/app/shell.test.tsx && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/shell-auth.spec.ts && uv run pytest tests/security/ui/test_admin_browser_boundary.py -q && pnpm --filter @tuntun/admin exec lint && pnpm --filter @tuntun/admin exec tsc --noEmit && pnpm --filter @tuntun/admin exec vite build`
+Run: `pnpm --filter @tuntun/admin test -- src/app/shell.test.tsx && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/shell-auth.spec.ts && uv run pytest tests/security/ui/test_admin_browser_boundary.py -q && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build`
 Expected: PASS; session/origin truth is visible, private state is not persisted, and absent navigation/chunks stay absent.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -632,7 +858,7 @@ it("never sends a browser-authored summary or policy binding", async () => {
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/unit/api/ui/test_prepared_actions.py tests/unit/api/ui/test_operation_results.py -q && pnpm --filter @tuntun/admin exec vitest run src/components/prepared-action.test.tsx`
+Run: `uv run pytest tests/unit/api/ui/test_prepared_actions.py tests/unit/api/ui/test_operation_results.py -q && pnpm --filter @tuntun/admin test -- src/components/prepared-action.test.tsx`
 Expected: FAIL because the shared projectors/components and slot/aggregate invariants do not exist.
 
 - [ ] **Step 3: Implement shared mechanics**
@@ -641,7 +867,7 @@ Reject changed parameters, stale generations, wrong slots, same-principal substi
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run pytest tests/unit/api/ui/test_prepared_actions.py tests/unit/api/ui/test_operation_results.py -q && pnpm --filter @tuntun/admin exec vitest run src/components/prepared-action.test.tsx && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/prepared-actions.spec.ts`
+Run: `uv run pytest tests/unit/api/ui/test_prepared_actions.py tests/unit/api/ui/test_operation_results.py -q && pnpm --filter @tuntun/admin test -- src/components/prepared-action.test.tsx && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/prepared-actions.spec.ts`
 Expected: PASS for refresh, back/forward, multi-tab, duplicate, expiry, policy/resource drift, privacy activation, distinct slots, complete target results, and late-result isolation.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -689,7 +915,7 @@ def test_passive_identity_surfaces_do_not_exist(route_and_bundle_probe) -> None:
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/privacy/ui/test_home_projection.py tests/security/ui/test_passive_identity_absent.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/home-identity.spec.ts`
+Run: `uv run pytest tests/privacy/ui/test_home_projection.py tests/security/ui/test_passive_identity_absent.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/home-identity.spec.ts`
 Expected: FAIL because the complete posture/safe-activity projections and explicit absence assertions are missing.
 
 - [ ] **Step 3: Implement truthful Home and identity flows**
@@ -698,7 +924,7 @@ Order attention by criticality and freshness; dismissal never changes the underl
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run pytest tests/privacy/ui/test_home_projection.py tests/security/ui/test_passive_identity_absent.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/home-identity.spec.ts && pnpm --filter @tuntun/admin exec vite build`
+Run: `uv run pytest tests/privacy/ui/test_home_projection.py tests/security/ui/test_passive_identity_absent.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/home-identity.spec.ts && pnpm --filter @tuntun/admin build`
 Expected: PASS; no composite score, private feed field, passive identity route, candidate chunk, or browser media surface exists.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -735,13 +961,15 @@ git commit -m "feat(admin): add truthful posture and explicit identity managemen
 
 ```python
 @pytest.mark.parametrize(("actor", "record", "shape"), [
-    ("owner_self", "owner_private", "body"),
-    ("adult_subject", "adult_private", "body"),
-    ("owner_admin_other_adult", "adult_private", "opaque"),
+    ("owner_self", "subject_private", "body"),
+    ("adult_subject", "subject_private", "body"),
+    ("owner_admin_other_adult", "subject_private", "opaque"),
     ("current_guardian", "guardian_child", "body"),
     ("stale_guardian", "guardian_child", "opaque"),
-    ("other_adult", "adult_private", "no_object"),
+    ("other_adult", "subject_private", "no_object"),
     ("child", "guardian_child", "no_object"),
+    ("adult_subject", "household_adults", "body"),
+    ("owner_self", "household_all", "body"),
     ("anonymous_guest", "any", "no_object"),
     ("designated_guest", "any", "no_object"),
 ])
@@ -751,16 +979,16 @@ def test_memory_projection_shape(projector, actor, record, shape):
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_memory_projection_matrix.py tests/security/ui/test_memory_oracles.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/memory-matrix.spec.ts`
+Run: `uv run pytest tests/security/ui/test_memory_projection_matrix.py tests/security/ui/test_memory_oracles.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/memory-matrix.spec.ts`
 Expected: FAIL because filters, counts, search, detail, and export do not yet share one server-side body-visibility matrix.
 
 - [ ] **Step 3: Implement matrix and UI**
 
-Authorize before list, predicate, sort, count, decrypt, serialize, export, or approval. Omit hidden fields entirely; reject hidden predicates such as audience/title/source/provenance/commitment/precise sensitivity. Policy-memory bodies are owner-only. The owner cannot approve/edit another adult's private body; blind lifecycle actions use exact count/set commitment. Guests receive 404/empty non-oracle behavior per endpoint policy, never an opaque row.
+Authorize before list, predicate, sort, count, decrypt, serialize, export, or approval. Audience values are exactly `subject_private | guardian_child | household_adults | household_all`, each with exact subject/audience/guardian/consent/child-safe-approval generations; every legacy alias is schema-unsupported. Omit hidden fields entirely; reject hidden predicates such as audience/title/source/provenance/commitment/precise sensitivity. Policy-memory bodies are owner-only. The owner cannot approve/edit another adult's private body; blind lifecycle actions use exact count/set commitment. Guests receive 404/empty non-oracle behavior per endpoint policy, never an opaque row.
 
 - [ ] **Step 4: Run green and body-prefetch scan**
 
-Run: `uv run pytest tests/security/ui/test_memory_projection_matrix.py tests/security/ui/test_memory_oracles.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/memory-matrix.spec.ts && uv run python scripts/ui/scan_browser_artifacts.py --scenario memory-matrix --forbid memory_body,title,source,commitment,ciphertext_size`
+Run: `uv run pytest tests/security/ui/test_memory_projection_matrix.py tests/security/ui/test_memory_oracles.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/memory-matrix.spec.ts && uv run python scripts/ui/scan_browser_artifacts.py --scenario memory-matrix --forbid memory_body,title,source,commitment,ciphertext_size`
 Expected: PASS across all actors/guardian generations; unauthorized bodies, derived lengths, filter/count oracles, prefetches, exports, and browser artifacts are absent.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -783,6 +1011,7 @@ git commit -m "feat(memory-ui): enforce body opaque and no-object projections"
 - Create: `apps/core/src/tuntun_core/api/routes/subject_privacy.py`
 - Create: `apps/core/src/tuntun_core/api/ui/projectors/subject_privacy.py`
 - Modify: `apps/subject-privacy/package.json`
+- Modify: `pnpm-lock.yaml`
 - Create: `apps/subject-privacy/src/main.tsx`
 - Create: `apps/subject-privacy/src/router.tsx`
 - Create: `apps/subject-privacy/src/api-client.ts`
@@ -850,22 +1079,22 @@ it("has no owner-console navigation or imports", async () => {
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_subject_privacy_zone.py -q && pnpm --filter @tuntun/subject-privacy exec vitest run && pnpm --filter @tuntun/subject-privacy exec playwright test tests/e2e/ui/subject-privacy.spec.ts`
+Run: `uv run pytest tests/security/ui/test_subject_privacy_zone.py -q && pnpm --filter @tuntun/subject-privacy test && pnpm --filter @tuntun/subject-privacy e2e -- tests/e2e/ui/subject-privacy.spec.ts`
 Expected: FAIL because the isolated app, exact endpoints, full decision enum, and session destruction are missing.
 
 - [ ] **Step 3: Implement ceremonies**
 
-The invitation contains only one subject, one exact operation/decision, immutable server summary/commitment, current resource/policy/guardian/disclosure generations, expiry, and one-use commitment. Adult subjects use their own subject passkey to grant or refuse only the prepared `subject_consent`. Persona prepare routes accept only the generated replace/clear union, reconstruct the foundation `ProfileActionDraft(action_name="profile.edit")`, and start the corresponding action-bound passkey ceremony; the decide route consumes the exact single-use grant and calls canonical `ProfileService.update_persona_traits`. Adult authority is self-only. Guardian passkey ownership and current relation/generation are rechecked at both prepare and decision time, and child traits pass the K2/N1-safe validator. Replace calls the current personalization-consent check; clear deliberately skips that check while retaining all identity, profile-version, capability, and guardian-authority checks. Consent and exact approval remain separate records. No batch approval/delete, guardian change, audience broaden, owner cross-adult edit, policy/routine/purchase/device enrollment, or substitution path exists. Revocation requires no owner invitation and increments consent generation synchronously.
+Add `"@tuntun/design-system":"workspace:*"` to the subject package and regenerate/freeze-check `pnpm-lock.yaml`; retain every U02-owned command, dependency, and config entry. The invitation contains only one subject, one exact operation/decision, immutable server summary/commitment, current resource/policy/guardian/disclosure generations, expiry, and one-use commitment. Adult subjects use their own subject passkey to grant or refuse only the prepared `subject_consent`. Persona prepare routes accept only the generated replace/clear union, reconstruct the foundation `ProfileActionDraft(action_name="profile.edit")`, and start the corresponding action-bound passkey ceremony; the decide route consumes the exact single-use grant and calls canonical `ProfileService.update_persona_traits`. Adult authority is self-only. Guardian passkey ownership and current relation/generation are rechecked at both prepare and decision time, and child traits pass the K2/N1-safe validator. Replace calls the current personalization-consent check; clear deliberately skips that check while retaining all identity, profile-version, capability, and guardian-authority checks. Consent and exact approval remain separate records. No batch approval/delete, guardian change, audience broaden, owner cross-adult edit, policy/routine/purchase/device enrollment, or substitution path exists. Revocation requires no owner invitation and increments consent generation synchronously.
 
 - [ ] **Step 4: Run green and forbidden-route scan**
 
-Run: `uv run pytest tests/security/ui/test_subject_privacy_zone.py -q && pnpm --filter @tuntun/subject-privacy exec vitest run && pnpm --filter @tuntun/subject-privacy exec tsc --noEmit && pnpm --filter @tuntun/subject-privacy exec vite build && pnpm --filter @tuntun/subject-privacy exec playwright test tests/e2e/ui/subject-privacy.spec.ts && uv run python scripts/ui/check_feature_absence.py --dist apps/subject-privacy/dist --forbid owner,camera,device,policy,audit,backup,provider,remote,desktop,robot`
+Run: `pnpm install --lockfile-only && pnpm install --frozen-lockfile && uv run pytest tests/security/ui/test_subject_privacy_zone.py -q && pnpm --filter @tuntun/subject-privacy test && pnpm --filter @tuntun/subject-privacy lint && pnpm --filter @tuntun/subject-privacy typecheck && pnpm --filter @tuntun/subject-privacy build && pnpm --filter @tuntun/subject-privacy e2e -- tests/e2e/ui/subject-privacy.spec.ts && uv run python scripts/ui/check_feature_absence.py --dist apps/subject-privacy/dist --forbid owner,camera,device,policy,audit,backup,provider,remote,desktop,robot`
 Expected: PASS for adult revocation without invitation, one-memory operations, adult-self persona replace/clear, all twelve guardian types including K2/N1 child-safe persona replace/clear, clear after personalization-consent revocation, current-generation enforcement, cross-adult/substitution denial, and zero owner/unrelated routes or chunks.
 
 - [ ] **Step 5: Commit checkpoint**
 
 ```bash
-git add apps/core/src/tuntun_core/api/routes/subject_privacy.py apps/core/src/tuntun_core/api/ui/projectors/subject_privacy.py apps/subject-privacy tests/security/ui/test_subject_privacy_zone.py tests/e2e/ui/subject-privacy.spec.ts packages/contracts/openapi/subject-privacy-v1.yaml apps/subject-privacy/src/api/generated/subject-privacy-v1.ts
+git add apps/core/src/tuntun_core/api/routes/subject_privacy.py apps/core/src/tuntun_core/api/ui/projectors/subject_privacy.py apps/subject-privacy pnpm-lock.yaml tests/security/ui/test_subject_privacy_zone.py tests/e2e/ui/subject-privacy.spec.ts packages/contracts/openapi/subject-privacy-v1.yaml apps/subject-privacy/src/api/generated/subject-privacy-v1.ts
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
@@ -874,7 +1103,7 @@ git commit -m "feat(subject-ui): add isolated self-service and guardian ceremoni
 
 ### Task U11: Implement the Reachy family presenter and three-purpose Anonymous Guest disclosure
 
-**Depends on:** U01–U05 and the accepted Phase 1/4 edge protocol.
+**Depends on:** U01–U05 and the accepted Phase 1 Reachy/edge protocol. Phase 4 room-endpoint extensions are deliberately deferred to U17, which already depends on accepted Phase 4 work; U11 must not create a Phase 1 -> Phase 4 dependency cycle.
 **Checkpoint:** U2.
 **Estimated effort:** 3 person-days.
 
@@ -968,7 +1197,7 @@ def test_privacy_off_requires_current_generation_owner_passkey_and_presence(api)
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/privacy/ui/test_privacy_effect_registry.py tests/performance/ui/test_privacy_feedback.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase1-system.spec.ts`
+Run: `uv run pytest tests/privacy/ui/test_privacy_effect_registry.py tests/performance/ui/test_privacy_feedback.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase1-system.spec.ts`
 Expected: FAIL because the complete effect/plane registry and truthful independent continuations are not yet projected together.
 
 - [ ] **Step 3: Implement Phase 1 system surfaces**
@@ -977,7 +1206,7 @@ Shield input feedback is immediate; `activating` lasts only until canonical revo
 
 - [ ] **Step 4: Run green and latency test**
 
-Run: `uv run pytest tests/privacy/ui/test_privacy_effect_registry.py tests/performance/ui/test_privacy_feedback.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase1-system.spec.ts && pnpm --filter @tuntun/admin exec vite build`
+Run: `uv run pytest tests/privacy/ui/test_privacy_effect_registry.py tests/performance/ui/test_privacy_feedback.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase1-system.spec.ts && pnpm --filter @tuntun/admin build`
 Expected: PASS; canonical shield authority and Reachy-local stop meet the Phase 1 P95 <=250 ms evidence gate, downstream uncertainty stays visible, and no voice-only privacy reduction exists.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1025,7 +1254,7 @@ def test_scene_result_has_every_manifest_target_in_order(projector) -> None:
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/contract/ui/test_phase2_location_projection.py tests/security/ui/test_phase2_results.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase2-areas-lights.spec.ts`
+Run: `uv run pytest tests/contract/ui/test_phase2_location_projection.py tests/security/ui/test_phase2_results.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase2-areas-lights.spec.ts`
 Expected: FAIL because canonical area enforcement and shared complete-result rendering are not wired through every Phase 2 page.
 
 - [ ] **Step 3: Implement inventory and control presentation**
@@ -1034,7 +1263,7 @@ Render uncommissioned/unsupported/quarantined/unavailable distinctly. Show curre
 
 - [ ] **Step 4: Run green and absence scan**
 
-Run: `uv run pytest tests/contract/ui/test_phase2_location_projection.py tests/security/ui/test_phase2_results.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase2-areas-lights.spec.ts && uv run python scripts/ui/check_feature_absence.py --feature phase2.home --manifest fixtures/synthetic/ui/features/phase1-only.json`
+Run: `uv run pytest tests/contract/ui/test_phase2_location_projection.py tests/security/ui/test_phase2_results.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase2-areas-lights.spec.ts && uv run python scripts/ui/check_feature_absence.py --feature phase2.home --manifest fixtures/synthetic/ui/features/phase1-only.json`
 Expected: PASS; installed controls are truthful and the same route/API/prepared action/chunks are absent in Phase 1-only builds.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1082,7 +1311,7 @@ def test_unknown_tv_evidence_invents_no_allowance_or_enforcement(screen_time_ui)
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_designated_guest_boundary.py tests/security/ui/test_screen_time_slots.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase2-routines-guest.spec.ts tests/e2e/ui/phase2-screen-time.spec.ts`
+Run: `uv run pytest tests/security/ui/test_designated_guest_boundary.py tests/security/ui/test_screen_time_slots.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase2-routines-guest.spec.ts tests/e2e/ui/phase2-screen-time.spec.ts`
 Expected: FAIL because Designated Guest and exact screen-time authority/evidence flows are incomplete.
 
 - [ ] **Step 3: Implement the three flows**
@@ -1091,7 +1320,7 @@ Separate trigger/conditions/actions/quiet hours/eligibility/expiry/fallback. Des
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run pytest tests/security/ui/test_designated_guest_boundary.py tests/security/ui/test_screen_time_slots.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase2-routines-guest.spec.ts tests/e2e/ui/phase2-screen-time.spec.ts`
+Run: `uv run pytest tests/security/ui/test_designated_guest_boundary.py tests/security/ui/test_screen_time_slots.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase2-routines-guest.spec.ts tests/e2e/ui/phase2-screen-time.spec.ts`
 Expected: PASS for exact request/session expiry, no batch/voice approval, current guardian generation, 30-day minimized history, and evidence-qualified Advisory/Cooperative/Strict labels only.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1132,9 +1361,34 @@ git commit -m "feat(admin): add governed routines guest requests and screen time
 - [ ] **Step 1: Write failing owner-only and media-capability tests**
 
 ```python
+CAMERA_READ_API_ROUTES = (
+    "/api/v1/ui/cameras/overview",
+    "/api/v1/ui/cameras/inventory",
+    "/api/v1/ui/cameras/recordings",
+    "/api/v1/ui/cameras/storage",
+    "/api/v1/ui/cameras/privacy-map",
+)
+CAMERA_OWNER_UI_ROUTES = (
+    "/cameras",
+    "/cameras/inventory",
+    "/cameras/recordings",
+    "/cameras/storage",
+    "/cameras/privacy",
+)
+
 @pytest.mark.parametrize("actor", ["adult_partner", "child", "guest", "anonymous", "home_assistant"])
-def test_non_owner_has_zero_camera_route(api, actor) -> None:
-    assert api.as_actor(actor).get("/api/v1/cameras").status_code in {403, 404}
+@pytest.mark.parametrize("path", CAMERA_READ_API_ROUTES)
+def test_non_owner_has_zero_camera_api_route(api, actor, path) -> None:
+    assert api.as_actor(actor).get(path).status_code == 404
+
+@pytest.mark.parametrize("actor", ["adult_partner", "child", "guest", "anonymous", "home_assistant"])
+@pytest.mark.parametrize("path", CAMERA_OWNER_UI_ROUTES)
+def test_non_owner_direct_url_and_bundle_have_no_camera_surface(
+    route_and_bundle_probe, actor, path,
+) -> None:
+    probe = route_and_bundle_probe.as_actor(actor)
+    assert probe.direct_url(path).status_code == 404
+    assert probe.bundle_contains_route_or_camera_chunk(path) is False
 
 def test_playback_projection_has_no_credential_url_or_path(playback_dto) -> None:
     assert forbidden_fields(playback_dto) == set()
@@ -1143,8 +1397,8 @@ def test_playback_projection_has_no_credential_url_or_path(playback_dto) -> None
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_camera_owner_boundary.py tests/security/ui/test_playback_browser_capability.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase3-cameras-playback.spec.ts`
-Expected: FAIL because complete owner/object isolation, clip-capability expiry, storage truth, and copy disclosures are not jointly tested.
+Run: `uv run pytest tests/security/ui/test_camera_owner_boundary.py tests/security/ui/test_playback_browser_capability.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase3-cameras-playback.spec.ts`
+Expected: FAIL because complete owner/object isolation across every real API path, direct URL, and actor-visible bundle, plus clip-capability expiry, storage truth, and copy disclosures, are not jointly tested.
 
 - [ ] **Step 3: Implement camera/storage presentation**
 
@@ -1152,8 +1406,8 @@ No autoplay, direct RTSP/ONVIF/vendor URL, credential, filesystem path, reusable
 
 - [ ] **Step 4: Run green and browser artifact scan**
 
-Run: `uv run pytest tests/security/ui/test_camera_owner_boundary.py tests/security/ui/test_playback_browser_capability.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase3-cameras-playback.spec.ts && uv run python scripts/ui/scan_browser_artifacts.py --scenario camera-playback --forbid rtsp,onvif,credential,direct_path,reusable_token`
-Expected: PASS; exact sources/storage are truthful and every media capability expires/revokes without cache or cross-clip enumeration.
+Run: `uv run pytest tests/security/ui/test_camera_owner_boundary.py tests/security/ui/test_playback_browser_capability.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase3-cameras-playback.spec.ts && uv run python scripts/ui/scan_browser_artifacts.py --scenario camera-playback --forbid rtsp,onvif,credential,direct_path,reusable_token`
+Expected: PASS; every real camera API/direct URL and camera chunk is absent for non-owners, exact owner sources/storage are truthful, and every media capability expires/revokes without cache or cross-clip enumeration.
 
 - [ ] **Step 5: Commit checkpoint**
 
@@ -1206,7 +1460,7 @@ def test_closed_page_reports_local_unread_not_immediate_delivery(alert_state) ->
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_no_background_delivery_claim.py tests/privacy/ui/test_presence_projection.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase3-alerts-sse.spec.ts tests/e2e/ui/phase3-presence.spec.ts`
+Run: `uv run pytest tests/security/ui/test_no_background_delivery_claim.py tests/privacy/ui/test_presence_projection.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase3-alerts-sse.spec.ts tests/e2e/ui/phase3-presence.spec.ts`
 Expected: FAIL because reconnect/dedup/delayed truth and closed presence-state handling are incomplete.
 
 - [ ] **Step 3: Implement alert and presence presentation**
@@ -1215,7 +1469,7 @@ Browser Notifications require an active paired page and explicit permission; no 
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run pytest tests/security/ui/test_no_background_delivery_claim.py tests/privacy/ui/test_presence_projection.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase3-alerts-sse.spec.ts tests/e2e/ui/phase3-presence.spec.ts`
+Run: `uv run pytest tests/security/ui/test_no_background_delivery_claim.py tests/privacy/ui/test_presence_projection.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase3-alerts-sse.spec.ts tests/e2e/ui/phase3-presence.spec.ts`
 Expected: PASS for reconnect, duplicate, closed/asleep page, permission denial, containment, stale source, unknown expiry, and no identity leakage.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1259,7 +1513,7 @@ def test_conversation_slots_is_exactly_one(config_and_ui) -> None:
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_phase4_area_only.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase4-room-voice.spec.ts`
+Run: `uv run pytest tests/security/ui/test_phase4_area_only.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase4-room-voice.spec.ts`
 Expected: FAIL because physical mute/indicator evidence, shared bakeoff shape, and complete single-slot state are not exposed.
 
 - [ ] **Step 3: Implement room voice presentation**
@@ -1268,7 +1522,7 @@ Purchased and DIY endpoints render identical required capability/latency/privacy
 
 - [ ] **Step 4: Run green and physical gate**
 
-Run synthetic: `uv run pytest tests/security/ui/test_phase4_area_only.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase4-room-voice.spec.ts`
+Run synthetic: `uv run pytest tests/security/ui/test_phase4_area_only.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase4-room-voice.spec.ts`
 Owner-gated: `TUNTUN_HARDWARE=1 uv run pytest tests/hardware/whole_home/test_room_endpoint_ui_evidence.py -q --evidence-dir var/evidence/ui/phase4-room-bakeoff`
 Expected: Synthetic PASS. Production registration requires signed evidence from the chosen exact common-area endpoint; failed candidates remain quarantined/absent.
 
@@ -1307,15 +1561,22 @@ def test_music_assistant_missing_gate_is_route_and_bundle_absent(absence_probe) 
     assert absence_probe.feature("music_assistant").all_surfaces_absent
 
 @pytest.mark.parametrize("tv", ["samsung-neo-led-49-exact", "tcl-42-exact"])
-def test_tv_starts_display_only_manual(tv_ui, tv) -> None:
+def test_tv_starts_uncommissioned_and_requires_exact_manual_hdmi_evidence(tv_ui, tv) -> None:
     row = tv_ui(tv, evidence=None)
-    assert row.capability == "DISPLAY_ONLY_MANUAL"
+    assert row.capability == "UNCOMMISSIONED"
     assert row.enforcement_mode not in {"Cooperative", "Strict"}
+
+    manual = tv_ui(tv, evidence=exact_manual_hdmi_evidence_for(tv))
+    assert manual.capability == "DISPLAY_ONLY_MANUAL"
+    assert manual.enforcement_mode not in {"Cooperative", "Strict"}
+
+    other_tv = "tcl-42-exact" if tv == "samsung-neo-led-49-exact" else "samsung-neo-led-49-exact"
+    assert tv_ui(other_tv, evidence=exact_manual_hdmi_evidence_for(tv)).capability == "UNCOMMISSIONED"
 ```
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_music_assistant_absence.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase4-media-tv.spec.ts`
+Run: `uv run pytest tests/security/ui/test_music_assistant_absence.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase4-media-tv.spec.ts`
 Expected: FAIL because optional MA absence and exact-unit TV promotion evidence are not completely reflected in UI registration.
 
 - [ ] **Step 3: Implement media and TV presentation**
@@ -1324,7 +1585,7 @@ No arbitrary URL/URI/path/service name, toggle, account switch, or dynamic all-s
 
 - [ ] **Step 4: Run green and exact physical gates**
 
-Run synthetic: `uv run pytest tests/security/ui/test_music_assistant_absence.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase4-media-tv.spec.ts`
+Run synthetic: `uv run pytest tests/security/ui/test_music_assistant_absence.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase4-media-tv.spec.ts`
 Owner-gated: `TUNTUN_HARDWARE=1 uv run pytest tests/hardware/whole_home/test_exact_tv_ui_evidence.py -q --tv samsung-neo-led-49-exact --tv tcl-42-exact --evidence-dir var/evidence/ui/phase4-tv`
 Expected: Synthetic PASS. Each physical TV independently produces signed promotion/absence evidence; a failure cannot borrow the other TV's capability.
 
@@ -1392,7 +1653,7 @@ def test_child_teaching_web_mode_is_fixed_no_web(teaching_ui_probe) -> None:
 
 - [ ] **Step 2: Run red**
 
-Run: `pnpm --dir apps/display-agent exec vitest run tests/projection-security.spec.tsx && uv run pytest tests/privacy/ui/test_ephemeral_learning_summary.py tests/security/ui/test_child_teaching_no_web.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase4-teaching-display.spec.ts`
+Run: `pnpm --filter @tuntun/display-agent test -- tests/projection-security.spec.tsx && uv run pytest tests/privacy/ui/test_ephemeral_learning_summary.py tests/security/ui/test_child_teaching_no_web.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase4-teaching-display.spec.ts`
 Expected: FAIL because the full projection dispatcher, hostile variants, RAM-only summary guarantee, and fixed no-web child path are missing.
 
 - [ ] **Step 3: Implement closed display and teaching UI**
@@ -1401,7 +1662,7 @@ Validate signer, digest, display binding, audience, session, policy, expiry, pro
 
 - [ ] **Step 4: Run green and physical HDMI gate**
 
-Run synthetic: `pnpm --dir apps/display-agent exec vitest run && uv run pytest tests/privacy/ui/test_ephemeral_learning_summary.py tests/security/ui/test_child_teaching_no_web.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase4-teaching-display.spec.ts`
+Run synthetic: `pnpm --filter @tuntun/display-agent test && uv run pytest tests/privacy/ui/test_ephemeral_learning_summary.py tests/security/ui/test_child_teaching_no_web.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase4-teaching-display.spec.ts`
 Owner-gated: `TUNTUN_HARDWARE=1 uv run pytest tests/hardware/whole_home/test_manual_hdmi_teaching.py -q --evidence-dir var/evidence/ui/phase4-display`
 Expected: PASS; all five projection variants render safely, child web mode is fixed `no_web` with no control/mutation/search call, unknown/hostile payloads clear neutral, display clear target is <=1 second when connected, and manual HDMI truth is recorded.
 
@@ -1446,7 +1707,7 @@ def test_server_filters_document_titles_before_projection(corpus_projector) -> N
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_corpus_owner_only.py tests/privacy/ui/test_corpus_projection.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase5-models-corpus.spec.ts`
+Run: `uv run pytest tests/security/ui/test_corpus_owner_only.py tests/privacy/ui/test_corpus_projection.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase5-models-corpus.spec.ts`
 Expected: FAIL because owner-only picker/API/bundle absence and content-safe title projection are not fully enforced.
 
 - [ ] **Step 3: Implement AI/corpus presentation**
@@ -1455,7 +1716,7 @@ Do not present a global `local AI` success switch: show task-cell state and evid
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run pytest tests/security/ui/test_corpus_owner_only.py tests/privacy/ui/test_corpus_projection.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase5-models-corpus.spec.ts && uv run python scripts/ui/check_feature_absence.py --feature phase5.corpus_import --actors adult_partner,guardian,child,guest`
+Run: `uv run pytest tests/security/ui/test_corpus_owner_only.py tests/privacy/ui/test_corpus_projection.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase5-models-corpus.spec.ts && uv run python scripts/ui/check_feature_absence.py --feature phase5.corpus_import --actors adult_partner,guardian,child,guest`
 Expected: PASS; staged route truth and corpus lifecycle are owner-only, minimized, bounded, and independently removable.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1477,9 +1738,9 @@ git commit -m "feat(admin): add owner-only model and corpus workspace"
 **Files:**
 - Modify: `apps/admin/src/features/ai-workspace/desktop.tsx`
 - Modify: `apps/admin/src/routes/ai-workspace-desktop.tsx`
-- Create: `apps/admin/src/features/ai-workspace/desktop-grant.tsx`
-- Create: `apps/admin/src/features/ai-workspace/desktop-egress.tsx`
-- Create: `apps/admin/src/features/ai-workspace/desktop-job-result.tsx`
+- Modify: `apps/admin/src/features/ai-workspace/desktop-grant.tsx` (extend the Phase 5-owned canonical surface)
+- Modify: `apps/admin/src/features/ai-workspace/desktop-egress.tsx` (extend the Phase 5-owned canonical surface)
+- Modify: `apps/admin/src/features/ai-workspace/desktop-job-result.tsx` (extend the Phase 5-owned canonical surface)
 - Create: `tests/e2e/ui/phase5-desktop.spec.ts`
 - Create: `tests/security/ui/test_desktop_owner_only.py`
 - Create: `tests/security/ui/test_desktop_egress_separation.py`
@@ -1491,15 +1752,23 @@ git commit -m "feat(admin): add owner-only model and corpus workspace"
 
 ```python
 def test_execution_network_never_authorizes_model_egress(desktop_api) -> None:
-    grant = desktop_api.create_grant(execution_network="registry.example:443", model_egress="local_only")
+    grant = desktop_api.create_grant(execution_network="none", model_egress="local_only")
     assert desktop_api.send_to_model(grant, cloud_model()).status_code == 403
 
 def test_model_egress_never_authorizes_helper_network(desktop_api) -> None:
     egress = desktop_api.authorize_egress(exact_content(), cloud_model())
     assert desktop_api.run_job(egress, network="registry.example:443").status_code == 403
+
+@pytest.mark.parametrize("network", ["registry.example:443", "loopback", "lan", "wan", "signed_workflow_allowlist"])
+def test_d4_rejects_every_non_none_execution_network(desktop_api, network) -> None:
+    assert desktop_api.create_d4_workflow(execution_network=network).status_code == 422
+
+def test_valid_d3_and_d4_present_network_none_truth(desktop_api) -> None:
+    assert desktop_api.valid_d3_proposal().execution_network_policy == "none"
+    assert desktop_api.valid_d4_manifest().execution_network_policy == "none"
 ```
 
-```ts
+```tsx
 it("renders terminal escapes and prompt injection as inert bounded text", () => {
   render(<DesktopJobResult value={hostileOutputFixture} />);
   expect(document.querySelector("script, a[href], iframe")).toBeNull();
@@ -1508,16 +1777,16 @@ it("renders terminal escapes and prompt injection as inert bounded text", () => 
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_desktop_owner_only.py tests/security/ui/test_desktop_egress_separation.py tests/privacy/ui/test_desktop_output_rendering.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase5-desktop.spec.ts`
+Run: `uv run pytest tests/security/ui/test_desktop_owner_only.py tests/security/ui/test_desktop_egress_separation.py tests/privacy/ui/test_desktop_output_rendering.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase5-desktop.spec.ts`
 Expected: FAIL because exact grant/egress separation, hostile-output rendering, and D3/D4 absence behavior are incomplete.
 
 - [ ] **Step 3: Implement desktop presentation**
 
-Owner-only native selection; forbidden secrets remain ungrantable. Read-only/local-only are defaults. D3 shows one pinned non-code inspection command; D4 shows the complete signed workflow and disposable-copy semantics. No shell string, auto-chain, live repository write/commit/push, remote helper, or broad terminal. Any edit/state drift invalidates confirmation. If no sandbox passes, D4 route/preparation/chunk is absent. Cancel/Shield revokes authority and late output cannot update a new job.
+Owner-only native selection; forbidden secrets remain ungrantable. D3 and D4 execution network is exactly `none` in the proposal, grant, manifest, receiver, and UI; model egress remains a separate single-use server authorization. D3 shows one pinned non-code inspection command; D4 shows the complete signed workflow and disposable-copy semantics. No shell string, auto-chain, live repository write/commit/push, remote helper, or broad terminal. Any edit/state drift invalidates confirmation. If no sandbox passes, D4 route/preparation/chunk is absent. Cancel/Shield revokes authority and late output cannot update a new job.
 
 - [ ] **Step 4: Run green and negative-reachability checks**
 
-Run: `uv run pytest tests/security/ui/test_desktop_owner_only.py tests/security/ui/test_desktop_egress_separation.py tests/privacy/ui/test_desktop_output_rendering.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase5-desktop.spec.ts && uv run python scripts/ui/check_feature_absence.py --feature phase5.desktop_d4 --manifest fixtures/synthetic/ui/features/no-d4.json`
+Run: `uv run pytest tests/security/ui/test_desktop_owner_only.py tests/security/ui/test_desktop_egress_separation.py tests/privacy/ui/test_desktop_output_rendering.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase5-desktop.spec.ts && uv run python scripts/ui/check_feature_absence.py --feature phase5.desktop_d4 --manifest fixtures/synthetic/ui/features/no-d4.json`
 Expected: PASS; non-owner/remote routes and absent D4 are unreachable, exact egress is single-use, and hostile output remains inert/minimized.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1539,15 +1808,15 @@ git commit -m "feat(admin): add exact desktop grants jobs and egress consent"
 **Files:**
 - Modify: `apps/admin/src/features/ai-workspace/perception.tsx`
 - Modify: `apps/admin/src/routes/ai-workspace-perception.tsx`
-- Create: `apps/admin/src/features/ai-workspace/robotics.tsx`
-- Create: `apps/admin/src/routes/ai-workspace-robotics.tsx`
+- Modify: `apps/admin/src/features/ai-workspace/robotics.tsx` (extend the Phase 5-owned canonical surface)
+- Modify: `apps/admin/src/routes/ai-workspace-robotics.tsx` (extend the Phase 5-owned canonical route)
 - Create: `tests/e2e/ui/phase5-perception-robot.spec.ts`
 - Create: `tests/privacy/ui/test_cv_projection.py`
 - Create: `tests/security/ui/test_cv_advisory_non_authority.py`
 - Create: `tests/security/ui/test_robot_owner_local_only.py`
 - Create: `tests/hardware/robot/test_robot_ui_safety_evidence.py`
 
-**Interfaces:** CV shows exact request, `area_id`, `zone_id`/zone generation, camera-binding generation, privacy generation, purpose, artifact/digest/calibration, request/result times, 1–3 frame cap, state/class/confidence/reasons, and explicit advisory/non-authoritative status. Robot shows exact hardware/firmware, paired status, e-stop/motor-enable, directional sensors/freshness, geofence, allowed directions/speed, stop-distance margin, watchdog/lease, battery/thermal/camera indicator, local adult supervisor, and last safety latch.
+**Interfaces:** CV shows exact request, `area_id`, `zone_id`/zone generation, camera-binding generation, privacy generation, purpose, artifact/digest/calibration, request/result times, 1–3 frame cap, state/class/confidence/reasons, and explicit advisory/non-authoritative status. Robot shows the exact activation-bound `(area_id, area_generation, robot_binding_id, robot_binding_generation, zone_id, zone_generation)`, activation commitment, hardware/firmware, paired status, e-stop/motor-enable, directional sensors/freshness, canonical-zone geofence state, allowed directions/speed, stop-distance margin, watchdog/lease, battery/charging/controller/sensor health, camera/indicator pair, local adult supervisor, and last safety latch.
 
 - [ ] **Step 1: Write failing CV minimization/non-authority and robot-route tests**
 
@@ -1562,20 +1831,38 @@ def test_cv_result_cannot_change_phase3_state(phase3, cv_result) -> None:
     before = phase3.snapshot()
     phase3.receive(cv_result.replace(count_band="multiple"))
     assert phase3.snapshot() == before
+
+@pytest.mark.parametrize("drift", [
+    "area_generation", "robot_binding_generation", "zone_generation", "activation_commitment",
+    "controller_epoch", "edge_key_generation", "core_key_generation", "valid_until",
+])
+def test_robot_ui_never_projects_green_or_controls_from_stale_or_substituted_fact(robot_ui, drift) -> None:
+    view = robot_ui.with_fact_drift(drift)
+    assert view.readiness_color != "green"
+    assert view.motion_controls == ()
+
+@pytest.mark.parametrize("pair", [
+    ("disabled", "on_verified"), ("disabled", "unverified"), ("disabled", "fault"),
+    ("indicator_verified", "off"), ("indicator_verified", "unverified"),
+    ("indicator_unverified", "on_verified"), ("fault", "off"),
+])
+def test_robot_ui_rejects_contradictory_camera_indicator_pairs(robot_ui, pair) -> None:
+    assert robot_ui.render_camera_indicator(*pair).state == "error_safe"
+    assert robot_ui.motion_controls == ()
 ```
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/privacy/ui/test_cv_projection.py tests/security/ui/test_cv_advisory_non_authority.py tests/security/ui/test_robot_owner_local_only.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase5-perception-robot.spec.ts`
+Run: `uv run pytest tests/privacy/ui/test_cv_projection.py tests/security/ui/test_cv_advisory_non_authority.py tests/security/ui/test_robot_owner_local_only.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase5-perception-robot.spec.ts`
 Expected: FAIL because exact generation display, count-ignore disclosure, forbidden media fields, and locally supervised robot route are incomplete.
 
 - [ ] **Step 3: Implement CV and robot presentation**
 
-CV administration and calibration views render no frame/thumbnail/raw handle/caption/OCR/name/face/demographic/clothing/emotion/health/free prose/VLM/cloud option. They do not block the locked commissioned native-event broker from invoking the Phase 5 runtime, but they grant no runtime-trigger authority to a child, Guest, other adult, or remote session. Denied/unknown/stale/malformed results clear transient content and never create a camera event, alert, presence assertion, action, or HA value. Robot is setup/health/session supervision, not a joystick. It has no autonomous child/pet claim or private-area route. Floor controls appear only after exact independent physical e-stop, allowed-direction obstacle/cliff path, 250ms lease, watchdog, local supervisor and common-area evidence; remote route remains absent.
+CV administration and calibration views render no frame/thumbnail/raw handle/caption/OCR/name/face/demographic/clothing/emotion/health/free prose/VLM/cloud option. They do not block the locked commissioned native-event broker from invoking the Phase 5 runtime, but they grant no runtime-trigger authority to a child, Guest, other adult, or remote session. Denied/unknown/stale/malformed results clear transient content and never create a camera event, alert, presence assertion, action, or HA value. Robot is setup/health/session supervision, not a joystick. It has no autonomous child/pet claim or private-area route. `geofence_state` is displayed only as evaluation of the canonical bound zone, never as another location registry. Only camera/indicator pairs `disabled/off` and `indicator_verified/on_verified` are valid; every other pair is error-safe. Floor controls appear only after exact current signed activation/location/key generations, independent physical e-stop, allowed-direction obstacle/cliff path, 250ms lease, watchdog, local supervisor and common-area evidence; remote route remains absent.
 
 - [ ] **Step 4: Run green and physical robot gate**
 
-Run synthetic: `uv run pytest tests/privacy/ui/test_cv_projection.py tests/security/ui/test_cv_advisory_non_authority.py tests/security/ui/test_robot_owner_local_only.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase5-perception-robot.spec.ts`
+Run synthetic: `uv run pytest tests/privacy/ui/test_cv_projection.py tests/security/ui/test_cv_advisory_non_authority.py tests/security/ui/test_robot_owner_local_only.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase5-perception-robot.spec.ts`
 Owner-gated: `TUNTUN_HARDWARE=1 uv run pytest tests/hardware/robot/test_robot_ui_safety_evidence.py -q --evidence-dir var/evidence/ui/phase5-robot`
 Expected: Synthetic PASS. Physical failure keeps floor-motion UI/API/preparation/chunk absent while simulator and wheels-raised evidence remain available.
 
@@ -1596,22 +1883,22 @@ git commit -m "feat(admin): add advisory CV and supervised robot safety UI"
 **Estimated effort:** 4 person-days plus seven-day read-only soak.
 
 **Files:**
-- Create: `apps/admin/src/features/system/remote-access.tsx`
-- Create: `apps/admin/src/routes/system-remote-access.tsx`
+- Modify: `apps/admin/src/features/system/remote-access.tsx` (extend the Phase 6 Task-12 canonical surface)
+- Modify: `apps/admin/src/routes/system-remote-access.tsx` (extend the Phase 6 Task-12 canonical route)
 - Modify: `apps/admin/src/app/session-context.tsx`
 - Create: `tests/e2e/ui/phase6-remote.spec.ts`
 - Create: `tests/security/ui/test_remote_operation_matrix.py`
 - Create: `tests/security/ui/test_remote_bundle_absence.py`
 - Create: `tests/acceptance/ui/test_remote_read_only_soak.py`
 
-**Interfaces:** Reuses the owner console as `surface=owner`, `origin=remote` (wire `route_origin_class=owner_vpn`); it does not register a remote surface. Presents exact `DISABLED -> COMMISSIONING -> READ_ONLY -> SCOPED_ACTIONS`, any-state `SUSPENDED`, approved node pseudonym, route/ACL/Tailnet Lock/app-passkey posture, idle/absolute expiry, assurance age, operation classes, last access, revoke/disable, and local-only limitations. Tailscale is the only named adapter; default install has no route.
+**Interfaces:** Reuses the owner console as `surface=owner`, `origin=remote` (wire `route_origin_class=owner_vpn`); it does not register a remote surface. Presents exact `DISABLED -> COMMISSIONING -> READ_ONLY -> SCOPED_ACTIONS`, any-state `SUSPENDED`, approved node pseudonym, canonical `grants` digest, Tailnet Lock/current signed-node set/two independent recovery signers, explicit Device Approval disabled state, two-view DNS/local-CA binding, app-passkey posture, idle/absolute expiry, assurance age, operation classes, last access, revoke/disable, and local-only limitations. Tailscale is the only named adapter; default install has no route.
 
 - [ ] **Step 1: Write failing local/remote matrix and bundle tests**
 
 ```python
 @pytest.mark.parametrize("operation", [
     "export", "identity_enroll", "guardian_change", "base_policy_change", "hard_cap_change",
-    "plugin_permission", "recovery_import", "restore", "bulk_delete", "developer_mode",
+    "plugin_permission_change", "recovery_key_import", "restore", "bulk_delete", "developer_mode",
     "desktop_execute", "robot_drive", "remote_shell",
 ])
 def test_remote_denied_operation_is_absent_everywhere(remote_absence, operation) -> None:
@@ -1619,20 +1906,37 @@ def test_remote_denied_operation_is_absent_everywhere(remote_absence, operation)
 
 def test_vpn_membership_without_app_passkey_reveals_nothing(remote_client) -> None:
     assert remote_client(vpn=True, app_passkey=False).get("/api/v1/ui/posture").status_code in {401, 403}
+
+@pytest.mark.parametrize("legacy_alias", ["plugin_permission", "recovery_import"])
+def test_legacy_remote_operation_alias_is_schema_unsupported(remote_client, legacy_alias) -> None:
+    assert remote_client.post_operation(legacy_alias).code == "SCHEMA_UNSUPPORTED"
+
+@pytest.mark.parametrize("extra", [
+    "schema_id", "target", "desired_state", "actor_subject_id", "application_session_id", "vpn_node_pseudonym",
+    "policy_version", "route_generation", "tailnet_lock_generation", "signed_node_set_generation",
+    "assurance", "authorized_at", "context_commitment",
+])
+def test_remote_ui_sends_only_operation_resource_idempotency(remote_client, extra) -> None:
+    assert remote_client.post_raw({**valid_remote_body(), extra: "spoof"}).code == "SCHEMA_UNSUPPORTED"
+
+def test_light_buttons_use_closed_intent_discriminators(remote_ui) -> None:
+    assert remote_ui.request_for("light_on").operation == "light_power_on"
+    assert remote_ui.request_for("light_off").operation == "light_power_off"
+    assert set(remote_ui.request_for("light_off").model_dump()) == {"operation", "resource", "idempotency_key"}
 ```
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_remote_operation_matrix.py tests/security/ui/test_remote_bundle_absence.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase6-remote.spec.ts`
+Run: `uv run pytest tests/security/ui/test_remote_operation_matrix.py tests/security/ui/test_remote_bundle_absence.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase6-remote.spec.ts`
 Expected: FAIL because remote origin filtering and local-only chunk/API/preparation absence are not fully proved.
 
 - [ ] **Step 3: Implement remote UI**
 
-Default disabled; no direct WireGuard, relay, Funnel, subnet/exit route, public Serve, SSH, wildcard bind, or public tunnel option. First production class is read-only health/availability/minimized alerts/cost/approval metadata. Each optional private detail, reversible light/media stop, camera metadata, or single-clip playback class is separately local-enabled and freshness-gated. Playback uses <=10-minute remote media session plus <=60-second Phase 3 grants and `no-store`. Lost device/drift/auth failure suspends and revokes; local operation remains unchanged.
+Default disabled; no direct WireGuard, relay, Funnel, subnet/exit route, public Serve, SSH, wildcard bind, or public tunnel option. Commissioning has no household body and requires the exact canonical `grants`/Tailnet-Lock/signed-node/two-view-DNS evidence before read-only. First production class is read-only health/availability/minimized alerts/cost/approval metadata. Each optional private detail, closed `light_power_on|light_power_off`, `media_stop`, camera metadata, or single-clip playback class is separately local-enabled and freshness-gated. The client sends only operation, bounded typed opaque resource, and idempotency; server authority never enters browser state. Playback uses <=10-minute remote media session plus <=60-second Phase 3 grants and `no-store`. Lost device/drift/auth failure suspends and revokes; local operation remains unchanged.
 
 - [ ] **Step 4: Run green and soak gate**
 
-Run synthetic: `uv run pytest tests/security/ui/test_remote_operation_matrix.py tests/security/ui/test_remote_bundle_absence.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase6-remote.spec.ts`
+Run synthetic: `uv run pytest tests/security/ui/test_remote_operation_matrix.py tests/security/ui/test_remote_bundle_absence.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase6-remote.spec.ts`
 Owner-gated: `TUNTUN_ELAPSED=1 uv run pytest tests/acceptance/ui/test_remote_read_only_soak.py -q --duration 7d --evidence-dir var/evidence/ui/phase6-remote`
 Expected: Synthetic PASS; read-only promotion requires the full seven-day route/theft/revoke/drift evidence and failed optional classes stay absent.
 
@@ -1653,9 +1957,9 @@ git commit -m "feat(admin): add exact Tailscale remote-access UI"
 **Estimated effort:** 3 person-days.
 
 **Files:**
-- Create: `apps/admin/src/features/system/plugins.tsx`
+- Modify: `apps/admin/src/features/system/plugins.tsx` (extend the Phase 6 Task-22 canonical surface)
 - Create: `apps/admin/src/features/system/plugin-render-panel.tsx`
-- Create: `apps/admin/src/routes/system-plugins.tsx`
+- Modify: `apps/admin/src/routes/system-plugins.tsx` (extend the Phase 6 Task-22 canonical route)
 - Create: `tests/e2e/ui/phase6-plugins.spec.ts`
 - Create: `tests/security/ui/test_plugin_render_boundary.py`
 - Create: `tests/security/ui/test_plugin_unknown_capability.py`
@@ -1678,7 +1982,7 @@ def test_plugin_cannot_suppress_authoritative_alert(plugin_fault) -> None:
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_plugin_render_boundary.py tests/security/ui/test_plugin_unknown_capability.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase6-plugins.spec.ts`
+Run: `uv run pytest tests/security/ui/test_plugin_render_boundary.py tests/security/ui/test_plugin_unknown_capability.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase6-plugins.spec.ts`
 Expected: FAIL because the labelled isolated render panels and exact registry denial are missing.
 
 - [ ] **Step 3: Implement plugin presentation**
@@ -1687,7 +1991,7 @@ Health rendering is explicit local-owner click; local alert rendering is optiona
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run pytest tests/security/ui/test_plugin_render_boundary.py tests/security/ui/test_plugin_unknown_capability.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase6-plugins.spec.ts && uv run python scripts/ui/scan_browser_artifacts.py --scenario plugins --forbid markup,url,action,identifier,diagnostic_detail`
+Run: `uv run pytest tests/security/ui/test_plugin_render_boundary.py tests/security/ui/test_plugin_unknown_capability.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase6-plugins.spec.ts && uv run python scripts/ui/scan_browser_artifacts.py --scenario plugins --forbid markup,url,action,identifier,diagnostic_detail`
 Expected: PASS for both exact capabilities, all malicious/unknown manifests/results, crash/timeout/revoke/remove, and mandatory alert independence.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1702,26 +2006,26 @@ git commit -m "feat(admin): add closed isolated plugin presentation"
 
 ### Task U25: Add recovery quarantine, incidents, updates, maintenance, and release-gate UI
 
-**Depends on:** U12, U23–U24 and accepted Phase 6 recovery/release services.
+**Depends on:** U12, U23–U24, accepted Phase 6 recovery/update/maintenance services, and the frozen pre-C0 release-projection contracts. It does not depend on an actual C1 decision or publication receipt.
 **Checkpoint:** U7.
 **Estimated effort:** 4 person-days.
 
 **Files:**
 - Create: `apps/admin/src/features/system/recovery.tsx`
-- Create: `apps/admin/src/features/system/incidents.tsx`
-- Create: `apps/admin/src/features/system/updates.tsx`
-- Create: `apps/admin/src/features/system/maintenance.tsx`
+- Modify: `apps/admin/src/features/system/incidents.tsx` (extend the Phase 6 Task-32 canonical surface)
+- Modify: `apps/admin/src/features/system/updates.tsx` (extend the Phase 6 Task-28 canonical surface)
+- Modify: `apps/admin/src/features/system/maintenance.tsx` (extend the Phase 6 Task-35 canonical surface)
 - Create: `apps/admin/src/features/system/release.tsx`
-- Create: `apps/admin/src/routes/system-recovery.tsx`
-- Create: `apps/admin/src/routes/system-incidents.tsx`
-- Create: `apps/admin/src/routes/system-updates.tsx`
-- Create: `apps/admin/src/routes/system-maintenance.tsx`
+- Modify: `apps/admin/src/routes/system-recovery.tsx` (extend the Phase 6 Task-35 canonical route)
+- Modify: `apps/admin/src/routes/system-incidents.tsx` (extend the Phase 6 Task-32 canonical route)
+- Modify: `apps/admin/src/routes/system-updates.tsx` (extend the Phase 6 Task-28 canonical route)
+- Modify: `apps/admin/src/routes/system-maintenance.tsx` (extend the Phase 6 Task-35 canonical route)
 - Create: `apps/admin/src/routes/system-release.tsx`
 - Create: `tests/e2e/ui/phase6-recovery-release.spec.ts`
 - Create: `tests/security/ui/test_recovery_local_owner_only.py`
 - Create: `tests/security/ui/test_c0_c1_ui_bindings.py`
 
-**Interfaces:** Shows backup tiers/age/verification/key availability/restore drill, exact `NORMAL | CONTAINED_REMOTE | CONTAINED_EGRESS | RECOVERY_QUARANTINE`, local critical-alert preservation, device retirement, signed update signer/digest/SBOM/compatibility/pre-backup/restart/rollback, weekly health and subsystem maintenance, and distinct P1 `P1R0/P1R1` versus whole-program `C0/C1` evidence/approvals.
+**Interfaces:** Shows identical-generation backup tier bindings/age/verification/key availability/restore drill, one-shot quarantine-only bootstrap truth, exact `NORMAL | CONTAINED_REMOTE | CONTAINED_EGRESS | RECOVERY_QUARANTINE`, local critical-alert preservation, device retirement, durable-journal signed update signer/final-byte digest/SBOM/compatibility/pre-backup/restart/rollback, weekly health and subsystem maintenance, distinct P1 `P1R0/P1R1` versus whole-program `C0`, and a signed **read-only** C1/publication-state projection. Before C0, implementation and U7/U8 testing use frozen schema-valid absent/pending/accepted/invalidated/published projection fixtures and pre-C0 services; they neither create nor require a real C1 receipt. After C0, Task 38 feeds the actual signed C1/publication receipts through this unchanged projection and reruns the read-only binding checks without modifying the frozen candidate. Household UI contains no C1/publication decision or maintainer credential path.
 
 - [ ] **Step 1: Write failing quarantine, containment, and gate-name tests**
 
@@ -1733,20 +2037,30 @@ def test_restore_starts_with_every_action_surface_closed(recovery_ui) -> None:
 def test_phase1_preview_gates_never_alias_whole_program_gates(release_ui) -> None:
     assert release_ui.gate("P1R0").id != release_ui.gate("C0").id
     assert release_ui.gate("P1R1").cannot_satisfy("C1")
+
+def test_household_ui_c1_is_read_only_and_has_no_maintainer_boundary(release_ui, bundle_graph) -> None:
+    assert release_ui.gate("C1").controls == ()
+    assert release_ui.gate("C1").projection_state in {"not_built", "pending", "accepted", "published", "invalidated"}
+    assert bundle_graph.household_imports & {"apps/release-maintainer", "project_maintainer_c1", "project_maintainer_publication"} == set()
+
+def test_backup_tiers_show_same_generation_and_d4_no_network(recovery_ui) -> None:
+    assert recovery_ui.attached.generation == recovery_ui.independent.generation
+    assert recovery_ui.attached.source_snapshot_digest == recovery_ui.independent.source_snapshot_digest
+    assert recovery_ui.restore_target.network == "none"
 ```
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/security/ui/test_recovery_local_owner_only.py tests/security/ui/test_c0_c1_ui_bindings.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase6-recovery-release.spec.ts`
+Run: `uv run pytest tests/security/ui/test_recovery_local_owner_only.py tests/security/ui/test_c0_c1_ui_bindings.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase6-recovery-release.spec.ts`
 Expected: FAIL because quarantined route closure, incident truth, and distinct gate binding are not yet fully presented.
 
 - [ ] **Step 3: Implement recovery/release presentation**
 
-Recovery key display/import, restore, reconciliation exit, retirement, incident exit, update approval, C0 and C1 are separate owner-only local-presence prepared ceremonies. Portable recovery explicitly excludes provider/VPN/TLS/device/release-signing credentials and action routes reopen one phase at a time after new generations. `CONTAINED_EGRESS` keeps mandatory local critical alerts visible while external adapters stop. Updates never silently install or continue after signer/provenance/SBOM/compatibility/backup/health failure. C0 binds one immutable same-candidate Phase 1–6 evidence set; C1 is a second fresh approval; publication is a third manual action.
+Recovery key display/import, restore, reconciliation exit, retirement, incident exit, update approval, and C0 are separate household-owner-only local-presence prepared ceremonies. Portable recovery explicitly excludes provider/VPN/TLS/device/release-signing credentials; D4 is visibly `network=none`; the one-shot bootstrap exposes only verify/decrypt-to-quarantine/quarantine truth; and action routes reopen one phase at a time only after new passkey and credential generations. `CONTAINED_EGRESS` keeps mandatory local critical alerts visible while external adapters stop. Updates never silently install or continue after signer/provenance/SBOM/compatibility/backup/health failure and display durable accepted/rolled-back/quarantined journal truth. C0 binds one immutable same-candidate Phase 1–6 evidence/final-artifact set. C1 approval/rejection/acceptance and the third publication action exist only in the separate project-maintainer terminal/app, which imports no household package, database, cookie, key, evidence body, backup/support/diagnostic reader, or household API client. Household UI verifies and renders read-only C1/publication receipts only.
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run pytest tests/security/ui/test_recovery_local_owner_only.py tests/security/ui/test_c0_c1_ui_bindings.py -q && pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui/phase6-recovery-release.spec.ts`
+Run: `uv run pytest tests/security/ui/test_recovery_local_owner_only.py tests/security/ui/test_c0_c1_ui_bindings.py -q && pnpm --filter @tuntun/admin e2e -- tests/e2e/ui/phase6-recovery-release.spec.ts`
 Expected: PASS for clean restore/no resurrection, containment enter/exit, failed update rollback, retired-device denial, C0/C1 invalidation on change, and local-only absence from remote UI/API/bundles.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1820,7 +2134,7 @@ Exercise CSRF, Host/Origin, rate, cursor, content type/size, object IDs, session
 
 - [ ] **Step 4: Run green and production builds**
 
-Run: `uv run pytest tests/security/ui tests/privacy/ui/test_browser_artifact_scan.py -q && pnpm --filter @tuntun/admin exec vite build && pnpm --filter @tuntun/subject-privacy exec vite build && pnpm --dir apps/display-agent exec vite build && uv run python scripts/ui/check_feature_absence.py --all-production-dist && uv run python scripts/ui/scan_browser_artifacts.py --all-surfaces`
+Run: `uv run pytest tests/security/ui tests/privacy/ui/test_browser_artifact_scan.py -q && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/subject-privacy build && pnpm --filter @tuntun/display-agent build && uv run python scripts/ui/check_feature_absence.py --all-production-dist && uv run python scripts/ui/scan_browser_artifacts.py --all-surfaces`
 Expected: PASS with zero unauthorized object/body, secret/private artifact, missing `no-store`, dormant route, absent-feature chunk, cross-surface import, or direct-request bypass.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1873,7 +2187,7 @@ def test_performance_budgets(measurements) -> None:
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/performance/ui/test_shell_budgets.py -q && pnpm --filter @tuntun/admin exec playwright test tests/ui/accessibility-matrix.spec.ts tests/ui/localization-matrix.spec.ts tests/ui/visual-state-matrix.spec.ts tests/performance/ui/navigation.spec.ts && pnpm --filter @tuntun/subject-privacy exec playwright test tests/ui/subject-accessibility.spec.ts && pnpm --dir apps/display-agent exec playwright test tests/ui/display-accessibility.spec.ts`
+Run: `uv run pytest tests/performance/ui/test_shell_budgets.py -q && pnpm --filter @tuntun/admin e2e -- tests/ui/accessibility-matrix.spec.ts tests/ui/localization-matrix.spec.ts tests/ui/visual-state-matrix.spec.ts tests/performance/ui/navigation.spec.ts && pnpm --filter @tuntun/subject-privacy e2e -- tests/ui/subject-accessibility.spec.ts && pnpm --filter @tuntun/display-agent e2e -- tests/ui/display-accessibility.spec.ts`
 Expected: FAIL with the exact missing route/state/matrix/budget evidence; do not update references until human visual review.
 
 - [ ] **Step 3: Fix presentation-only accessibility/performance gaps**
@@ -1882,7 +2196,7 @@ Ensure landmarks, headings, live announcements, focus restoration/trap, table/ca
 
 - [ ] **Step 4: Run green on the Intel baseline**
 
-Run: `uv run python scripts/ui/capture_visuals.py --all-matrix && uv run python scripts/ui/verify_budgets.py --target intel-2020 --household-load && uv run pytest tests/performance/ui/test_shell_budgets.py -q && pnpm --filter @tuntun/admin exec playwright test tests/ui tests/performance/ui/navigation.spec.ts && pnpm --filter @tuntun/subject-privacy exec playwright test tests/ui/subject-accessibility.spec.ts && pnpm --dir apps/display-agent exec playwright test tests/ui/display-accessibility.spec.ts`
+Run: `uv run python scripts/ui/capture_visuals.py --all-matrix && uv run python scripts/ui/verify_budgets.py --target intel-2020 --household-load && uv run pytest tests/performance/ui/test_shell_budgets.py -q && pnpm --filter @tuntun/admin e2e -- tests/ui tests/performance/ui/navigation.spec.ts && pnpm --filter @tuntun/subject-privacy e2e -- tests/ui/subject-accessibility.spec.ts && pnpm --filter @tuntun/display-agent e2e -- tests/ui/display-accessibility.spec.ts`
 Expected: PASS with reviewed visual evidence, zero serious/critical axe findings, completed keyboard/VoiceOver checklist, no clipped mixed-script fixture, and all three performance budgets met. Paired-LAN results are reported separately.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -1897,8 +2211,9 @@ git commit -m "test(ui): prove accessible localized and responsive performance"
 
 ### Task U28: Run fault campaigns, unified maintenance gate, and final UI acceptance
 
-**Depends on:** U01–U27 and the exact accepted feature manifest/hardware set.
-**Checkpoint:** U8 final.
+**Tooling-preparation dependency/order:** U01–U27 and stable Phase 6 UI/evidence contracts. Steps 1–5 implement, test and commit the acceptance verifier as checkpoint U8A before Phase 6 Task 36B freezes final bytes; synthetic evidence grants no production UI acceptance.
+**Production-acceptance dependency/order:** Phase 6 Task 36B's exact frozen candidate, Task 34B's real maintenance receipt, Task 35R's current post-drill resilience receipt and every applicable physical UI gate. Step 6 writes the U8B receipt outside the tracked tree before Task 35B/P6-4; actual C1 approval/publication remain later read-only Task 38 inputs.
+**Checkpoint:** U8A tooling qualification, then U8B final evidence acceptance.
 **Estimated effort:** 3 person-days plus non-compressible soak and maintenance windows.
 
 **Files:**
@@ -1929,6 +2244,22 @@ def test_fault_surfaces_remain_truthful_and_non_authorizing(fault_harness, fault
 def test_ui_acceptance_recomputes_not_trusts_pass_flag(verifier, forged_evidence) -> None:
     with pytest.raises(EvidenceRejected):
         verifier.verify(forged_evidence | {"pass": True})
+
+def test_ui_acceptance_rejects_maintenance_from_another_candidate(verifier, evidence) -> None:
+    with pytest.raises(EvidenceRejected, match="ui_candidate_mismatch"):
+        verifier.verify(evidence.with_cross_candidate_maintenance_receipt())
+
+@pytest.mark.parametrize("fault",(
+    "missing_successor","late_successor","reordered_successor",
+    "signature_drift","candidate_drift","registration_drift",
+    "wall_deadline_equality","monotonic_deadline_equality",
+    "transition_receipt_missing","expired_authority_interval",
+))
+def test_ui_acceptance_recomputes_canonical_campaign_authority(
+    verifier,evidence,fault,
+) -> None:
+    with pytest.raises(EvidenceRejected,match="feature_authority"):
+        verifier.verify(evidence.with_feature_authority_fault(fault))
 ```
 
 - [ ] **Step 2: Run red**
@@ -1938,32 +2269,42 @@ Expected: FAIL because the signed evidence schema/verifier and complete fault/ma
 
 - [ ] **Step 3: Implement evidence recomputation and rollback rules**
 
-The verifier rejects caller-authored pass flags, missing suites, expired evidence, mismatched candidate/feature/schema/policy/migration/build/hardware digests, unreviewed screenshots, absent negative-reachability rows, compressed elapsed gates, or private content. Any feature-specific failure removes that feature's manifest entry and proves absence; shared shell/auth/privacy/subject/display contract failure blocks UI promotion. Rollback preserves the prior accepted build and manifest; it never downgrades data without the phase-owned recovery path.
+The verifier rejects caller-authored pass flags, missing suites, expired evidence, mismatched candidate/feature/schema/policy/migration/build/hardware digests, unreviewed screenshots, absent negative-reachability rows, compressed elapsed gates, or private content. It imports the Phase 2 canonical chain verifier, recomputes `FeatureAuthorityCampaignEvidenceV1` from the externally pre-issued `SignedFeatureManifestRolloverChainV1` and ordered transition receipts, and requires one frozen candidate/complete registration set plus literal zero expired-authority interval across every consumed elapsed receipt. It never trusts a child receipt's pass/authority flag and has no signer, fetch, renewal, or grace path. Any feature-specific failure removes that feature's manifest entry and proves absence; shared shell/auth/privacy/subject/display contract failure blocks UI promotion. Rollback preserves the prior accepted build and manifest; it never downgrades data without the phase-owned recovery path.
 
-Ordinary owner-work logging by subsystem may begin after at least 60 steady-state days. Evaluate the rolling three-month median for promotion only after at least 90 steady-state days and three complete monthly buckets. The median for the complete Phase 1–6 system—not UI alone—must be <=8 hours/month. Include ordinary health, backup, certificate/key, storage, device, plugin, and update work. Record commissioning, quarterly restore/security/physical-safety drills, incidents, hardware replacement, unplanned repair, and major migrations separately; they cannot lower the ordinary metric. Three consecutive months over eight hours freeze optional expansion and require simplification or retirement review.
+The production owner-work epoch opens only after Phase 6 Task 36B freezes and target-qualifies the final candidate. Ordinary logging by subsystem may become eligible after at least 60 uninterrupted steady-state days. Evaluate the rolling three-month median for promotion only after at least 90 uninterrupted days and three complete monthly buckets. The median for the complete Phase 1–6 system—not UI alone—must be <=8 hours/month. Include ordinary health, backup, certificate/key, storage, device, plugin, and update work. Record commissioning, quarterly restore/security/physical-safety drills, incidents, hardware replacement, unplanned repair, and major migrations separately; they cannot lower the ordinary metric. Three consecutive months over eight hours freeze optional expansion and require simplification or retirement review. Candidate/authority drift resets the generation and the full window; U8B cannot accept a receipt from pre-freeze tooling or another candidate.
 
-- [ ] **Step 4: Run final green gates from one clean candidate**
+- [ ] **Step 4: Run green tooling gates and synthetic candidate-binding fixtures**
 
 ```bash
 uv run pytest tests/contract/ui tests/security/ui tests/privacy/ui tests/fault/ui tests/acceptance/ui -q
-pnpm --filter @tuntun/admin exec vitest run
-pnpm --filter @tuntun/subject-privacy exec vitest run
-pnpm --dir apps/display-agent exec vitest run
-pnpm --filter @tuntun/admin exec playwright test tests/e2e/ui tests/ui tests/performance/ui/navigation.spec.ts
+pnpm --filter @tuntun/admin test
+pnpm --filter @tuntun/subject-privacy test
+pnpm --filter @tuntun/display-agent test
+pnpm --filter @tuntun/admin e2e -- tests/e2e/ui tests/ui tests/performance/ui/navigation.spec.ts
 uv run ruff format --check apps packages tests scripts/ui
 uv run ruff check apps packages tests scripts/ui
 uv run mypy apps/core/src apps/edge/src packages/contracts/src packages/testing/src
-pnpm --filter @tuntun/admin exec lint
-pnpm --filter @tuntun/admin exec tsc --noEmit
-pnpm --filter @tuntun/admin exec vite build
-pnpm --filter @tuntun/subject-privacy exec vite build
-pnpm --dir apps/display-agent exec vite build
+pnpm --filter @tuntun/admin lint
+pnpm --filter @tuntun/admin typecheck
+pnpm --filter @tuntun/admin build
+pnpm --filter @tuntun/ui-contracts lint
+pnpm --filter @tuntun/ui-contracts typecheck
+pnpm --filter @tuntun/ui-contracts build
+pnpm --filter @tuntun/design-system lint
+pnpm --filter @tuntun/design-system typecheck
+pnpm --filter @tuntun/design-system build
+pnpm --filter @tuntun/subject-privacy lint
+pnpm --filter @tuntun/subject-privacy typecheck
+pnpm --filter @tuntun/subject-privacy build
+pnpm --filter @tuntun/display-agent lint
+pnpm --filter @tuntun/display-agent typecheck
+pnpm --filter @tuntun/display-agent build
 uv run python scripts/ui/check_feature_absence.py --all-production-dist
 uv run python scripts/ui/scan_browser_artifacts.py --all-surfaces
-uv run python scripts/ui/verify_acceptance.py var/evidence/ui/acceptance --commit "$(git rev-parse HEAD)" --require-physical-gates --require-negative-reachability --require-full-system-maintenance
+uv run python scripts/ui/verify_acceptance.py fixtures/synthetic/ui/acceptance --synthetic --require-negative-reachability --reject-compressed-maintenance
 ```
 
-Expected: PASS against one unchanged candidate. Owner-gated hardware/elapsed rows must already be valid; synthetic output cannot substitute. All absent features are negatively unreachable and every enabled feature has current exact evidence.
+Expected: PASS for tooling/static/browser/fault oracles. Cross-candidate, compressed, missing-physical and synthetic-as-production fixtures deny; no production U8 receipt exists yet.
 
 - [ ] **Step 5: Commit final plan implementation checkpoint**
 
@@ -1972,8 +2313,14 @@ git add tests/fault/ui tests/acceptance/ui schemas/evidence/ui scripts/ui/verify
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
-git commit -m "test(ui): freeze six-phase presentation acceptance evidence"
+git commit -m "test(ui): prepare six-phase presentation acceptance tooling"
 ```
+
+- [ ] **Step 6 (U8B): Accept the exact frozen-candidate UI evidence without changing the candidate**
+
+After Phase 6 Task 34B and Task 35R complete, require the exact Task 36B release manifest/service inventory, the same-candidate externally pre-issued canonical chain, current post-drill resilience receipt, real physical UI rows and an empty tracked tree. Run: `TUNTUN_ALLOW_REAL_UI_GATE=1 uv run python scripts/ui/verify_acceptance.py var/evidence/ui/acceptance --candidate-manifest var/release/frozen/release-manifest.json --service-inventory var/release/frozen/service-inventory.json --feature-manifest-chain var/evidence/phase6/final-feature-authority/signed-rollover-chain.json --maintenance-receipt var/evidence/phase6/maintenance.json --resilience-receipt var/evidence/phase6/p6-4-resilience.json --require-physical-gates --require-negative-reachability --require-full-system-maintenance --require-zero-expired-authority --output var/evidence/ui/u8-accepted.json && uv run python ops/release/finalize.py --verify-unchanged var/release/frozen && uv run python scripts/scan_private_data.py --paths var/evidence/ui/u8-accepted.json`.
+
+Expected: the signed U8B receipt binds the exact Task 36B commit/artifact/service inventory, canonical rollover-chain/ordered-transition digests and zero expired interval, Task 34B maintenance receipt, Task 35R post-drill state, enabled hardware/config and complete UI security/accessibility/fault/absence evidence. Candidate substitution, authority gap/drift, stale physical or resilience rows, synthetic input or an elapsed-gate shortcut denies without a receipt. This step writes evidence only; Task 35B/P6-4 may consume U8B, while any source/route/service-row/artifact mutation invalidates U8B and the maintenance window.
 
 ## Effort and Calendar Envelope
 
@@ -1992,7 +2339,7 @@ The task estimates total **92.5 focused person-days**, but this is a work-alloca
 | Whole-system UI assurance | U26–U28 | 11 days | Distributed phase security/accessibility/evidence work plus Phase 6 C0/C1 preparation |
 | **Total allocated UI effort** | **U01–U28** | **92.5 days** | **Already contained within the corresponding phase/program estimates** |
 
-The U0–U8 checkpoints remain sequential for authority/schema stability, but task branches within an accepted checkpoint may run in parallel when they share no files or physical devices. This effort total is not a delivery promise and does not compress physical or elapsed acceptance gates.
+The U0–U7 and U8A tooling checkpoints remain sequential for authority/schema stability. U8B is intentionally delayed until the final Phase 6 candidate and Task 34B maintenance evidence exist; it cannot be a prerequisite to creating that candidate. Task branches within a checkpoint may run in parallel only when they share no files or physical devices. This effort total is not a delivery promise and does not compress physical or elapsed acceptance gates.
 
 Elapsed gates are tracked separately from hands-on UI effort:
 

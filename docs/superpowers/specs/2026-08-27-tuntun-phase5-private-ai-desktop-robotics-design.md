@@ -32,8 +32,11 @@ Raspbot V2 is a later supervised endpoint, not an autonomous household agent. It
 | Knowledge corpus | Separate SQLCipher relational catalog plus application-encrypted object store under one configured canonical storage binding; FTS baseline and vector retrieval only where measured useful |
 | Camera vision | Phase 3 may issue bounded, selected-frame local leases only; no continuous cloud video and no Reolink-derived identity |
 | Desktop posture | Risk-tiered and low-friction; D3 executes only pinned non-code inspection utilities, while every repository code/test/lint/build/format operation is D4 and runs only in a proved sandbox |
-| Desktop scope | Initial production pilot is on the Tuntun Mac through loopback/Unix-domain transport; the outer-network office laptop receives no new inner-network route in Phase 5 |
+| Desktop scope | Initial production pilot is loopback/Unix-domain transport on the one 2020 Intel Mac that is both office-use machine and Tuntun Core; no second office laptop or ambient cross-network helper exists |
 | Desktop model egress | Selected files, excerpts, repository material, and command/workflow output are local-only by default; one exact owner-approved cloud exception is single-use, expiring, revocable, and bound to the current `DesktopGrantV1` plus content/output, provider, model, purpose, sensitivity, disclosure, and provider-policy commitments |
+| Owner HTTP entry point | Phase 3 `tuntun-owner-ingress` remains the sole owner-facing HTTP process/LAN listener; Phase 5 adds no listener and reaches Core only through the existing authenticated Core Unix-domain socket |
+| Route composition | Phase 5 route modules are pure injected factories; each installed owner-flow checkpoint atomically updates Core/owner-ingress composition, signed route manifest, and refreshed owner-ingress row before physical/elapsed evidence, with a final repeat at Phase 5 release |
+| Multi-day authority | Every Phase 5 campaign longer than 24 hours reuses the Phase 2 externally signed, pre-issued `SignedFeatureManifestRolloverChainV1` and per-admission wall/monotonic lease for one frozen candidate; Phase 5 adds no runtime signer or renewal path |
 | Robot posture | Raspbot manual/telepresence first; common-area geofence; no stairs, water, kitchen hazards, private rooms, unsupervised exploration, following, carrying, or autonomous navigation |
 | Robot authority | Models can explain or propose, but cannot mint motion leases or sit in the motor-control loop |
 | LILYGO | Optional experiment; never the sole or primary emergency stop, authenticator, voice endpoint, or policy authority |
@@ -49,6 +52,17 @@ The following Phase 1 and Phase 2 controls remain unchanged:
 - Home Assistant remains the deterministic device plane and receives no model, document, identity, or desktop authority;
 - no public inbound home service, router port-forwarding, or ambient cross-router trust is introduced;
 - model output, retrieved text, command output, robot telemetry, and camera observations are untrusted inputs until local schema and policy validation pass.
+
+### 2.1 Audited contract and lineage closure
+
+- The four and only four knowledge audiences are `subject_private`, `guardian_child`, `household_adults`, and `household_all`. Profile classes remain exactly `owner|adult|k2|n1|guest`; there is no `child` alias. Every import/query/excerpt projection retains the subject ID plus current audience, guardian, consent, and applicable child-safe-approval generations. `guardian_child` requires a K2/N1 subject and guardian/child-safe approval; `household_all` always requires explicit child-safe approval and also current guardian authority for K2/N1; `household_adults` excludes K2/N1/Guest; `subject_private` never widens. Owner role does not grant another subject's body, and Guest/cross-household queries are indistinguishably denied before listing, rank, decrypt, count, or serialization.
+- Retrieval is at most eight excerpts and 12,000 aggregate document tokens. Per-excerpt token counts and their checked bundle sum are commitment-bound and enforced before decryption/materialization/provider serialization. Every excerpt remains valid through the bundle expiry; a new wrapper cannot freshen an expired member.
+- Runtime policy/system text comes only from the locally resolved digest-pinned template. Caller segments cannot claim policy authority. The closed mapping is `user_text -> user_statement`, `approved_memory_excerpt|knowledge_excerpt -> untrusted_retrieval`, and `command_output -> untrusted_tool_output`; injection remains inert data.
+- `InferenceResultV1` is a status-discriminated union. Only `completed` carries the registered successful schema; `refused` carries a bounded safe-refusal; cancelled, timed-out, and failed carry no output. Every branch binds request, response schema, model, and prompt-template commitments and cannot encode a tool, memory, action, desktop, media, or robot proposal.
+- Phase 5's Guest/child prohibition is a local-route promotion rule, not a rewrite of Phase 1. Before M5, current Phase 1 exact-disclosure/guardian-consented approved-cloud behavior remains available where its own gates pass; child web remains denied.
+- `DesktopModelEgressAuthorizationV1` bounds and commitment-binds the exact ordered non-empty selection, byte count, token count, canonical serialization, grant/generation, provider/account/model, and one provider attempt. Reordering, duplication, partial use, or mutation denies before network I/O; workflow network authority remains independent and Phase 5 D4 stays `none`.
+- Core migrations are one exact chain `0019_screen_time_real_adapter -> 0020_private_ai_registry -> 0021_desktop_authority -> 0022_robotics`. The knowledge catalog has a separate Alembic environment/version table and exact chain `0001_knowledge_sources -> 0002_knowledge_fts -> 0003_knowledge_embeddings -> 0004_knowledge_recovery`; the graphs never share a head or version table.
+- Robot activation binds current Phase 2 `(area_id, area_generation)`, robot binding ID/generation, and a zone ID/generation proved to belong to that same area/binding. Every motion lease/readiness/safety fact binds that tuple and the exact activation commitment. Activation, motion lease, readiness, safety state, stop, and stop receipt have distinct signature domains plus current core/edge signing-key generations. Signed readiness/safety facts include battery, charging, controller/sensors, camera/indicator, last valid lease, observation time, and validity; only `disabled/off` and `indicator_verified/on_verified` are coherent camera pairs. Stale, reclassified, cross-domain, or contradictory facts deny motion and cannot render ready.
 
 ## 3. Scope boundaries
 
@@ -75,7 +89,7 @@ The following Phase 1 and Phase 2 controls remain unchanged:
 - Allowing retrieved documents, source-code instructions, command output, or model text to execute a tool, change policy, write memory, or move a robot directly.
 - Ambient screen capture, keylogging, clipboard history, Accessibility control, password-manager access, browser cookies, SSH-agent access, arbitrary shell strings, arbitrary package installation, or unrestricted full-disk access.
 - Sending desktop-selected content or command/workflow output to a cloud/VPS model because a workflow has network access; model egress and workflow network authority are separate grants.
-- A Phase 5 route from the BE800-connected office laptop into the inner ASUS network; a paired cross-network desktop helper waits for Phase 6 VPN/remote-access design.
+- Reconnecting the Core Mac's direct BE800 link or representing a second office laptop/helper as part of the family-ready baseline. The baseline single-homes the one Mac on inner ASUS/AiMesh; an optional dual-home mode is separately qualified and adds no ambient cross-network helper or authority.
 - Autonomous Raspbot mapping, exploration, room-to-room navigation, person following, child supervision, fall detection, deliveries, object carrying, stair operation, operation near water/heat, or internet telepresence.
 - Representing the Raspbot’s vendor face recognition, large-model package, or prebuilt image as Tuntun identity or authorization.
 - Using the LILYGO as a far-field room voice node, primary e-stop, unattended credential vault, or reason to expand scope.
@@ -113,18 +127,24 @@ The following Phase 1 and Phase 2 controls remain unchanged:
 ```mermaid
 flowchart LR
   subgraph ENDPOINTS[Existing and governed endpoints]
+    CONSOLE[Local owner console]
     REACHY[Reachy + Phase 4 room speech nodes]
     DESKTOP[Local desktop helper\nloopback pilot]
-    FRAME[Phase 3 selected-frame broker\nlocal one-shot leases]
+    FRAME[Phase 3 selected-frame\ncontract + validators]
     ROBOT[Raspbot edge + independent safety]
     HA[Home Assistant Green\ndevice authority]
   end
 
   subgraph MAC[2020 Intel MacBook Pro · trusted control plane]
+    INGRESS[Phase 3 owner ingress\nsole HTTP listener]
+    COREAPI[Canonical Core app\nauthenticated UDS]
     TURN[Conversation workflow]
     POLICY[Identity · policy · auth · consent]
     GATE[Inference gateway + router]
     PERCEPT[Non-generative perception gateway]
+    FRAMEBROKER[Phase 5 one-shot\nframe broker + consumer]
+    LPROXY[Mac inference proxy\ndedicated UDS service]
+    LMODEL[Bounded local model runtime]
     MODELREG[Model/evaluation registry]
     MEM[Phase 1 canonical 7-kind memory]
     KNOW[Knowledge service]
@@ -134,6 +154,8 @@ flowchart LR
     ROBOTPOL[Robot session/geofence policy]
     AUDIT[Audit · usage · power · cost]
 
+    INGRESS -->|signed route manifest| COREAPI
+    COREAPI --> POLICY
     TURN --> POLICY --> GATE
     POLICY --> MEM
     TURN --> KNOW
@@ -141,6 +163,7 @@ flowchart LR
     KNOW --> OBJ
     MODELREG --> GATE
     MODELREG --> PERCEPT
+    GATE --> LPROXY --> LMODEL
     DESKPOL --> POLICY
     ROBOTPOL --> POLICY
     GATE --> AUDIT
@@ -166,15 +189,18 @@ flowchart LR
     VPS[Optional owner GPU VPS\nstill cloud processing]
   end
 
+  CONSOLE -->|local authenticated HTTPS| INGRESS
   REACHY <-->|Phase 1/4 typed media and state| TURN
   DESKTOP <-->|expiring grants + typed jobs| DESKPOL
-  FRAME -->|RAM-only selected-frame request| PERCEPT
-  PERCEPT -->|typed anonymous observation| FRAME
+  FRAME -->|validated frame availability| FRAMEBROKER
+  FRAMEBROKER -->|RAM-only selected-frame request| PERCEPT
+  PERCEPT -->|typed anonymous observation| FRAMEBROKER
+  FRAMEBROKER -->|validated observation| FRAME
   ROBOT <-->|signed short leases + telemetry| ROBOTPOL
   POLICY -->|existing Phase 2 action path only| HA
 
-  GATE -->|sanitized signed language request| PROXY
-  PERCEPT -->|separate bounded perception request| CVPROXY
+  GATE -.->|optional isolated appliance language target| PROXY
+  PERCEPT -.->|optional separately gated appliance CV target| CVPROXY
   GATE -->|sanitized provider request| API
   GATE -.->|same consent/redaction/budget gate| VPS
 
@@ -182,27 +208,41 @@ flowchart LR
   classDef data fill:#DCFCE7,stroke:#15803D,color:#052E16,stroke-width:2px;
   classDef edge fill:#FEF3C7,stroke:#B45309,color:#451A03,stroke-width:2px;
   classDef compute fill:#EDE9FE,stroke:#7C3AED,color:#2E1065,stroke-width:2px;
-  class POLICY,GATE,PERCEPT,MODELREG,DESKPOL,ROBOTPOL,TURN,AUDIT trust;
+  class INGRESS,COREAPI,POLICY,GATE,PERCEPT,FRAMEBROKER,MODELREG,DESKPOL,ROBOTPOL,TURN,AUDIT trust;
   class MEM,KNOW,KDB,OBJ data;
-  class REACHY,DESKTOP,FRAME,ROBOT,HA edge;
-  class PROXY,SERVE,WEIGHTS,CVPROXY,CV,CVWEIGHTS,API,VPS compute;
+  class CONSOLE,REACHY,DESKTOP,FRAME,ROBOT,HA edge;
+  class LPROXY,LMODEL,PROXY,SERVE,WEIGHTS,CVPROXY,CV,CVWEIGHTS,API,VPS compute;
 ```
 
 ### 5.1 Trust boundary
 
-The Mac is the policy-enforcement point before and after every inference or perception request. The appliance language service accepts only signed `SanitizedInferenceRequestV1` messages; its separate perception service accepts only Phase 3 `selected_frame_request.v1`. Both return untrusted typed output. Neither has a direct route or credential for SQLCipher, Keychain, the object store, Home Assistant, Reolink, Reachy media beyond the single-use selected frames, desktop files, Raspbot motion, the owner console, or cloud-provider administration.
+The Mac is the policy-enforcement point before and after every inference or perception request. The selected language proxy target accepts only signed `SanitizedInferenceRequestV1` messages; the separate perception proxy accepts only Phase 3 `selected_frame_request.v1`. Both return untrusted typed output. Neither has a direct route or credential for SQLCipher, Keychain, the object store, Home Assistant, Reolink, Reachy media beyond the single-use selected frames, desktop files, Raspbot motion, the owner console, or cloud-provider administration.
 
 Inference can move; authority does not. A local model response follows the same schema validation, DLP, child-safety, action/memory proposal, citation, confirmation, and audit path as a cloud response. A runtime claiming OpenAI compatibility does not bypass adapter conformance tests.
 
 ### 5.2 Deployment model
 
 - `tuntun-core` remains one modular-monolith process on the Mac, with focused in-process modules and bounded worker pools.
-- `tuntun-inference-proxy` is one least-privilege service on an optional appliance. The serving runtime may be a separate local process/container reachable only by the proxy over loopback.
-- `tuntun-perception-proxy` is a different least-privilege appliance service and identity. It accepts only Phase 3 `selected_frame_request.v1`, reaches only a pinned non-generative CV runtime, and shares no language-model endpoint, prompt template, tool schema, or queue.
+- `tuntun-inference-proxy` is one least-privilege service family. The current M1 path runs it as a dedicated launch daemon on the Mac over a Core-authenticated Unix-domain socket. An optional appliance reuses only the protocol/distribution after Task P5-3 isolation and adds a distinct `appliance_compose` target record under the same signed service-family row; it has a different service identity/configuration/lifecycle and never inherits the Mac credential. The serving runtime may be a separate local process/container reachable only by the proxy over loopback.
+- `tuntun-perception-proxy` is a different least-privilege appliance service and identity, enabled only after the delivered Task P5-3 appliance isolation gate. It accepts only Phase 3 `selected_frame_request.v1` over a separately authenticated Mac-only mTLS port, reaches only a pinned non-generative CV runtime, and shares no container, UID, certificate, port, model mount, language-model endpoint, prompt template, tool schema, queue, or credential with inference. Without the appliance gate, its production target remains absent.
 - `tuntun-desktop-helper` is a separate least-privilege process on the Mac. It uses a Unix-domain socket with peer-credential checks for the initial pilot and receives no provider/model key.
 - `tuntun-robot-edge` runs on the Raspbot Raspberry Pi beside vendor motor/sensor code but behind an independent safety supervisor. Vendor ROS/DDS and control ports are restricted to loopback where the hardware/software probe permits.
 - The knowledge catalog and object store remain under the single commissioned `KnowledgeStorageBindingV1` on the owner-controlled encrypted internal root or separately named `TUNTUN_KNOWLEDGE` volume. Large objects do not move to the inference appliance as an ambient mount.
 - No new broker, service mesh, Kubernetes cluster, or distributed database is required. Typed queues and existing cross-domain envelopes remain sufficient.
+
+The four production service families are release-controlled by signed inventory rows `phase5-inference-proxy.v1`, `phase5-desktop-helper.v1`, `phase5-perception-proxy.v1`, and `phase5-robot-edge.v1`. The inference row may contain the independently gated Mac and appliance target records; every other row has exactly its named target in this phase. A positive target record binds the exact distribution/wheel, executable and argv, target, job/unit digest, dedicated account, root-owned configuration, UDS/listener/runtime boundary, restart/health policy, firewall profile, and owned cleanup set. Start refuses root/wrong account or unsafe configuration before any key/file/media/device/network effect; health is bounded/read-only; restart rotates the boot/session generation and cannot replay work, grants, frames, or motion. Each enabled target must pass install, start, health, SIGTERM, deliberate crash/restart, wrong-account/config, stale-runtime and preserve/destroy cleanup tests. When a capability target is absent, its production distribution/job/config/account/socket/listener/unit target record is absent too; a wholly absent family has no row. Phase 6 consumes these signed rows for package/update/uninstall rather than rediscovering services.
+
+Phase 3's `tuntun-owner-ingress` remains the only owner-facing HTTP process and LAN listener. Core is an authenticated Unix-domain-socket upstream; no Phase 5 module opens an HTTP socket. Phase 5 route modules export only side-effect-free factories whose dependencies and enabled feature facts are passed explicitly. Importing a route cannot call `include_router`, mutate a global route list, resolve a dependency, read feature state, or bind a listener. Every task that first adds or changes an owner-facing route performs an atomic installed checkpoint before its UI, physical, soak, or elapsed evidence: construct the candidate Core container/app, update the exact owner-ingress allowlist, sign `ops/routes/owner-ingress-routes.v1.json`, rebuild the candidate ingress wheel, refresh/re-sign `phase3-owner-ingress.v1`, and verify listener -> ingress -> authenticated Core UDS positives plus unknown/disabled `404`, takeover, crash/restart, update, rollback, and both uninstall modes. A mixed old/new app, router, manifest, wheel, or row never becomes active. Task 35 selected-frame transport is explicitly excluded because it is an outbound typed perception-gateway/proxy protocol, not an owner HTTP route; Task 36 first creates and checkpoints the owner-facing perception status route. Final Phase 5 release repeats the whole composition against all final bytes. The prior Phase 4 or earlier Phase 5 row is invalid with later Phase 5 bytes and is usable only as part of a complete rollback to its matching app and route-manifest set.
+
+Service-row freshness is evaluated after each source/configuration mutation and before the next actual gated use, not merely when a service is introduced or finally released. Task 28 refreshes the desktop-helper row after Task 26 before P5-4 owner use; Tasks 30, 31, and 32 refresh it after their respective registry/executor/sandbox mutations before D3 execution, actual D4 qualification, and actual D4 workflow, and Task 33 verifies the applicable current row. Tasks 39, 40, 42, and 43 each refresh the robot-edge row before their physical/effect campaigns, while Tasks 41 and 44 verify it before owner session and soak use. A stale interval permits only no-effect source/unit tests; helper file/process work, sandbox execution, device/media access, and motor authority remain denied. Final Phase 5 candidate preparation regenerates and re-signs all enabled rows and reruns installed lifecycle/update/rollback, independently revalidating inference and perception against their final Task 15/34 bytes before any final elapsed campaign. An absent target removes its production artifacts and target record, and an entirely absent family removes its row.
+
+Every Phase 5 campaign longer than 24 hours—the seven-day Mac run, M3/M4 promotion runs, seven-day robot soak, optional fourteen-day LILYGO trial, and final thirty-day release campaign—inherits Phase 2's `SignedFeatureManifestRolloverChainV1` and `FeatureManifestLeaseSupervisor` unchanged. Once the applicable candidate is frozen, the external acceptance-signing workflow pre-issues a complete hash-linked chain of at-most-24-hour manifests with identical candidate, package, and registrations across that campaign. M3-to-M4 promotion changes stage/activation/evidence authority, so every appliance cell has separate cell-and-stage-namespaced M3 and M4 chains; an earlier-stage or another-cell chain is never widened, reused, or accepted. Runtime holds no signer and admits foreground or background work only while both the current wall-clock expiry and a process-local monotonic lease remain valid. Campaign evidence binds the exact chain and proves ordered activation with zero expired-authority interval; a missing, late, reordered, widened, rollback, invalid, drifted, wall-expired, or monotonic-expired successor fails closed before preparation/work, invokes the inherited whole-composition recovery, and invalidates that uninterrupted run. Phase 5 defines no parallel renewal system.
+
+An elapsed runner refuses to start until its runner, verifier, schemas, tests, signed route/service rows, and every bound candidate byte are committed, the worktree is clean, and the external workflow signs the chain for that resolved commit. Pre-commit validation is limited to bounded synthetic, fake-clock, and lifecycle tests that produce no elapsed evidence. Each physical interval starts from zero only after the tooling commit, and any later bound source, registration, route, service, configuration, artifact, firmware, or hardware change invalidates the affected receipt. Because Tasks 45–48 change the composition after Task 44, final Phase 5 release reruns the 30-day non-robot campaign and, when floor motion remains enabled, a fresh seven-day supervised robot soak against the same immutable final candidate and continuous chain. The final 30-day run includes any retained LILYGO role; earlier Task 44/45 receipts remain qualification inputs only.
+
+### 5.3 Migration ownership
+
+The canonical core SQLCipher Alembic graph remains one head: `0020_private_ai_registry` has exact parent `0019_screen_time_real_adapter`, `0021_desktop_authority` has exact parent `0020_private_ai_registry`, and `0022_robotics` has exact parent `0021_desktop_authority`. All three extend the existing `adapters/sqlcipher/models.py`; their only new persistence adapters are the first-owned feature modules `private_ai_registry_repository.py`, `desktop_authority_repository.py`, and `robotics_repository.py`. No parallel `adapters/database` tree or generic widening repository exists. The knowledge catalog uses its own migration configuration/script directory and `knowledge_alembic_version` table with exact graph `0001_knowledge_sources -> 0002_knowledge_fts -> 0003_knowledge_embeddings -> 0004_knowledge_recovery`. Fresh install, sequential upgrade, interruption/restart, downgrade-or-clean-restore, and restored prior-head tests enumerate the actual revision files and edges. A changed applied revision, wrong/missing parent, branch label, dependency edge, merge, fork, orphan, multiple head, cross-version-table write, or authority reopened by downgrade blocks startup.
 
 ## 6. Component ownership
 
@@ -219,7 +259,7 @@ Inference can move; authority does not. A local model response follows the same 
 | Desktop policy service | Owner grant preparation, exact model-egress/confirmation/passkey binding, workflow manifests, job reconciliation | Direct OS execution, arbitrary shell parsing, or treating workflow network as model egress |
 | Desktop helper | Resolved-path reads, pinned D3 inspection, and approved D4 sandbox job execution | Model access, policy changes, Keychain, UI automation, or model-egress decisions |
 | Selected-frame vision adapter | One-shot selected-frame request consumption and separate advisory local observation | Continuous stream, identity, raw-frame persistence, cloud vision, security/presence promotion |
-| Robot policy service | Session authorization, geofence/version, signed motion leases, owner audit | Motor PWM, obstacle loop, local e-stop decisions |
+| Robot policy service | Session authorization, canonical area/robot-binding/zone generations, zone-bound safety policy, signed motion leases, owner audit | Motor PWM, obstacle loop, local e-stop decisions |
 | Raspbot safety supervisor | Motor watchdog, hard limits, sensor freshness, obstacle stop, e-stop latch, camera indicator | Family identity, model calls, household memory, policy editing |
 | LILYGO experiment | Non-authoritative status and optional secondary stop/provisioning ceremony | Sole safety function, durable owner credential, policy authority |
 
@@ -232,7 +272,7 @@ The gateway emits one canonical, JCS-signed request after local policy, consent,
 ```text
 SanitizedInferenceRequestV1
   request_id
-  schema_version = 1
+  schema_version = "1.0"
   household_session_pseudonym
   turn_id
   task_class
@@ -244,7 +284,7 @@ SanitizedInferenceRequestV1
   input_segments[1..32]:
     segment_id
     kind: user_text | approved_memory_excerpt | knowledge_excerpt | command_output
-    trust_class: trusted_policy | user_statement | untrusted_retrieval | untrusted_tool_output | untrusted_media
+    trust_class: user_statement | untrusted_retrieval | untrusted_tool_output
     content_or_single_use_ref
     token_or_byte_count
     provenance_commitment
@@ -265,17 +305,22 @@ SanitizedInferenceRequestV1
 
 The request contains no real family name, biometric data, stable profile/database identifier, provider secret, object-store key, filesystem path, camera URL, Home Assistant entity ID, desktop grant token, robot credential, or raw canonical-memory record. `persona_descriptor` reuses the canonical Phase 1 `PersonaProjection` exactly: `role`, `context`, `tone`, `depth`, and `learning_level`, with the same closed enums and no parallel alias or extension. Camera frames are not valid segments in this language-inference contract; Section 10 uses a separate `PerceptionGatewayPort` and the exact Phase 3 request. A desktop-derived segment sent to `approved_cloud` requires the commitment of the exact current `DesktopModelEgressAuthorizationV1`; a local route omits it, and an execution-network grant cannot populate it.
 
-`input_segments` are ordered data, not an instruction hierarchy. Only the locally pinned system/policy template may supply instructions. A model adapter cannot add a tool, increase limits, change task class, or reinterpret one trust class as another.
+`input_segments` are ordered data, not an instruction hierarchy. Segment IDs are unique; consent receipt commitments are unique and capped at 16. Only the locally resolved, digest-pinned system/policy template may supply instructions, out of band from caller segments. The gateway enforces the exact kind-to-trust mapping from Section 2.1 before signing and again before serialization; `trusted_policy`, `system`, media, and every cross-kind elevation are unknown and rejected. A model adapter cannot add a tool, increase limits, change task class, or reinterpret one trust class as another.
+
+`RouteDecisionV1.request_commitment` is a purpose-separated HMAC over the canonical JCS bytes of that complete signed request, including its key ID/signature. The dispatcher recomputes it and verifies the decision commitment/current generations before consulting a task cell, artifact registry, budget, runtime, or provider. Reusing the request ID while changing persona, ordered segments, token limits, or any other request byte is a commitment mismatch and performs no I/O.
 
 ### 7.2 Response contract
 
 ```text
 InferenceResultV1
   request_id
-  schema_version = 1
+  schema_version = "1.0"
   status: completed | refused | cancelled | timed_out | failed
   response_schema_id
-  output
+  request_commitment
+  output: successful closed output only when completed;
+          bounded safe refusal only when refused;
+          absent when cancelled, timed_out, or failed
   finish_reason
   model_artifact_id
   model_digest
@@ -294,7 +339,7 @@ InferenceResultV1
   signature
 ```
 
-The Mac rejects a result if request identity, schema, model activation, template digest, deadline, cancellation state, signature, or output limits do not match. Output remains model-generated and untrusted. Ordinary conversational schemas may carry only the existing closed Phase 1 intent unions; knowledge, web-assisted, desktop-output, and selected-frame schemas contain no action or memory proposal field. Local code alone resolves current IDs, authorization, and side effects.
+The Mac rejects a result if request commitment, response schema, model activation, template digest, deadline, cancellation state, signature, status/output discriminator, safety-field cardinality, or output limits do not match. Output remains model-generated and untrusted. Only a `completed` result can carry its registered successful closed output; refusal/cancellation/timeout/failure cannot smuggle a tool, memory, action, desktop, media, robot, or arbitrary proposal. Local code alone resolves current IDs, authorization, and side effects.
 
 ### 7.3 Model artefact manifest
 
@@ -323,6 +368,8 @@ activated_at / revoked_at
 ```
 
 Weights are downloaded only during an owner-approved maintenance window into quarantine. Hash, licence, provenance, expected file set, malware/content-sentinel checks, and runtime load tests pass before activation. Model caches never enter source control or ordinary family backups. A manifest or runtime drift disables the route until evaluation is rebound to the new digests.
+
+Source URLs and licence IDs are non-empty, unique and capped at eight; supported task classes are non-empty, all task-class lists are unique/capped at 32 and supported/prohibited sets are disjoint; approved routes are non-empty, unique and capped at the three closed execution zones. Revocation requires an earlier activation timestamp. Empty, duplicate, oversized, overlapping or time-incoherent manifests fail before acquisition, registry lookup or artefact I/O.
 
 `required_runtime_and_accelerator` is the closed `RuntimeRequirementV1`: pinned runtime name/version/artifact digest, a unique `x86_64 | arm64` host-architecture set, `cpu_only | metal_optional | metal_required`, the closed `avx2 | fma` CPU-feature set where applicable, and a maximum of 16 worker threads. It contains no command, image, package source, environment, or arbitrary accelerator option. An ARM-only requirement cannot claim x86 CPU features.
 
@@ -417,7 +464,7 @@ KnowledgeStorageBindingV1
 - An external canonical root is permitted only on an explicitly separate encrypted APFS volume named `TUNTUN_KNOWLEDGE`, with its own quota, UUID, mount point, Keychain namespace, health evidence, and binding generation. It must not be `TUNTUN_VIDEO`, `HA_BACKUPS`, an alias into either volume, or a subdirectory sharing either quota.
 - The service opens the root by commissioned volume identity and directory handle, not by path string alone. Missing encryption evidence, an absent or wrong volume UUID, mount substitution, mount-point drift, unexpected filesystem, read-only state, ownership change, quota loss, or CAS/version mismatch disables imports, retrieval, indexing, export, and restore. It never falls back automatically from external to internal storage or spills into the video, backup, or Mac root volume.
 - Moving the canonical root is a separately approved migration: freeze writes, verify a complete encrypted copy and catalog/object commitments, atomically change the binding generation, re-open by volume identity, then retire the old root. Two roots are never merged or queried concurrently.
-- `catalog.db` is a separate SQLCipher database with its own 256-bit key and schema version.
+- `catalog.db` is a separate SQLCipher database with its own 256-bit key, `alembic-knowledge.ini` migration environment, `knowledge_alembic_version` table, and exact linear `0001 -> 0002 -> 0003 -> 0004` graph. It never attaches to or advances the canonical core `alembic_version`/head.
 - Each object is encrypted with a random per-version DEK using an authenticated-encryption format; the DEK is wrapped by a knowledge-object root in Keychain.
 - Object paths use random identifiers and reveal neither filename nor subject. Plaintext exists only in a bounded parser/retrieval workspace and RAM.
 - FTS5 lives inside SQLCipher and is the mandatory baseline. It indexes normalized extracted text plus section/page locations.
@@ -425,7 +472,7 @@ KnowledgeStorageBindingV1
 - Indexes are rebuildable from authorized source objects; they are not the source of truth and cannot extend source retention.
 - The corpus has its own binding and quota, and an external corpus has its own volume, separate from Phase 3 video and Home Assistant backups; video or backup pressure cannot silently delete documents.
 
-The recovery copy has an independent `KnowledgeRecoveryPolicyV1`, destination binding, encryption/key bundle, destination-volume UUID, quota, schedule, retention, and deletion generation. It is never the active retrieval root and must be on a different owner-controlled encrypted failure domain from the canonical corpus. The baseline recovery point objective is 24 hours: after a changed day, retain seven daily and four weekly encrypted generations, prune expired generations within 24 hours, and verify one offline restore quarterly. Source deletion or consent revocation immediately blocks affected generations from restore; within 24 hours Tuntun destroys or rekeys every affected managed recovery generation and creates a clean generation. Failure marks recovery `ineligible`, blocks new imports, and remains visible until reconciled. An owner-created export is not a recovery copy and follows its own disclosed lifecycle.
+The recovery copy has an independent `KnowledgeRecoveryPolicyV1`, destination binding, encryption/key bundle, destination-volume UUID, quota, schedule, retention, and deletion generation. It is never the active retrieval root and must be on a different owner-controlled encrypted failure domain from the canonical corpus. The baseline recovery point objective is 24 hours: after a changed day, retain seven daily and four weekly encrypted generations, prune expired generations within 24 hours, and verify one offline restore quarterly. A policy cannot become `eligible` without a non-null independently verified offline-restore timestamp; missing, future, stale or failed evidence remains ineligible. Source deletion or consent revocation immediately blocks affected generations from restore; within 24 hours Tuntun destroys or rekeys every affected managed recovery generation and creates a clean generation. Failure marks recovery `ineligible`, blocks new imports, and remains visible until reconciled. An owner-created export is not a recovery copy and follows its own disclosed lifecycle.
 
 ### 8.3 Relational model
 
@@ -457,7 +504,7 @@ knowledge_citation
   issued_at, expires_at, display_label, commitment
 ```
 
-The `audience` values and guardian semantics reuse Phase 1: `subject_private`, `guardian_child`, `household_adults`, and `household_all`. For a child subject namespace, only `guardian_child` or an explicitly approved child-safe `household_all` ACL is eligible; child `subject_private` and `household_adults` ACLs are invalid. Guest retrieves nothing. Child retrieval requires the current guardian/consent binding and child-safe classification at pre-filter, pre-decryption, and provider-serialization boundaries.
+The `audience` values and guardian semantics reuse Phase 1: `subject_private`, `guardian_child`, `household_adults`, and `household_all`. For a K2/N1 subject namespace, only `guardian_child` or an explicitly approved child-safe `household_all` binding is eligible; K2/N1 `subject_private` and `household_adults` bindings are invalid. Guest retrieves nothing. K2/N1 retrieval requires current guardian, consent, and child-safe-approval generations at pre-filter, pre-decryption, and provider-serialization boundaries. An adult-origin `household_all` record still needs its own current child-safe-approval generation even though a child guardian generation is inapplicable.
 
 `cloud_egress_policy` is either `local_only` or `bounded_excerpt_with_current_consent`; default is `local_only`. Changing it is an exact owner passkey action bound to source/version, audience, sensitivity, provider policy, and expiry.
 
@@ -470,7 +517,7 @@ The `audience` values and guardian semantics reuse Phase 1: `subject_private`, `
 5. One serialized transaction commits source/version/chunk metadata and the encrypted object reference. FTS then indexes authorized extracted text. Embeddings are queued only when an activated local embedding model exists.
 6. The temporary parser workspace is destroyed, and a sentinel scan verifies that plaintext did not enter logs, crash reports, model caches, or unrelated storage.
 
-Import failure leaves no searchable partial document. Unsupported media remains an encrypted unindexed object only if the owner explicitly chooses archival storage; otherwise quarantine is destroyed.
+Import failure leaves no searchable partial document. Unsupported media remains an encrypted unindexed object only if the owner explicitly chooses archival storage; otherwise quarantine is destroyed. A terminal receipt is shape-truthful: `published` carries a source and at least one object (an explicitly archived unindexed object may have zero chunks), while `rejected`, `cancelled`, and `failed` carry no source and zero object/chunk counts. Contradictory receipts fail validation.
 
 ### 8.5 Knowledge query sequence
 
@@ -501,7 +548,7 @@ sequenceDiagram
   T-->>U: Answer with local source/version citations
 ```
 
-Retrieval uses at most eight chunks and 12,000 total document tokens per turn, within the model-specific context limit. FTS is always available for exact terms. Vector candidates may improve semantic recall but never bypass ACL, sensitivity, source status, or current-version checks. A score threshold cannot convert `no result` into an invented answer.
+Retrieval uses at most eight excerpts and 12,000 aggregate document tokens per turn, within the model-specific context limit. Each excerpt and the checked bundle total carry token counts under the signed result commitment; a ninth excerpt, 12,001st token, count mismatch, or rank/decrypt generation change is rejected before object decryption, plaintext materialization, or provider serialization. FTS is always available for exact terms. Vector candidates may improve semantic recall but never bypass subject/audience/guardian/consent generation, child-safe classification, sensitivity, source status, or current-version checks. A score threshold cannot convert `no result` into an invented answer.
 
 Documents and retrieved chunks are untrusted data. The inference request labels them accordingly, says they cannot change instructions or request tools/secrets, and exposes an answer-and-citations-only schema. If the user wants to execute a command or remember a claim found in a document, a new ordinary turn restates the exact intent and goes through the desktop or memory policy path.
 
@@ -527,7 +574,7 @@ Desktop filesystem capability is owner-only in the Phase 5 household profile. Ot
 | `D1 selected_read` | Read exact files or a bounded selected project tree | Native picker/owner console creates an expiring grant | Read-only; no network |
 | `D2 propose` | Propose exact argv commands or a unified patch from D1 material | Active D1 grant; model output remains a proposal | No execution or file write |
 | `D3 confirmed_inspection` | Run one pinned non-code-executing inspection utility against granted material | Exact command confirmation bound to grant/job/repository state | Read-only and network-off; never repository code, test, lint, build, format, hook, plugin, or script execution |
-| `D4 approved_workflow` | Run any repository code, test, lint, build, format, generator, or isolated patch workflow | Fresh owner passkey bound to complete workflow manifest and input digest | Proved sandbox; explicit mounts, writes, execution network, and limits |
+| `D4 approved_workflow` | Run any repository code, test, lint, build, format, generator, or isolated patch workflow | Fresh owner passkey bound to complete workflow manifest and input digest | Proved sandbox; explicit mounts and disposable writes, `execution_network_policy=none`, and fixed limits |
 
 No level grants unrestricted or silent control. A higher level includes only the operations named in its exact grant; it is not a general role. The owner can reduce or revoke a grant immediately without authentication. Increasing scope creates a new prepared authorization.
 
@@ -536,7 +583,7 @@ No level grants unrestricted or silent control. A higher level includes only the
 ```text
 DesktopGrantV1
   grant_id
-  schema_version = 1
+  schema_version = "1.0"
   generation
   revocation_generation
   subject_id
@@ -575,13 +622,17 @@ Desktop-selected content, repository material, and command/workflow output are `
 ```text
 DesktopModelEgressAuthorizationV1
   authorization_id
-  schema_version = 1
+  schema_version = "1.0"
   owner_subject_id
   desktop_grant_id
   desktop_grant_generation
   selected_file_identity_commitments[]
   selected_content_commitments[]
   selected_command_or_workflow_output_commitments[]
+  provider_attempt_id
+  exact_serialized_payload_commitment
+  exact_serialized_payload_bytes
+  exact_serialized_payload_tokens
   provider_id
   provider_account_id_commitment
   model_id
@@ -598,9 +649,9 @@ DesktopModelEgressAuthorizationV1
   authorization_commitment
 ```
 
-The UI shows the exact owner subject, files/excerpts/output portions, byte/token totals, provider, model, purpose, sensitivity, applicable disclosure, provider data-use/retention policy, and expiry before approval. Expiry is at most 15 minutes and never exceeds the bound `DesktopGrantV1`. Every serialized byte must match one selected commitment; a changed file, new command output, changed provider/model/purpose/sensitivity/policy, grant expiry/revocation, or egress-authorization revocation rejects the request. The gateway transactionally consumes the authorization for one provider attempt and records only content commitments and outcome metadata. Secrets and ungrantable paths remain ineligible even with owner approval. Without this exact contract the result is produced by an eligible local model or reported unavailable; it never falls back to cloud.
+The UI shows the exact owner subject, ordered files/excerpts/output portions, byte/token totals, provider attempt, provider, model, purpose, sensitivity, applicable disclosure, provider data-use/retention policy, and expiry before approval. Expiry is at most 15 minutes and never exceeds the bound `DesktopGrantV1`. The three collections are bounded and their union must be non-empty and duplicate-free; canonical order is authority. Every serialized byte and token count must match the approved canonical serialization commitment. Empty, oversized, duplicated, reordered, partially consumed, cross-grant, cross-provider, cross-attempt, or post-authorization-mutated input rejects before network I/O. The gateway transactionally consumes the authorization for exactly one provider attempt and records only content commitments and outcome metadata. Secrets and ungrantable paths remain ineligible even with owner approval. Without this exact contract the result is produced by an eligible local model or reported unavailable; it never falls back to cloud.
 
-`execution_network_policy` controls network access of an executed D4 sandbox job only. It never authorizes model serialization. Conversely, `DesktopModelEgressAuthorizationV1` authorizes only the committed model request and never grants the helper, D3 process, or D4 workflow a network destination.
+`execution_network_policy` is fixed to `none` for every Phase 5 D4 grant, manifest, step, API, UI, configuration, and import. Any non-`none` construction is invalid before launch. Separately, `DesktopModelEgressAuthorizationV1` authorizes only the committed model request and never grants the helper, D3 process, or D4 workflow a network destination.
 
 ### 9.3 Command proposal and confirmation
 
@@ -630,6 +681,8 @@ The registry defines the pinned operating-system executable, exact argv grammar,
 - `git --no-pager diff --no-ext-diff --no-textconv --` with explicit granted paths;
 - `git --no-pager log --oneline --max-count N` where `N <= 200`, with signature rendering disabled;
 - `rg` with a literal/regex pattern, explicit granted paths, no preprocessor, and bounded results;
+
+All variable grant/proposal/job collections are schema-bounded before helper I/O: at most 32 include/exclude globs per root, 16 command or workflow IDs, 64 argv elements, 250 declared reads or writes, and 20 result-artifact commitments. Include globs and argv/declared reads are non-empty where required, and duplicate IDs/commitments fail. Most importantly, an authorized D3 job must have an empty declared-write set; a confirmed proposal with even one declared write is invalid rather than delegated to runtime interpretation.
 
 Git runs with a controlled empty home/config environment, external diff/text conversion, pagers, hooks, filters, filesystem monitors, credential helpers, signing, and optional object/program helpers disabled. D3 never runs a repository binary, script, hook, plugin, formatter, generator, package command, compiler, interpreter, test, lint, build, or application entry point. Whether dependencies are already installed is irrelevant: all repository or project code execution is D4 and requires a proved sandbox.
 
@@ -703,13 +756,15 @@ sequenceDiagram
 
 Command output may contain prompt injection, terminal escapes, secrets, or hostile filenames. The helper strips unsafe terminal control sequences, enforces byte/line caps, labels output untrusted, and passes it through DLP before a model. It remains local-only unless the exact output commitment is covered by a current `DesktopModelEgressAuthorizationV1`. The result can propose the next job but cannot auto-chain. Each command/workflow is a fresh authorization event. Tests, lint, builds, formatters, generators, repository scripts/binaries, and all other project code use D4; the sequence above does not grant them a D3 route.
 
+`DesktopJobResultV1` has an exact terminal matrix. `started=true` means process start was proved or conservatively could have occurred after durable launch admission. `VERIFIED` means the job started and cleanup is verified. `FAILED` is permitted either before start with no output and cleanup not applicable, or after start only when cleanup is verified. Any started job whose cleanup is not verified is `UNKNOWN`, unless a separately verified `SignedDesktopAcceptedUnverifiedEvidenceV1` justifies `ACCEPTED_UNVERIFIED`; it can never be `FAILED`. That evidence is signed by the pinned helper over the exact job ID/digest, durable admission commitment, terminal-process receipt, observation time, quarantined-output state and no-relaunch bit. `DesktopAcceptanceEvidenceVerifierPort` reloads the signed authorized job plus durable helper-admission and terminal-execution receipts and exact-compares all repeated bindings, the current helper key/domain and observation/completion order; no result or nested evidence is self-authorizing. Core rejects stale, replayed, cross-job, stored-authority-drifted or one-field-substituted evidence to `UNKNOWN` with outputs quarantined before constructing the result. `EXPIRED` means no start, no output, and cleanup not applicable. Restart reconciliation follows the same matrix and never converts uncertainty into success/failure or launches the same job again.
+
 ### 9.6 Initial device and network boundary
 
-The initial desktop helper runs on the same Mac as Tuntun Core and communicates over an owner-only Unix-domain socket. It does not bind a LAN port. The office laptop remains directly attached to the outer BE800 network under the Phase 2 topology plus host and negative-reachability controls; this wording does not claim proved mutual or VLAN isolation. Phase 5 neither opens an outer-to-inner rule nor installs a relay. A future office-laptop helper must use the Phase 6 VPN/paired-device architecture and re-run device identity, data-flow, grant, remote-session, and recovery design.
+The initial desktop helper runs on the same one inventoried 2020 Intel Mac as Tuntun Core and communicates over an owner-only Unix-domain socket. That Mac is also the office-use machine; there is no second office laptop/helper. It does not bind a LAN port. The family-ready baseline single-homes the Mac on inner ASUS/AiMesh and disconnects its direct BE800 link. A separately qualified optional dual-home mode must prove no forwarding, bridging, Internet Sharing, proxy, outer ingress, or route/DNS/firewall drift, and it still creates no remote helper authority. A distinct future remote client must use the Phase 6 paired VPN/application-session design and re-run identity, data-flow, grant, remote-session, and recovery gates.
 
 ## 10. Phase 3 selected-frame local vision
 
-Phase 5 consumes only the Phase 3 frame-selection seam. The Reolink recorder/video plane remains independent, never performs family identity, and never supplies continuous streams, audio, credentials, or raw clips to a model. Privacy Shield blocks the Tuntun frame handoff; stopping the independent recorder remains a separate owner action and UI state.
+Phase 5 consumes only the Phase 3 frozen frame-selection contracts, validators, topology and privacy seam. Phase 3 deliberately kept selected-frame perception runtime absent; Phase 5 first-owns `services/vision/selected_frame_broker.py`, `services/vision/observation_consumer.py`, and the outbound perception-gateway transport binding, then registers the broker, consumer, container provider, and authenticated proxy target in one signed generation. That internal bridge creates no Core HTTP route, owner-ingress method/path, or route-manifest entry; Task 36 first-owns the separate owner-facing perception status route. Before the bridge's positive gate, and after any evidence drift, all of its internal providers/transports are absent together. The Reolink recorder/video plane remains independent, never performs family identity, and never supplies continuous streams, audio, credentials, or raw clips to a model. Privacy Shield blocks the Tuntun frame handoff; stopping the independent recorder remains a separate owner action and UI state.
 
 ### 10.1 Selected-frame request
 
@@ -803,7 +858,7 @@ If an independent e-stop cannot be installed and tested, or no allowed motion di
 Mac Tuntun Core
   RobotPolicyService
     - owner/passkey telepresence session
-    - commissioned geofence/version
+    - current canonical area/robot-binding/zone generations and zone-bound safety commitment
     - signed short motion leases
     - audit and revocation
               |
@@ -822,6 +877,10 @@ Raspbot Pi 5
 ```
 
 The robot initiates the paired connection to the Mac. It holds a device certificate and signing key but no family memory, provider key, Home Assistant credential, owner passkey, or inference-appliance credential. Vendor ROS/DDS/control endpoints stay loopback-only behind `RobotEdgeAdapter`; if that cannot be enforced, floor use is disabled pending a tested isolated network boundary.
+
+Activation consumes the Phase 2 location authority directly: exact `(area_id, area_generation)`, robot binding ID/generation, and `(zone_id, zone_generation)` plus a commitment proving the zone is a child of that same area and robot binding. No `room_id`, display label, alias, or separately maintained map is accepted. Area/zone/binding reclassification or generation drift, controller restart, or restore revokes the session and every outstanding lease before motion.
+
+`RobotReadinessV1` and `RobotSafetyStateV1` are signed closed facts. Both bind session/robot, exact activation/location commitment, controller epoch, capability and edge-key generations, battery percentage, charging state, controller and directional-sensor health, camera and indicator state, last-valid lease identity/expiry, `observed_at`, and `valid_until`; the safety state also binds motion/stop/canonical-zone geofence evaluation/sequence. Readiness lasts at most two seconds and a moving safety fact at most 250 ms. Only `disabled↔off` and `indicator_verified↔on_verified` are valid camera/indicator pairs. A missing pair, stale signature/time/key/activation, low battery, charging motor, failed/unknown controller or sensor, indicator contradiction, wrong/expired lease, zone drift, or stop/geofence uncertainty is unsafe: motion is denied/stopped and UI cannot render green.
 
 ### 11.3 Spatial and operational boundaries
 
@@ -856,14 +915,16 @@ The LILYGO may be evaluated as a **secondary** stop transmitter only. Loss, spoo
 ```text
 RobotMotionLeaseV1
   lease_id
-  schema_version = 1
+  schema_version = "1.0"
   robot_endpoint_id
   telepresence_session_id
   sequence
   issued_at
   expires_at
-  geofence_id
-  geofence_version
+  area_id + area_generation
+  robot_binding_id + robot_binding_generation
+  zone_id + zone_generation
+  activation_commitment
   safety_capability_digest
   linear_x_mps
   linear_y_mps
@@ -948,7 +1009,7 @@ The board enters the main framework only if a two-week owner trial shows a capab
 - Command output is terminal-escape sanitized, size-capped, marked untrusted, and cannot trigger a follow-on job.
 - D3 can invoke only the pinned non-code inspection registry under a controlled environment. Repository binaries/scripts, hooks, plugins, tests, lint, builds, formatters, generators, compilers, interpreters, and application entry points are impossible through D3 and require D4's proved sandbox.
 - The sandbox has no Docker socket, host daemon socket, Keychain, SSH agent, browser profile, Tuntun data, camera/robot/Home Assistant route, or internet by default.
-- D4 `execution_network_policy` and desktop model egress are separately authorized, displayed, revoked, audited, and negatively tested; neither policy can be interpreted as the other.
+- D4 `execution_network_policy` is always `none`; every non-`none` API/UI/config/import value is rejected. Desktop model egress is separately authorized, displayed, revoked, audited, and negatively tested and cannot be interpreted as workflow network.
 - Workflow manifests and executable images are digest-pinned. Project changes invalidate the prepared authorization when the state commitment no longer matches.
 - A sandbox escape, unexpected network packet, undeclared write, process-limit breach, or timeout terminates the job, revokes the grant, quarantines outputs, and disables that backend pending owner review.
 
@@ -1048,7 +1109,7 @@ No failure may cause an automatic retry through a more permissive model, provide
 - Direct process/API tests prove shell interpreters, arbitrary script paths, ambient `PATH`, pipes/redirection/substitution, package managers, privilege escalation, SSH agents, browser profiles, Keychain, Tuntun data, Docker/host sockets, and undeclared network destinations are unreachable.
 - At least 500 hostile repository/document/terminal-output cases produce zero automatic command, auto-chaining, secret egress, permission expansion, or policy/memory/action mutation.
 - Desktop file/excerpt/output egress defaults to local-only. Positive tests serialize only the exact commitments covered by one current, single-use `DesktopModelEgressAuthorizationV1`; changed owner subject, grant/generation, file/output, provider/account, model/route, purpose, sensitivity, disclosure, provider policy, expiry, consumption, or revocation produces zero cloud/VPS bytes.
-- D4 execution-network tests and desktop model-egress tests prove independence in both directions: network-enabled workflow without egress authorization sends no material to a model, while model egress authorization opens no helper/workflow destination.
+- D4 execution-network tests and desktop model-egress tests prove independence in both directions: every attempted non-`none` workflow-network value is rejected before sandbox launch regardless of model-egress state, while a valid single-use model-egress authorization opens no helper/workflow destination and never changes D4's fixed `none` policy.
 - Every D3 job binds exact executable digest, argv grammar, cwd identity, repository state, controlled environment, declared effects, read-only/network-off policy, limits, owner subject/session, grant generation, and two-minute confirmation expiry. Direct and indirect tests produce zero repository code, script, binary, hook, plugin, test, lint, build, format, generator, compiler, interpreter, or application execution through D3.
 - D4 sandbox tests cover filesystem/process/network/device/IPC escapes, resource exhaustion, cleanup, cancellation, undeclared writes, malicious build scripts, output control sequences, and secret sentinels. Any escape disables D4.
 - Every repository code/test/lint/build/format/generator operation is D4 and absent when no sandbox backend is proved. The initial production D4 set is limited to signed already-installed workflows in a disposable sandbox. Host patch publication or arbitrary write-back is absent until a separate exact-diff/apply design passes.
@@ -1073,13 +1134,13 @@ No failure may cause an automatic retry through a more permissive model, provide
 - One hundred adversarial boundary runs per reachable restricted boundary produce zero prohibited-area entry. Any near miss disables floor operation pending a physical/design change.
 - Camera indicator, no-audio, live-only, expiry, no-store, pan/tilt privacy, owner session, and no-cloud/no-identity/no-recorder tests pass before telepresence video.
 - Child, Guest, voice, model, Home Assistant, camera event, routine, remote Phase 6 session, and LILYGO cannot start or extend motion through UI, API, configuration, replay, restore, or direct protocol.
-- A seven-day supervised common-area soak has no uncommanded motion, missed local stop, prohibited view/area, session resurrection, or unsafe battery state; ordinary owner work is recorded by subsystem for the single Phase 6 full-system maintenance gate.
+- A seven-day supervised common-area soak binds the exact unchanged route/edge/feature candidate and inherited pre-issued rollover-chain commitment, proves ordered wall/monotonic lease transitions with zero expired-authority interval, and has no uncommanded motion, missed local stop, prohibited view/area, session resurrection, or unsafe battery state. Missing/stale rollover closes new motion admission and invalidates the uninterrupted soak while physical e-stop/watchdog/stop remain independent. Task 44 reruns this qualification after its own clean tooling commit; if floor motion remains enabled, final release repeats the complete seven-day oracle after all Task 48 bytes/rows are committed and frozen. Ordinary owner work is recorded by subsystem for the single Phase 6 full-system maintenance gate.
 
 ### 15.7 LILYGO experiment
 
 - Firmware, USB update, pairing, signing, nonce/replay, stale status, lost-device, battery/power, Wi-Fi/BLE failure, reset, and factory-wipe tests pass using synthetic/non-sensitive state.
 - It cannot store or derive a family profile, passkey, recovery key, long-lived robot authority, primary e-stop state, camera media, memory, provider key, or private network credential beyond its narrow paired device key.
-- The two-week trial demonstrates a unique retained value and less than fifteen minutes quarterly maintenance. Otherwise the production adapter, route, UI, and package are absent.
+- The two-week trial binds its exact unchanged firmware/route/feature candidate and inherited pre-issued rollover-chain commitment, proves ordered wall/monotonic lease transitions with zero expired-authority interval, demonstrates a unique retained value, and requires less than fifteen minutes quarterly maintenance. Missing/stale rollover invalidates the uninterrupted trial; otherwise the production adapter, route, UI, and package are absent.
 
 ### 15.8 Security, recovery, and household release
 
@@ -1088,7 +1149,10 @@ No failure may cause an automatic retry through a more permissive model, provide
 - Backup/restore reproduces the canonical model registry, knowledge catalog/objects, workflow manifests, robot/LILYGO inventory, and audit receipts while keeping grants, sessions, pairings, motion, selected-frame requests, and routes disabled until reconciliation.
 - Privacy Shield, stop, revoke, quarantine, key rotation, model rollback, corpus deletion, desktop cancellation, robot e-stop, and lost-device procedures pass during active work and partial component failure.
 - External and outer-network scans find no Phase 5 public listener or new BE800-to-inner-network route.
-- A thirty-day owner trial of enabled non-robot capabilities plus the separate seven-day supervised robot soak produces no high/critical unresolved finding, unauthorized data flow, policy downgrade, or canonical-state loss; ordinary owner work is recorded by subsystem for the single Phase 6 full-system maintenance gate.
+- The installed route proof traverses the real owner listener -> Phase 3 owner-ingress -> authenticated Core UDS for every enabled Phase 5 route, finds no second HTTP listener, and returns the same non-enumerating `404` without Core dispatch for every unknown or disabled route. The signed route-manifest digest and refreshed `phase3-owner-ingress.v1` row match the installed bytes; a changed route, stale row, mixed Phase 4/Phase 5 set, or partial composition blocks startup/release.
+- Every enabled inference-proxy, desktop-helper, perception-proxy, and robot-edge target has the exact signed target record and current install/start/health/SIGTERM/crash-restart/wrong-account/config/stale-runtime/preserve-uninstall/destroy-uninstall evidence; a disabled target has no production package/job/config/account/socket/unit/target record or owned residue, and a wholly disabled family has no row.
+- Every enabled Phase 5 service row is regenerated only after its final package/job/configuration/firewall bytes, then passes update and rollback in addition to the lifecycle matrix. Earlier desktop-helper/robot-edge rows and any other digest-stale row are rejected rather than carried into release.
+- After all release tooling/composition/service-row bytes are committed, a thirty-day owner trial of every enabled non-robot capability—including retained LILYGO—proves the inherited pre-issued rollover-chain commitment, unchanged final-candidate authority, current wall/monotonic lease at every admission, and zero expired-authority interval; missing/stale rollover fails closed and restarts the uninterrupted campaign. When floor motion is enabled, a fresh seven-day supervised robot soak runs against that same final candidate rather than reusing Task 44's earlier candidate receipt. Together these final-candidate receipts produce no high/critical unresolved finding, unauthorized data flow, policy downgrade, or canonical-state loss; ordinary owner work is recorded by subsystem for the single Phase 6 full-system maintenance gate. Only after every applicable post-commit receipt and final verifier passes does the external release-signing workflow sign and atomically publish the P5-9 manifest bound to the resolved commit, candidate/route/service graph, chain commitment, and exact receipt digests; publication changes no candidate or tracked byte, and any signing/binding failure leaves the release unpublished.
 
 ## 16. Staged commissioning and milestones
 
@@ -1156,14 +1220,14 @@ No failure may cause an automatic retry through a more permissive model, provide
 - Enable owner-only LAN manual control in one commissioned zone, then local live video if its independent indicator/privacy gate passes.
 - Keep all autonomy, carrying, following, docking search, private-room entry, voice motion, and remote driving absent.
 
-**Gate:** the seven-day supervised soak and Section 15.6 pass; a failed subsystem falls back to simulator/bench rather than a weaker floor mode.
+**Gate:** the seven-day supervised soak, its inherited continuous rollover-chain/lease proof, and Section 15.6 pass; a failed subsystem falls back to simulator/bench rather than a weaker floor mode.
 
 ### P5-9 — Household release and optional LILYGO decision
 
 - Complete the thirty-day non-robot soak, restore/rollback drill, maintenance measurement, and model/corpus/desktop/robot evidence bundle.
 - Run the two-week LILYGO experiment only if an exact use still appears valuable.
 
-**Gate:** the feature manifest lists each task cell, knowledge/vector capability, desktop level/workflow, frame purpose, robot capability, and LILYGO role as independently `enabled` or `absent`.
+**Gate:** the external release signer may publish only after the manifest independently lists each task cell, knowledge/vector capability, desktop level/workflow, frame purpose, robot capability, and LILYGO role as `enabled` or `absent`, and all of the following pass: the single installed owner-listener chain; the final signed route manifest/refreshed owner-ingress row; every final-byte Phase 5 service row/lifecycle/update/rollback proof; the post-commit inherited continuous 30-day non-robot rollover-chain/lease proof, including retained LILYGO; and a post-commit final-candidate seven-day robot proof when floor motion is enabled.
 
 ## 17. Owner-console additions
 
@@ -1177,6 +1241,8 @@ The authenticated local console gains the Phase 5 routes defined by the six-phas
 6. **LILYGO experiment:** exact firmware/digest, narrow role, pairing, freshness/battery, revoke/wipe, maintenance result, and keep/remove decision.
 
 Model activation, source egress change, corpus storage/recovery binding or audience broadening/export/deletion, desktop grant/model-egress/command/workflow, robot pairing/session/re-arm, and LILYGO pairing require the exact assurance registered for that operation. Raspbot motion controls are available only on the local authenticated console while the owner holds the active supervised session. Phase 6 remote sessions receive health only and cannot execute desktop or robot operations.
+
+These owner-console modules remain pure injected factories but are promoted incrementally when an installed owner flow is needed. Each named feature checkpoint atomically composes all currently enabled factories into the canonical Core app, updates the Phase 3 owner-ingress allowlist and signed route manifest, refreshes the owner-ingress service row, and verifies the installed listener-to-Core chain before collecting its UI, physical, soak, or elapsed evidence. A disabled route remains `404`, and a new/changed route remains unaccepted if any part of that candidate set or lifecycle fails. The final household-release transaction repeats the procedure against every final route and row.
 
 ## 18. Hardware, procurement, and cost model
 

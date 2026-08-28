@@ -42,6 +42,17 @@ The Phase 1 four-area concept—Home, Family + Memory, Privacy, and System—is 
 | Theme | Light and dark themes with the same semantic hierarchy and status meaning |
 | Open-source boundary | Household names, images, events, memories, credentials, topology, and screenshots never ship in public fixtures or documentation |
 
+### 2.1 Audited cross-phase UI closure
+
+- The inventoried 2020 Intel Mac is both the office-use machine and the sole Core/UI host; the UI never depicts or requires a second office laptop/helper. Family-ready topology is the Mac single-homed on the inner ASUS/AiMesh network with its direct BE800 link disconnected; optional dual-home state is a separately qualified fact, never ambient authority.
+- Memory/knowledge audience vocabulary is exactly `subject_private`, `guardian_child`, `household_adults`, and `household_all`. Every row binds exact subject, audience, guardian, consent, and applicable child-safe-approval generations. Legacy aliases fail schema decoding; owner status never widens `subject_private`.
+- Every `ui.plane_fact.v1` owns its source generation, observation time, validity deadline, and evidence commitment. A newly generated wrapper may shorten but cannot refresh an expired source fact; stale/unknown/error-safe facts never render green or enable controls.
+- D3 and D4 execution network is exactly `none` in contract and presentation. The separately prepared desktop model-egress exception displays the exact bounded selections, provider/model/attempt, serialized-byte/token counts, commitments, disclosure/policy, and expiry and never authorizes helper network access.
+- Robot readiness/safety binds the exact activation/location tuple and commitment, controller epoch, current edge/core key generations, lease, battery/charging/controller/sensor facts, and exact camera/indicator pair. Only `disabled/off` and `indicator_verified/on_verified` are coherent. Any stale/reclassified/substituted/contradictory fact removes green state and all motion controls. `geofence_state` is only the safety evaluation of the canonical bound zone.
+- Remote UI renders canonical Tailscale `grants`, Tailnet Lock/current signed-node set/two independent recovery signers, Device Approval disabled, and the two authoritative DNS views. External requests contain only operation, typed opaque resource, and idempotency. Light buttons select `light_power_on|light_power_off`; the browser never sends target, desired state, actor/session/policy/generation, assurance, time, or commitment authority.
+- The permanent remote-denial list is generated from shared real operation IDs, including `plugin_permission_change` and `recovery_key_import`; `plugin_permission`, `recovery_import`, and unknown aliases are schema-unsupported. Remote private detail shows only the authenticated owner's own current `subject_private` body.
+- Recovery UI proves both backup tiers bind the identical eligible generation and D4 has `network=none`; one-shot offline bootstrap displays quarantine-only authority. Update UI projects durable accepted/rolled-back/quarantined journal truth. Household UI may approve C0 but only verifies and displays read-only C1/publication receipts. C1 decisions and the third publication action exist solely in a separate project-maintainer app/terminal with no household imports, API client, database, cookie, key, evidence body, backup, diagnostic, or support reader.
+
 ## 3. Alternatives and recommendation
 
 ### 3.1 Minimal owner dashboard
@@ -372,7 +383,7 @@ Security containment disables future external/outbound notification adapters, bu
 
 ### 12.3 Desktop assistance
 
-- Grants are owner-only, task-scoped, time-bounded, resource-specific, and visually explicit: folder, repository, assistance level, command class, workflow-network permission, model-egress policy, provider/model, selected-content commitment, write authority, and expiry. Workflow network and model/content egress are separate facts.
+- Grants are owner-only, task-scoped, time-bounded, resource-specific, and visually explicit: folder, repository, assistance level, command class, execution network (`none` for D3/D4), model-egress policy, provider/model, selected-content commitment, write authority, and expiry. Execution network and model/content egress are separate facts, and neither can authorize the other.
 - The default is read-only inspection. Proposed writes show an exact diff or bounded action summary before execution.
 - Desktop files and command output are `local_only` by default. Any cloud exception requires a separate exact prepared owner consent bound to content/output commitments, provider, model, purpose, sensitivity, disclosure/policy version, and expiry; the page names what will leave the Mac before authorization. Secrets and protected terminal output are redacted before display or any eligible model route. A grant does not silently expand after a tool failure.
 - Remote desktop execution remains absent; the Phase 6 remote console cannot reach these actions.
@@ -386,7 +397,8 @@ Security containment disables future external/outbound notification adapters, bu
 ### 12.5 Robotics
 
 - Raspbot/LILYGO endpoints are shown only after their feature gate. The default page is health and supervised-session preparation, not a drive joystick.
-- Movement requires local supervision, a bounded workspace, current safety state, stop path, and a short-lived session.
+- Movement requires local supervision, the exact activation-bound area/robot-binding/zone identities and generations, current controller/key/safety facts, stop path, and a short-lived lease. A fresh UI wrapper cannot refresh an expired readiness/safety fact.
+- Camera and indicator are one exact safety pair: disabled requires off, and indicator-verified requires on-verified. Every other pair is error-safe and removes motion controls. Geofence status is explicitly the evaluation of the canonical bound zone, never another location identity.
 - Camera/sensor preview follows the robotics privacy policy and cannot enter family identity or permanent memory automatically.
 - Remote owner sessions cannot drive a robot.
 
@@ -467,10 +479,11 @@ Each card shows current state, controller, last authoritative update, what data 
 
 ### 14.4 Backup, update, plugins, and remote access
 
-- Backup cards show last successful creation, independent copy, verification, restore drill, key availability, and next due action.
-- Update review shows signed version, signer, digest, release/security notes, compatibility, pre-update backup, expected restart, and rollback plan before approval.
+- Backup cards show both tiers' identical source generation/snapshot/archive/deletion/key/RPO/eligibility binding, distinct failure domains, verification, no-network restore drill, one-shot quarantine bootstrap, key availability, and next due action.
+- Update review shows signed version, signer, exact final post-staple digest, release/security notes, compatibility, pre-update backup, expected restart, durable journal/reconciliation state, and rollback plan before approval.
 - Plugins show publisher, signature/digest, requested/granted capabilities, network/filesystem/data access, resource limits, and disable/remove controls. Unknown capability denies installation.
-- Remote access starts disabled. Commissioning, read-only, scoped action, suspended, and disabled states follow the Phase 6 state machine and operation matrix.
+- Remote access starts disabled. Commissioning shows canonical `grants`, Tailnet Lock/signed-node/recovery-signer generations, Device Approval disabled, two-view DNS/local CA, read-only, scoped action, suspended, and disabled states from the Phase 6 state machine and exact operation matrix.
+- C0 is a household-owner local ceremony. C1 approval/rejection/acceptance and publication never appear as controls in this household application; it verifies and renders their signed read-only state. Those actions live only in the isolated project-maintainer terminal.
 
 ## 15. Authorization interaction model
 
@@ -574,6 +587,7 @@ The UI consumes presentation-specific contracts rather than exposing domain tabl
 ```text
 ui.household_posture.v1
   generated_at
+  valid_until
   feature_manifest_version
   route_origin_class: localhost | paired_lan | owner_vpn
   facts[]: ui.plane_fact.v1
@@ -597,12 +611,13 @@ ui.plane_fact.v1
   evidence_source: local_process | paired_endpoint | home_assistant | camera_source |
                    recorder | player_adapter | display_agent | model_proxy |
                    desktop_helper | robot_safety | plugin_supervisor | vpn_adapter
-  evidence_generation
+  source_generation
   verification_strength: authoritative | corroborated | acknowledged_unverified | none
   reason_code
   safe_summary_message_id
   evidence_observed_at
   valid_until
+  evidence_commitment
   owner_route
 ```
 
@@ -860,7 +875,8 @@ The console may be packaged in the monorepo but depends only on versioned UI con
 - Reference screenshots exist for every route’s default, loading, empty, error, stale, degraded, privacy-on, and authorization states at supported widths/themes.
 - Visual review checks hierarchy, spacing, typography, focus, truncation, touch size, contrast, motion, and safe-summary legibility; snapshot equality alone is not approval.
 - Fault injection covers API restart, database/key unavailable, cloud outage, HA outage, camera/event/recorder split failures, disk pressure, display disconnect, VPN drift, update rollback, and audit-chain failure.
-- Evidence logging may begin after 60 steady-state days; evaluation for promotion requires at least 90 steady-state days and three complete monthly buckets. At that point, the rolling three-month median of ordinary full-system owner maintenance is at most eight hours per month, excluding initial commissioning, incidents, hardware replacement, and explicitly scheduled quarterly restore/security drills; measured time is reported by subsystem. Crossing eight hours/month for three consecutive months freezes optional expansion and triggers simplification/retirement review.
+- U8 has two ordered parts: U8A commits the UI acceptance verifier before Phase 6 freezes final bytes; U8B runs only after that exact frozen candidate completes its real maintenance window and the current Task 35R resilience drills, then writes evidence only before P6-4. This prevents the UI verifier from depending on evidence that cannot exist until after its own code is in the candidate and ensures it observes post-drill truth.
+- The final-candidate maintenance epoch opens only after Phase 6 Task 36B freezes and target-qualifies the exact artifact/service inventory. Evidence logging may begin after 60 steady-state days; evaluation for promotion requires at least 90 steady-state days and three complete monthly buckets. At that point, the rolling three-month median of ordinary full-system owner maintenance is at most eight hours per month, excluding initial commissioning, incidents, hardware replacement, and explicitly scheduled quarterly restore/security drills; measured time is reported by subsystem. Crossing eight hours/month for three consecutive months freezes optional expansion and triggers simplification/retirement review. Candidate or authority drift invalidates U8B and restarts the full window; no source, route, service-row or artifact mutation is allowed after the freeze.
 
 ## 26. Performance budgets
 

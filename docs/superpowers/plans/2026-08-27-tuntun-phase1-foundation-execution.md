@@ -6,12 +6,12 @@
 
 **Architecture:** Establish four Python workspace packages and one minimal React application, then freeze project-owned contracts before adding adapters. Configuration, Keychain, model installation, SQLCipher, record encryption, migrations, transactions, and audit are separate ports/adapters with fail-closed boundaries; the only durable database produced by this plan is encrypted and contains exactly the tables owned by `0001_foundation.py`.
 
-**Tech Stack:** Python 3.12, `uv`, Pydantic v2, Pydantic Settings, Typer, RFC 8785/JCS, SQLAlchemy 2, Alembic, `sqlcipher3==0.6.2`, `cryptography`, keyring/macOS Keychain, structlog, JSON Schema, pytest, pytest-asyncio, Hypothesis, Ruff, strict mypy; React 19, TypeScript, Vite, Vitest, Testing Library, pnpm, Playwright, and GitHub Actions.
+**Tech Stack:** Python 3.12 for the Mac core and repository tooling; Python 3.11/3.12-compatible edge/shared-contract source selected later by the delivered-Reachy gate; `uv`, Pydantic v2, Pydantic Settings, Typer, RFC 8785/JCS, SQLAlchemy 2, Alembic, `sqlcipher3==0.6.2`, `cryptography`, keyring/macOS Keychain, structlog, JSON Schema, pytest, pytest-asyncio, Hypothesis, Ruff, strict mypy; React 19, TypeScript, Vite, Vitest, Testing Library, pnpm, Playwright, and GitHub Actions.
 
 ## Global Constraints
 
 1. The normative specification is `docs/superpowers/specs/2026-08-27-tuntun-phase1-anchor-design.md`; changing a locked decision requires a specification update and ADR before implementation.
-2. Python is exactly 3.12 at the repository boundary. `sqlcipher3==0.6.2` is a compatibility candidate and is accepted only after the target Intel Mac probe passes.
+2. The repository runner and Mac core are exactly Python 3.12. The pure-Python `tuntun-edge` and `tuntun-contracts` distributions declare `>=3.11,<3.13`, avoid 3.12-only syntax, and are installed only for the exact delivered Reachy interpreter/version/ABI/platform combination accepted by the later hardware gate; every other combination blocks packaging. `sqlcipher3==0.6.2` is a Mac-only compatibility candidate and is accepted only after the target Intel Mac probe passes.
 3. No real family name, audio, transcript, image, embedding, credential, memory, provider response, database, backup, key, certificate, local username, hostname, IP, MAC address, or serial number may enter source control, test reports, CI artifacts, or public issues.
 4. All Pydantic trust-boundary models are frozen, reject unknown fields, use aware UTC timestamps, bounded text/bytes, random UUIDs, integer confidence/money, and explicit schema version `1.0`.
 5. RFC 8785/JCS canonical bytes normalize Unicode to NFC and serialize UTC timestamps with exactly six fractional digits. Private or low-entropy values use purpose-separated HMAC-SHA-256 commitments, never bare hashes.
@@ -31,6 +31,7 @@
 | Area | Files | Responsibility |
 |---|---|---|
 | Workspace | `.python-version`, root/package `pyproject.toml`, `uv.lock`, `Makefile`, pnpm files | Reproducible Python/web workspaces and commands |
+| Assurance | `scripts/verify_private_data.py`, `scripts/assurance_common.py`, `scripts/check_feature_absence.py`, `scripts/check_import_boundaries.py`, `scripts/check_migration_ownership.py`, `scripts/scan_browser_artifacts.py`, `scripts/scan_network_surface.py` | First owner of fail-closed cross-phase scanners required by Phases 3–6 |
 | Contracts | `packages/contracts/src/tuntun_contracts/*.py`, `fixtures/v1/*.json` | Frozen DTOs, canonical bytes, and async ports; no adapters |
 | Configuration | `apps/core/src/tuntun_core/config/*.py`, `config/tuntun.example.yaml` | Strict defaults, YAML/env precedence, owner-only paths |
 | Secrets/logging | `apps/core/src/tuntun_core/adapters/keychain/*.py` | `SecretProvider`, macOS backend, typed redaction |
@@ -66,6 +67,7 @@ class UnitOfWork:
 class AsyncUnitOfWork:
     async def __aenter__(self) -> AsyncUnitOfWork: raise NotImplementedError
     async def run_sync(self, operation: Callable[[UnitOfWork], T]) -> T: raise NotImplementedError
+    def signal_after_commit(self, name: str) -> None: raise NotImplementedError
     async def commit(self) -> None: raise NotImplementedError
     async def rollback(self) -> None: raise NotImplementedError
     async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> bool: raise NotImplementedError
@@ -208,7 +210,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tuntun-edge"
 version = "0.1.0.dev0"
-requires-python = "==3.12.*"
+requires-python = ">=3.11,<3.13"
 
 [build-system]
 requires = ["hatchling>=1.27,<2"]
@@ -220,7 +222,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tuntun-contracts"
 version = "0.1.0.dev0"
-requires-python = "==3.12.*"
+requires-python = ">=3.11,<3.13"
 dependencies = ["pydantic>=2.11,<3", "rfc8785>=0.1.4,<0.2"]
 
 [build-system]
@@ -294,14 +296,21 @@ git commit -m "build: bootstrap Tuntun Python workspace"
 - Create: `apps/admin/index.html`
 - Create: `apps/admin/vite.config.ts`
 - Create: `apps/admin/tsconfig.json`
+- Create: `apps/admin/eslint.config.js`
+- Create: `apps/admin/playwright.config.ts`
 - Create: `apps/admin/src/main.tsx`
 - Create: `apps/admin/src/app.tsx`
 - Create: `apps/admin/src/test-setup.ts`
 - Test: `apps/admin/src/app.test.tsx`
+- Test: `tests/unit/admin/root-discovery.test.ts`
+- Test: `tests/e2e/admin-smoke.spec.ts`
+- Test: `tests/ui/admin-accessibility.spec.ts`
 - Create: `Makefile`
 - Create: `.gitignore`
 - Create: `.pre-commit-config.yaml`
 - Create: `.github/workflows/ci.yml`
+- Test: `tests/ci/test_workflow_policy.py`
+- Test: `tests/ci/test_web_command_contract.py`
 
 **Interfaces:**
 - Consumes: Task 1 workspace commands.
@@ -323,6 +332,115 @@ describe("App", () => {
 });
 ```
 
+Also write the workflow-policy test before adding CI. It treats workflow syntax as a release contract rather than trusting a visual review:
+
+```python
+# tests/ci/test_workflow_policy.py
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
+
+FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+FIXED_RUNNERS = {"ubuntu-24.04", "macos-15-intel"}
+WORKFLOW_ROOT = Path(".github/workflows")
+
+
+def workflow_paths(root: Path = WORKFLOW_ROOT) -> tuple[Path, ...]:
+    paths = tuple(sorted((*root.glob("*.yml"), *root.glob("*.yaml"))))
+    assert paths, "at least one workflow is required"
+    return paths
+
+
+def _assert_uses_is_immutable(value: str) -> None:
+    if value.startswith("./"):
+        return
+    assert FULL_SHA.fullmatch(value), value
+
+
+def _assert_workflow_policy(path: Path) -> None:
+    assert path.is_file() and not path.is_symlink()
+    raw = path.read_text()
+    lowered = raw.lower()
+    for forbidden in (
+        "contents: write", "pages: write", "gh release create", "git tag ",
+        "npm publish", "pnpm publish", "twine upload", "secrets.",
+        "reachy_hardware", "live_cloud",
+    ):
+        assert forbidden not in lowered, (path, forbidden)
+    workflow = yaml.safe_load(raw)
+    assert isinstance(workflow, dict) and isinstance(workflow.get("jobs"), dict)
+    for job in workflow["jobs"].values():
+        if "uses" in job:
+            _assert_uses_is_immutable(job["uses"])
+            continue
+        runner = job["runs-on"]
+        if isinstance(runner, str) and runner.startswith("${{"):
+            assert runner == "${{ matrix.os }}"
+            assert set(job["strategy"]["matrix"]["os"]) <= FIXED_RUNNERS
+        else:
+            assert runner in FIXED_RUNNERS
+        for step in job.get("steps", []):
+            if "uses" in step:
+                _assert_uses_is_immutable(step["uses"])
+
+
+def test_every_yml_and_yaml_workflow_has_only_fixed_runners_and_full_sha_actions() -> None:
+    for path in workflow_paths():
+        _assert_workflow_policy(path)
+
+
+def test_ci_matrix_remains_exact() -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
+    assert workflow["jobs"]["check"]["strategy"]["matrix"]["os"] == [
+        "ubuntu-24.04",
+        "macos-15-intel",
+    ]
+
+
+def test_ci_is_unprivileged_and_has_no_hardware_or_provider_secrets() -> None:
+    text = (WORKFLOW_ROOT / "ci.yml").read_text()
+    workflow = yaml.safe_load(text)
+    assert workflow["permissions"] == {"contents": "read"}
+    assert "secrets." not in text
+    assert "reachy_hardware" not in text and "live_cloud" not in text
+
+
+def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path) -> None:
+    root = tmp_path / ".github" / "workflows"
+    root.mkdir(parents=True)
+    valid = {
+        "jobs": {
+            "check": {
+                "runs-on": "ubuntu-24.04",
+                "steps": [{"uses": "actions/checkout@" + "a" * 40}],
+            }
+        }
+    }
+    (root / "security.yml").write_text(yaml.safe_dump(valid))
+    (root / "release.yaml").write_text(yaml.safe_dump(valid))
+    assert {path.name for path in workflow_paths(root)} == {"security.yml", "release.yaml"}
+    for name, mutation in (
+        ("security.yml", {"runs-on": "ubuntu-latest"}),
+        ("release.yaml", {"steps": [{"uses": "actions/checkout@v4"}]}),
+        ("security.yml", {"steps": [{"run": "gh release create v1"}]}),
+        ("release.yaml", {"steps": [{"run": "echo ${{ secrets.TOKEN }}"}]}),
+    ):
+        changed = {"jobs": {"check": {**valid["jobs"]["check"], **mutation}}}
+        path = root / name
+        path.write_text(yaml.safe_dump(changed))
+        with pytest.raises(AssertionError):
+            _assert_workflow_policy(path)
+        path.write_text(yaml.safe_dump(valid))
+    privileged = {**valid, "permissions": {"contents": "write"}}
+    path = root / "release.yaml"
+    path.write_text(yaml.safe_dump(privileged))
+    with pytest.raises(AssertionError):
+        _assert_workflow_policy(path)
+```
+
 - [ ] **Step 2: Run the red web test**
 
 Run: `corepack enable && pnpm --filter @tuntun/admin test`
@@ -331,30 +449,37 @@ Expected: FAIL with `No projects matched the filters` because the pnpm workspace
 
 - [ ] **Step 3: Add the minimal web application and command surface**
 
+`package.json`
+
 ```json
-// package.json
-{"name":"tuntun-workspace","private":true,"packageManager":"pnpm@10.15.0"}
+{"name":"tuntun-workspace","private":true,"packageManager":"pnpm@10.15.0","devDependencies":{"@axe-core/playwright":"4.10.2","@playwright/test":"1.55.0","@testing-library/jest-dom":"6.8.0","@testing-library/react":"16.3.0","@types/react":"19.1.10","@types/react-dom":"19.1.7","jsdom":"26.1.0","react":"19.1.1","react-dom":"19.1.1","typescript":"5.9.2","vite":"7.1.3","vitest":"3.2.4"}}
 ```
 
 ```yaml
 # pnpm-workspace.yaml
 packages:
-  - apps/admin
+  - apps/*
+  - packages/*
 ```
 
+`apps/admin/package.json`
+
 ```json
-// apps/admin/package.json
 {
   "name": "@tuntun/admin",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit && vite build",
+    "dev": "vite --host 127.0.0.1 --port 4173",
+    "lint": "eslint . ../../tests/unit/admin ../../tests/ui --max-warnings 0",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "e2e": "playwright test"
+    "build": "pnpm run typecheck && vite build",
+    "e2e": "playwright test",
+    "generate:openapi": "openapi-typescript ../../packages/contracts/openapi/admin-v1.yaml -o src/api/generated/admin-v1.ts"
   },
-  "dependencies": {"react":"19.1.1","react-dom":"19.1.1"},
-  "devDependencies": {"@playwright/test":"1.55.0","@testing-library/jest-dom":"6.8.0","@testing-library/react":"16.3.0","@types/react":"19.1.10","@types/react-dom":"19.1.7","@vitejs/plugin-react":"5.0.2","jsdom":"26.1.0","typescript":"5.9.2","vite":"7.1.3","vitest":"3.2.4"}
+  "dependencies": {"@tanstack/react-query":"5.85.5","react":"19.1.1","react-dom":"19.1.1","react-intl":"7.1.11","react-router-dom":"7.8.2"},
+  "devDependencies": {"@axe-core/playwright":"4.10.2","@eslint/js":"9.34.0","@playwright/test":"1.55.0","@testing-library/jest-dom":"6.8.0","@testing-library/react":"16.3.0","@types/react":"19.1.10","@types/react-dom":"19.1.7","@vitejs/plugin-react":"5.0.2","eslint":"9.34.0","eslint-plugin-react-hooks":"5.2.0","eslint-plugin-react-refresh":"0.4.20","globals":"16.3.0","jsdom":"26.1.0","openapi-typescript":"7.9.1","typescript":"5.9.2","typescript-eslint":"8.41.0","vite":"7.1.3","vitest":"3.2.4"}
 }
 ```
 
@@ -376,8 +501,76 @@ ReactDOM.createRoot(document.getElementById("root")!).render(<React.StrictMode><
 ```ts
 // apps/admin/vite.config.ts
 import react from "@vitejs/plugin-react";
-import {defineConfig} from "vite";
-export default defineConfig({plugins: [react()], test: {environment: "jsdom", setupFiles: ["./src/test-setup.ts"]}});
+import {defineConfig} from "vitest/config";
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./src/test-setup.ts"],
+    include: [
+      "src/**/*.{test,spec}.{ts,tsx}",
+      "../../tests/unit/admin/**/*.{test,spec}.{ts,tsx}",
+      "../../tests/ui/**/*.spec.tsx",
+    ],
+    exclude: ["../../tests/e2e/**", "../../tests/ui/e2e/**"],
+  },
+});
+```
+
+```js
+// apps/admin/eslint.config.js
+import js from "@eslint/js";
+import globals from "globals";
+import reactHooks from "eslint-plugin-react-hooks";
+import reactRefresh from "eslint-plugin-react-refresh";
+import tseslint from "typescript-eslint";
+
+export default tseslint.config(
+  {ignores: ["dist", "playwright-report", "test-results"]},
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  {
+    files: ["**/*.{ts,tsx}"],
+    languageOptions: {ecmaVersion: 2022, globals: {...globals.browser, ...globals.node}},
+    plugins: {"react-hooks": reactHooks, "react-refresh": reactRefresh},
+    rules: {
+      ...reactHooks.configs.recommended.rules,
+      "react-refresh/only-export-components": ["error", {allowConstantExport: true}],
+    },
+  },
+);
+```
+
+```ts
+// apps/admin/playwright.config.ts
+import {defineConfig, devices} from "@playwright/test";
+
+export default defineConfig({
+  testDir: "../../tests",
+  testMatch: ["**/e2e/**/*.spec.ts", "**/ui/**/*.spec.ts", "**/performance/ui/**/*.spec.ts"],
+  testIgnore: [
+    "**/e2e/ui/subject-*.spec.ts",
+    "**/ui/subject-*.spec.ts",
+    "**/ui/display-*.spec.ts",
+    "**/ui/e2e/display-agent-*.spec.ts",
+  ],
+  fullyParallel: false,
+  workers: 1,
+  retries: 0,
+  use: {
+    baseURL: "http://127.0.0.1:4173",
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
+    video: "off",
+  },
+  webServer: {
+    command: "pnpm run dev",
+    url: "http://127.0.0.1:4173",
+    reuseExistingServer: false,
+    timeout: 120_000,
+  },
+  projects: [{name: "chromium", use: {...devices["Desktop Chrome"]}}],
+});
 ```
 
 ```ts
@@ -385,14 +578,121 @@ export default defineConfig({plugins: [react()], test: {environment: "jsdom", se
 import "@testing-library/jest-dom/vitest";
 ```
 
+`apps/admin/tsconfig.json`
+
 ```json
-// apps/admin/tsconfig.json
-{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":true,"noEmit":true},"include":["src","vite.config.ts"]}
+{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":true,"noEmit":true,"skipLibCheck":true,"types":["vite/client","vitest/globals"]},"include":["src","vite.config.ts","../../tests/unit/admin/**/*.ts","../../tests/unit/admin/**/*.tsx","../../tests/ui/**/*.spec.tsx"]}
 ```
 
 ```html
 <!-- apps/admin/index.html -->
 <!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tuntun</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>
+```
+
+```ts
+// tests/unit/admin/root-discovery.test.ts
+import {describe, expect, it} from "vitest";
+import {App} from "../../../apps/admin/src/app";
+
+describe("root unit-test discovery", () => {
+  it("loads an admin module from the root test tree", () => {
+    expect(typeof App).toBe("function");
+  });
+});
+```
+
+```ts
+// tests/e2e/admin-smoke.spec.ts
+import {expect, test} from "@playwright/test";
+
+test("serves the offline setup shell", async ({page}) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", {name: "Tuntun setup in progress"})).toBeVisible();
+});
+```
+
+```ts
+// tests/ui/admin-accessibility.spec.ts
+import AxeBuilder from "@axe-core/playwright";
+import {expect, test} from "@playwright/test";
+
+test("has no serious or critical baseline accessibility violations", async ({page}) => {
+  await page.goto("/");
+  const result = await new AxeBuilder({page}).analyze();
+  expect(result.violations.filter(({impact}) => impact === "serious" || impact === "critical")).toHaveLength(0);
+});
+```
+
+```python
+# tests/ci/test_web_command_contract.py
+import json
+import re
+import subprocess
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_admin_owns_every_public_web_command() -> None:
+    package = json.loads((ROOT / "apps/admin/package.json").read_text())
+    expected_scripts = {
+        "dev",
+        "lint",
+        "typecheck",
+        "test",
+        "build",
+        "e2e",
+        "generate:openapi",
+    }
+    expected_tools = {
+        "@axe-core/playwright",
+        "@playwright/test",
+        "eslint",
+        "typescript",
+        "vitest",
+    }
+    assert expected_scripts <= set(package["scripts"])
+    assert expected_tools <= set(package["devDependencies"])
+
+
+def test_workspace_admits_all_later_apps_and_typescript_packages() -> None:
+    workspace = yaml.safe_load((ROOT / "pnpm-workspace.yaml").read_text())
+    assert workspace == {"packages": ["apps/*", "packages/*"]}
+
+
+def test_playwright_config_owns_root_discovery_server_and_project() -> None:
+    config = (ROOT / "apps/admin/playwright.config.ts").read_text()
+    required_fragments = (
+        'testDir: "../../tests"',
+        '"**/e2e/**/*.spec.ts"',
+        '"**/ui/**/*.spec.ts"',
+        "testIgnore:",
+        "webServer:",
+        "projects:",
+        "127.0.0.1:4173",
+    )
+    for required in required_fragments:
+        assert required in config
+
+
+def test_playwright_discovers_root_e2e_and_ui_suites() -> None:
+    completed = subprocess.run(
+        ["pnpm", "--filter", "@tuntun/admin", "e2e", "--", "--list"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 0, output
+    assert "tests/e2e/admin-smoke.spec.ts" in output
+    assert "tests/ui/admin-accessibility.spec.ts" in output
+    discovered = re.search(r"Total:\s+(\d+)\s+tests?", output)
+    assert discovered and int(discovered.group(1)) >= 2, output
 ```
 
 ```make
@@ -405,8 +705,10 @@ format:
 	uv run ruff format .
 lint:
 	uv run ruff check .
+	pnpm --filter @tuntun/admin lint
 typecheck:
 	uv run mypy apps/core/src apps/edge/src packages/contracts/src packages/testing/src
+	pnpm --filter @tuntun/admin typecheck
 test:
 	uv run pytest -m "not live_cloud and not reachy_hardware" --cov --cov-branch
 test-security:
@@ -470,51 +772,79 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15-intel]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with: {version: "0.8.13", enable-cache: true}
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with: {version: "10.15.0", run_install: false}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: {node-version: "22", cache: pnpm}
       - run: uv sync --all-packages --frozen
       - run: pnpm install --frozen-lockfile
       - run: make lint typecheck test web-test web-build
 ```
 
+The four action revisions are full reviewed commit SHAs and the comments are informational only. The policy test enumerates the union of `.github/workflows/*.yml` and `.github/workflows/*.yaml` on every run, so later security/release workflows cannot escape review by using the other suffix. It checks job-level reusable workflows and every step-level third-party `uses`, while allowing only repository-local `./` actions, and validates every literal or matrix-expanded runner against the fixed set. Dependabot may propose an update, but CI rejects a tag, branch, abbreviated SHA, `*-latest` runner, unreviewed runner label, secret reference, or hardware/provider job. Linux remains the portable gate; `macos-15-intel` proves hosted Intel compatibility only. It is not evidence for the household Mac, Reachy, network, reboot, thermal, firewall, or lifecycle qualification gates.
+
 - [ ] **Step 4: Run the green web/build gate**
 
-Run: `pnpm install && pnpm --filter @tuntun/admin test && pnpm --filter @tuntun/admin build && make lint && make typecheck`
+Run: `pnpm install && pnpm --filter @tuntun/admin test && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/admin e2e -- --list && uv run pytest tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py -q && make lint && make typecheck`
 
-Expected: PASS with one Vitest test, a successful Vite production build, and zero Ruff/mypy errors.
+Expected: PASS on Linux and Intel macOS with the app-local and root-unit Vitest sentinels, both root Playwright suites listed and a nonzero discovery total, a successful Vite production build, fixed runner labels, only full-SHA third-party actions, and zero ESLint/TypeScript/Ruff/mypy errors. These discovery sentinels are mandatory because skipped root trees or a zero-test runner invocation are not acceptance evidence; browser execution remains the explicit `make web-e2e` gate after Chromium is installed.
 
 - [ ] **Step 5: Commit exact Task 2 paths**
 
 ```bash
 git status --short
-git add package.json pnpm-workspace.yaml pnpm-lock.yaml apps/admin/package.json apps/admin/index.html apps/admin/vite.config.ts apps/admin/tsconfig.json apps/admin/src/main.tsx apps/admin/src/app.tsx apps/admin/src/app.test.tsx apps/admin/src/test-setup.ts Makefile .gitignore .pre-commit-config.yaml .github/workflows/ci.yml
+git add package.json pnpm-workspace.yaml pnpm-lock.yaml apps/admin/package.json apps/admin/index.html apps/admin/vite.config.ts apps/admin/tsconfig.json apps/admin/eslint.config.js apps/admin/playwright.config.ts apps/admin/src/main.tsx apps/admin/src/app.tsx apps/admin/src/app.test.tsx apps/admin/src/test-setup.ts tests/unit/admin/root-discovery.test.ts tests/e2e/admin-smoke.spec.ts tests/ui/admin-accessibility.spec.ts Makefile .gitignore .pre-commit-config.yaml .github/workflows/ci.yml tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "build: add web workspace and baseline CI"
 ```
 
-### Task 3: Add the fail-closed private-data scanner
+### Task 3: Add fail-closed private-data and shared structural-assurance scanners
 
 **Master package:** 01
-**Depends on:** Task 1.
-**Estimated effort:** 0.5 person-day.
+**Depends on:** Tasks 1–2.
+**Estimated effort:** 1.5 person-days.
 
 **Files:**
 - Create: `scripts/verify_private_data.py`
+- Create: `scripts/assurance_common.py`
+- Create: `scripts/check_feature_absence.py`
+- Create: `scripts/check_import_boundaries.py`
+- Create: `scripts/check_migration_ownership.py`
+- Create: `scripts/scan_browser_artifacts.py`
+- Create: `scripts/scan_network_surface.py`
+- Create: `scripts/scan_private_data.py`
+- Create: `scripts/scan_backup_artifacts.py`
+- Create: `scripts/scan_sandbox_residue.py`
+- Create: `scripts/scan_sql_schema.py`
+- Create: `scripts/check_migration_graph.py`
 - Test: `tests/security/test_private_data_scanner.py`
+- Test: `tests/security/test_shared_assurance_tools.py`
 - Create: `tests/fixtures/synthetic/README.md`
 - Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
-- Consumes: repository root path.
-- Produces: `scan(root: Path) -> tuple[Finding, ...]`; CLI exits 1 and prints relative paths/reason codes for forbidden content, otherwise prints `private-data scan: PASS` and exits 0.
+- Consumes: one or more explicit repository, evidence, candidate, or artifact roots.
+- Produces: `scan(roots: Path | Sequence[Path]) -> tuple[Finding, ...]`; CLI exits 1 and prints root-qualified relative paths/reason codes for forbidden content or an incomplete scan, otherwise prints `private-data scan: PASS` and exits 0.
+- Produces the first and only owners of the shared commands already consumed by later phase plans: `check_feature_absence.py`, `check_import_boundaries.py`, `check_migration_ownership.py`, `scan_browser_artifacts.py`, and `scan_network_surface.py`. Each exposes `main(argv: Sequence[str] | None = None) -> int`, accepts an optional lexical `--root PATH` that defaults to the current repository, returns `0` only for a complete passing scan, returns `1` for a policy finding, and returns `2` for invalid arguments, a missing/unreadable/changing input, parser/structure exhaustion, or an unavailable required inventory. They perform no network access and no repository/runtime mutation.
+- `scripts/assurance_common.py` produces descriptor-bound `read_regular_file(path: Path, *, max_bytes: int) -> bytes`, duplicate-safe `parse_json_object(raw: bytes, *, max_depth: int, max_containers: int, max_tokens: int) -> Mapping[str, object]`, bounded `walk_regular_files(roots: Sequence[Path], *, max_files: int, max_total_bytes: int) -> Iterator[FrozenRegularFile]`, `CsvSet.parse(value: str) -> tuple[str, ...]`, and `AssuranceFinding(path: Path, code: str, detail: str | None)`. Every tool uses these primitives; symlinks, special files, duplicate JSON keys, non-UTF-8, input replacement, duplicate CSV values, excess depth/count/bytes, and partial subprocess output block rather than pass.
+- `check_feature_absence.py` supports exactly one selector mode: `--manifest PATH --feature ID`, `--manifest PATH --features CSV`, `--feature ID --phase N`, `--features CSV --phase N`, or `--all-canonically-absent --direct-and-replay`. It checks source/route/config/OpenAPI/package/chunk/IPC/launchd registration plus direct and replay reachability where requested; an unknown feature or missing required surface inventory is a blocking incomplete scan.
+- `check_import_boundaries.py` supports exactly one of `--domain NAME` or `--all`, builds a bounded Python AST import graph from workspace `src` roots, resolves absolute and relative imports, and rejects domain/service/workflow imports of adapter implementations, cross-domain private modules, dynamic imports with non-literal targets, and modules that cannot be parsed.
+- `check_migration_ownership.py` accepts `--revisions REV [REV ...]`, optional `--exact-head REVISION_NAME`, and optional `--forbid-branch-merge-orphan`. It parses Alembic modules without importing them, requires each requested numeric revision to have exactly one file/`revision` value, validates `down_revision`, rejects duplicate/edited/unknown ancestry and, under the strict flag, requires one linear reachable head with no branch, merge, or orphan.
+- `scan_browser_artifacts.py` accepts optional `--playwright-output PATH` and required `--forbid CSV`; it scans every existing production browser bundle/source map/manifest plus the explicit Playwright tree when named, including compressed/textual assets, and matches normalized JSON/property names and literal browser persistence/URL/path patterns. A missing explicit output, corrupt map/archive, unreadable bundle, or build tree changing during the scan blocks.
+- `scan_network_surface.py` accepts the closed Phase 3/6 flag vocabulary `--require-listener ADDRESS:PORT=OWNER`, `--forbid-lan-port PORT`, `--optional-exact-commissioned-private-lan-port PORT=OWNER`, `--forbid-wildcard`, `--forbid-ipv6`, `--forbid-core-tcp`, `--forbid-media-proxy-tcp`, `--forbid-camera-ports`, and `--forbid-camera-public`. It obtains one bounded point-in-time process/socket snapshot, joins socket owner PID to executable/service identity, rejects ambiguous/truncated inventory, and never treats an unavailable platform probe as an empty passing surface.
+- `scan_private_data.py` is a thin CLI over the same `verify_private_data.scan` engine, not a second matcher. It supports the later closed `--paths PATH...`, `--include-git-history`, and `--allow-safe-ids` options; history mode uses one bounded fixed-argv Git object stream and applies the same byte/archive budgets, while safe IDs permit only the documented synthetic/public identifiers and never credentials, household/device/subject/network values, or arbitrary allowlists.
+- `scan_backup_artifacts.py --root PATH --require-encrypted --forbid CSV` verifies a bounded nofollow backup tree contains only authenticated ciphertext/manifests and none of the named portable-secret/video/plaintext classes; unknown classes, missing encryption proof, corrupt archives, or incomplete inventory block. `scan_sandbox_residue.py --root PATH --require-empty` proves the descriptor-walked root has no remaining entry/mount/process handle and fails on an absent, changing, symlinked, unreadable, or nonempty root. `scan_sql_schema.py --db-kind vision|canonical --forbid CSV` uses the migration/schema parser without importing migrations, requires the selected registered schema inventory to be complete, and rejects forbidden normalized table/column/index/trigger/view tokens or unowned/unknown DDL.
+- `check_migration_graph.py` is the richer graph-view CLI over `check_migration_ownership.py`'s same parser. It accepts exact core version table/head plus repeated `--exact-edge CHILD:PARENT` and `--forbid-forks|--forbid-merges|--forbid-orphans`; it proves the complete unique closed ancestry without importing migration code. The two CLIs share implementation and fixtures, so no second migration truth exists.
 
 - [ ] **Step 1: Write the scanner’s red tests**
 
@@ -522,6 +852,8 @@ git commit -m "build: add web workspace and baseline CI"
 # tests/security/test_private_data_scanner.py
 from pathlib import Path
 
+import pytest
+import scripts.verify_private_data as private_data_scanner
 from scripts.verify_private_data import scan
 
 
@@ -540,28 +872,560 @@ def test_scanner_allows_declared_synthetic_text(tmp_path: Path) -> None:
     fixture.mkdir(parents=True)
     (fixture / "case.json").write_text('{"speaker":"synthetic-guest"}', encoding="utf-8")
     assert scan(tmp_path) == ()
+
+
+def test_explicit_generated_artifacts_and_bytes_after_two_megabytes_are_scanned(tmp_path: Path) -> None:
+    artifact = tmp_path / "dist" / "candidate.bin"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"x" * 2_100_000 + b"sk-proj-" + b"A" * 24)
+    findings = scan((tmp_path / "tests", artifact))
+    assert (artifact, "credential-pattern") in {
+        (finding.path, finding.reason) for finding in findings
+    }
+
+
+def test_every_bounded_archive_member_is_scanned(tmp_path: Path) -> None:
+    import io
+    import tarfile
+
+    archive = tmp_path / "dist" / "candidate.tar.gz"
+    archive.parent.mkdir()
+    payload = b"x" * 2_100_000 + b"-----BEGIN PRIVATE KEY-----"
+    with tarfile.open(archive, "w:gz") as output:
+        member = tarfile.TarInfo("nested/config.txt")
+        member.size = len(payload)
+        output.addfile(member, io.BytesIO(payload))
+    findings = scan(archive)
+    assert any(
+        finding.path == Path(str(archive) + "!nested/config.txt")
+        and finding.reason == "private-key"
+        for finding in findings
+    )
+
+
+def test_realistic_reachy_wheelhouse_archive_is_streamed_past_old_16mib_limit(
+    tmp_path: Path,
+) -> None:
+    import io
+    import tarfile
+    import zipfile
+
+    archive = tmp_path / "tuntun-edge-realistic.tar.gz"
+    wheel=io.BytesIO()
+    with zipfile.ZipFile(wheel,"w",compression=zipfile.ZIP_STORED) as output:
+        output.writestr("synthetic_runtime/payload.bin",b"synthetic-wheel-bytes\n"*1_100_000)
+    payload=wheel.getvalue()
+    with tarfile.open(archive, "w:gz") as output:
+        member = tarfile.TarInfo("wheelhouse/synthetic_runtime-1.0-cp312-manylinux_aarch64.whl")
+        member.size = len(payload)
+        output.addfile(member, io.BytesIO(payload))
+    assert len(payload) > 16 * 1024 * 1024
+    assert scan(archive) == ()
+
+
+def test_separate_raw_compressed_member_and_cumulative_limits_fail_closed(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import io
+    import tarfile
+
+    large = tmp_path / "large.txt"
+    large.write_bytes(b"x" * 1025)
+    monkeypatch.setattr(private_data_scanner, "MAX_RAW_FILE_BYTES", 1024)
+    assert scan(large)[0].reason == "raw-byte-limit"
+
+    archive = tmp_path / "bomb.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        for name in ("one.bin", "two.bin"):
+            member = tarfile.TarInfo(name)
+            member.size = 800
+            output.addfile(member, io.BytesIO(b"z" * member.size))
+    monkeypatch.setattr(private_data_scanner, "MAX_COMPRESSED_ARCHIVE_BYTES", 1)
+    assert scan(archive)[0].reason == "compressed-byte-limit"
+    monkeypatch.setattr(private_data_scanner, "MAX_COMPRESSED_ARCHIVE_BYTES", 1024 * 1024)
+    monkeypatch.setattr(private_data_scanner, "MAX_ARCHIVE_MEMBER_BYTES", 700)
+    assert any(item.reason == "archive-member-byte-limit" for item in scan(archive))
+    monkeypatch.setattr(private_data_scanner, "MAX_ARCHIVE_MEMBER_BYTES", 1024)
+    monkeypatch.setattr(private_data_scanner, "MAX_CUMULATIVE_EXPANDED_BYTES", 1500)
+    assert any(item.reason == "cumulative-expanded-byte-limit" for item in scan(archive))
+
+
+def test_missing_explicit_release_root_fails_closed(tmp_path: Path) -> None:
+    missing = tmp_path / "dist"
+    assert [(item.path, item.reason) for item in scan(missing)] == [
+        (missing, "missing-root")
+    ]
+
+
+def test_explicit_corrupt_archive_suffix_never_passes_as_an_ordinary_file(tmp_path: Path) -> None:
+    for name in ("candidate.zip", "candidate.tar", "candidate.tar.gz", "candidate.tgz"):
+        path=tmp_path/name; path.write_bytes(b"not a parseable archive")
+        assert [(item.path,item.reason) for item in scan(path)]==[(path,"corrupt-archive")]
+
+
+def test_corrupt_archive_magic_without_suffix_fails_closed(tmp_path: Path) -> None:
+    for name,prefix in (("zipish.bin",b"PK\x03\x04broken"),("gzipish.bin",b"\x1f\x8bbroken")):
+        path=tmp_path/name; path.write_bytes(prefix)
+        assert [(item.path,item.reason) for item in scan(path)]==[(path,"corrupt-archive")]
+
+
+@pytest.mark.parametrize(("mutation","reason"),(
+    ("oversized_directory","zip-central-directory-limit"),
+    ("inconsistent_offset","zip-central-directory-invalid"),
+    ("dishonest_entry_count","zip-central-directory-invalid"),
+))
+def test_zip_eocd_preflight_bounds_directory_before_zipfile_allocation(
+    tmp_path: Path,mutation:str,reason:str,
+) -> None:
+    import struct
+    import zipfile
+
+    archive=tmp_path/"malformed.zip"
+    with zipfile.ZipFile(archive,"w") as output:
+        output.writestr("safe.txt",b"safe"); output.writestr("also-safe.txt",b"safe")
+    data=bytearray(archive.read_bytes()); marker=data.rfind(b"PK\x05\x06")
+    assert marker>=0
+    if mutation=="oversized_directory":
+        struct.pack_into("<I",data,marker+12,private_data_scanner.MAX_ZIP_CENTRAL_DIRECTORY_BYTES+1)
+    else:
+        if mutation=="inconsistent_offset":
+            offset=struct.unpack_from("<I",data,marker+16)[0]
+            struct.pack_into("<I",data,marker+16,offset+1)
+        else:
+            struct.pack_into("<H",data,marker+8,1)
+            struct.pack_into("<H",data,marker+10,1)
+    archive.write_bytes(data)
+    assert scan(archive)[0].reason==reason
+
+
+def test_nested_archive_member_is_recursively_scanned_under_the_same_budget(tmp_path: Path) -> None:
+    import io
+    import tarfile
+    import zipfile
+
+    nested=io.BytesIO()
+    with zipfile.ZipFile(nested,"w",compression=zipfile.ZIP_DEFLATED) as output:
+        output.writestr("nested/config.txt",b"sk-proj-"+b"A"*24)
+    outer=tmp_path/"candidate.tar.gz"
+    with tarfile.open(outer,"w:gz") as output:
+        member=tarfile.TarInfo("wheelhouse/example.whl")
+        member.size=len(nested.getvalue())
+        output.addfile(member,io.BytesIO(nested.getvalue()))
+    assert any(item.reason=="credential-pattern" for item in scan(outer))
+
+
+def test_filesystem_and_archive_symlink_or_special_entries_fail_closed(tmp_path: Path) -> None:
+    import io
+    import os
+    import tarfile
+
+    target=tmp_path/"target.txt"; target.write_text("synthetic")
+    (tmp_path/"alias.txt").symlink_to(target)
+    os.mkfifo(tmp_path/"named-pipe")
+    archive=tmp_path/"links.tar"
+    with tarfile.open(archive,"w") as output:
+        symlink=tarfile.TarInfo("alias"); symlink.type=tarfile.SYMTYPE; symlink.linkname="target"
+        output.addfile(symlink)
+        device=tarfile.TarInfo("device"); device.type=tarfile.CHRTYPE
+        output.addfile(device)
+    reasons={item.reason for item in scan(tmp_path)}
+    assert {"filesystem-symlink","filesystem-special","unsafe-archive-member"}<=reasons
+
+
+def test_cumulative_actual_expansion_is_shared_across_archives(
+    tmp_path: Path,monkeypatch,
+) -> None:
+    import gzip
+    import io
+    import tarfile
+
+    archives=[]
+    for index in range(2):
+        archive=tmp_path/f"part-{index}.tar.gz"
+        with tarfile.open(archive,"w:gz") as output:
+            member=tarfile.TarInfo("payload.bin"); member.size=800
+            output.addfile(member,io.BytesIO(b"x"*member.size))
+        archives.append(archive)
+    one_archive_expansion=len(gzip.decompress(archives[0].read_bytes()))
+    monkeypatch.setattr(
+        private_data_scanner,"MAX_CUMULATIVE_EXPANDED_BYTES",one_archive_expansion+512,
+    )
+    assert scan(archives[0])==()
+    assert any(item.reason=="cumulative-expanded-byte-limit" for item in scan(tuple(archives)))
+
+
+def test_files_input_bytes_and_archive_members_share_one_budget_across_roots(
+    tmp_path: Path,monkeypatch,
+) -> None:
+    import io
+    import tarfile
+
+    raw=[]
+    for index in range(2):
+        path=tmp_path/f"raw-{index}.txt"; path.write_bytes(b"x"*800); raw.append(path)
+    monkeypatch.setattr(private_data_scanner,"MAX_TOTAL_INPUT_BYTES",1500)
+    assert scan(tuple(raw))[-1].reason=="total-input-byte-limit"
+    monkeypatch.setattr(private_data_scanner,"MAX_TOTAL_INPUT_BYTES",4096)
+    monkeypatch.setattr(private_data_scanner,"MAX_FILES",1)
+    assert scan(tuple(raw))[-1].reason=="file-count-limit"
+
+    monkeypatch.setattr(private_data_scanner,"MAX_FILES",10)
+    archives=[]
+    for index in range(2):
+        archive=tmp_path/f"members-{index}.tar"
+        with tarfile.open(archive,"w") as output:
+            member=tarfile.TarInfo("payload.bin"); member.size=1
+            output.addfile(member,io.BytesIO(b"x"))
+        archives.append(archive)
+    monkeypatch.setattr(private_data_scanner,"MAX_TOTAL_INPUT_BYTES",100_000)
+    monkeypatch.setattr(private_data_scanner,"MAX_ARCHIVE_MEMBERS",1)
+    assert scan(tuple(archives))[-1].reason=="archive-member-limit"
+
+
+def test_streaming_walk_stops_before_materializing_a_million_entries(
+    tmp_path: Path,monkeypatch,
+) -> None:
+    class Entry:
+        def __init__(self,index): self.name=f"missing-{index}"
+    class LazyMillion:
+        emitted=0
+        def __enter__(self): return self
+        def __exit__(self,*_args): return False
+        def __iter__(self): return self
+        def __next__(self):
+            if self.emitted==1_000_000: raise StopIteration
+            item=Entry(self.emitted); self.emitted+=1; return item
+    lazy=LazyMillion()
+    original_stat=private_data_scanner.os.stat
+    def bounded_stat(path,*args,dir_fd=None,**kwargs):
+        if dir_fd is not None and str(path).startswith("missing-"):
+            return type("Metadata",(),{
+                "st_mode":private_data_scanner.stat.S_IFLNK,
+                "st_dev":1,"st_ino":1,"st_size":0,"st_mtime_ns":0,"st_ctime_ns":0,
+            })()
+        return original_stat(path,*args,dir_fd=dir_fd,**kwargs)
+    monkeypatch.setattr(private_data_scanner,"MAX_PATH_ENTRIES",3)
+    monkeypatch.setattr(private_data_scanner.os,"scandir",lambda _path:lazy)
+    monkeypatch.setattr(private_data_scanner.os,"stat",bounded_stat)
+    assert any(item.reason=="path-entry-limit" for item in scan(tmp_path))
+    assert lazy.emitted==4
+
+
+def _ustar_header(name: bytes, size: int, kind: bytes = b"0") -> bytes:
+    header=bytearray(512); header[0:len(name)]=name
+    for offset,width,value in ((100,8,0o644),(108,8,0),(116,8,0),(124,12,size),(136,12,0)):
+        encoded=(f"{value:0{width-1}o}\0").encode("ascii")
+        header[offset:offset+width]=encoded
+    header[148:156]=b"        "; header[156:157]=kind
+    header[257:265]=b"ustar\x0000"
+    checksum=sum(header); header[148:156]=f"{checksum:06o}\0 ".encode("ascii")
+    return bytes(header)
+
+
+@pytest.mark.parametrize("kind",(b"x",b"g",b"L",b"K"))
+def test_tar_extended_metadata_is_blocked_before_declared_payload_allocation(
+    tmp_path: Path,kind:bytes,
+) -> None:
+    archive=tmp_path/"hostile.tar"
+    archive.write_bytes(_ustar_header(b"metadata",private_data_scanner.MAX_TAR_METADATA_BYTES+1,kind))
+    assert scan(archive)[0].reason=="tar-metadata-limit"
+
+
+def test_tar_and_gzip_trailing_bytes_are_bounded_and_must_be_zero(
+    tmp_path: Path,monkeypatch,
+) -> None:
+    import gzip
+
+    monkeypatch.setattr(private_data_scanner,"MAX_TAR_TRAILING_PADDING_BYTES",1024)
+    monkeypatch.setattr(private_data_scanner,"MAX_GZIP_TRAILING_PADDING_BYTES",1024)
+    end=b"\0"*1024
+    excessive_tar=tmp_path/"tar-padding.tar.gz"
+    excessive_tar.write_bytes(gzip.compress(end+b"\0"*1536,mtime=0))
+    assert scan(excessive_tar)[0].reason=="tar-trailing-padding-limit"
+
+    valid=tmp_path/"gzip-padding.tar.gz"
+    compressed=gzip.compress(end,mtime=0)
+    valid.write_bytes(compressed+b"\0"*1025)
+    assert scan(valid)[0].reason=="gzip-trailing-padding-limit"
+    valid.write_bytes(compressed+b"\0"*32+b"x")
+    assert scan(valid)[0].reason=="gzip-trailing-data"
+
+
+def test_gzip_header_crc_is_validated(tmp_path: Path) -> None:
+    import gzip
+    import struct
+    import zlib
+
+    compressed=gzip.compress(b"\0"*1024,mtime=0)
+    header=bytearray(compressed[:10]); header[3]|=0x02
+    crc=zlib.crc32(header)&0xffff
+    valid=tmp_path/"valid-fhcrc.tar.gz"
+    valid.write_bytes(bytes(header)+struct.pack("<H",crc)+compressed[10:])
+    assert scan(valid)==()
+    invalid=tmp_path/"invalid-fhcrc.tar.gz"
+    invalid.write_bytes(bytes(header)+struct.pack("<H",crc^1)+compressed[10:])
+    assert scan(invalid)[0].reason=="corrupt-archive"
+
+
+@pytest.mark.parametrize("container",("zip_comment","zip_extra","tar_header","gzip_comment"))
+def test_archive_metadata_bytes_are_pattern_scanned(tmp_path: Path,container:str) -> None:
+    import gzip
+    import struct
+    import zipfile
+
+    secret=b"sk-proj-"+b"M"*24
+    path=tmp_path/(container+(".zip" if container.startswith("zip") else ".tar.gz"))
+    if container.startswith("zip"):
+        with zipfile.ZipFile(path,"w") as archive:
+            item=zipfile.ZipInfo("safe.txt")
+            if container=="zip_extra": item.extra=struct.pack("<HH",0xCAFE,len(secret))+secret
+            archive.writestr(item,b"synthetic")
+            if container=="zip_comment": archive.comment=secret
+    elif container=="tar_header":
+        header=bytearray(_ustar_header(b"safe.txt",0)); header[265:265+len(secret)]=secret
+        header[148:156]=b"        "; header[148:156]=f"{sum(header):06o}\0 ".encode()
+        path.write_bytes(gzip.compress(bytes(header)+b"\0"*1024,mtime=0))
+    else:
+        payload=gzip.compress(b"\0"*1024,mtime=0); fixed=bytearray(payload[:10]); fixed[3]|=0x10
+        path.write_bytes(bytes(fixed)+secret+b"\0"+payload[10:])
+    assert any(item.reason=="credential-pattern" for item in scan(path))
+
+
+def test_cli_preserves_explicit_symlink_for_nofollow_rejection(
+    tmp_path: Path,monkeypatch,capsys,
+) -> None:
+    target=tmp_path/"target.txt"; target.write_text("synthetic")
+    alias=tmp_path/"explicit.txt"; alias.symlink_to(target)
+    monkeypatch.setattr(private_data_scanner.sys,"argv",["verify_private_data.py",str(alias)])
+    assert private_data_scanner.main()==1
+    assert "filesystem-symlink" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("generated_name",("dist","var","node_modules"))
+def test_nested_generated_name_is_not_a_skip_boundary(
+    tmp_path: Path,generated_name:str,
+) -> None:
+    nested=tmp_path/"src"/generated_name/"tracked-secret.txt"
+    nested.parent.mkdir(parents=True); nested.write_bytes(b"sk-proj-"+b"A"*24)
+    assert any(item.reason=="credential-pattern" for item in scan(tmp_path))
+
+
+def test_tracked_file_inside_exact_generated_root_is_scanned(tmp_path: Path) -> None:
+    import subprocess
+
+    subprocess.run(("git","init","-q",str(tmp_path)),check=True)
+    secret=tmp_path/"dist"/"tracked-secret.txt"
+    secret.parent.mkdir(); secret.write_bytes(b"sk-proj-"+b"A"*24)
+    subprocess.run(("git","-C",str(tmp_path),"add","dist/tracked-secret.txt"),check=True)
+    assert any(item.reason=="credential-pattern" for item in scan(tmp_path))
+
+
+def test_explicit_generated_root_does_not_skip_its_nested_generated_name(tmp_path: Path) -> None:
+    explicit=tmp_path/"var"; secret=explicit/"node_modules"/"secret.txt"
+    secret.parent.mkdir(parents=True); secret.write_bytes(b"sk-proj-"+b"A"*24)
+    assert any(item.reason=="credential-pattern" for item in scan(explicit))
+
+
+def test_zip_directory_payload_duplicate_and_unsafe_virtual_names_block(tmp_path: Path) -> None:
+    import stat
+    import zipfile
+
+    for name,write in (
+        ("payload.zip",lambda value: value.writestr("secret.txt/",b"sk-proj-"+b"A"*24)),
+        ("duplicate.zip",lambda value: (value.writestr("same.txt",b"one"),value.writestr("same.txt",b"two"))),
+        ("escape.zip",lambda value: value.writestr("../escape.txt",b"synthetic")),
+    ):
+        archive=tmp_path/name
+        with zipfile.ZipFile(archive,"w") as output: write(output)
+        assert any(item.reason=="unsafe-archive-member" for item in scan(archive))
+    valid=tmp_path/"directory.zip"
+    with zipfile.ZipFile(valid,"w") as output:
+        item=zipfile.ZipInfo("empty/"); item.external_attr=(stat.S_IFDIR|0o755)<<16
+        output.writestr(item,b"")
+    assert scan(valid)==()
+
+
+def test_special_tar_member_with_nonzero_body_is_rejected_before_body_read(
+    tmp_path: Path,
+) -> None:
+    archive=tmp_path/"special.tar"
+    archive.write_bytes(_ustar_header(b"device",2*1024*1024*1024,b"3"))
+    assert scan(archive)[0].reason=="unsafe-archive-member"
+
+
+def test_named_file_and_queued_directory_replacement_cannot_attest_substitute(
+    tmp_path: Path,monkeypatch,
+) -> None:
+    clean=tmp_path/"clean.txt"; clean.write_text("synthetic")
+    substitute=tmp_path/"substitute.txt"; substitute.write_bytes(b"sk-proj-"+b"A"*24)
+    original_read=private_data_scanner.FrozenFileView.read; replaced=False
+    def replacing_read(self,size=-1):
+        nonlocal replaced
+        if not replaced:
+            replaced=True; clean.replace(tmp_path/"old.txt"); substitute.replace(clean)
+        return original_read(self,size)
+    monkeypatch.setattr(private_data_scanner.FrozenFileView,"read",replacing_read)
+    assert any(item.reason=="input-changed-during-scan" for item in scan(clean))
+
+    directory=tmp_path/"tree"; directory.mkdir(); (directory/"safe.txt").write_text("synthetic")
+    replacement=tmp_path/"replacement"; replacement.mkdir()
+    (replacement/"secret.txt").write_bytes(b"sk-proj-"+b"B"*24)
+    original_scandir=private_data_scanner.os.scandir; swapped=False
+    def replacing_scandir(path):
+        nonlocal swapped
+        if isinstance(path,int) and not swapped:
+            swapped=True; directory.replace(tmp_path/"old-tree"); replacement.replace(directory)
+        return original_scandir(path)
+    monkeypatch.setattr(private_data_scanner.os,"scandir",replacing_scandir)
+    findings=scan(directory)
+    assert any(item.reason in {"input-changed-during-scan","credential-pattern"} for item in findings)
+
+
+@pytest.mark.parametrize("replacement_kind",("regular","symlink","fifo"))
+def test_walk_entry_replacement_between_first_stat_and_open_is_blocked(
+    tmp_path:Path,monkeypatch,replacement_kind:str,
+) -> None:
+    tree=tmp_path/"walk-race"; tree.mkdir(); candidate=tree/"race.txt"
+    candidate.write_text("synthetic"); substitute=tree/"substitute"
+    substitute.write_bytes(b"sk-proj-"+b"R"*24); target=tree/"target"; target.write_text("synthetic")
+    original_stat=private_data_scanner.os.stat; calls=0
+    def replacing_stat(path,*args,dir_fd=None,**kwargs):
+        nonlocal calls
+        if dir_fd is not None and str(path)=="race.txt":
+            calls+=1
+            if calls==2:
+                candidate.unlink()
+                if replacement_kind=="regular": substitute.replace(candidate)
+                elif replacement_kind=="symlink": candidate.symlink_to(target.name)
+                else: private_data_scanner.os.mkfifo(candidate)
+        return original_stat(path,*args,dir_fd=dir_fd,**kwargs)
+    monkeypatch.setattr(private_data_scanner.os,"stat",replacing_stat)
+    findings=scan(tree)
+    assert calls>=2
+    assert any(item.reason=="input-changed-during-scan" for item in findings)
+```
+
+```python
+# tests/security/test_shared_assurance_tools.py
+import pytest
+
+from scripts import (
+    check_feature_absence,
+    check_import_boundaries,
+    check_migration_ownership,
+    scan_browser_artifacts,
+    scan_network_surface,
+)
+
+
+@pytest.mark.parametrize(
+    ("tool", "argv"),
+    [
+        (check_feature_absence, ["--feature", "selected_frame_perception", "--phase", "3"]),
+        (check_import_boundaries, ["--domain", "vision"]),
+        (check_migration_ownership, ["--revisions", "0013", "0014", "0015"]),
+        (scan_browser_artifacts, ["--forbid", "credential,reusable_token"]),
+        (scan_network_surface, ["--forbid-wildcard", "--forbid-core-tcp"]),
+    ],
+)
+def test_shared_assurance_cli_is_owned_and_callable(
+    tool, argv, shared_assurance_harness,
+) -> None:
+    workspace = shared_assurance_harness.complete_positive_workspace_for(tool)
+    assert tool.main(["--root", str(workspace), *argv]) == 0
+
+
+@pytest.mark.parametrize("fault", [
+    "missing_input", "symlink_input", "special_input", "input_replaced",
+    "duplicate_json_key", "invalid_utf8", "oversize", "overdepth", "too_many_files",
+    "ambiguous_process_owner", "truncated_socket_inventory",
+])
+def test_shared_assurance_tools_never_convert_incomplete_scan_to_pass(
+    shared_assurance_harness, fault,
+) -> None:
+    result = shared_assurance_harness.run_every_tool_with(fault)
+    assert result.exit_codes
+    assert all(code in {1, 2} for code in result.exit_codes)
+    assert all(receipt.complete is False for receipt in result.receipts)
+
+
+def test_feature_absence_checks_direct_replay_and_every_registration_surface(
+    shared_assurance_harness,
+) -> None:
+    for surface in (
+        "source", "config", "api", "openapi", "package", "browser_chunk",
+        "ipc", "launchd", "direct_request", "replay",
+    ):
+        result = shared_assurance_harness.feature_present_only_on(surface)
+        assert check_feature_absence.main(result.argv) == 1
+
+
+def test_migration_checker_rejects_duplicate_revision_and_hidden_fork(
+    migration_workspace,
+) -> None:
+    migration_workspace.add_duplicate_revision("0015")
+    assert check_migration_ownership.main([
+        "--root", str(migration_workspace.root), "--revisions", "0013", "0014", "0015",
+        "--exact-head", "0015_presence_checkpoint", "--forbid-branch-merge-orphan",
+    ]) == 1
+
+
+def test_network_checker_requires_complete_pid_owner_snapshot(
+    network_inventory, monkeypatch,
+) -> None:
+    network_inventory.truncate_between_socket_and_process_tables()
+    network_inventory.install_as_probe(monkeypatch)
+    assert scan_network_surface.main([
+        "--require-listener", "127.0.0.1:8787=owner_ingress",
+        "--forbid-wildcard",
+    ]) == 2
 ```
 
 - [ ] **Step 2: Run the red scanner tests**
 
-Run: `uv run pytest tests/security/test_private_data_scanner.py -q`
+Run: `uv run pytest tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py -q`
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'scripts.verify_private_data'`.
+Expected: FAIL during collection because the private-data and shared assurance modules do not exist.
 
-- [ ] **Step 3: Implement bounded path/content scanning**
+- [ ] **Step 3: Implement bounded private-data and structural-assurance scanning**
 
 ```python
 # scripts/verify_private_data.py
 from __future__ import annotations
 
+import os
 import re
+import stat
+import struct
+import subprocess
 import sys
+import tempfile
+import zipfile
+import zlib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path,PurePosixPath
+from collections.abc import Sequence
 
 FORBIDDEN_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".crt", ".wav", ".mp3", ".mp4", ".jpg", ".jpeg", ".png", ".onnx", ".safetensors"}
 PATTERNS = (("credential-pattern", re.compile(rb"(?:sk-proj-|AKIA)[A-Za-z0-9_-]{16,}")), ("private-key", re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----")))
-SKIP_PARTS = {".git", ".venv", "node_modules", "dist", "var"}
+SKIP_ROOT_PARTS = {".git", ".venv", "node_modules", "dist", "var"}
+STREAM_CHUNK_BYTES = 1024 * 1024
+PATTERN_OVERLAP_BYTES = 256
+MAX_RAW_FILE_BYTES = 4 * 1024 * 1024 * 1024
+MAX_COMPRESSED_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
+MAX_TOTAL_INPUT_BYTES = 16 * 1024 * 1024 * 1024
+MAX_ARCHIVE_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
+MAX_CUMULATIVE_EXPANDED_BYTES = 12 * 1024 * 1024 * 1024
+MAX_FILES = 100_000
+MAX_PATH_ENTRIES = 100_000
+MAX_ARCHIVE_MEMBERS = 50_000
+MAX_ARCHIVE_DEPTH = 3
+MAX_ZIP_CENTRAL_DIRECTORY_BYTES = 64 * 1024 * 1024
+MAX_TAR_METADATA_BYTES = 64 * 1024
+MAX_TAR_TRAILING_PADDING_BYTES = 1024 * 1024
+MAX_GZIP_HEADER_BYTES = 64 * 1024
+MAX_GZIP_TRAILING_PADDING_BYTES = 1024 * 1024
+ZIP_MAGIC=(b"PK\x03\x04",b"PK\x05\x06",b"PK\x07\x08")
 
 
 @dataclass(frozen=True, slots=True)
@@ -570,25 +1434,643 @@ class Finding:
     reason: str
 
 
-def scan(root: Path) -> tuple[Finding, ...]:
-    findings: list[Finding] = []
-    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
-        relative = path.relative_to(root)
-        if any(part in SKIP_PARTS for part in relative.parts):
-            continue
-        if path.suffix.lower() in FORBIDDEN_SUFFIXES:
-            findings.append(Finding(relative, "forbidden-extension"))
-            continue
-        data = path.read_bytes()[:2_000_000]
+@dataclass(slots=True)
+class OpenedCandidate:
+    path:Path
+    metadata:os.stat_result
+    fd:int|None
+    parent_fd:int|None
+    name:str|None
+
+
+class ScanLimit(RuntimeError):
+    def __init__(self,path:Path,reason:str): self.path,self.reason=path,reason
+
+
+@dataclass(slots=True)
+class ScanBudget:
+    path_entries:int=0; files:int=0; archive_members:int=0
+    input_bytes:int=0; expanded_bytes:int=0
+    def consume(self,field:str,amount:int,limit:int,path:Path,reason:str) -> None:
+        value=getattr(self,field)+amount; setattr(self,field,value)
+        if value>limit: raise ScanLimit(path,reason)
+    def path_entry(self,path): self.consume("path_entries",1,MAX_PATH_ENTRIES,path,"path-entry-limit")
+    def file(self,path): self.consume("files",1,MAX_FILES,path,"file-count-limit")
+    def input(self,path,size): self.consume("input_bytes",size,MAX_TOTAL_INPUT_BYTES,path,"total-input-byte-limit")
+    def member(self,path): self.consume("archive_members",1,MAX_ARCHIVE_MEMBERS,path,"archive-member-limit")
+    def expanded(self,path,size): self.consume("expanded_bytes",size,MAX_CUMULATIVE_EXPANDED_BYTES,path,"cumulative-expanded-byte-limit")
+
+
+class FrozenFileView:
+    def __init__(self,source,size:int): self._source,self._size=source,size
+    def tell(self): return self._source.tell()
+    def readable(self): return True
+    def seekable(self): return True
+    def read(self,size=-1):
+        remaining=max(0,self._size-self.tell())
+        return self._source.read(remaining if size is None or size<0 else min(size,remaining))
+    def seek(self,offset,whence=os.SEEK_SET):
+        if whence==os.SEEK_SET: target=offset
+        elif whence==os.SEEK_CUR: target=self.tell()+offset
+        elif whence==os.SEEK_END: target=self._size+offset
+        else: raise ValueError("invalid seek mode")
+        if not 0<=target<=self._size: raise OSError("scan input changed bounds")
+        return self._source.seek(target,os.SEEK_SET)
+
+
+class ArchiveFormatError(RuntimeError):
+    pass
+
+
+def _read_exact(source,size:int) -> bytes:
+    chunks=[]; remaining=size
+    while remaining:
+        chunk=source.read(remaining)
+        if not chunk: raise ArchiveFormatError("truncated archive")
+        chunks.append(chunk); remaining-=len(chunk)
+    return b"".join(chunks)
+
+
+class StrictGzipReader:
+    """One bounded RFC-1952 member; concatenated members are deliberately blocked."""
+    def __init__(self,source,display:Path):
+        self._source=source; self._display=display; self._pending=b""
+        self._decompressor=zlib.decompressobj(-zlib.MAX_WBITS)
+        self._crc=0; self._size=0; self._finished=False
+        self._read_header()
+    def _compressed(self,size:int) -> bytes:
+        result=self._pending[:size]; self._pending=self._pending[len(result):]
+        if len(result)<size: result+=self._source.read(size-len(result))
+        return result
+    def _header_exact(self,size:int,counter:list[int]) -> bytes:
+        counter[0]+=size
+        if counter[0]>MAX_GZIP_HEADER_BYTES:
+            raise ScanLimit(self._display,"gzip-header-limit")
+        value=self._compressed(size)
+        if len(value)!=size: raise ArchiveFormatError("truncated gzip header")
+        return value
+    def _header_c_string(self,counter:list[int]) -> bytes:
+        value=bytearray()
+        while True:
+            byte=self._header_exact(1,counter); value.extend(byte)
+            if byte==b"\0": return bytes(value)
+    def _read_header(self) -> None:
+        count=[0]; fixed=self._header_exact(10,count); header=bytearray(fixed)
+        if fixed[:3]!=b"\x1f\x8b\x08" or fixed[3]&0xE0:
+            raise ArchiveFormatError("invalid gzip header")
+        flags=fixed[3]
+        if flags&0x04:
+            raw_length=self._header_exact(2,count); header.extend(raw_length)
+            length=struct.unpack("<H",raw_length)[0]
+            header.extend(self._header_exact(length,count))
+        if flags&0x08: header.extend(self._header_c_string(count))
+        if flags&0x10: header.extend(self._header_c_string(count))
+        if flags&0x02:
+            expected=struct.unpack("<H",self._header_exact(2,count))[0]
+            if expected!=(zlib.crc32(header)&0xffff):
+                raise ArchiveFormatError("invalid gzip header crc")
+    def _finish(self) -> None:
+        trailer=self._compressed(8)
+        if len(trailer)!=8: raise ArchiveFormatError("truncated gzip trailer")
+        expected_crc,expected_size=struct.unpack("<II",trailer)
+        if expected_crc!=self._crc or expected_size!=(self._size&0xFFFFFFFF):
+            raise ArchiveFormatError("invalid gzip trailer")
+        trailing=0
+        while True:
+            chunk=self._compressed(64*1024)
+            if not chunk: break
+            trailing+=len(chunk)
+            if trailing>MAX_GZIP_TRAILING_PADDING_BYTES:
+                raise ScanLimit(self._display,"gzip-trailing-padding-limit")
+            if any(chunk): raise ScanLimit(self._display,"gzip-trailing-data")
+        self._finished=True
+    def read(self,size=-1):
+        if size is None or size<0: raise ValueError("bounded read size required")
+        output=bytearray()
+        while len(output)<size and not self._finished:
+            if self._decompressor.eof:
+                self._finish(); break
+            if not self._pending:
+                self._pending=self._source.read(64*1024)
+                if not self._pending: raise ArchiveFormatError("truncated deflate stream")
+            compressed=self._pending; self._pending=b""
+            try:
+                decoded=self._decompressor.decompress(compressed,size-len(output))
+            except zlib.error as error:
+                raise ArchiveFormatError("invalid deflate stream") from error
+            if self._decompressor.eof:
+                self._pending=self._decompressor.unused_data
+            elif self._decompressor.unconsumed_tail:
+                self._pending=self._decompressor.unconsumed_tail
+            output.extend(decoded); self._crc=zlib.crc32(decoded,self._crc)
+            self._size+=len(decoded)
+        return bytes(output)
+
+
+class ExpandedBudgetReader:
+    def __init__(self,source,budget:ScanBudget,display:Path):
+        self._source,self._budget,self._display=source,budget,display
+    def read(self,size=-1):
+        value=self._source.read(size)
+        self._budget.expanded(self._display,len(value))
+        return value
+
+
+class TarMemberReader:
+    def __init__(self,source,size:int): self._source,self.remaining=source,size
+    def read(self,size=-1):
+        if self.remaining==0: return b""
+        requested=self.remaining if size is None or size<0 else min(size,self.remaining)
+        value=self._source.read(requested); self.remaining-=len(value)
+        return value
+
+
+def _patterns_stream(
+    path: Path, source, *, expected_size: int | None, byte_limit: int,
+    limit_reason: str, budget:ScanBudget|None=None, expanded:bool=False,
+    initial:bytes=b"", sink=None,
+) -> list[Finding]:
+    findings = []
+    if Path(path.name.split("!", 1)[-1]).suffix.lower() in FORBIDDEN_SUFFIXES:
+        findings.append(Finding(path, "forbidden-extension"))
+    if expected_size is not None and expected_size > byte_limit:
+        return [*findings, Finding(path, limit_reason)]
+    total = 0
+    tail = b""
+    matched = set()
+    pending=initial
+    while pending or (pending:=source.read(STREAM_CHUNK_BYTES)):
+        chunk=pending; pending=b""
+        total += len(chunk)
+        if total > byte_limit:
+            return [*findings, Finding(path, limit_reason)]
+        if expected_size is not None and total > expected_size:
+            return [*findings, Finding(path, "archive-read-failed")]
+        if budget is not None and expanded:
+            budget.expanded(path,len(chunk))
+        if sink is not None: sink.write(chunk)
+        window = tail + chunk
         for reason, pattern in PATTERNS:
-            if pattern.search(data):
-                findings.append(Finding(relative, reason))
+            if reason not in matched and pattern.search(window):
+                matched.add(reason)
+                findings.append(Finding(path, reason))
+        tail = window[-PATTERN_OVERLAP_BYTES:]
+    if expected_size is not None and total != expected_size:
+        findings.append(Finding(path, "archive-read-failed"))
+    return findings
+
+
+def _archive_intent(name:str,prefix:bytes) -> str | None:
+    name=name.lower()
+    if name.endswith((".zip",".whl")) or prefix.startswith(ZIP_MAGIC): return "zip"
+    if name.endswith((".tar.gz",".tgz")) or prefix.startswith(b"\x1f\x8b"):
+        return "compressed_tar"
+    if name.endswith(".tar") or prefix[257:262]==b"ustar": return "tar"
+    return None
+
+
+def _zip_member_count(source,display:Path,budget:ScanBudget) -> None:
+    source.seek(0,os.SEEK_END); size=source.tell(); tail_offset=max(0,size-65_557)
+    source.seek(tail_offset); tail=source.read(65_557); marker=tail.rfind(b"PK\x05\x06")
+    while marker>=0:
+        if len(tail)-marker>=22:
+            comment_size=struct.unpack_from("<H",tail,marker+20)[0]
+            if tail_offset+marker+22+comment_size==size: break
+        marker=tail.rfind(b"PK\x05\x06",0,marker)
+    if marker<0: raise zipfile.BadZipFile("missing EOCD")
+    disk,directory_disk,disk_count,count=struct.unpack_from("<HHHH",tail,marker+4)
+    directory_size,directory_offset=struct.unpack_from("<II",tail,marker+12)
+    if (any(value==0xFFFF for value in (disk,directory_disk,disk_count,count))
+        or directory_size==0xFFFFFFFF or directory_offset==0xFFFFFFFF):
+        raise ScanLimit(display,"zip64-unsupported")
+    if disk!=0 or directory_disk!=0 or disk_count!=count:
+        raise ScanLimit(display,"zip-central-directory-invalid")
+    if directory_size>MAX_ZIP_CENTRAL_DIRECTORY_BYTES:
+        raise ScanLimit(display,"zip-central-directory-limit")
+    eocd_offset=tail_offset+marker
+    if (directory_size<count*46 or directory_offset>eocd_offset
+        or directory_offset+directory_size!=eocd_offset):
+        raise ScanLimit(display,"zip-central-directory-invalid")
+    source.seek(directory_offset); remaining=directory_size; actual_count=0
+    while remaining:
+        header=source.read(46)
+        if len(header)!=46 or not header.startswith(b"PK\x01\x02"):
+            raise ScanLimit(display,"zip-central-directory-invalid")
+        name_size,extra_size,comment_size=struct.unpack_from("<HHH",header,28)
+        record_size=46+name_size+extra_size+comment_size
+        if record_size>remaining:
+            raise ScanLimit(display,"zip-central-directory-invalid")
+        source.seek(record_size-46,os.SEEK_CUR); remaining-=record_size
+        actual_count+=1
+        if actual_count>MAX_ARCHIVE_MEMBERS:
+            raise ScanLimit(display,"archive-member-limit")
+    if actual_count!=count:
+        raise ScanLimit(display,"zip-central-directory-invalid")
+    if budget.archive_members+count>MAX_ARCHIVE_MEMBERS:
+        raise ScanLimit(display,"archive-member-limit")
+    source.seek(0)
+
+
+def _canonical_archive_name(raw:str) -> str:
+    if (not raw or "\\" in raw
+        or any(ord(char)<32 or ord(char)==127 for char in raw)):
+        raise ValueError("unsafe archive name")
+    trimmed=raw[:-1] if raw.endswith("/") else raw
+    path=PurePosixPath(trimmed)
+    if (not trimmed or path.is_absolute() or path.as_posix()!=trimmed
+        or any(part in {"",".",".."} for part in path.parts)):
+        raise ValueError("unsafe archive name")
+    return path.as_posix()
+
+
+def _scan_member(
+    source,name:str,display:Path,expected_size:int,budget:ScanBudget,depth:int,
+    *,charge_expanded:bool=True,
+):
+    prefix=source.read(min(512,expected_size)); intent=_archive_intent(name,prefix)
+    if intent is None:
+        return _patterns_stream(
+            display,source,initial=prefix,expected_size=expected_size,
+            byte_limit=MAX_ARCHIVE_MEMBER_BYTES,limit_reason="archive-member-byte-limit",
+            budget=budget,expanded=charge_expanded,
+        )
+    if depth>=MAX_ARCHIVE_DEPTH: return [Finding(display,"archive-depth-limit")]
+    with tempfile.TemporaryFile() as nested:
+        findings=_patterns_stream(
+            display,source,initial=prefix,expected_size=expected_size,
+            byte_limit=MAX_ARCHIVE_MEMBER_BYTES,limit_reason="archive-member-byte-limit",
+            budget=budget,expanded=charge_expanded,sink=nested,
+        )
+        if any(item.reason.endswith("limit") or item.reason=="archive-read-failed" for item in findings):
+            return findings
+        nested.seek(0)
+        return [*findings,*_scan_archive(nested,intent,display,budget,depth+1)]
+
+
+def _tar_octal(field:bytes) -> int:
+    value=field.rstrip(b"\0 ").lstrip(b" ")
+    if not value or re.fullmatch(rb"[0-7]+",value) is None:
+        raise ArchiveFormatError("invalid tar number")
+    return int(value,8)
+
+
+def _tar_name(header:bytes) -> str:
+    name=header[0:100].split(b"\0",1)[0]
+    prefix=header[345:500].split(b"\0",1)[0]
+    raw=(prefix+b"/" if prefix else b"")+name
+    try: value=raw.decode("utf-8")
+    except UnicodeDecodeError as error: raise ArchiveFormatError("invalid tar name") from error
+    value=value[:-1] if value.endswith("/") else value
+    parts=value.split("/")
+    if (not value or value.startswith("/") or "\\" in value
+        or any(part in {"",".",".."} for part in parts)):
+        raise ArchiveFormatError("unsafe tar name")
+    return value
+
+
+def _discard_exact(source,size:int) -> None:
+    remaining=size
+    while remaining:
+        chunk=source.read(min(STREAM_CHUNK_BYTES,remaining))
+        if not chunk: raise ArchiveFormatError("truncated tar member")
+        remaining-=len(chunk)
+
+
+def _scan_ustar(source,display:Path,budget:ScanBudget,depth:int):
+    findings=[]; saw_end=False
+    while True:
+        header=_read_exact(source,512)
+        if header==b"\0"*512:
+            if _read_exact(source,512)!=b"\0"*512:
+                raise ArchiveFormatError("invalid tar end marker")
+            saw_end=True; break
+        if header[257:263] not in {b"ustar\0",b"ustar "}:
+            raise ArchiveFormatError("unsupported tar format")
+        stored=_tar_octal(header[148:156])
+        checksum=sum(header[:148])+8*ord(" ")+sum(header[156:])
+        if stored!=checksum: raise ArchiveFormatError("invalid tar checksum")
+        size=_tar_octal(header[124:136]); name=_tar_name(header)
+        member_display=Path(str(display)+"!"+name); budget.member(member_display)
+        kind=header[156:157]
+        if kind in {b"x",b"g",b"L",b"K"}:
+            if size>MAX_TAR_METADATA_BYTES:
+                raise ScanLimit(member_display,"tar-metadata-limit")
+            _discard_exact(source,size)
+            findings.append(Finding(member_display,"unsupported-tar-metadata"))
+        elif kind==b"5":
+            if size: raise ArchiveFormatError("directory has tar payload")
+        elif kind in {b"",b"\0",b"0"}:
+            if size>MAX_ARCHIVE_MEMBER_BYTES:
+                raise ScanLimit(member_display,"archive-member-byte-limit")
+            member_source=TarMemberReader(source,size)
+            findings.extend(_scan_member(
+                member_source,name,member_display,size,budget,depth,
+                charge_expanded=False,
+            ))
+            if member_source.remaining: raise ArchiveFormatError("truncated tar member")
+        else:
+            if size:
+                raise ScanLimit(member_display,"unsafe-archive-member")
+            findings.append(Finding(member_display,"unsafe-archive-member"))
+        padding=(-size)%512
+        if padding and _read_exact(source,padding)!=b"\0"*padding:
+            raise ArchiveFormatError("invalid tar member padding")
+    if not saw_end: raise ArchiveFormatError("missing tar end marker")
+    trailing=0
+    while chunk:=source.read(512):
+        trailing+=len(chunk)
+        if trailing>MAX_TAR_TRAILING_PADDING_BYTES:
+            raise ScanLimit(display,"tar-trailing-padding-limit")
+        if len(chunk)!=512 or any(chunk):
+            raise ScanLimit(display,"tar-trailing-data")
+    return findings
+
+
+def _scan_archive(source,intent:str,display:Path,budget:ScanBudget,depth:int):
+    findings=[]
+    if intent=="zip":
+        _zip_member_count(source,display,budget)
+        with zipfile.ZipFile(source) as archive:
+            seen=set()
+            for member in archive.infolist():
+                raw_display=Path(str(display)+"!"+member.filename); budget.member(raw_display)
+                try: canonical=_canonical_archive_name(member.filename)
+                except ValueError:
+                    findings.append(Finding(raw_display,"unsafe-archive-member")); continue
+                member_display=Path(str(display)+"!"+canonical)
+                mode=(member.external_attr>>16)&0o170000
+                if canonical in seen:
+                    findings.append(Finding(member_display,"unsafe-archive-member")); continue
+                seen.add(canonical)
+                if member.is_dir():
+                    if (mode!=stat.S_IFDIR or member.file_size!=0
+                        or member.compress_size!=0):
+                        findings.append(Finding(member_display,"unsafe-archive-member"))
+                    continue
+                if mode==stat.S_IFDIR or (mode and mode!=stat.S_IFREG):
+                    findings.append(Finding(member_display,"unsafe-archive-member")); continue
+                with archive.open(member) as member_source:
+                    findings.extend(_scan_member(
+                        member_source,member.filename,member_display,
+                        member.file_size,budget,depth,
+                    ))
+        return findings
+    tar_source=(StrictGzipReader(source,display) if intent=="compressed_tar" else source)
+    return _scan_ustar(ExpandedBudgetReader(tar_source,budget,display),display,budget,depth)
+
+
+def _scan_file(
+    path:Path,display:Path,budget:ScanBudget,candidate:OpenedCandidate|None=None,
+) -> list[Finding]:
+    try:
+        metadata=path.lstat() if candidate is None else candidate.metadata
+        if stat.S_ISLNK(metadata.st_mode): return [Finding(display,"filesystem-symlink")]
+        if not stat.S_ISREG(metadata.st_mode): return [Finding(display,"filesystem-special")]
+        budget.file(display)
+        descriptor=(
+            os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+            if candidate is None else candidate.fd
+        )
+        if descriptor is None: return [Finding(display,"unreadable-input")]
+        if candidate is not None: candidate.fd=None
+        with os.fdopen(descriptor,"rb") as source:
+            opened=os.fstat(source.fileno())
+            if (opened.st_dev,opened.st_ino)!=(metadata.st_dev,metadata.st_ino):
+                return [Finding(display,"input-changed-during-scan")]
+            budget.input(display,opened.st_size)
+            frozen=FrozenFileView(source,opened.st_size)
+            prefix=frozen.read(512); frozen.seek(0)
+            intent=_archive_intent(path.name,prefix)
+            input_limit = (
+                MAX_COMPRESSED_ARCHIVE_BYTES
+                if intent in {"zip", "compressed_tar"}
+                else MAX_RAW_FILE_BYTES
+            )
+            if opened.st_size > input_limit:
+                reason = (
+                    "compressed-byte-limit"
+                    if intent in {"zip", "compressed_tar"}
+                    else "raw-byte-limit"
+                )
+                return [Finding(display, reason)]
+            if intent is not None:
+                # Scan every physical archive byte as well as expanded members;
+                # this covers ZIP comments/extras, GZip optional headers, and TAR
+                # header/reserved bytes that archive libraries do not yield.
+                findings=_patterns_stream(
+                    display,frozen,expected_size=opened.st_size,
+                    byte_limit=input_limit,limit_reason="compressed-byte-limit",
+                )
+                frozen.seek(0)
+                findings.extend(_scan_archive(frozen,intent,display,budget,0))
+            else:
+                findings=_patterns_stream(
+                    display,frozen,expected_size=opened.st_size,
+                    byte_limit=MAX_RAW_FILE_BYTES,limit_reason="raw-byte-limit",
+                )
+            final=os.fstat(source.fileno())
+            opened_identity=(opened.st_dev,opened.st_ino,opened.st_size,opened.st_mtime_ns,opened.st_ctime_ns)
+            final_identity=(final.st_dev,final.st_ino,final.st_size,final.st_mtime_ns,final.st_ctime_ns)
+            try:
+                renamed=(
+                    path.stat(follow_symlinks=False)
+                    if candidate is None
+                    else os.stat(
+                        candidate.name,dir_fd=candidate.parent_fd,follow_symlinks=False,
+                    )
+                )
+            except OSError:
+                return [*findings,Finding(display,"input-changed-during-scan")]
+            if (final_identity!=opened_identity or not stat.S_ISREG(renamed.st_mode)
+                or (renamed.st_dev,renamed.st_ino)!=(opened.st_dev,opened.st_ino)):
+                return [*findings,Finding(display,"input-changed-during-scan")]
+            return findings
+    except ScanLimit as error:
+        return [Finding(error.path,error.reason)]
+    except (EOFError,RuntimeError,zipfile.BadZipFile):
+        return [Finding(display,"corrupt-archive")]
+    except OSError:
+        return [Finding(display, "unreadable-input")]
+    finally:
+        if candidate is not None and candidate.fd is not None:
+            os.close(candidate.fd); candidate.fd=None
+
+
+def _is_repository_root(root:Path) -> bool:
+    try:
+        marker=(root/".git").stat(follow_symlinks=False)
+        if stat.S_ISLNK(marker.st_mode): return False
+        result=subprocess.run(
+            ("git","-C",str(root),"rev-parse","--show-toplevel"),
+            text=True,capture_output=True,timeout=10,check=False,
+        )
+        return (result.returncode==0 and len(result.stdout)<=4096
+            and Path(result.stdout.strip()).resolve()==root.resolve())
+    except (OSError,subprocess.SubprocessError): return False
+
+
+def _tracked_skipped_files(root:Path,budget:ScanBudget):
+    process=subprocess.Popen(
+        ("git","-C",str(root),"ls-files","-z","--",*sorted(SKIP_ROOT_PARTS-{".git"})),
+        stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+    )
+    pending=bytearray()
+    try:
+        assert process.stdout is not None
+        while chunk:=process.stdout.read(64*1024):
+            pending.extend(chunk)
+            if len(pending)>4096 and b"\0" not in pending:
+                raise ScanLimit(root,"tracked-path-length-limit")
+            while b"\0" in pending:
+                raw,_,rest=pending.partition(b"\0"); pending=bytearray(rest)
+                if len(raw)>4096:
+                    raise ScanLimit(root,"tracked-path-length-limit")
+                relative=Path(os.fsdecode(bytes(raw)))
+                if (not relative.parts or relative.is_absolute()
+                    or relative.parts[0] not in SKIP_ROOT_PARTS
+                    or any(part in {"",".",".."} for part in relative.parts)):
+                    raise ScanLimit(root,"tracked-inventory-invalid")
+                budget.path_entry(relative); yield relative
+        if pending or process.wait()!=0:
+            raise ScanLimit(root,"tracked-inventory-failed")
+    finally:
+        if process.poll() is None: process.kill()
+        process.wait()
+
+
+def _identity(metadata):
+    return (metadata.st_dev,metadata.st_ino,metadata.st_mode,metadata.st_size,metadata.st_mtime_ns,metadata.st_ctime_ns)
+
+
+def _opened_candidate(
+    parent_fd:int,name:str,path:Path,expected:os.stat_result|None=None,
+) -> OpenedCandidate:
+    metadata=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+    if expected is not None and _identity(metadata)!=_identity(expected):
+        raise ScanLimit(path,"input-changed-during-scan")
+    if not stat.S_ISREG(metadata.st_mode):
+        return OpenedCandidate(path,metadata,None,parent_fd,name)
+    fd=os.open(name,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0),dir_fd=parent_fd)
+    opened=os.fstat(fd)
+    if (opened.st_dev,opened.st_ino)!=(metadata.st_dev,metadata.st_ino):
+        os.close(fd); raise ScanLimit(path,"input-changed-during-scan")
+    return OpenedCandidate(path,metadata,fd,parent_fd,name)
+
+
+def _open_relative_candidate(root_fd:int,root:Path,relative:Path):
+    current=os.dup(root_fd)
+    try:
+        for index,part in enumerate(relative.parts):
+            path=root.joinpath(*relative.parts[:index+1])
+            if index==len(relative.parts)-1:
+                yield _opened_candidate(current,part,path); return
+            metadata=os.stat(part,dir_fd=current,follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode): raise ScanLimit(path,"filesystem-symlink")
+            if not stat.S_ISDIR(metadata.st_mode): raise ScanLimit(path,"filesystem-special")
+            child=os.open(
+                part,os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0),
+                dir_fd=current,
+            )
+            opened=os.fstat(child)
+            if (opened.st_dev,opened.st_ino)!=(metadata.st_dev,metadata.st_ino):
+                os.close(child); raise ScanLimit(path,"input-changed-during-scan")
+            os.close(current); current=child
+    finally: os.close(current)
+
+
+def _walk_directory(
+    root:Path,directory:Path,directory_fd:int,budget:ScanBudget,
+    *,depth:int,skip_root_generated:bool,
+):
+    if depth>64: raise ScanLimit(directory,"directory-depth-limit")
+    with os.scandir(directory_fd) as entries:
+        for entry in entries:
+            path=directory/entry.name; relative=path.relative_to(root); budget.path_entry(relative)
+            metadata=os.stat(entry.name,dir_fd=directory_fd,follow_symlinks=False)
+            if stat.S_ISDIR(metadata.st_mode):
+                if depth==0 and skip_root_generated and entry.name in SKIP_ROOT_PARTS: continue
+                child=os.open(
+                    entry.name,
+                    os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0),
+                    dir_fd=directory_fd,
+                )
+                opened=os.fstat(child)
+                if (opened.st_dev,opened.st_ino)!=(metadata.st_dev,metadata.st_ino):
+                    os.close(child); raise ScanLimit(path,"input-changed-during-scan")
+                try:
+                    yield from _walk_directory(
+                        root,path,child,budget,depth=depth+1,
+                        skip_root_generated=skip_root_generated,
+                    )
+                    renamed=os.stat(entry.name,dir_fd=directory_fd,follow_symlinks=False)
+                    if _identity(renamed)!=_identity(opened):
+                        raise ScanLimit(path,"input-changed-during-scan")
+                finally: os.close(child)
+                continue
+            yield _opened_candidate(directory_fd,entry.name,path,metadata)
+
+
+def _walk(root:Path,budget:ScanBudget):
+    flags=os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)
+    root_fd=os.open(root,flags); opened=os.fstat(root_fd)
+    try:
+        named=root.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(named.st_mode) or (named.st_dev,named.st_ino)!=(opened.st_dev,opened.st_ino):
+            raise ScanLimit(root,"input-changed-during-scan")
+        repository_root=_is_repository_root(root)
+        if repository_root:
+            for relative in _tracked_skipped_files(root,budget):
+                yield from _open_relative_candidate(root_fd,root,relative)
+        yield from _walk_directory(
+            root,root,root_fd,budget,depth=0,skip_root_generated=repository_root,
+        )
+        renamed=root.stat(follow_symlinks=False)
+        if _identity(renamed)!=_identity(opened):
+            raise ScanLimit(root,"input-changed-during-scan")
+    finally: os.close(root_fd)
+
+
+def scan(roots: Path | Sequence[Path]) -> tuple[Finding, ...]:
+    requested = (roots,) if isinstance(roots, Path) else tuple(roots)
+    if not requested:
+        return (Finding(Path("."), "no-scan-roots"),)
+    findings: list[Finding] = []
+    budget=ScanBudget()
+    for root in requested:
+        if root.is_symlink():
+            findings.append(Finding(root,"filesystem-symlink")); continue
+        if not root.exists():
+            findings.append(Finding(root, "missing-root"))
+            continue
+        try:
+            if root.is_file(): candidates=(root,)
+            elif root.is_dir(): candidates=_walk(root,budget)
+            else: candidates=(root,)
+            try:
+                for value in candidates:
+                    candidate=value if isinstance(value,OpenedCandidate) else None
+                    path=value.path if candidate is not None else value
+                    display=path if root.is_file() else path.relative_to(root)
+                    findings.extend(_scan_file(path,display,budget,candidate))
+                    if findings and findings[-1].reason in {
+                        "path-entry-limit","file-count-limit","total-input-byte-limit",
+                        "archive-member-limit","cumulative-expanded-byte-limit",
+                    }: return tuple(findings)
+            finally:
+                close=getattr(candidates,"close",None)
+                if close is not None: close()
+        except ScanLimit as error:
+            findings.append(Finding(error.path,error.reason)); return tuple(findings)
+        except OSError:
+            findings.append(Finding(root,"unreadable-input")); return tuple(findings)
     return tuple(findings)
 
 
 def main() -> int:
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
-    findings = scan(root)
+    # abspath is lexical: unlike resolve(), it does not erase an explicit
+    # symlink before scan() performs lstat/O_NOFOLLOW validation.
+    roots = tuple(Path(os.path.abspath(item)) for item in (sys.argv[1:] or ["."]))
+    findings = scan(roots)
     for finding in findings:
         print(f"{finding.path}: {finding.reason}")
     if findings:
@@ -601,24 +2083,70 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
+Create the shared structural scanners on the same nofollow/bounded-input foundation. Their command grammar and pass conditions are closed here so later plans may extend recognized domains/features but may not invent a second implementation:
+
+```python
+# scripts/assurance_common.py
+@dataclass(frozen=True, order=True)
+class AssuranceFinding:
+    path: Path
+    code: str
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class AssuranceResult:
+    tool: str
+    complete: bool
+    findings: tuple[AssuranceFinding, ...]
+
+    def exit_code(self) -> int:
+        if not self.complete:
+            return 2
+        return 1 if self.findings else 0
+
+
+def finish(result: AssuranceResult) -> int:
+    for finding in sorted(result.findings):
+        suffix = "" if finding.detail is None else f": {finding.detail}"
+        print(f"{finding.path}: {finding.code}{suffix}")
+    if result.complete and not result.findings:
+        print(f"{result.tool}: PASS")
+    elif not result.complete:
+        print(f"{result.tool}: INCOMPLETE")
+    return result.exit_code()
+```
+
+| Tool | Bounded inventory | Exact zero-exit condition |
+|---|---|---|
+| `check_feature_absence.py` | Canonical feature manifests plus tracked Python/TypeScript/config/OpenAPI/package/launchd/IPC artifacts; direct/replay probes use only the synthetic local harness | Every requested ID is declared absent and absent from every requested surface; direct and replay both return schema-unsupported/no-route without side effects |
+| `check_import_boundaries.py` | All tracked `.py` files under workspace `src` roots, parsed with an AST-node cap; module roots come from workspace `pyproject.toml` files | Every import resolves or is an approved stdlib/third-party import, no forbidden layer/cross-domain edge exists, and every literal `importlib` target obeys the same graph |
+| `check_migration_ownership.py` | All regular `apps/*/migrations/versions/*.py` files, AST-parsed without execution | Requested revisions are unique and present; declared names/parents form the requested reachable graph and satisfy optional exact-head/linear-history constraints |
+| `scan_browser_artifacts.py` | Every regular asset/source map/manifest below existing `apps/*/dist` roots and the explicit Playwright output; gzip/brotli/source-map JSON is bounded before decode | All required build roots were inventoried completely and no normalized forbidden key/literal/persistence pattern occurs |
+| `scan_network_surface.py` | One process table and TCP/UDP socket table captured under one monotonic generation with bounded command time/output and PID/executable/service join | Every required listener has one exact owner, every optional commissioned listener is either absent or exact, every forbidden bind/port/process class is absent, and the inventory has no unresolved/truncated row |
+
+Use `argparse` sub-free parsers with `allow_abbrev=False`; reject mutually combined selector modes, empty/duplicate CSV entries, non-canonical ports/addresses/revisions/domains, unknown flags, and any repository root that is not a nofollow directory. AST parsing never imports scanned application or migration modules. Browser decoding never executes JavaScript. The network scanner invokes fixed absolute/basename command argument vectors with `shell=False`, a ten-second timeout, a 4 MiB stdout/stderr cap per probe, `LC_ALL=C`, and no inherited secret-bearing environment; Darwin and Linux parsers must agree on one normalized `ListenerRecord(protocol, address, port, pid, executable, service_owner)` shape. If a platform cannot produce every required field, the result is incomplete rather than empty.
+
 Create `tests/fixtures/synthetic/README.md` stating that fixtures use generated UUIDs and roles only, never recorded media, real names, credentials, addresses, host identifiers, or provider bodies.
+
+Only exact generated directories at a verified Git worktree root are skipped during the filesystem walk; an explicitly supplied `var`, or a nested `src/dist`, `src/var`, or `src/node_modules`, is ordinary scannable content. Before skipping a root generated directory, a bounded streaming `git ls-files -z` inventory adds every tracked file beneath it to the same scan, and a malformed, overlong, or failed tracked inventory blocks. Every explicitly named file or directory—including `dist/` and `var/` evidence—is scanned, and CLI normalization remains lexical so an explicitly supplied symlink reaches the nofollow check. One mutable `ScanBudget` spans every explicit root: it caps path entries, regular files, physical input bytes, archive members at every nesting level, and actual decompressed bytes rather than trusting declared member sizes. Raw ordinary files remain capped at 4 GiB, compressed ZIP/GZip inputs at 4 GiB, one expanded member at 2 GiB, total physical input at 16 GiB, and total actual expansion at 12 GiB across 50,000 members. Directory traversal opens the lexical root and every child through descriptor-relative `O_DIRECTORY|O_NOFOLLOW`, scans depth-first with at most 64 directory descriptors, opens each file relative to its still-open parent, and rechecks the first directory-entry metadata, opened descriptor, and final file/directory name against the same device/inode/type/size/change timestamps before attesting. New, removed, renamed, symlink-swapped, special-file-swapped, or changed queued paths therefore block instead of redirecting the walk. Each file's opened size is charged to the shared input budget, and all parsers receive a frozen view that cannot seek or read beyond that size. The descriptor-relative `os.scandir` walk charges an entry before yielding it and never materializes or sorts the complete tree. Before `ZipFile` may allocate its member list, the EOCD is found by its exact comment boundary, multi-disk/ZIP64 sentinels are blocked, and the central-directory size is capped at 64 MiB and required to end exactly at the EOCD. A bounded streaming header walk then proves every complete central record and requires its actual count to equal the capped EOCD count, so a forged small count cannot make `ZipFile` allocate an oversized list. ZIP virtual names must be unique, canonical, relative, and safe; a directory requires directory mode plus zero compressed/uncompressed size, while a directory-mode non-directory or payload-bearing trailing-slash entry blocks. TAR/GZip uses a bounded single-member deflate reader and a conservative streaming USTAR parser instead of `tarfile`: GZip optional headers, compressed padding, every decompressed TAR header/body/padding byte, member metadata, and trailing TAR padding are capped and charged before further parsing, and FHCRC is verified when present. Concatenated GZip, PAX/GNU long-name/extended metadata, sparse entries, links, devices, and every non-USTAR/special member are blocked before any declared special-member body is read; release archives are already required to be deterministic USTAR. Every bounded physical archive byte is pattern-scanned before parsing, in addition to each expanded regular member, so ZIP comments/extras, GZip names/comments/extra fields, TAR names/owner/reserved header bytes, and parser-ignored metadata cannot carry an unreported literal credential. Pattern matching retains a 256-byte overlap so a credential split across chunks is still found. A bounded file or member is read completely; exceeding any per-object or scan-wide bound is a blocking finding and stops traversal. Filesystem symlinks, FIFOs, devices, sockets, and archive symlink/hardlink/device/special members are blocking inputs. ZIP, wheel, TAR, GZip, and magic-identified regular members recurse through bounded anonymous temporary storage under the same depth/member/byte budget, so a secret inside the Reachy wheelhouse cannot hide in an archive-inside-archive. Archive paths remain virtual and nothing is extracted into the candidate or repository tree. An intended archive that cannot be parsed returns blocking `corrupt-archive`, never an ordinary passing file. Corrupt, changing, or unreadable explicit inputs also block.
 
 Change the final CI command in `.github/workflows/ci.yml` from `make lint typecheck test web-test web-build` to `make check`; Task 3 now owns the scanner that makes the full command available.
 
-- [ ] **Step 4: Run the green scanner gate**
+- [ ] **Step 4: Run the green scanner and shared assurance gate**
 
-Run: `uv run pytest tests/security/test_private_data_scanner.py -q && uv run python scripts/verify_private_data.py .`
+Run: `uv run pytest tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py -q && mkdir -p dist var && uv run python scripts/verify_private_data.py . && uv run python scripts/verify_private_data.py dist var && uv run ruff check scripts/verify_private_data.py scripts/assurance_common.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_ownership.py scripts/check_migration_graph.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_backup_artifacts.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py && uv run mypy scripts`
 
-Expected: PASS with `2 passed` and `private-data scan: PASS`.
+Expected: PASS after the test gate creates the two bounded empty artifact/evidence roots. The scanner fails closed for a missing/unreadable/changing or rename-substituted root/file/directory, a regular/symlink/special replacement between entry stat and open, explicit symlink, filesystem/archive special entry, unsafe/duplicate/payload-directory ZIP entry, nested-archive leak, malformed or oversized ZIP central directory, invalid GZip FHCRC, hostile PAX/GNU metadata, nonzero special-member body, nonzero or excessive TAR/GZip padding, or any per-object/scan-wide path, file, physical-input, member, metadata, header, directory-depth, archive-depth, or actual-expansion limit. Literal credential patterns in ZIP comments/extras, GZip optional headers, and TAR header fields are reported. The lazy million-entry fixture stops after the first over-limit entry, exact generated-root skips still scan tracked files, explicit/nested generated roots do not skip content, and two individually small archives share one cumulative expansion budget. Complete streaming includes every bounded nested wheel member and a realistic Reachy wheelhouse beyond the old 16 MiB ceiling without extracting into a public tree. All five structural tools pass their synthetic positive cases, reject every injected finding, and return `2` for incomplete/raced/unparseable inventories.
 
 - [ ] **Step 5: Commit exact Task 3 paths**
 
 ```bash
 git status --short
-git add scripts/verify_private_data.py tests/security/test_private_data_scanner.py tests/fixtures/synthetic/README.md .github/workflows/ci.yml
+git add scripts/verify_private_data.py scripts/assurance_common.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_ownership.py scripts/check_migration_graph.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_backup_artifacts.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py tests/fixtures/synthetic/README.md .github/workflows/ci.yml
 git diff --cached --name-only
 git diff --cached
-git commit -m "security: add fail-closed private-data scanner"
+git commit -m "security: add fail-closed assurance scanners"
 ```
 
 ### Task 4: Freeze canonical contract primitives and signed event envelopes
@@ -630,45 +2158,197 @@ git commit -m "security: add fail-closed private-data scanner"
 **Files:**
 - Create: `packages/contracts/src/tuntun_contracts/base.py`
 - Create: `packages/contracts/src/tuntun_contracts/events.py`
+- Create: `scripts/generate_schemas.py`
+- Create: `scripts/generate_openapi.py`
 - Modify: `packages/contracts/src/tuntun_contracts/__init__.py`
 - Test: `tests/contract/test_strict_models.py`
 - Test: `tests/contract/test_event_canonicalization.py`
+- Test: `tests/contract/test_contract_generators.py`
 
 **Interfaces:**
 - Consumes: Pydantic v2 and `rfc8785.dumps(value) -> bytes`.
-- Produces: `ContractModel`, `Sensitivity`, `Commitment`, `canonical_bytes(model: ContractModel) -> bytes`, `EventType`, `WakeDetectedPayload`, `StopRequestedPayload`, `EventEnvelope`, and `SignedEventEnvelope` exactly as shown below.
+- Produces: `JSONValue`, `ContractParseError`, bounded duplicate-safe `parse_bounded_json_value(raw, *, max_bytes, max_depth=32, max_containers=4096, max_structure_tokens=16384)`, `ContractModel`, `registered_contract_models()`, `Sensitivity`, `Commitment`, `canonical_bytes(model: ContractModel) -> bytes`, `parse_contract_json(model_type, raw: bytes, *, max_bytes, require_canonical=False)`, `EventType`, `WakeDetectedPayload`, `StopRequestedPayload`, `EventEnvelope`, and `SignedEventEnvelope` exactly as shown below. Hostile bytes (size, UTF-8, syntax, duplicate, shape, numeric, schema, or canonicality faults) normalize to `ContractParseError`; caller/programmer errors such as an invalid parser configuration or non-contract model type remain visible as their ordinary `TypeError`/`ValueError`. This task also owns the sole deterministic `generate_schemas.py` and `generate_openapi.py`. Each supports exactly one of `--check` or explicit maintainer-only `--write`; check mode renders the bounded complete registered inventory into a private temporary tree and byte-compares unique normalized output paths without repository mutation. Missing/extra/stale/nondeterministic/symlinked/duplicate/changing inputs or outputs fail closed. Schema generation consumes `registered_contract_models()` plus an explicit model/path registry; OpenAPI generation consumes only the closed route/DTO registry and canonical serializer. Neither imports app bootstrap, reads household state/credentials, opens listeners, or performs network access.
 
 - [ ] **Step 1: Write strictness and canonical-byte tests**
 
 ```python
 # tests/contract/test_strict_models.py
-from datetime import datetime
+import json
+from datetime import UTC, datetime, timedelta, timezone
+from enum import StrEnum
 from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
-from tuntun_contracts.base import Commitment, canonical_bytes
-from tuntun_contracts.events import StopRequestedPayload
-from tuntun_contracts.events import EventEnvelope
+from tuntun_contracts.base import (
+    Commitment,ContractModel,ContractParseError,Sensitivity,canonical_bytes,canonical_mapping_bytes,
+    parse_bounded_json_value,
+    parse_contract_json,
+)
+from tuntun_contracts.events import EventEnvelope, EventType, WakeDetectedPayload
+
+def valid_python_event() -> dict:
+    return {
+        "schema_version":"1.0","event_id":UUID(int=1),"event_type":EventType.WAKE_DETECTED,
+        "household_id":UUID(int=2),"device_id":UUID(int=3),"session_id":None,
+        "correlation_id":UUID(int=4),"causation_id":None,"device_sequence":1,
+        "occurred_at":datetime(2026,8,27,1,2,3,tzinfo=UTC),"sensitivity":Sensitivity.HOUSEHOLD,
+        "payload_commitment":Commitment(algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64="A"*43+"="),
+        "payload":WakeDetectedPayload(kind="speech.wake_detected",turn_id=UUID(int=5),score_micros=900000),
+    }
 
 
 def test_contracts_reject_extra_fields_and_naive_time() -> None:
     with pytest.raises(ValidationError):
-        Commitment(algorithm="HMAC-SHA-256", key_id="audit-v1", value_b64="A" * 44, extra=True)
+        Commitment(algorithm="HMAC-SHA-256", key_id="audit-v1", value_b64="A" * 43 + "=", extra=True)
     with pytest.raises(ValidationError, match="timezone-aware"):
-        EventEnvelope.model_validate({
-            "schema_version":"1.0","event_id":str(UUID(int=1)),"event_type":"speech.wake_detected",
-            "household_id":str(UUID(int=2)),"device_id":str(UUID(int=3)),"session_id":None,
-            "correlation_id":str(UUID(int=4)),"causation_id":None,"device_sequence":1,
-            "occurred_at":datetime(2026, 8, 27, 1, 2, 3),"sensitivity":"household",
-            "payload_commitment":{"algorithm":"HMAC-SHA-256","key_id":"audit-v1","value_b64":"A" * 44},
-            "payload":{"kind":"speech.wake_detected","turn_id":str(UUID(int=5)),"score_micros":900000},
-        })
+        EventEnvelope(
+            schema_version="1.0",event_id=UUID(int=1),event_type=EventType.WAKE_DETECTED,
+            household_id=UUID(int=2),device_id=UUID(int=3),session_id=None,
+            correlation_id=UUID(int=4),causation_id=None,device_sequence=1,
+            occurred_at=datetime(2026,8,27,1,2,3),sensitivity=Sensitivity.HOUSEHOLD,
+            payload_commitment=Commitment(algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64="A"*43+"="),
+            payload=WakeDetectedPayload(kind="speech.wake_detected",turn_id=UUID(int=5),score_micros=900000),
+        )
+
+
+@pytest.mark.parametrize("field,value",(
+    ("device_sequence","1"),("device_sequence",True),("schema_version",1),
+    ("event_id",str(UUID(int=1))),("occurred_at","2026-08-27T01:02:03Z"),
+    ("event_type","speech.wake_detected"),
+))
+def test_python_contract_path_rejects_all_coercion(field,value) -> None:
+    with pytest.raises(ValidationError): EventEnvelope.model_validate({**valid_python_event(),field:value})
+
+
+def test_strict_json_path_accepts_only_json_native_uuid_and_time_strings() -> None:
+    valid_wake_json=json.loads(canonical_bytes(EventEnvelope(**valid_python_event())))
+    parsed=EventEnvelope.model_validate_json(json.dumps(valid_wake_json))
+    assert parsed.event_id==UUID(valid_wake_json["event_id"])
+    for field,value in (("device_sequence","1"),("device_sequence",True),("schema_version",1)):
+        with pytest.raises(ValidationError):
+            EventEnvelope.model_validate_json(json.dumps({**valid_wake_json,field:value}))
+
+
+@pytest.mark.parametrize("value",(
+    "A"*44,"A"*42+"==","A"*43,"A"*43+"==","_"*43+"=","A"*42+"B=",
+))
+def test_commitment_requires_canonical_base64_of_exactly_32_bytes(value) -> None:
+    with pytest.raises(ValidationError):
+        Commitment(algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64=value)
+
+
+def test_contract_json_ingress_rejects_duplicates_nonfinite_size_and_noncanonical() -> None:
+    commitment=Commitment(
+        algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64="A"*43+"=",
+    )
+    canonical=canonical_bytes(commitment)
+    assert parse_contract_json(
+        Commitment,canonical,max_bytes=1024,require_canonical=True,
+    )==commitment
+    duplicate=b'{"algorithm":"HMAC-SHA-256","algorithm":"HMAC-SHA-256","key_id":"audit-v1","value_b64":"'+b"A"*43+b'="}'
+    giant_decimal=b'{"x":0.'+b"1"*65+b'}'
+    too_deep=b"["*33+b"0"+b"]"*33
+    too_many=b"["+b",".join((b"[]",)*4_097)+b"]"
+    too_flat=b"["+b",".join((b"0",)*16_385)+b"]"
+    for raw in (
+        duplicate,b'{"x":NaN}',b'{"x":Infinity}',b'{"x":-Infinity}',
+        giant_decimal,b'{"x":1e999999}',b'{"x":1e-999999}',
+        too_deep,too_many,too_flat,
+    ):
+        with pytest.raises(ValueError): parse_contract_json(
+            Commitment,raw,max_bytes=32_000,require_canonical=False,
+        )
+    with pytest.raises(ValueError): parse_contract_json(
+        Commitment,canonical,max_bytes=len(canonical)-1,require_canonical=False,
+    )
+    noncanonical=json.dumps(commitment.model_dump(mode="json"),sort_keys=False).encode("utf-8")
+    with pytest.raises(ValueError,match="not canonical"):
+        parse_contract_json(Commitment,noncanonical,max_bytes=1024,require_canonical=True)
+    assert parse_contract_json(
+        Commitment,noncanonical,max_bytes=1024,require_canonical=False,
+    )==commitment
+
+
+def test_bounded_json_value_is_reusable_without_a_contract_model() -> None:
+    assert parse_bounded_json_value(
+        b'{"vendor":true,"ports":[443,8443]}',max_bytes=64,
+    )=={"vendor":True,"ports":[443,8443]}
+    at_limit=b"["+b",".join((b"0",)*16_384)+b"]"
+    assert len(parse_bounded_json_value(at_limit,max_bytes=65_536))==16_384
+    flat=b"["+b",".join((b"0",)*16_385)+b"]"
+    with pytest.raises(ValueError,match="shape limit"):
+        parse_bounded_json_value(flat,max_bytes=65_536)
+    for raw in (b'{"x":1e999999}',b'{"x":1e-999999}'):
+        with pytest.raises(ValueError,match="decimal range"):
+            parse_bounded_json_value(raw,max_bytes=64)
+
+
+class _CanonicalKind(StrEnum):
+    SAMPLE="sample"
+
+class _NFCProbe(ContractModel):
+    text:str
+    nested:dict[str,tuple[str,...]]
+
+def test_contract_ingress_normalizes_nfc_recursively_in_python_and_json_modes() -> None:
+    python_value=_NFCProbe(text="e\u0301",nested={"a\u030a":("n\u0303",)})
+    json_value=_NFCProbe.model_validate_json(
+        b'{"text":"e\\u0301","nested":{"a\\u030a":["n\\u0303"]}}',strict=True,
+    )
+    assert python_value==json_value==_NFCProbe(
+        text="\u00e9",nested={"\u00e5":("\u00f1",)},
+    )
+    with pytest.raises(ValidationError,match="collide after NFC"):
+        _NFCProbe(text="ok",nested={"e\u0301":("one",),"\u00e9":("two",)})
+
+
+def test_shared_canonical_mapping_has_one_cross_phase_golden_encoding() -> None:
+    value={
+        "text":"e\u0301",
+        "time":datetime(2026,8,27,9,2,3,4,tzinfo=timezone(timedelta(hours=8))),
+        "id":UUID(int=1),
+        "kind":_CanonicalKind.SAMPLE,
+        "blob":b"\x00\xff",
+    }
+    assert canonical_mapping_bytes(value)==(
+        b'{"blob":"AP8=","id":"00000000-0000-0000-0000-000000000001",'
+        b'"kind":"sample","text":"\xc3\xa9","time":"2026-08-27T01:02:03.000004Z"}'
+    )
+
+
+@pytest.mark.parametrize("value",(
+    {1:"non-string-key"},
+    {"e\u0301":1,"\u00e9":2},
+))
+def test_shared_canonical_mapping_rejects_key_coercion_or_nfc_collision(value) -> None:
+    with pytest.raises((TypeError,ValueError)):
+        canonical_mapping_bytes(value)
+
+def test_hostile_parse_faults_normalize_but_programmer_faults_propagate(monkeypatch) -> None:
+    import tuntun_contracts.base as base
+    with pytest.raises(ContractParseError):
+        parse_bounded_json_value(b'\xff',max_bytes=64)
+    with pytest.raises(ContractParseError):
+        parse_contract_json(Commitment,b'{}',max_bytes=64)
+    with pytest.raises(TypeError):
+        parse_bounded_json_value("{}",max_bytes=64)
+    with pytest.raises(ValueError,match="configuration"):
+        parse_bounded_json_value(b'{}',max_bytes=0)
+    with pytest.raises(TypeError,match="ContractModel"):
+        parse_contract_json(dict,b'{}',max_bytes=64)
+    def unexpected_programmer_failure(*args,**kwargs):
+        raise ValueError("injected programmer failure")
+    monkeypatch.setattr(base.json,"loads",unexpected_programmer_failure)
+    with pytest.raises(ValueError,match="injected programmer failure") as raised:
+        parse_bounded_json_value(b'{}',max_bytes=64)
+    assert type(raised.value) is ValueError
 ```
 
 ```python
 # tests/contract/test_event_canonicalization.py
+import json
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -683,7 +2363,7 @@ VALID_WAKE = {
     "household_id":str(UUID(int=2)),"device_id":str(UUID(int=3)),"session_id":None,
     "correlation_id":str(UUID(int=4)),"causation_id":None,"device_sequence":1,
     "occurred_at":"2026-08-27T01:02:03.000004Z","sensitivity":"household",
-    "payload_commitment":{"algorithm":"HMAC-SHA-256","key_id":"audit-v1","value_b64":"A" * 44},
+    "payload_commitment":{"algorithm":"HMAC-SHA-256","key_id":"audit-v1","value_b64":"A" * 43 + "="},
     "payload":{"kind":"speech.wake_detected","turn_id":str(UUID(int=5)),"score_micros":900000},
 }
 
@@ -694,7 +2374,7 @@ def test_event_canonical_bytes_use_nfc_and_six_utc_digits() -> None:
         household_id=UUID(int=2), device_id=UUID(int=3), session_id=None,
         correlation_id=UUID(int=4), causation_id=None, device_sequence=7,
         occurred_at=datetime(2026, 8, 27, 1, 2, 3, 4, UTC), sensitivity=Sensitivity.HOUSEHOLD,
-        payload_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="audit-v1", value_b64="A" * 44),
+        payload_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="audit-v1", value_b64="A" * 43 + "="),
         payload=WakeDetectedPayload(kind="speech.wake_detected", turn_id=UUID(int=5), score_micros=900000),
     )
     encoded = canonical_bytes(envelope)
@@ -706,7 +2386,7 @@ def test_event_type_must_equal_payload_kind() -> None:
     data = EventEnvelope.model_json_schema()
     assert data["title"] == "EventEnvelope"
     with pytest.raises(ValidationError, match="event_type must equal payload.kind"):
-        EventEnvelope.model_validate({**VALID_WAKE, "event_type":"safety.stop_requested"})
+        EventEnvelope.model_validate_json(json.dumps({**VALID_WAKE, "event_type":"safety.stop_requested"}))
 ```
 
 - [ ] **Step 2: Run the red contract tests**
@@ -722,25 +2402,174 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 from __future__ import annotations
 
 import base64
+import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import Enum, StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias, TypeVar
 from unicodedata import normalize
 from uuid import UUID
 
 import rfc8785
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field,ValidationError,field_validator
+
+_CONTRACT_MODEL_REGISTRY: set[type[BaseModel]] = set()
+
+def _normalize_contract_input(value:Any) -> Any:
+    if isinstance(value,Enum):
+        return value
+    if isinstance(value,str):
+        return normalize("NFC",value)
+    if isinstance(value,Mapping):
+        result={}
+        for key,item in value.items():
+            if type(key) is not str:
+                raise ValueError("contract mapping keys must be strings")
+            normalized_key=normalize("NFC",key)
+            if normalized_key in result:
+                raise ValueError("contract mapping keys collide after NFC")
+            result[normalized_key]=_normalize_contract_input(item)
+        return result
+    if isinstance(value,tuple):
+        return tuple(_normalize_contract_input(item) for item in value)
+    if isinstance(value,list):
+        return [_normalize_contract_input(item) for item in value]
+    if isinstance(value,frozenset):
+        normalized=frozenset(_normalize_contract_input(item) for item in value)
+        if len(normalized)!=len(value):
+            raise ValueError("contract set values collide after NFC")
+        return normalized
+    if isinstance(value,set):
+        normalized={_normalize_contract_input(item) for item in value}
+        if len(normalized)!=len(value):
+            raise ValueError("contract set values collide after NFC")
+        return normalized
+    return value
 
 
 class ContractModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_assignment=True, str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False, validate_assignment=True, str_strip_whitespace=True)
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        _CONTRACT_MODEL_REGISTRY.add(cls)
 
     @field_validator("*", mode="before")
     @classmethod
     def require_aware_datetimes(cls, value: Any) -> Any:
+        value=_normalize_contract_input(value)
         if isinstance(value, datetime) and value.tzinfo is None:
             raise ValueError("datetime must be timezone-aware")
         return value
+
+
+def registered_contract_models() -> tuple[type[BaseModel], ...]:
+    return tuple(sorted(_CONTRACT_MODEL_REGISTRY,key=lambda item:(item.__module__,item.__qualname__)))
+
+
+ContractT=TypeVar("ContractT",bound=ContractModel)
+JSONValue:TypeAlias=(
+    str|int|Decimal|bool|None|list["JSONValue"]|dict[str,"JSONValue"]
+)
+
+class ContractParseError(ValueError):
+    """Hostile/untrusted contract bytes failed closed at an ingress boundary."""
+
+class _HostileJSONError(Exception): pass
+
+def _unique_json_object(pairs):
+    result={}
+    for key,value in pairs:
+        if key in result: raise _HostileJSONError("duplicate JSON key")
+        result[key]=value
+    return result
+
+def _bounded_json_int(value:str) -> int:
+    if len(value.removeprefix("-"))>20: raise _HostileJSONError("JSON integer too large")
+    return int(value)
+
+def _bounded_json_decimal(value:str) -> Decimal:
+    if len(value)>64: raise _HostileJSONError("JSON decimal too large")
+    result=Decimal(value)
+    if not result.is_finite(): raise _HostileJSONError("non-finite JSON number")
+    if len(result.as_tuple().digits)>64 or not -308<=result.adjusted()<=308:
+        raise _HostileJSONError("JSON decimal range exceeded")
+    return result
+
+def _reject_json_constant(value:str):
+    raise _HostileJSONError(f"non-finite JSON number: {value}")
+
+def _require_bounded_json_shape(
+    text:str,*,max_depth:int,max_containers:int,max_structure_tokens:int,
+) -> None:
+    # Count the root value plus each outside-string comma/colon. This makes a
+    # flat array admit at most max_structure_tokens scalar members; objects are
+    # stricter because both member separators and key/value separators count.
+    depth=containers=0; structure_tokens=1; in_string=escaped=False
+    for character in text:
+        if in_string:
+            if escaped: escaped=False
+            elif character=="\\": escaped=True
+            elif character=='"': in_string=False
+            continue
+        if character=='"': in_string=True
+        elif character in "[{":
+            depth+=1; containers+=1
+            if depth>max_depth or containers>max_containers:
+                raise _HostileJSONError("contract JSON shape limit exceeded")
+        elif character in "]}":
+            depth-=1
+            if depth<0: raise _HostileJSONError("contract JSON shape invalid")
+        elif character in ",:":
+            structure_tokens+=1
+            if structure_tokens>max_structure_tokens:
+                raise _HostileJSONError("contract JSON shape limit exceeded")
+    if in_string or depth!=0: raise _HostileJSONError("contract JSON shape invalid")
+
+def parse_bounded_json_value(
+    raw:bytes,*,max_bytes:int,max_depth:int=32,max_containers:int=4_096,
+    max_structure_tokens:int=16_384,
+) -> JSONValue:
+    limits=(max_bytes,max_depth,max_containers,max_structure_tokens)
+    ceilings=(8_388_608,32,4_096,16_384)
+    if type(raw) is not bytes:
+        raise TypeError("contract JSON raw input must be bytes")
+    if (
+        any(type(value) is not int for value in limits)
+        or any(not 1<=value<=ceiling for value,ceiling in zip(limits,ceilings,strict=True))
+    ):
+        raise ValueError("invalid contract JSON parser configuration")
+    if not 1<=len(raw)<=max_bytes:
+        raise ContractParseError("contract JSON size invalid")
+    try:
+        text=raw.decode("utf-8",errors="strict")
+        _require_bounded_json_shape(
+            text,max_depth=max_depth,max_containers=max_containers,
+            max_structure_tokens=max_structure_tokens,
+        )
+        return json.loads(
+            text,object_pairs_hook=_unique_json_object,parse_int=_bounded_json_int,
+            parse_float=_bounded_json_decimal,parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError,json.JSONDecodeError,RecursionError,_HostileJSONError) as error:
+        raise ContractParseError("contract JSON ingress rejected") from error
+
+def parse_contract_json(
+    model_type:type[ContractT],raw:bytes,*,max_bytes:int,require_canonical:bool=False,
+) -> ContractT:
+    # The bounded first pass rejects parser-amplification shapes, duplicates,
+    # and non-standard numbers before Pydantic sees the same immutable bytes.
+    parse_bounded_json_value(raw,max_bytes=max_bytes)
+    if not isinstance(model_type,type) or not issubclass(model_type,ContractModel):
+        raise TypeError("model_type must be a ContractModel subclass")
+    try: model=model_type.model_validate_json(raw,strict=True)
+    except (ValidationError,RecursionError) as error:
+        raise ContractParseError("contract JSON schema rejected") from error
+    if require_canonical and canonical_bytes(model)!=raw:
+        raise ContractParseError("contract JSON is not canonical JCS")
+    return model
 
 
 class Sensitivity(StrEnum):
@@ -751,7 +2580,18 @@ class Sensitivity(StrEnum):
 class Commitment(ContractModel):
     algorithm: Literal["HMAC-SHA-256"]
     key_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
-    value_b64: str = Field(min_length=40, max_length=128, pattern=r"^[A-Za-z0-9+/]+={0,2}$")
+    value_b64: str = Field(min_length=44, max_length=44, pattern=r"^[A-Za-z0-9+/]{43}=$")
+
+    @field_validator("value_b64")
+    @classmethod
+    def canonical_hmac_sha256(cls, value: str) -> str:
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (ValueError, base64.binascii.Error) as error:
+            raise ValueError("commitment must be canonical base64") from error
+        if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
+            raise ValueError("commitment must encode exactly 32 bytes canonically")
+        return value
 
 
 def _canonical_value(value: Any) -> Any:
@@ -767,15 +2607,40 @@ def _canonical_value(value: Any) -> Any:
         return _canonical_value(value.value)
     if isinstance(value, bytes):
         return base64.b64encode(value).decode("ascii")
-    if isinstance(value, dict):
-        return {normalize("NFC", str(key)): _canonical_value(item) for key, item in value.items()}
+    if isinstance(value, Mapping):
+        result={}
+        for key,item in value.items():
+            if type(key) is not str:
+                raise TypeError("canonical JSON mapping keys must be strings")
+            normalized_key=normalize("NFC",key)
+            if normalized_key in result:
+                raise ValueError("canonical JSON mapping keys collide after NFC")
+            result[normalized_key]=_canonical_value(item)
+        return result
     if isinstance(value, (list, tuple)):
         return [_canonical_value(item) for item in value]
     return value
 
 
+def canonical_mapping_bytes(value: Mapping[str,Any]) -> bytes:
+    if not isinstance(value,Mapping):
+        raise TypeError("canonical JSON root must be a mapping")
+    return rfc8785.dumps(_canonical_value(value))
+
+
 def canonical_bytes(model: ContractModel) -> bytes:
-    return rfc8785.dumps(_canonical_value(model.model_dump(mode="python")))
+    if not isinstance(model,ContractModel):
+        raise TypeError("canonical_bytes requires a ContractModel")
+    return canonical_mapping_bytes(model.model_dump(mode="python"))
+```
+
+```python
+# packages/contracts/src/tuntun_contracts/__init__.py
+from .base import (
+    JSONValue,Commitment,ContractModel,ContractParseError,Sensitivity,canonical_bytes,
+    canonical_mapping_bytes,parse_bounded_json_value,parse_contract_json,
+    registered_contract_models,
+)
 ```
 
 ```python
@@ -784,7 +2649,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from .base import Commitment, ContractModel, Sensitivity
 
@@ -832,15 +2697,15 @@ class SignedEventEnvelope(ContractModel):
 
 - [ ] **Step 4: Run the green canonical-contract gate**
 
-Run: `uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py -q && uv run ruff check packages/contracts/src tests/contract && uv run mypy packages/contracts/src`
+Run: `uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py -q && uv run python scripts/generate_schemas.py --check && uv run python scripts/generate_openapi.py --check && uv run ruff check packages/contracts/src scripts/generate_schemas.py scripts/generate_openapi.py tests/contract && uv run mypy packages/contracts/src scripts/generate_schemas.py scripts/generate_openapi.py`
 
-Expected: PASS with all contract tests passing and Ruff/mypy exiting 0.
+Expected: PASS with all contract/generator tests passing, two consecutive renders byte-identical, drift/missing/extra/duplicate-path inputs rejected, check mode leaving the worktree byte-identical, and Ruff/mypy exiting 0.
 
 - [ ] **Step 5: Commit exact Task 4 paths**
 
 ```bash
 git status --short
-git add packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py
+git add packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/generate_schemas.py scripts/generate_openapi.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(contracts): freeze canonical event primitives"
@@ -902,7 +2767,7 @@ class IdentityFusionPort(Protocol):
 class MemoryRepositoryPort(Protocol):
     async def create(self, memory: ApprovedMemory, expected_absent: bool = True) -> MemoryRecord: raise NotImplementedError
     async def replace(self, memory_id: UUID, expected_version: int, memory: ApprovedMemory) -> MemoryRecord: raise NotImplementedError
-    async def delete(self, memory_id: UUID, expected_version: int, auth: AuthContext) -> None: raise NotImplementedError
+    async def delete(self, memory_id: UUID, expected_version: int, auth: AuthContext, approved_proposal_id: UUID) -> None: raise NotImplementedError
     async def query(self, query: MemoryQuery) -> tuple[MemoryRecord, ...]: raise NotImplementedError
 
 class MemoryProposalServicePort(Protocol):
@@ -950,15 +2815,48 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from tuntun_contracts.actions import ActionBinding, ActionProposalDraft, ActionReceipt, ConsentActionDraft, IdentityActionDraft, ProfileActionDraft, TimerCreateActionDraft, TimerTargetActionDraft
-from tuntun_contracts.base import Commitment, canonical_bytes
+from tuntun_contracts import actions, audit, budget, events, identity, memory, policy, ports, provider, reachy, speech
+from tuntun_contracts.base import Commitment, canonical_bytes, registered_contract_models
+from tuntun_contracts.budget import BudgetReconciliationRequest, BudgetReservation, BudgetReservationRequest, BudgetSettlement, BudgetSettlementRequest, LlmUsageUnits, ProviderUsageReceiptV1, SttUsageUnits, TransportProof, TtsUsageUnits, WebSearchUsageUnits
 from tuntun_contracts.events import StopRequestedPayload
-from tuntun_contracts.identity import PersonaProjection, PersonaTraits
-from tuntun_contracts.memory import MemoryAudience, MemoryKind, PreferenceContent
+from tuntun_contracts.identity import IdentityEvidence, IdentityRequest, PersonaProjection, PersonaTraits
+from tuntun_contracts.memory import ApprovedMemory, EpisodicContent, MemoryAudience, MemoryKind, MemoryQuery, PreferenceContent, ProceduralContent, WorkingContent
 from tuntun_contracts.policy import AdminSessionPrincipal, AssuranceLevel, AuthGrant, CurrentOwnerAuthority
 from tuntun_contracts.ports import ActionProviderPort, AuthenticationPort, BudgetPort, LanguageModelPort, MemoryRepositoryPort, RouteAuthorizerPort, ReachyPort
-from tuntun_contracts.provider import RouteAuthorization
+from tuntun_contracts.provider import ProviderName, ProviderResponse, RedactionReceipt, RouteAuthorization, SanitizedProviderMessage, SanitizedProviderRequest, SanitizedToolReference
 from tuntun_contracts.reachy import StopSignal
-from tuntun_contracts.speech import AuthorizedSynthesisRequest, AuthorizedTranscriptionRequest
+from tuntun_contracts.speech import AudioFormat, AuthorizedSynthesisRequest, AuthorizedTranscriptionRequest
+
+
+def test_every_registered_contract_model_is_strict_closed_and_frozen() -> None:
+    # Importing every owning module above completes the registry before this
+    # reflection gate; fixture discovery is not the authority for this test.
+    registered=registered_contract_models()
+    assert registered
+    violations={
+        f"{model.__module__}.{model.__qualname__}":dict(model.model_config)
+        for model in registered
+        if model.model_config.get("strict") is not True
+        or model.model_config.get("extra") != "forbid"
+        or model.model_config.get("frozen") is not True
+    }
+    assert violations=={}
+
+
+def test_public_contract_collection_schemas_are_never_variadic() -> None:
+    expected={
+        (SanitizedProviderRequest,"messages"):(1,32),(SanitizedProviderRequest,"allowed_tools"):(0,8),
+        (AuthorizedTranscriptionRequest,"language_hints"):(1,2),
+        (IdentityRequest,"evidence"):(0,2),(BudgetReconciliationRequest,"proofs"):(0,8),
+        (RedactionReceipt,"removed_categories"):(0,16),
+        (WorkingContent,"unresolved_intents"):(0,8),(EpisodicContent,"participant_ids"):(0,16),
+        (ProceduralContent,"steps"):(1,32),(MemoryQuery,"kinds"):(1,7),
+        (ApprovedMemory,"source_receipt_ids"):(1,8),
+    }
+    for (model,field),(minimum,maximum) in expected.items():
+        schema=model.model_json_schema()["properties"][field]
+        assert schema.get("minItems",0)==minimum
+        assert schema["maxItems"]==maximum
 
 
 def test_required_memory_kinds_are_exact() -> None:
@@ -972,6 +2870,136 @@ def test_memory_audiences_are_closed() -> None:
     assert {audience.value for audience in MemoryAudience} == {
         "subject_private", "guardian_child", "household_adults", "household_all"
     }
+
+
+def test_budget_request_carries_closed_usage_not_a_caller_cost() -> None:
+    common = {
+        "household_id": UUID(int=61), "turn_id": UUID(int=62), "request_id": UUID(int=63),
+        "attempt_id": UUID(int=64), "provider": "openai", "model": "gpt-5.6-sol",
+        "category": "llm", "month_key": "2026-08",
+        "usage_ceiling": LlmUsageUnits(category="llm", input_tokens=8_000, output_tokens=2_000),
+    }
+    request = BudgetReservationRequest.model_validate(common)
+    assert tuple(BudgetReservationRequest.model_fields) == (
+        "household_id", "turn_id", "request_id", "attempt_id", "provider", "model",
+        "category", "usage_ceiling", "month_key",
+    )
+    assert request.usage_ceiling.category == "llm"
+    for caller_amount in (-1, 0, 1, 1_000_000_000_001):
+        with pytest.raises(ValidationError):
+            BudgetReservationRequest.model_validate(common | {"worst_case_micros_sgd": caller_amount})
+    with pytest.raises(ValidationError):
+        BudgetReservationRequest.model_validate(common | {
+            "category": "stt",
+        })
+    with pytest.raises(ValidationError):
+        BudgetReservationRequest.model_validate(common | {
+            "usage_ceiling": LlmUsageUnits(category="llm", input_tokens=0, output_tokens=0),
+        })
+    with pytest.raises(ValidationError):
+        LlmUsageUnits(category="llm", input_tokens=10_000_001, output_tokens=0)
+    with pytest.raises(ValidationError):
+        SttUsageUnits(category="stt", audio_millis=3_600_001)
+    with pytest.raises(ValidationError):
+        TtsUsageUnits(category="tts", characters=4_097)
+    assert WebSearchUsageUnits(
+        category="web_search",input_tokens=1,output_tokens=1,web_search_calls=1,
+    ).web_search_calls==1
+    for calls in (0,2,-1,17):
+        with pytest.raises(ValidationError):
+            BudgetReservationRequest.model_validate(common | {
+                "category":"web_search",
+                "usage_ceiling":{
+                    "category":"web_search","input_tokens":1,"output_tokens":1,
+                    "web_search_calls":calls,
+                },
+            })
+
+
+def test_budget_settlement_has_no_caller_actual_and_reports_overrun_freeze_truth() -> None:
+    request = BudgetSettlementRequest(reservation_id=UUID(int=65), attempt_id=UUID(int=66))
+    assert tuple(BudgetSettlementRequest.model_fields) == ("reservation_id", "attempt_id")
+    for injected in ({"actual_micros_sgd": 1}, {"provider_usage_present": True}):
+        with pytest.raises(ValidationError):
+            BudgetSettlementRequest.model_validate(request.model_dump() | injected)
+    settlement = BudgetSettlement(
+        reservation_id=request.reservation_id, charged_micros_sgd=501,
+        conservative_estimate_used=False, estimate_overrun=True, cloud_egress_frozen=True,
+    )
+    assert settlement.estimate_overrun and settlement.cloud_egress_frozen
+    with pytest.raises(ValidationError):
+        BudgetSettlement.model_validate(settlement.model_dump() | {"charged_micros_sgd": 1_000_000_000_001})
+
+
+def test_provider_usage_receipt_is_closed_and_bound_to_the_exact_call() -> None:
+    commitment = Commitment(algorithm="HMAC-SHA-256", key_id="provider-usage-v1", value_b64="A" * 43 + "=")
+    receipt = ProviderUsageReceiptV1(
+        schema_version="tuntun.provider-usage-receipt.v1",
+        receipt_id=UUID(int=67), provider_call_id=UUID(int=68), reservation_id=UUID(int=69),
+        request_id=UUID(int=70), attempt_id=UUID(int=71), authorization_id=UUID(int=72),
+        provider="openai", model="gpt-5.6-sol", category="llm",
+        accounting_basis="provider_reported_exact",
+        billable_usage=LlmUsageUnits(category="llm", input_tokens=100, output_tokens=25),
+        provider_response_commitment=commitment, observed_at=datetime(2026, 8, 27, tzinfo=UTC),
+        receipt_commitment=commitment,
+    )
+    assert tuple(ProviderUsageReceiptV1.model_fields) == (
+        "schema_version", "receipt_id", "provider_call_id", "reservation_id", "request_id", "attempt_id",
+        "authorization_id", "provider", "model", "category", "accounting_basis",
+        "billable_usage",
+        "provider_response_commitment", "observed_at", "receipt_commitment",
+    )
+    with pytest.raises(ValidationError):
+        ProviderUsageReceiptV1.model_validate(receipt.model_dump() | {
+            "category": "stt", "billable_usage": {"category": "llm", "input_tokens": 100, "output_tokens": 25},
+        })
+    with pytest.raises(ValidationError,match="web_search_receipt_requires_exactly_one_call"):
+        ProviderUsageReceiptV1.model_validate(receipt.model_dump() | {
+            "category":"web_search",
+            "billable_usage":{
+                "category":"web_search","input_tokens":100,"output_tokens":25,
+                "web_search_calls":2,
+            },
+        })
+
+
+def test_provider_response_exposes_only_the_persisted_usage_receipt_identity() -> None:
+    response = ProviderResponse(
+        request_id=UUID(int=76), text="synthetic", language="en",
+        provider_usage_receipt_id=UUID(int=77),
+    )
+    assert tuple(ProviderResponse.model_fields) == (
+        "request_id", "text", "language", "provider_usage_receipt_id",
+    )
+    assert ProviderResponse(
+        request_id=UUID(int=78), text="synthetic-without-usage", language="en",
+        provider_usage_receipt_id=None,
+    ).provider_usage_receipt_id is None
+    with pytest.raises(ValidationError):
+        ProviderResponse.model_validate(response.model_dump() | {
+            "usage": {"input_units": 1, "output_units": 1, "audio_millis": 0,
+                      "provider_usage_present": True},
+        })
+
+
+@pytest.mark.parametrize(("outcome", "amount", "commitment_present"), [
+    ("allow", 1, True), ("allow_soft_warning", 1_000_000_000_000, True),
+    ("deny_hard_limit", 0, True), ("deny_unknown_price", 0, False),
+    ("deny_cloud_egress_frozen", 0, False),
+])
+def test_budget_reservation_outcome_amount_and_quote_commitment_are_exact(outcome, amount, commitment_present) -> None:
+    commitment = Commitment(algorithm="HMAC-SHA-256", key_id="pricing-v1", value_b64="A" * 43 + "=")
+    reservation = BudgetReservation(
+        reservation_id=UUID(int=73), request_id=UUID(int=74), attempt_id=UUID(int=75),
+        outcome=outcome, amount_micros_sgd=amount,
+        pricing_commitment=commitment if commitment_present else None,
+        expires_at=datetime(2026, 8, 27, tzinfo=UTC),
+    )
+    assert reservation.amount_micros_sgd == amount
+    with pytest.raises(ValidationError):
+        BudgetReservation.model_validate(reservation.model_dump() | {
+            "pricing_commitment": None if commitment_present else commitment,
+        })
 
 
 def test_assurance_values_are_exact_and_auth_grants_have_no_biometric_source() -> None:
@@ -990,7 +3018,7 @@ def test_route_authorization_is_attempt_and_purpose_specific() -> None:
         authorization_id=UUID(int=1), request_id=UUID(int=9), attempt_id=UUID(int=2), purpose="cloud_reasoning",
         household_id=UUID(int=3), subject_id=None, session_id=UUID(int=4), turn_id=UUID(int=5),
         provider="openai", model="gpt-5.6-sol",
-        request_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="route-v1", value_b64="A" * 44),
+        request_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="route-v1", value_b64="A" * 43 + "="),
         max_input_bytes=8_388_608, max_input_units=8_000,
         privacy_receipt_id=UUID(int=6), consent_receipt_ids=(UUID(int=7),),
         budget_reservation_id=UUID(int=8), maximum_sensitivity="household",
@@ -1006,6 +3034,65 @@ def test_route_authorization_is_attempt_and_purpose_specific() -> None:
         RouteAuthorization.model_validate(route.model_dump() | {"consent_receipt_ids": []})
     assert {"audio_commitment","audio_bytes","duration_ms"} <= set(AuthorizedTranscriptionRequest.model_fields)
     assert {"text_commitment","segment_index","segment_count"} <= set(AuthorizedSynthesisRequest.model_fields)
+
+
+def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
+    commitment=Commitment(
+        algorithm="HMAC-SHA-256",key_id="bounds-v1",value_b64="A"*43+"=",
+    )
+    route=RouteAuthorization(
+        authorization_id=UUID(int=801),request_id=UUID(int=802),attempt_id=UUID(int=803),
+        purpose="cloud_reasoning",household_id=UUID(int=804),subject_id=None,
+        session_id=UUID(int=805),turn_id=UUID(int=806),provider="openai",model="gpt-5.6-sol",
+        request_commitment=commitment,max_input_bytes=1024,max_input_units=1024,
+        privacy_receipt_id=UUID(int=807),consent_receipt_ids=(UUID(int=808),),
+        budget_reservation_id=UUID(int=809),maximum_sensitivity="household",
+        expires_at=datetime(2026,8,27,tzinfo=UTC),
+    )
+    message=SanitizedProviderMessage(role="user",content="synthetic")
+    tool=SanitizedToolReference(
+        registered_name="safe.tool",schema_version="1.0",schema_commitment=commitment,
+    )
+    request=dict(
+        request_id=route.request_id,provider=ProviderName.OPENAI,model=route.model,
+        messages=(message,),allowed_tools=(),max_output_tokens=10,store=False,
+        redaction_receipt_id=UUID(int=810),route=route,timeout_ms=1_000,
+    )
+    SanitizedProviderRequest(**request)
+    for mutation in ({"messages":()},{"messages":(message,)*33},{"allowed_tools":(tool,)*9}):
+        with pytest.raises(ValidationError): SanitizedProviderRequest(**(request|mutation))
+
+    audio=dict(
+        request_id=UUID(int=811),turn_id=route.turn_id,
+        audio_format=AudioFormat(sample_format="s16le",sample_rate_hz=16_000,channels=1,interleaved=True,channel_layout="mono"),
+        audio_commitment=commitment,audio_bytes=2,duration_ms=1,language_hints=("en",),route=route,
+    )
+    AuthorizedTranscriptionRequest(**audio)
+    for hints in ((),("en","en"),("en","hi","en")):
+        with pytest.raises(ValidationError): AuthorizedTranscriptionRequest(**(audio|{"language_hints":hints}))
+
+    observed=datetime(2026,8,27,tzinfo=UTC)
+    evidence=IdentityEvidence(
+        modality="face",subject_id=None,confidence_micros=1,quality_micros=1,
+        liveness_accepted=False,model_version="synthetic",observed_at=observed,expires_at=observed,
+    )
+    with pytest.raises(ValidationError):
+        IdentityRequest(household_id=route.household_id,session_id=route.session_id,evidence=(evidence,evidence))
+    with pytest.raises(ValidationError):
+        IdentityRequest(household_id=route.household_id,session_id=route.session_id,evidence=(evidence,)*3)
+
+    proof=TransportProof(
+        reservation_id=route.budget_reservation_id,attempt_id=route.attempt_id,
+        disposition="never_sent",evidence_code="synthetic",observed_at=observed,
+    )
+    with pytest.raises(ValidationError): BudgetReconciliationRequest(turn_id=route.turn_id,proofs=(proof,proof))
+    with pytest.raises(ValidationError): BudgetReconciliationRequest(turn_id=route.turn_id,proofs=(proof,)*9)
+
+    provider_schema=SanitizedProviderRequest.model_json_schema()["properties"]
+    speech_schema=AuthorizedTranscriptionRequest.model_json_schema()["properties"]
+    assert (provider_schema["messages"]["minItems"],provider_schema["messages"]["maxItems"])==(1,32)
+    assert provider_schema["allowed_tools"]["maxItems"]==8
+    assert (speech_schema["language_hints"]["minItems"],speech_schema["language_hints"]["maxItems"])==(1,2)
 
 
 def test_action_receipt_is_frozen_for_downstream_consumers() -> None:
@@ -1107,7 +3194,7 @@ def test_profile_edit_is_exactly_versioned_replace_or_clear_without_role_change(
         "proposal_id": UUID(int=21), "schema_version": "1.0", "action_name": "profile.edit",
         "resource_type": "profile", "resource_id": UUID(int=22), "subject_id": UUID(int=22),
         "target_profile_class": "adult",
-        "parameters_commitment": Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 44),
+        "parameters_commitment": Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="),
         "uncertainty_micros": 0, "expires_at": datetime(2026, 8, 27, tzinfo=UTC), "idempotency_key": UUID(int=23),
     }
     with pytest.raises(ValidationError):
@@ -1127,7 +3214,7 @@ def test_profile_edit_allows_exact_server_derived_self_or_guardian_shape(target_
         persona_traits=traits if operation == "replace" else None,
         clear_persona_traits=operation == "clear", expected_version=2,
         guardian_generation=guardian_generation,
-        parameters_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 44),
+        parameters_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="),
         uncertainty_micros=0, expires_at=datetime(2026, 8, 27, tzinfo=UTC), idempotency_key=UUID(int=26),
     )
     assert draft.target_profile_class == target_profile_class
@@ -1146,7 +3233,7 @@ def test_profile_edit_rejects_cross_role_or_null_guardian_generation(target_prof
             target_profile_class=target_profile_class,
             persona_traits=PersonaTraits(context="general", tone="neutral", depth="brief", learning_level="none"),
             expected_version=1, guardian_generation=guardian_generation,
-            parameters_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 44),
+            parameters_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="),
             uncertainty_micros=0, expires_at=datetime(2026, 8, 27, tzinfo=UTC), idempotency_key=UUID(int=29),
         )
 
@@ -1157,7 +3244,7 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
         return {
             "proposal_id": UUID(int=100 + resource_id), "schema_version": "1.0", "action_name": action_name,
             "resource_type": action_name.split(".", 1)[0], "resource_id": UUID(int=resource_id),
-            "parameters_commitment": Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 44),
+            "parameters_commitment": Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="),
             "uncertainty_micros": 0, "expires_at": datetime(2026, 8, 27, tzinfo=UTC),
             "idempotency_key": UUID(int=200 + resource_id),
         }
@@ -1245,7 +3332,7 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 # packages/contracts/src/tuntun_contracts/speech.py
 from typing import Annotated, AsyncIterator, Literal
 from uuid import UUID
-from pydantic import Field
+from pydantic import Field, field_validator
 from .base import Commitment, ContractModel
 from .provider import RouteAuthorization
 
@@ -1261,15 +3348,21 @@ class AuthorizedTranscriptionRequest(ContractModel):
     audio_commitment: Commitment
     audio_bytes: Annotated[int, Field(ge=1, le=8_388_608)]
     duration_ms: Annotated[int, Field(ge=1, le=90_000)]
-    language_hints: tuple[Literal["en", "hi"], ...]
+    language_hints: Annotated[tuple[Literal["en", "hi"], ...], Field(min_length=1, max_length=2)]
     route: RouteAuthorization
+
+    @field_validator("language_hints")
+    @classmethod
+    def unique_language_hints(cls, value):
+        if len(set(value)) != len(value): raise ValueError("duplicate language hint")
+        return value
 
 class TranscriptResult(ContractModel):
     request_id: UUID; text: Annotated[str, Field(min_length=1, max_length=32_000)]
     language: Literal["en", "hi", "hinglish", "unknown"]; duration_ms: Annotated[int, Field(ge=0, le=90_000)]
 
 class AuthorizedSynthesisRequest(ContractModel):
-    request_id: UUID; turn_id: UUID; text: Annotated[str, Field(min_length=1, max_length=8_000)]
+    request_id: UUID; turn_id: UUID; text: Annotated[str, Field(min_length=1, max_length=4_096)]
     text_commitment: Commitment
     segment_index: Annotated[int, Field(ge=0, le=255)]
     segment_count: Annotated[int, Field(ge=1, le=256)]
@@ -1285,7 +3378,7 @@ class SpeechChunk(ContractModel):
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, field_validator
 from .base import Commitment, ContractModel, Sensitivity
 
 class ProviderName(StrEnum):
@@ -1336,23 +3429,26 @@ class SanitizedToolReference(ContractModel):
 class SanitizedProviderRequest(ContractModel):
     request_id: UUID; provider: ProviderName
     model: Annotated[str, Field(min_length=1, max_length=128)]
-    messages: tuple[SanitizedProviderMessage, ...]; allowed_tools: tuple[SanitizedToolReference, ...]
+    messages: Annotated[tuple[SanitizedProviderMessage, ...], Field(min_length=1, max_length=32)]
+    allowed_tools: Annotated[tuple[SanitizedToolReference, ...], Field(min_length=0, max_length=8)]
     max_output_tokens: Annotated[int, Field(ge=1, le=16_384)]; store: Literal[False] = False
     redaction_receipt_id: UUID; route: RouteAuthorization
     timeout_ms: Annotated[int, Field(ge=1_000, le=120_000)]
 
-class Usage(ContractModel):
-    input_units: Annotated[int, Field(ge=0)]; output_units: Annotated[int, Field(ge=0)]
-    audio_millis: Annotated[int, Field(ge=0)]; provider_usage_present: bool
-
 class ProviderResponse(ContractModel):
     request_id: UUID; text: Annotated[str, Field(min_length=1, max_length=8_000)]
-    language: Literal["en", "hi", "hinglish"]; usage: Usage
+    language: Literal["en", "hi", "hinglish"]; provider_usage_receipt_id: UUID | None
 class RedactionReceipt(ContractModel):
     receipt_id: UUID; purpose: Literal["cloud_reasoning","cloud_tts"]
     input_commitment: Commitment; output_commitment: Commitment
-    removed_categories: tuple[str, ...]; removed_count: Annotated[int, Field(ge=0)]
+    removed_categories: Annotated[tuple[Annotated[str,Field(min_length=1,max_length=64)],...],Field(min_length=0,max_length=16)]
+    removed_count: Annotated[int, Field(ge=0)]
     policy_version: str; maximum_sensitivity: Sensitivity
+    @field_validator("removed_categories")
+    @classmethod
+    def unique_removed_categories(cls,value):
+        if len(set(value))!=len(value): raise ValueError("duplicate redaction category")
+        return value
 ```
 
 ```python
@@ -1360,7 +3456,7 @@ class RedactionReceipt(ContractModel):
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 from .base import Commitment, ContractModel, Sensitivity
 
 class MemoryKind(StrEnum):
@@ -1372,15 +3468,24 @@ class MemoryAudience(StrEnum):
     HOUSEHOLD_ADULTS="household_adults"; HOUSEHOLD_ALL="household_all"
 
 class WorkingContent(ContractModel):
-    kind: Literal["working"]; state_summary: str = Field(max_length=2_000); unresolved_intents: tuple[str, ...]
+    kind: Literal["working"]; state_summary: str = Field(max_length=2_000)
+    unresolved_intents: Annotated[tuple[Annotated[str,Field(min_length=1,max_length=256)],...],Field(min_length=0,max_length=8)]
 class EpisodicContent(ContractModel):
-    kind: Literal["episodic"]; event_summary: str = Field(max_length=2_000); occurred_at: AwareDatetime; participant_ids: tuple[UUID, ...]
+    kind: Literal["episodic"]; event_summary: str = Field(max_length=2_000); occurred_at: AwareDatetime
+    participant_ids: Annotated[tuple[UUID,...],Field(min_length=0,max_length=16)]
+    @field_validator("participant_ids")
+    @classmethod
+    def unique_participants(cls,value):
+        if len(set(value))!=len(value): raise ValueError("duplicate participant")
+        return value
 class SemanticContent(ContractModel):
     kind: Literal["semantic"]; subject: str = Field(max_length=256); predicate: str = Field(max_length=128); object: str = Field(max_length=2_000)
 class PreferenceContent(ContractModel):
     kind: Literal["preference"] = "preference"; category: str = Field(max_length=128); key: str = Field(max_length=128); value: str = Field(max_length=2_000); strength_micros: Annotated[int, Field(ge=0, le=1_000_000)]
 class ProceduralContent(ContractModel):
-    kind: Literal["procedural"]; name: str = Field(max_length=256); steps: tuple[str, ...]; tool_label: str | None = Field(default=None, max_length=128)
+    kind: Literal["procedural"]; name: str = Field(max_length=256)
+    steps: Annotated[tuple[Annotated[str,Field(min_length=1,max_length=512)],...],Field(min_length=1,max_length=32)]
+    tool_label: str | None = Field(default=None, max_length=128)
 class RelationalContent(ContractModel):
     kind: Literal["relational"]; subject_id: UUID; relation: str = Field(max_length=128); object_subject_id: UUID; note: str | None = Field(default=None, max_length=1_000)
 class PolicyContent(ContractModel):
@@ -1416,11 +3521,24 @@ class MemoryRecord(ContractModel):
     memory_id: UUID; household_id: UUID; subject_id: UUID; version: Annotated[int, Field(ge=1)]
     content: MemoryContent; audience: MemoryAudience; sensitivity: Sensitivity; valid_until: AwareDatetime | None
 class MemoryQuery(ContractModel):
-    household_id: UUID; subject_id: UUID; kinds: tuple[MemoryKind, ...]
+    household_id: UUID; subject_id: UUID
+    kinds: Annotated[tuple[MemoryKind,...],Field(min_length=1,max_length=7)]
     maximum_sensitivity: Sensitivity; limit: Annotated[int, Field(ge=1, le=6)] = 6
+    @field_validator("kinds")
+    @classmethod
+    def unique_kinds(cls,value):
+        if len(set(value))!=len(value): raise ValueError("duplicate memory kind")
+        return value
 class ApprovedMemory(ContractModel):
     memory_id: UUID; household_id: UUID; subject_id: UUID; content: MemoryContent; audience: MemoryAudience; sensitivity: Sensitivity
-    source_receipt_ids: tuple[UUID, ...]; valid_until: AwareDatetime | None
+    approved_proposal_id: UUID
+    source_receipt_ids: Annotated[tuple[UUID,...],Field(min_length=1,max_length=8)]
+    valid_until: AwareDatetime | None
+    @field_validator("source_receipt_ids")
+    @classmethod
+    def unique_source_receipts(cls,value):
+        if len(set(value))!=len(value): raise ValueError("duplicate source receipt")
+        return value
 class ProposalContext(ContractModel):
     household_id: UUID; subject_id: UUID | None; session_id: UUID; turn_id: UUID; actor_subject_id: UUID | None
 class DecideMemoryProposal(ContractModel):
@@ -1431,13 +3549,22 @@ Create the remaining modules with these exact declarations:
 
 ```python
 # identity.py
+from pydantic import field_validator
+
 class IdentityStatus(StrEnum): VERIFIED="verified"; AMBIGUOUS="ambiguous"; UNKNOWN="unknown"; CONFLICT="conflict"
 class IdentityEvidence(ContractModel):
     modality: Literal["face","voice"]; subject_id: UUID | None
     confidence_micros: Annotated[int, Field(ge=0, le=1_000_000)]
     quality_micros: Annotated[int, Field(ge=0, le=1_000_000)]
     liveness_accepted: bool; model_version: str; observed_at: AwareDatetime; expires_at: AwareDatetime
-class IdentityRequest(ContractModel): household_id: UUID; session_id: UUID; evidence: tuple[IdentityEvidence, ...]
+class IdentityRequest(ContractModel):
+    household_id: UUID; session_id: UUID
+    evidence: Annotated[tuple[IdentityEvidence, ...], Field(min_length=0, max_length=2)]
+    @field_validator("evidence")
+    @classmethod
+    def unique_modalities(cls,value):
+        if len({item.modality for item in value}) != len(value): raise ValueError("duplicate identity modality")
+        return value
 class IdentityDecision(ContractModel): status: IdentityStatus; subject_id: UUID | None; reason_code: str; expires_at: AwareDatetime
 class PersonaTraits(ContractModel):
     context: Literal["general","technical_security","household_practical","early_learning"]
@@ -1780,12 +3907,74 @@ class AdminSessionPrincipal(ContractModel):
 class TimerIntent(ContractModel): timer_id: UUID; operation: Literal["create","cancel","status"]; duration_seconds: Annotated[int, Field(ge=1, le=86_400)] | None; label_commitment: Commitment | None; idempotency_key: UUID
 
 # budget.py
-class BudgetReservationRequest(ContractModel): household_id: UUID; turn_id: UUID; request_id: UUID; attempt_id: UUID; provider: Literal["openai","qwen"]; model: str; category: Literal["stt","llm","tts"]; worst_case_micros_sgd: Annotated[int, Field(ge=0)]; month_key: str
-class BudgetReservation(ContractModel): reservation_id: UUID; request_id: UUID; attempt_id: UUID; outcome: Literal["allow","allow_soft_warning","deny_hard_limit","deny_unknown_price"]; amount_micros_sgd: Annotated[int, Field(ge=0)]; expires_at: AwareDatetime
-class BudgetSettlementRequest(ContractModel): reservation_id: UUID; attempt_id: UUID; actual_micros_sgd: Annotated[int, Field(ge=0)] | None; provider_usage_present: bool
-class BudgetSettlement(ContractModel): reservation_id: UUID; charged_micros_sgd: Annotated[int, Field(ge=0)]; conservative_estimate_used: bool
+from pydantic import field_validator
+
+MAX_USAGE_UNITS=10_000_000
+MAX_AUDIO_MILLIS=3_600_000
+MAX_WEB_SEARCH_CALLS=16
+MAX_CHARGE_MICROS_SGD=1_000_000_000_000
+class LlmUsageUnits(ContractModel): category: Literal["llm"]; input_tokens: Annotated[int, Field(ge=0,le=MAX_USAGE_UNITS)]; output_tokens: Annotated[int, Field(ge=0,le=MAX_USAGE_UNITS)]
+class SttUsageUnits(ContractModel): category: Literal["stt"]; audio_millis: Annotated[int, Field(ge=0,le=MAX_AUDIO_MILLIS)]
+class TtsUsageUnits(ContractModel): category: Literal["tts"]; characters: Annotated[int, Field(ge=0,le=4_096)]
+class WebSearchUsageUnits(ContractModel): category: Literal["web_search"]; input_tokens: Annotated[int,Field(ge=0,le=MAX_USAGE_UNITS)]; output_tokens: Annotated[int,Field(ge=0,le=MAX_USAGE_UNITS)]; web_search_calls: Annotated[int,Field(ge=0,le=MAX_WEB_SEARCH_CALLS)]
+UsageUnits=Annotated[LlmUsageUnits|SttUsageUnits|TtsUsageUnits|WebSearchUsageUnits,Field(discriminator="category")]
+def usage_total(value: UsageUnits) -> int:
+    if isinstance(value,LlmUsageUnits): return value.input_tokens+value.output_tokens
+    if isinstance(value,SttUsageUnits): return value.audio_millis
+    if isinstance(value,TtsUsageUnits): return value.characters
+    return value.input_tokens+value.output_tokens+value.web_search_calls
+class BudgetReservationRequest(ContractModel):
+    household_id: UUID; turn_id: UUID; request_id: UUID; attempt_id: UUID
+    provider: Literal["openai","qwen"]; model: Annotated[str,Field(min_length=1,max_length=128)]
+    category: Literal["stt","llm","tts","web_search"]; usage_ceiling: UsageUnits
+    month_key: Annotated[str,Field(pattern=r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")]
+    @model_validator(mode="after")
+    def exact_pricing_purpose(self) -> "BudgetReservationRequest":
+        if self.usage_ceiling.category!=self.category or usage_total(self.usage_ceiling)<=0:
+            raise ValueError("budget_usage_ceiling_invalid")
+        if isinstance(self.usage_ceiling,WebSearchUsageUnits) and self.usage_ceiling.web_search_calls!=1:
+            raise ValueError("web_search_reservation_must_price_exactly_one_call")
+        return self
+class BudgetReservation(ContractModel):
+    reservation_id: UUID; request_id: UUID; attempt_id: UUID
+    outcome: Literal["allow","allow_soft_warning","deny_hard_limit","deny_unknown_price","deny_cloud_egress_frozen"]
+    amount_micros_sgd: Annotated[int,Field(ge=0,le=MAX_CHARGE_MICROS_SGD)]
+    pricing_commitment: Commitment|None; expires_at: AwareDatetime
+    @model_validator(mode="after")
+    def exact_quote_shape(self) -> "BudgetReservation":
+        quote_absent=self.outcome in {"deny_unknown_price","deny_cloud_egress_frozen"}
+        if quote_absent!=(self.pricing_commitment is None): raise ValueError("budget_reservation_quote_shape_invalid")
+        allowed=self.outcome in {"allow","allow_soft_warning"}
+        if allowed!=(self.amount_micros_sgd>0): raise ValueError("budget_reservation_amount_shape_invalid")
+        return self
+class BudgetSettlementRequest(ContractModel): reservation_id: UUID; attempt_id: UUID
+class BudgetSettlement(ContractModel):
+    reservation_id: UUID; charged_micros_sgd: Annotated[int,Field(ge=0,le=MAX_CHARGE_MICROS_SGD)]
+    conservative_estimate_used: bool; estimate_overrun: bool; cloud_egress_frozen: bool
+class ProviderUsageReceiptV1(ContractModel):
+    schema_version: Literal["tuntun.provider-usage-receipt.v1"]
+    receipt_id: UUID; provider_call_id: UUID; reservation_id: UUID; request_id: UUID; attempt_id: UUID; authorization_id: UUID
+    provider: Literal["openai","qwen"]; model: Annotated[str,Field(min_length=1,max_length=128)]
+    category: Literal["stt","llm","tts","web_search"]
+    accounting_basis: Literal["provider_reported_exact","request_bound_exact","conservative_full_reservation"]
+    billable_usage: UsageUnits
+    provider_response_commitment: Commitment; observed_at: AwareDatetime; receipt_commitment: Commitment
+    @model_validator(mode="after")
+    def exact_usage_category(self) -> "ProviderUsageReceiptV1":
+        if self.category!=self.billable_usage.category: raise ValueError("provider_usage_category_mismatch")
+        if isinstance(self.billable_usage,WebSearchUsageUnits) and self.billable_usage.web_search_calls!=1:
+            raise ValueError("web_search_receipt_requires_exactly_one_call")
+        return self
 class TransportProof(ContractModel): reservation_id: UUID; attempt_id: UUID; disposition: Literal["never_sent","sent","unknown"]; evidence_code: str; observed_at: AwareDatetime
-class BudgetReconciliationRequest(ContractModel): turn_id: UUID; proofs: tuple[TransportProof, ...]
+class BudgetReconciliationRequest(ContractModel):
+    turn_id: UUID
+    proofs: Annotated[tuple[TransportProof, ...], Field(min_length=0, max_length=8)]
+    @field_validator("proofs")
+    @classmethod
+    def unique_attempt_proofs(cls,value):
+        keys={(item.reservation_id,item.attempt_id) for item in value}
+        if len(keys) != len(value): raise ValueError("duplicate transport proof")
+        return value
 
 # audit.py
 class AuditDraft(ContractModel): event_id: UUID; occurred_at: AwareDatetime; actor_pseudonym: str; action_code: str; outcome: str; reason_code: str; correlation_id: UUID; payload_commitment: Commitment
@@ -1808,6 +3997,10 @@ class ReachyCommand(ContractModel):
 class ReachyReceipt(ContractModel): command_id: UUID; accepted: bool; reason_code: str
 class ReachyHealth(ContractModel): state: ReachyState; daemon_connected: bool; queue_depth: Annotated[int, Field(ge=0)]
 class SafetyReceipt(ContractModel): turn_id: UUID | None; playback_stopped: bool; motion_stopped: bool; buffers_cleared: bool
+class StopAllReceiptBundleV1(ContractModel):
+    schema_version: Literal["tuntun.reachy-stop-all-receipts.v1"]="tuntun.reachy-stop-all-receipts.v1"
+    command_receipt: ReachyReceipt
+    safety_receipt: SafetyReceipt
 class StopSignal(ContractModel): signal_id: UUID; source: Literal["edge_keyword","physical_input","owner_console","watchdog"]; occurred_at: AwareDatetime
 class CameraWindowGrant(ContractModel):
     grant_id: UUID; household_id: UUID; device_id: UUID; session_id: UUID; turn_id: UUID
@@ -1833,7 +4026,7 @@ class TurnOutput(ContractModel): turn_id: UUID; outcome: Literal["completed","ca
 
 Use `StrEnum`, `Literal`, `Annotated`, `Field`, `AwareDatetime`, `model_validator`, and UUID imports exactly as required by those declarations. In `ports.py`, declare every protocol from the Interfaces block with `@runtime_checkable`; import `AsyncIterator`, `Protocol`, and the DTOs from their owning modules. Export all public names from `tuntun_contracts/__init__.py` without importing any application package.
 
-The contract semantics are also frozen: `IdentityFusionPort` returns identity only and cannot mint assurance. `AuthGrant`/`AuthContext.assurance_source` deliberately has no biometric value, so face/voice evidence cannot create `confirmed` or a stronger assurance. `CurrentOwnerAuthority` is the current database observation of one exact household owner subject, owner generation, and active profile version. `AdminSessionPrincipal` additionally binds that authority snapshot to one exact admin-session version plus idle/absolute expiries; request and mutation boundaries must re-open the session row, reject `revoked_at`, compare every principal field, and revalidate the current owner snapshot before use. It proves only a current owner console session and can never substitute for an action-bound `AuthGrant`/`AuthContext`; every mutation reconstructs its exact binding on the server and consumes a fresh matching grant when the registry requires one. The same admin principal grants no implicit memory-body visibility: every memory create/replace persists one closed `MemoryAudience`, and later read projections use subject, current guardian, and audience policy before decryption. An `ActionBinding` includes household, proposal, turn, idempotency, action, resource, parameter commitment, policy, conversation session, and subject, so a proof cannot be transplanted across any of those boundaries. `ActionReceipt` additionally persists `household_id` and the server-derived `resource_scope`; its idempotency boundary is exactly `(household_id, action_name, resource_scope, idempotency_key)`, matching `action_proposals`, and a global unique idempotency key is forbidden. Frozen DTOs remain fields-only: callers use explicit binding comparators, policy-request factories, and audit-draft mappers rather than calling undeclared methods on them. `RouteAuthorizerPort.consume` is single-use and must compare every `RouteConsumption` binding field to the stored authorization in constant time for commitments before any adapter I/O. `BudgetPort.release_unsent` accepts only a matching `TransportProof(disposition="never_sent")`; `sent` and `unknown` reconcile conservatively through settlement, while every retry retains `request_id` and receives a fresh `attempt_id`. `CameraWindowGrant` is the only contract that permits camera frames; it is action/subject/session/turn/purpose-bound, single-use, at most 10 seconds/20 frames/10 MiB, and its byte/frame/rate/expiry bounds may only be narrowed downstream.
+The contract semantics are also frozen: `IdentityFusionPort` returns identity only and cannot mint assurance. `AuthGrant`/`AuthContext.assurance_source` deliberately has no biometric value, so face/voice evidence cannot create `confirmed` or a stronger assurance. `CurrentOwnerAuthority` is the current database observation of one exact household owner subject, owner generation, and active profile version. `AdminSessionPrincipal` additionally binds that authority snapshot to one exact admin-session version plus idle/absolute expiries; request and mutation boundaries must re-open the session row, reject `revoked_at`, compare every principal field, and revalidate the current owner snapshot before use. It proves only a current owner console session and can never substitute for an action-bound `AuthGrant`/`AuthContext`; every mutation reconstructs its exact binding on the server and consumes a fresh matching grant when the registry requires one. The same admin principal grants no implicit memory-body visibility: every memory create/replace persists one closed `MemoryAudience`, and later read projections use subject, current guardian, and audience policy before decryption. An `ActionBinding` includes household, proposal, turn, idempotency, action, resource, parameter commitment, policy, conversation session, and subject, so a proof cannot be transplanted across any of those boundaries. `ActionReceipt` additionally persists `household_id` and the server-derived `resource_scope`; its idempotency boundary is exactly `(household_id, action_name, resource_scope, idempotency_key)`, matching `action_proposals`, and a global unique idempotency key is forbidden. Frozen DTOs remain fields-only: callers use explicit binding comparators, policy-request factories, and audit-draft mappers rather than calling undeclared methods on them. `RouteAuthorizerPort.consume` is single-use and must compare every `RouteConsumption` binding field to the stored authorization in constant time for commitments before any adapter I/O. `BudgetReservationRequest` carries only a closed, positive, bounded usage ceiling; extra caller monetary estimates are forbidden. Reservation pricing is recomputed locally from the exact provider/model/category and one current price/FX record, and the returned `pricing_commitment` is null exactly for unknown-price or already-frozen denials. `BudgetSettlementRequest` carries no caller cost or usage-presence claim: settlement loads and purpose-verifies the full `ProviderUsageReceiptV1` persisted by the gateway against the exact call/reservation/request/attempt/authorization/provider/model/category and the provider-response commitment, then recomputes the charge from the immutable reservation price snapshot. `ProviderResponse` exposes only the nullable ID of that already-persisted receipt, never raw usage or an authority boolean; a non-null ID is gateway-bound to the exact call/route, while missing or malformed usage never means zero and a succeeded call without one valid persisted receipt freezes/alerts and fails settlement as an unknown possible overage. `BudgetPort.release_unsent` accepts only a matching `TransportProof(disposition="never_sent")`; `sent` and `unknown` reconcile conservatively through settlement, while every retry retains `request_id` and receives a fresh `attempt_id`. A verified actual above the reservation is never clipped; `estimate_overrun` and `cloud_egress_frozen` expose the durable overrun/freeze truth. `CameraWindowGrant` is the only contract that permits camera frames; it is action/subject/session/turn/purpose-bound, single-use, at most 10 seconds/20 frames/10 MiB, and its byte/frame/rate/expiry bounds may only be narrowed downstream.
 
 `web_search` and `child_durable_memory_v1` are Phase 1 contract amendments consumed by the controlled-web and identity/memory supplements. `web_search` is durable owner/adult self-consent; `child_durable_memory_v1` is durable K2/N1 consent granted or revoked only by that child's current primary guardian with the exact guardian generation. Neither widens the baseline `RouteAuthorization` speech/reasoning/TTS purpose union. Every consent draft carries the expected latest receipt ID, guardian generation when applicable, and policy/disclosure versions; revoke requires a non-null expected receipt. Its purpose-separated parameter commitment covers exactly subject, purpose, expected receipt state, guardian generation, and both versions, while the `ActionBinding` separately fixes household, authenticated actor, action, resource, session, and turn. The mutation service reconstructs that payload and compares its HMAC before any receipt access. Guest disclosure/session-consent contracts remain exactly `cloud_stt|cloud_reasoning|cloud_tts`; K2/N1 search and owner/adult child-memory consent are policy-denied even if a caller forges a prepared consent action. This amendment changes no task number or effort estimate.
 
@@ -1892,15 +4085,15 @@ from pathlib import Path
 
 import pytest
 
-from tuntun_contracts.base import Commitment, canonical_bytes
+from tuntun_contracts.base import Commitment, canonical_bytes, parse_contract_json
 from tuntun_contracts.events import EventEnvelope, SignedEventEnvelope, StopRequestedPayload, WakeDetectedPayload
 from tuntun_contracts.speech import AudioFormat, AuthorizedTranscriptionRequest, TranscriptResult, AuthorizedSynthesisRequest, SpeechChunk
 from tuntun_contracts.identity import IdentityEvidence, IdentityRequest, IdentityDecision
 from tuntun_contracts.actions import ActionBinding, ActionProposalDraft, ActionReceipt, ValidatedActionProposal
 from tuntun_contracts.memory import WorkingContent, EpisodicContent, SemanticContent, PreferenceContent, ProceduralContent, RelationalContent, PolicyContent, MemoryProposalDraft, MemoryProposal, MemoryRecord, MemoryQuery, ApprovedMemory, ProposalContext, DecideMemoryProposal
 from tuntun_contracts.policy import PolicyRequest, PolicyDecision, AuthenticationRequest, AuthenticationChallenge, AuthenticationResponse, AuthGrant, AuthContext, CurrentOwnerAuthority, AdminSessionPrincipal, TimerIntent
-from tuntun_contracts.provider import RouteAuthorization, RouteAuthorizationRequest, RouteConsumption, ProviderResponseReceipt, SanitizedProviderMessage, SanitizedToolReference, SanitizedProviderRequest, Usage, ProviderResponse, RedactionReceipt
-from tuntun_contracts.budget import BudgetReservationRequest, BudgetReservation, BudgetSettlementRequest, BudgetSettlement, TransportProof, BudgetReconciliationRequest
+from tuntun_contracts.provider import RouteAuthorization, RouteAuthorizationRequest, RouteConsumption, ProviderResponseReceipt, SanitizedProviderMessage, SanitizedToolReference, SanitizedProviderRequest, ProviderResponse, RedactionReceipt
+from tuntun_contracts.budget import BudgetReservationRequest, BudgetReservation, BudgetSettlementRequest, BudgetSettlement, LlmUsageUnits, ProviderUsageReceiptV1, SttUsageUnits, TransportProof, TtsUsageUnits, WebSearchUsageUnits, BudgetReconciliationRequest
 from tuntun_contracts.audit import AuditDraft, AuditReceipt
 from tuntun_contracts.reachy import ReachyCommand, ReachyReceipt, ReachyHealth, SafetyReceipt, StopSignal, CameraWindowGrant
 from tuntun_contracts.ports import TurnInput, TurnOutput
@@ -1913,8 +4106,8 @@ MODEL_REGISTRY = {
     "identity":{"IdentityEvidence":IdentityEvidence,"IdentityRequest":IdentityRequest,"IdentityDecision":IdentityDecision},
     "memory":{"WorkingContent":WorkingContent,"EpisodicContent":EpisodicContent,"SemanticContent":SemanticContent,"PreferenceContent":PreferenceContent,"ProceduralContent":ProceduralContent,"RelationalContent":RelationalContent,"PolicyContent":PolicyContent,"MemoryProposalDraft":MemoryProposalDraft,"MemoryProposal":MemoryProposal,"MemoryRecord":MemoryRecord,"MemoryQuery":MemoryQuery,"ApprovedMemory":ApprovedMemory,"ProposalContext":ProposalContext,"DecideMemoryProposal":DecideMemoryProposal},
     "policy":{"PolicyRequest":PolicyRequest,"PolicyDecision":PolicyDecision,"AuthenticationRequest":AuthenticationRequest,"AuthenticationChallenge":AuthenticationChallenge,"AuthenticationResponse":AuthenticationResponse,"AuthGrant":AuthGrant,"AuthContext":AuthContext,"CurrentOwnerAuthority":CurrentOwnerAuthority,"AdminSessionPrincipal":AdminSessionPrincipal,"TimerIntent":TimerIntent},
-    "provider":{"RouteAuthorization":RouteAuthorization,"RouteAuthorizationRequest":RouteAuthorizationRequest,"RouteConsumption":RouteConsumption,"ProviderResponseReceipt":ProviderResponseReceipt,"SanitizedProviderMessage":SanitizedProviderMessage,"SanitizedToolReference":SanitizedToolReference,"SanitizedProviderRequest":SanitizedProviderRequest,"Usage":Usage,"ProviderResponse":ProviderResponse,"RedactionReceipt":RedactionReceipt},
-    "budget":{"BudgetReservationRequest":BudgetReservationRequest,"BudgetReservation":BudgetReservation,"BudgetSettlementRequest":BudgetSettlementRequest,"BudgetSettlement":BudgetSettlement,"TransportProof":TransportProof,"BudgetReconciliationRequest":BudgetReconciliationRequest},
+    "provider":{"RouteAuthorization":RouteAuthorization,"RouteAuthorizationRequest":RouteAuthorizationRequest,"RouteConsumption":RouteConsumption,"ProviderResponseReceipt":ProviderResponseReceipt,"SanitizedProviderMessage":SanitizedProviderMessage,"SanitizedToolReference":SanitizedToolReference,"SanitizedProviderRequest":SanitizedProviderRequest,"ProviderResponse":ProviderResponse,"RedactionReceipt":RedactionReceipt},
+    "budget":{"LlmUsageUnits":LlmUsageUnits,"SttUsageUnits":SttUsageUnits,"TtsUsageUnits":TtsUsageUnits,"WebSearchUsageUnits":WebSearchUsageUnits,"BudgetReservationRequest":BudgetReservationRequest,"BudgetReservation":BudgetReservation,"BudgetSettlementRequest":BudgetSettlementRequest,"BudgetSettlement":BudgetSettlement,"ProviderUsageReceiptV1":ProviderUsageReceiptV1,"TransportProof":TransportProof,"BudgetReconciliationRequest":BudgetReconciliationRequest},
     "audit":{"AuditDraft":AuditDraft,"AuditReceipt":AuditReceipt},
     "reachy":{"ReachyCommand":ReachyCommand,"ReachyReceipt":ReachyReceipt,"ReachyHealth":ReachyHealth,"SafetyReceipt":SafetyReceipt,"StopSignal":StopSignal,"CameraWindowGrant":CameraWindowGrant},
 }
@@ -1926,13 +4119,19 @@ def test_fixture_file_exists_and_is_version_one(name: str) -> None:
     assert payload["schema_version"] == "1.0"
     assert set(payload["examples"]) == set(MODEL_REGISTRY[name])
     for model_name, model_type in MODEL_REGISTRY[name].items():
-        model = model_type.model_validate(payload["examples"][model_name])
+        model = parse_contract_json(
+            model_type,json.dumps(payload["examples"][model_name],separators=(",",":")).encode("utf-8"),
+            max_bytes=1_048_576,require_canonical=False,
+        )
         assert canonical_bytes(model).decode("utf-8") == payload["canonical_examples"][model_name]
 
 
 def test_event_fixture_round_trips_to_identical_canonical_bytes() -> None:
     payload = json.loads((FIXTURE_ROOT / "events.json").read_text(encoding="utf-8"))
-    model = EventEnvelope.model_validate(payload["examples"]["EventEnvelope"])
+    model = parse_contract_json(
+        EventEnvelope,json.dumps(payload["examples"]["EventEnvelope"],separators=(",",":")).encode("utf-8"),
+        max_bytes=1_048_576,require_canonical=False,
+    )
     assert canonical_bytes(model).decode("utf-8") == payload["canonical_examples"]["EventEnvelope"]
 ```
 
@@ -1951,7 +4150,7 @@ import json
 from pathlib import Path
 from typing import Any
 from tuntun_contracts import actions, audit, budget, events, identity, memory, policy, ports, provider, reachy, speech
-from tuntun_contracts.base import Commitment, ContractModel, canonical_bytes
+from tuntun_contracts.base import Commitment, ContractModel, canonical_bytes, parse_contract_json
 
 MODULES = {
     "actions": (actions,),
@@ -1992,7 +4191,7 @@ def sample(schema: dict[str, Any], definitions: dict[str, Any], field_name: str,
         if schema.get("format") == "date-time": return "2026-08-27T01:02:03.000004Z"
         pattern=str(schema.get("pattern", ""))
         if "0-9a-f" in pattern: return "0" * 64
-        if "A-Za-z0-9+/" in pattern: return "A" * 44
+        if "A-Za-z0-9+/" in pattern: return "A" * 43 + "="
         length=max(int(schema.get("minLength", 1)), len("status")); return ("status" + "x" * length)[:length]
     if kind == "null": return None
     raise ValueError(f"unsupported fixture schema for {field_name}: {schema}")
@@ -2006,7 +4205,13 @@ def main() -> None:
             schema=model_type.model_json_schema(); value=sample(schema, schema.get("$defs",{}), name, counter)
             if name == "AuthGrant": value.update({"assurance":"confirmed","assurance_source":"explicit_confirmation"})
             if name == "AuthContext": value.update({"grant_id":None,"assurance":"guest","assurance_source":"guest"})
-            model=model_type.model_validate(value); examples[name]=model.model_dump(mode="json"); canonical[name]=canonical_bytes(model).decode("utf-8")
+            if name == "BudgetReservationRequest": value.update({"category":"llm","month_key":"2026-08","usage_ceiling":{"category":"llm","input_tokens":1,"output_tokens":0}})
+            if name == "BudgetReservation": value.update({"outcome":"allow","amount_micros_sgd":1,"pricing_commitment":{"algorithm":"HMAC-SHA-256","key_id":"pricing-v1","value_b64":"A"*43+"="}})
+            if name == "ProviderUsageReceiptV1": value.update({"category":"llm","accounting_basis":"provider_reported_exact","billable_usage":{"category":"llm","input_tokens":1,"output_tokens":0}})
+            model=parse_contract_json(
+                model_type,json.dumps(value,separators=(",",":")).encode("utf-8"),
+                max_bytes=1_048_576,require_canonical=False,
+            ); examples[name]=model.model_dump(mode="json"); canonical[name]=canonical_bytes(model).decode("utf-8")
         (root/f"{group}.json").write_text(json.dumps({"schema_version":"1.0","examples":examples,"canonical_examples":canonical},indent=2,sort_keys=True)+"\n",encoding="utf-8")
 
 if __name__ == "__main__": main()
@@ -2091,6 +4296,26 @@ def test_environment_overrides_yaml_but_unspecified_yaml_survives(tmp_path: Path
     settings=load_settings(config,{"TUNTUN_PROVIDERS__PRIMARY_MODEL":"environment-model"})
     assert settings.providers.primary_model == "environment-model"
     assert settings.memory.max_items_per_turn == 5
+
+
+@pytest.mark.parametrize("mutation",(
+    "duplicate_key","yaml_alias","explicit_tag","overdeep","too_many_events",
+    "oversized_file","symlink","fifo","group_writable","changed_during_read",
+))
+def test_settings_file_is_bounded_duplicate_free_nofollow_and_stable(
+    strict_settings_case,mutation,
+) -> None:
+    strict_settings_case.mutate(mutation)
+    with pytest.raises((PermissionError,ValueError)):
+        load_settings(strict_settings_case.path,{})
+
+
+@pytest.mark.parametrize("raw",(
+    "[1,2]","{x: 1}","&x value","!custom value","x"*1_025,
+))
+def test_environment_override_is_one_bounded_plain_scalar(raw) -> None:
+    with pytest.raises(ValueError):
+        load_settings(None,{"TUNTUN_MEMORY__MAX_ITEMS_PER_TURN":raw})
 ```
 
 ```python
@@ -2120,7 +4345,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class FrozenSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 class HouseholdSettings(FrozenSettings): timezone: str = "Asia/Singapore"
 class ConversationSettings(FrozenSettings):
     active_limit: int = Field(default=1, ge=1, le=1); follow_up_window_seconds: int = 30
@@ -2164,22 +4389,98 @@ class Settings(FrozenSettings):
 
 ```python
 # apps/core/src/tuntun_core/config/loader.py
+import os
 from pathlib import Path
+import stat
 from typing import Mapping
 import yaml
+from yaml.events import AliasEvent,CollectionEndEvent,CollectionStartEvent
+from yaml.nodes import MappingNode
 from .settings import Settings
+
+MAX_SETTINGS_BYTES=262_144
+
+class StrictSettingsLoader(yaml.SafeLoader):
+    def construct_mapping(self,node,deep=False):
+        if not isinstance(node,MappingNode): raise ValueError("invalid configuration")
+        result={}
+        for key_node,value_node in node.value:
+            key=self.construct_object(key_node,deep=deep)
+            if type(key) is not str or key in result:
+                raise ValueError("invalid configuration")
+            result[key]=self.construct_object(value_node,deep=deep)
+        return result
+
+def parse_bounded_strict_yaml(
+    raw:bytes,*,max_bytes:int,max_events:int=16_384,max_depth:int=32,
+):
+    if (
+        type(raw) is not bytes or type(max_bytes) is not int
+        or not 0<=len(raw)<=max_bytes<=1_048_576
+    ): raise ValueError("invalid configuration")
+    text=raw.decode("utf-8",errors="strict"); depth=count=0
+    try:
+        for event in yaml.parse(text):
+            count+=1
+            if (
+                count>max_events or isinstance(event,AliasEvent)
+                or getattr(event,"anchor",None) is not None
+            ):
+                raise ValueError("invalid configuration")
+            if getattr(event,"tag",None) is not None:
+                raise ValueError("invalid configuration")
+            if isinstance(event,CollectionStartEvent):
+                depth+=1
+                if depth>max_depth: raise ValueError("invalid configuration")
+            elif isinstance(event,CollectionEndEvent): depth-=1
+        if depth!=0: raise ValueError("invalid configuration")
+        return yaml.load(text,Loader=StrictSettingsLoader)
+    except (UnicodeError,yaml.YAMLError) as error:
+        raise ValueError("invalid configuration") from error
+
+def read_bounded_strict_yaml(path:Path,*,max_bytes:int=MAX_SETTINGS_BYTES):
+    fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC|getattr(os,"O_NOFOLLOW",0))
+    try:
+        before=os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid not in {0,os.geteuid()} or before.st_mode&0o022
+            or before.st_size>max_bytes
+        ): raise PermissionError("unsafe configuration file")
+        chunks=[]; total=0
+        while True:
+            chunk=os.read(fd,min(65_536,max_bytes+1-total))
+            if not chunk: break
+            total+=len(chunk)
+            if total>max_bytes: raise ValueError("invalid configuration")
+            chunks.append(chunk)
+        after=os.fstat(fd); named=os.lstat(path)
+        if (
+            total!=before.st_size
+            or (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)
+            !=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
+            or (after.st_dev,after.st_ino)!=(named.st_dev,named.st_ino)
+        ): raise PermissionError("configuration changed during read")
+        return parse_bounded_strict_yaml(b"".join(chunks),max_bytes=max_bytes)
+    finally: os.close(fd)
 
 def load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Settings:
     data: dict[str, object] = {}
     if yaml_path is not None:
-        loaded = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        loaded = read_bounded_strict_yaml(yaml_path) or {}
         if not isinstance(loaded, dict): raise ValueError("configuration root must be a mapping")
         data = loaded
     for name, raw_value in environ.items():
         if not name.startswith("TUNTUN_"): continue
         path=name.removeprefix("TUNTUN_").lower().split("__")
         if len(path) != 2: raise ValueError(f"invalid TUNTUN override: {name}")
-        section, key=path; nested=dict(data.get(section, {})); nested[key]=yaml.safe_load(raw_value); data[section]=nested
+        encoded=raw_value.encode("utf-8",errors="strict")
+        value=parse_bounded_strict_yaml(
+            encoded,max_bytes=1_024,max_events=8,max_depth=1,
+        )
+        if isinstance(value,(dict,list,tuple,set)) or value is None:
+            raise ValueError(f"invalid TUNTUN override: {name}")
+        section, key=path; nested=dict(data.get(section, {})); nested[key]=value; data[section]=nested
     return Settings.model_validate(data)
 ```
 
@@ -2381,15 +4682,18 @@ git commit -m "feat(core): add Keychain boundary and log redaction"
 - Create: `packages/testing/src/tuntun_testing/fake_reachy.py`
 - Create: `packages/testing/src/tuntun_testing/scenario.py`
 - Modify: `packages/testing/src/tuntun_testing/__init__.py`
+- Create: `scripts/run_scenarios.py`
 - Create: `apps/core/src/tuntun_core/cli/commands/simulate.py`
 - Modify: `apps/core/src/tuntun_core/cli/main.py`
 - Create: `tests/fixtures/scenarios/guest-hinglish.yaml`
 - Test: `tests/unit/testing/test_scenario.py`
+- Test: `tests/unit/testing/test_scenario_cli.py`
 - Test: `tests/integration/test_deterministic_turn.py`
 
 **Interfaces:**
 - Consumes: Task 5 DTOs and ports; synthetic audio tokens are UUIDs, never media.
-- Produces: `FakeClock(start: datetime)`, `advance(delta: timedelta) -> None`; `FakeSpeechToText`, `FakeTextToSpeech`, `FakeLanguageModel`, `FakeIdentity`, `FakeMemory`, `FakePolicy`, `FakeAuthentication`, `FakeAudit`, `FakeBudget`, and `FakeReachy`, each rejecting unexpected calls; `ScenarioRunner.run(path: Path) -> ScenarioResult`; `ScenarioResult.canonical_json() -> bytes`; CLI `tuntunctl simulate --scenario PATH --json`.
+- Produces: `FakeClock(start: datetime)`, `advance(delta: timedelta) -> None`; `FakeSpeechToText`, `FakeTextToSpeech`, `FakeLanguageModel`, `FakeIdentity`, `FakeMemory`, `FakePolicy`, `FakeAuthentication`, `FakeAudit`, `FakeBudget`, and `FakeReachy`, each rejecting unexpected calls; `ScenarioRunner.run(path: Path) -> ScenarioResult`; `ScenarioResult.canonical_json() -> bytes`; CLI `tuntunctl simulate --scenario PATH --json`; and the repository gate `scripts/run_scenarios.py [--scenario PATH ...] --turns N [--assert-resource-bounds] [--json]`.
+- `run_scenarios.py` accepts `1 <= N <= 10_000`, rejects duplicate/non-regular/symlink scenario paths and over-limit YAML before parsing, sorts either the explicit paths or the default `tests/fixtures/scenarios/*.yaml` set by normalized repository-relative name, installs the test-suite socket/DNS deny guard before loading application code, uses only synthetic fakes, and exits 2 for invalid input or 1 for a failed assertion. Its versioned `scenario_gate.v1` JSON is emitted only to stdout; diagnostics go to stderr. Task C23 extends this same owned executable with the complete fault/privacy/resource measurements used by B2.
 
 - [ ] **Step 1: Write red deterministic tests**
 
@@ -2429,9 +4733,11 @@ def test_scenario_is_byte_deterministic() -> None:
     assert b'"transcript":"synthetic-transcript-hi-en"' in first
 ```
 
+`tests/unit/testing/test_scenario_cli.py` must run the script in a subprocess and prove identical canonical JSON for repeated runs, exact exit codes for zero/10,001 turns, a symlink, duplicate normalized paths, malformed/oversized YAML, and any attempted socket or DNS use. It also proves that `--assert-resource-bounds` is accepted in the foundation synthetic runner without weakening the later B2 thresholds.
+
 - [ ] **Step 2: Run the red fake/scenario tests**
 
-Run: `uv run pytest tests/unit/testing/test_scenario.py tests/integration/test_deterministic_turn.py -q`
+Run: `uv run pytest tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py -q`
 
 Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_testing.fake_clock'`.
 
@@ -2499,7 +4805,7 @@ class FakeIdentity(ScriptedAsyncFake):
 class FakeMemory(ScriptedAsyncFake):
     async def create(self, memory, expected_absent=True): return await self.call(("create",memory,expected_absent))
     async def replace(self, memory_id, expected_version, memory): return await self.call(("replace",memory_id,expected_version,memory))
-    async def delete(self, memory_id, expected_version, auth): return await self.call(("delete",memory_id,expected_version,auth))
+    async def delete(self, memory_id, expected_version, auth, approved_proposal_id): return await self.call(("delete",memory_id,expected_version,auth,approved_proposal_id))
     async def query(self, request): return await self.call(("query",request))
 class FakeMemoryProposalService(ScriptedAsyncFake):
     async def stage(self, draft, context): return await self.call(("stage",draft,context))
@@ -2586,17 +4892,19 @@ audit_outcome: completed
 
 Add `PyYAML>=6.0,<7` to `packages/testing/pyproject.toml` and export every public fake/scenario class shown above from `tuntun_testing/__init__.py`.
 
+Implement `scripts/run_scenarios.py` as a thin, import-safe dispatcher over `ScenarioRunner`: bounded reads occur before YAML parsing, the network-deny guard is active before scenario/application imports, every requested turn receives a fresh scripted-fake container, and the process fails closed if a fake has an unconsumed expectation or an unexpected call. The foundation resource assertion is limited to universally available invariants (zero leaked asyncio tasks and zero leaked file descriptors after a warm-up plus collection); C23 owns the production B2 RSS, privacy-latency, sentinel, and duplicate-effect assertions.
+
 - [ ] **Step 4: Run the green deterministic gate**
 
-Run: `uv lock && uv run pytest tests/unit/testing/test_scenario.py tests/integration/test_deterministic_turn.py -q && uv run tuntunctl simulate --scenario tests/fixtures/scenarios/guest-hinglish.yaml --json > /tmp/tuntun-scenario-a.json && uv run tuntunctl simulate --scenario tests/fixtures/scenarios/guest-hinglish.yaml --json > /tmp/tuntun-scenario-b.json && cmp /tmp/tuntun-scenario-a.json /tmp/tuntun-scenario-b.json && uv run python scripts/verify_private_data.py tests/fixtures/scenarios`
+Run: `uv lock && uv run pytest tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py -q && uv run tuntunctl simulate --scenario tests/fixtures/scenarios/guest-hinglish.yaml --json > /tmp/tuntun-scenario-a.json && uv run tuntunctl simulate --scenario tests/fixtures/scenarios/guest-hinglish.yaml --json > /tmp/tuntun-scenario-b.json && cmp /tmp/tuntun-scenario-a.json /tmp/tuntun-scenario-b.json && uv run python scripts/run_scenarios.py --scenario tests/fixtures/scenarios/guest-hinglish.yaml --turns 2 --assert-resource-bounds --json && uv run python scripts/verify_private_data.py tests/fixtures/scenarios`
 
-Expected: PASS with three tests and `private-data scan: PASS`.
+Expected: PASS with all deterministic/CLI tests, a `scenario_gate.v1` success document, and `private-data scan: PASS`.
 
 - [ ] **Step 5: Commit exact Task 9 paths**
 
 ```bash
 git status --short
-git add packages/testing/pyproject.toml packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/scenario.py packages/testing/src/tuntun_testing/__init__.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/fixtures/scenarios/guest-hinglish.yaml tests/unit/testing/test_scenario.py tests/integration/test_deterministic_turn.py uv.lock
+git add packages/testing/pyproject.toml packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/scenario.py packages/testing/src/tuntun_testing/__init__.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/fixtures/scenarios/guest-hinglish.yaml tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py uv.lock
 git diff --cached --name-only
 git diff --cached
 git commit -m "test: add deterministic foundation scenario"
@@ -2611,6 +4919,8 @@ git commit -m "test: add deterministic foundation scenario"
 **Files:**
 - Modify: `apps/core/pyproject.toml`
 - Modify: `uv.lock`
+- Create: `apps/core/src/tuntun_core/services/models/fs.py`
+- Create: `apps/core/src/tuntun_core/services/models/network.py`
 - Create: `apps/core/src/tuntun_core/services/models/registry.py`
 - Create: `apps/core/src/tuntun_core/services/models/installer.py`
 - Create: `apps/core/src/tuntun_core/cli/commands/models.py`
@@ -2621,27 +4931,209 @@ git commit -m "test: add deterministic foundation scenario"
 - Test: `tests/security/test_model_governance.py`
 
 **Interfaces:**
-- Consumes: owner-invoked immutable HTTPS URL, declared byte size/SHA-256, owner-only model directory.
-- Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel`; `ModelInstaller.install(model_id: str) -> ActivatedModel`; no download occurs in either constructor or `activate`.
+- Consumes: owner-invoked immutable HTTPS URL on an exact host allowlist, declared bounded byte size/SHA-256, a bounded duplicate-free manifest, and owner-only no-follow model directory descriptors.
+- Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only verified stable read-only file descriptors; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
 
 - [ ] **Step 1: Write red model-governance tests**
 
 ```python
 # tests/security/test_model_governance.py
+import fcntl
+import inspect
+import os
+import stat
 from pathlib import Path
 import pytest
-from tuntun_core.services.models.registry import ModelRegistry
+from tuntun_core.services.models.installer import ModelInstaller
+from tuntun_core.services.models.fs import hash_exact_fd
+from tuntun_core.services.models.registry import ModelRegistry, ModelVerificationError
 
 def test_floating_revision_and_pickle_are_rejected(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text('schema_version: "1.0"\nmodels:\n- id: bad\n  revision: main\n  files:\n  - path: model.pkl\n    size: 1\n    sha256: "' + "0" * 64 + '"\n', encoding="utf-8")
-    with pytest.raises(ValueError, match="immutable revision"):
+    with pytest.raises(ValueError, match="invalid model manifest"):
         ModelRegistry.load(manifest)
 
 def test_empty_registry_never_downloads(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.yaml"; manifest.write_text('schema_version: "1.0"\nmodels: []\n', encoding="utf-8")
     registry = ModelRegistry.load(manifest)
     with pytest.raises(LookupError, match="model is not registered"): registry.activate("missing")
+
+
+@pytest.mark.parametrize("mutation",(
+    "duplicate_yaml_key","yaml_alias","manifest_too_large","duplicate_model_id",
+    "duplicate_file_name","unknown_top_level","unknown_model_field",
+    "unknown_file_field","bad_model_id","floating_revision","uppercase_hash",
+    "zero_size","file_too_large","total_too_large","nested_path","dot_path",
+    "pickle_suffix","http_url","url_credentials","url_port","url_query",
+    "too_many_models","too_many_files","bool_size","string_size",
+    "list_model_id","mapping_revision","null_url",
+))
+def test_manifest_runtime_checks_reject_even_without_json_schema(
+    governed_model_case,mutation,
+) -> None:
+    governed_model_case.mutate_manifest(mutation)
+    with pytest.raises(ValueError,match="invalid model manifest"):
+        ModelRegistry.load(governed_model_case.manifest)
+
+
+@pytest.mark.parametrize("mutation",(
+    "manifest_symlink","model_root_symlink","model_id_symlink",
+    "revision_symlink","artifact_symlink","artifact_fifo","artifact_device",
+    "wrong_owner","group_writable_root","world_writable_revision",
+))
+def test_every_named_filesystem_object_is_nofollow_regular_owner_only(
+    governed_model_case,mutation,
+) -> None:
+    governed_model_case.apply_filesystem_mutation(mutation)
+    with pytest.raises((PermissionError,RuntimeError),match="unsafe model filesystem"):
+        governed_model_case.registry_or_activate()
+
+
+def test_activation_and_runtime_use_the_same_descriptor_not_a_reopened_path(
+    installed_model,runtime_adapter,runtime_receipt_verifier,
+) -> None:
+    activated=installed_model.registry.activate(installed_model.model_id)
+    installed_model.replace_every_named_path_with_attacker_bytes()
+    receipt=activated.load_with(runtime_adapter,runtime_receipt_verifier)
+    assert receipt.loaded_sha256==installed_model.expected_sha256
+    assert runtime_adapter.path_opens==[]
+
+
+@pytest.mark.parametrize("mutation",(
+    "wrong_model","wrong_revision","missing_file","extra_file","reordered_file",
+    "wrong_size","wrong_hash","wrong_signature_domain","wrong_key_generation",
+    "bad_signature","expired_receipt",
+))
+def test_runtime_loader_receipt_is_authenticated_and_exact_bound(
+    installed_model,runtime_adapter,runtime_receipt_verifier,mutation,
+) -> None:
+    runtime_adapter.mutate_receipt(mutation)
+    activated=installed_model.registry.activate(installed_model.model_id)
+    with pytest.raises(ModelVerificationError,match="runtime model receipt mismatch"):
+        activated.load_with(runtime_adapter,runtime_receipt_verifier)
+    assert runtime_adapter.open_duplicate_fd_count==0
+    assert runtime_adapter.abort_calls==1
+
+
+def test_zero_write_fails_without_publishing(governed_model_case) -> None:
+    governed_model_case.inject_os_write_result(0)
+    with pytest.raises(OSError): governed_model_case.install()
+    assert governed_model_case.open_descriptor_count==0
+    assert not governed_model_case.final_revision_exists()
+
+
+def test_repeated_one_byte_short_writes_eventually_publish_exact_bytes(
+    governed_model_case,
+) -> None:
+    governed_model_case.inject_repeated_os_write_result(1)
+    result=governed_model_case.install()
+    assert result.all_files_verified
+    assert governed_model_case.final_revision_is_complete_and_verified()
+
+
+def test_installer_retains_only_same_inode_read_only_verified_descriptor(
+    governed_model_case,runtime_adapter,runtime_receipt_verifier,
+) -> None:
+    activated=governed_model_case.install()
+    handle=activated.files[0]
+    assert governed_model_case.reader_open_expected_modes==[0o600]
+    assert fcntl.fcntl(handle.fd,fcntl.F_GETFL)&os.O_ACCMODE==os.O_RDONLY
+    assert stat.S_IMODE(os.fstat(handle.fd).st_mode)==0o400
+    assert governed_model_case.returned_descriptor_identity(handle.fd)==governed_model_case.written_inode_identity
+    governed_model_case.rehash_exact_descriptor(handle.fd)
+    with pytest.raises(OSError): os.write(handle.fd,b"mutation")
+    receipt=activated.load_with(runtime_adapter,runtime_receipt_verifier)
+    assert receipt.loaded_sha256==governed_model_case.expected_sha256
+    source=inspect.getsource(ModelInstaller._download)
+    assert "return read_fd" in source
+    assert "return write_fd" not in source and "return fd" not in source
+    assert runtime_adapter.path_opens==[]
+
+
+@pytest.mark.parametrize("prior_offset",(0,1,"eof"))
+def test_rehash_and_repeated_runtime_reads_ignore_shared_descriptor_offset(
+    installed_model,runtime_adapter,prior_offset,
+) -> None:
+    handle=installed_model.registry.activate(installed_model.model_id).files[0]
+    offset=handle.size if prior_offset=="eof" else prior_offset
+    os.lseek(handle.fd,offset,os.SEEK_SET)
+    for _ in range(2):
+        hash_exact_fd(handle.fd,handle.size,handle.sha256)
+        assert os.lseek(handle.fd,0,os.SEEK_CUR)==offset
+        handle.load_with(runtime_adapter)
+        assert runtime_adapter.last_loaded_bytes==installed_model.expected_bytes
+        assert os.lseek(handle.fd,0,os.SEEK_CUR)==offset
+
+
+def test_adapter_failure_closes_every_duplicated_runtime_handle(
+    installed_model,failing_runtime_adapter,runtime_receipt_verifier,
+) -> None:
+    activated=installed_model.registry.activate(installed_model.model_id)
+    with pytest.raises(RuntimeError):
+        activated.load_with(failing_runtime_adapter,runtime_receipt_verifier)
+    assert failing_runtime_adapter.open_duplicate_fd_count==0
+    assert failing_runtime_adapter.abort_calls==1
+
+
+@pytest.mark.parametrize("failure",("finish_model","receipt_verifier"))
+def test_unverified_runtime_is_aborted_and_never_published(
+    installed_model,runtime_adapter,runtime_receipt_verifier,failure,
+) -> None:
+    runtime_adapter.fail_at(failure,runtime_receipt_verifier)
+    activated=installed_model.registry.activate(installed_model.model_id)
+    with pytest.raises((RuntimeError,ModelVerificationError)):
+        activated.load_with(runtime_adapter,runtime_receipt_verifier)
+    assert runtime_adapter.abort_calls==1
+    assert runtime_adapter.published_runtime_count==0
+    assert runtime_adapter.open_duplicate_fd_count==0
+
+
+@pytest.mark.parametrize("race",(
+    "swap_root_before_open","swap_revision_during_open","swap_file_during_open",
+    "grow_file_during_hash","truncate_file_during_hash","overwrite_same_size_during_load",
+))
+def test_activation_races_fail_or_load_only_bytes_matching_manifest(
+    governed_model_case,runtime_adapter,race,
+) -> None:
+    result=governed_model_case.race_activation(race,runtime_adapter)
+    assert result.failed_closed or result.loaded_sha256==governed_model_case.expected_sha256
+
+
+@pytest.mark.parametrize("network_fault",(
+    "redirect_to_127_0_0_1","redirect_to_rfc1918","redirect_to_other_https_host",
+    "allowlisted_dns_private_answer","content_length_too_large","stream_plus_one_byte",
+    "stream_truncated","timeout_after_first_file","hash_mismatch",
+    "slow_drip_past_total_deadline","resolver_hang_past_total_deadline",
+))
+def test_install_rejects_redirect_lan_oversize_and_partial_downloads(
+    governed_model_case,network_fault,
+) -> None:
+    governed_model_case.network.inject(network_fault)
+    with pytest.raises((PermissionError,ValueError,TimeoutError)):
+        governed_model_case.install()
+    assert not governed_model_case.final_revision_exists()
+    assert governed_model_case.previous_revision_unchanged()
+    assert governed_model_case.network.followed_redirects==[]
+
+
+def test_two_installers_publish_one_complete_immutable_revision(concurrent_model_case) -> None:
+    results=concurrent_model_case.run_two_installers()
+    assert concurrent_model_case.maximum_simultaneous_lock_holders==1
+    assert concurrent_model_case.published_revision_count==1
+    assert all(result.all_files_verified for result in results)
+    assert concurrent_model_case.no_stage_directory_remains()
+
+
+@pytest.mark.parametrize("fault",(
+    "after_each_file","before_stage_fsync","after_stage_fsync",
+    "before_publish","after_publish_before_parent_fsync",
+))
+def test_crash_or_error_never_exposes_a_mixed_revision(governed_model_case,fault) -> None:
+    governed_model_case.crash_install_at(fault)
+    governed_model_case.restart_and_reconcile()
+    assert governed_model_case.final_revision_is_absent_or_complete_and_verified()
+    assert governed_model_case.previous_revision_unchanged()
 ```
 
 - [ ] **Step 2: Run the red model tests**
@@ -2653,88 +5145,625 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 - [ ] **Step 3: Implement schema validation, activation, and explicit installation**
 
 ```python
+# apps/core/src/tuntun_core/services/models/fs.py
+import ctypes,fcntl,hashlib,os,stat,sys,time
+from pathlib import Path
+import yaml
+from yaml.events import AliasEvent,CollectionEndEvent,CollectionStartEvent
+from yaml.nodes import MappingNode
+
+MAX_MANIFEST_BYTES=1_048_576
+MAX_MANIFEST_EVENTS=16_384
+MAX_MANIFEST_DEPTH=32
+
+def _regular_owner(st,*,mode_mask=0o022):
+    return stat.S_ISREG(st.st_mode) and st.st_uid==os.geteuid() and not st.st_mode&mode_mask
+
+class StrictSafeLoader(yaml.SafeLoader):
+    def construct_mapping(self,node,deep=False):
+        if not isinstance(node,MappingNode):
+            raise ValueError("invalid model manifest")
+        result={}
+        for key_node,value_node in node.value:
+            key=self.construct_object(key_node,deep=deep)
+            if not isinstance(key,str) or key in result:
+                raise ValueError("invalid model manifest")
+            result[key]=self.construct_object(value_node,deep=deep)
+        return result
+
+def parse_yaml_no_duplicates_aliases_tags(data,*,max_events,max_depth):
+    depth=count=0
+    for event in yaml.parse(data):
+        count+=1
+        if count>max_events or isinstance(event,AliasEvent):
+            raise ValueError("invalid model manifest")
+        if getattr(event,"tag",None) is not None:
+            raise ValueError("invalid model manifest")
+        if isinstance(event,CollectionStartEvent):
+            depth+=1
+            if depth>max_depth: raise ValueError("invalid model manifest")
+        elif isinstance(event,CollectionEndEvent): depth-=1
+    if depth!=0: raise ValueError("invalid model manifest")
+    return yaml.load(data,Loader=StrictSafeLoader)
+
+def read_bounded_strict_yaml(path:Path):
+    """One no-follow descriptor, no aliases/tags, duplicate keys, or path swap."""
+    fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
+    try:
+        before=os.fstat(fd)
+        if not _regular_owner(before) or before.st_size>MAX_MANIFEST_BYTES:
+            raise ValueError("invalid model manifest")
+        chunks=[]; total=0
+        while True:
+            chunk=os.read(fd,min(65_536,MAX_MANIFEST_BYTES+1-total))
+            if not chunk: break
+            chunks.append(chunk); total+=len(chunk)
+            if total>MAX_MANIFEST_BYTES: raise ValueError("invalid model manifest")
+        after=os.fstat(fd); named=os.lstat(path)
+        if (before.st_dev,before.st_ino,before.st_size)!=(after.st_dev,after.st_ino,after.st_size) or (after.st_dev,after.st_ino)!=(named.st_dev,named.st_ino):
+            raise ValueError("invalid model manifest")
+        return parse_yaml_no_duplicates_aliases_tags(
+            b"".join(chunks),max_events=MAX_MANIFEST_EVENTS,
+            max_depth=MAX_MANIFEST_DEPTH,
+        )
+    except (OSError,UnicodeError) as error:
+        raise ValueError("invalid model manifest") from error
+    finally: os.close(fd)
+
+class OwnedDirectory:
+    """Stable O_DIRECTORY|O_NOFOLLOW dirfd with exact final owner/mode."""
+    def __init__(self,fd,mode):
+        self.fd=fd; st=os.fstat(fd); self.identity=(st.st_dev,st.st_ino)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.geteuid() or stat.S_IMODE(st.st_mode)!=mode:
+            os.close(fd); raise PermissionError("unsafe model filesystem")
+    @staticmethod
+    def _parent(path):
+        absolute=path.absolute(); parts=absolute.parts
+        fd=os.open(parts[0],os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
+        for part in parts[1:-1]:
+            next_fd=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=fd)
+            st=os.fstat(next_fd)
+            if not stat.S_ISDIR(st.st_mode) or st.st_mode&0o022 or st.st_uid not in {0,os.geteuid()}:
+                os.close(next_fd); os.close(fd); raise PermissionError("unsafe model filesystem")
+            os.close(fd); fd=next_fd
+        return fd,parts[-1]
+    @classmethod
+    def open(cls,path:Path,mode=0o700):
+        parent,name=cls._parent(path)
+        try: fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=parent)
+        finally: os.close(parent)
+        return cls(fd,mode)
+    @classmethod
+    def open_or_create(cls,path:Path,mode=0o700):
+        parent,name=cls._parent(path)
+        try:
+            try: os.mkdir(name,mode,dir_fd=parent)
+            except FileExistsError: pass
+            fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=parent)
+        finally: os.close(parent)
+        return cls(fd,mode)
+    def child(self,name,*,create=False,exist_ok=False,mode=0o700):
+        if not name or name in {".",".."} or "/" in name or "\x00" in name:
+            raise PermissionError("unsafe model filesystem")
+        if create:
+            try: os.mkdir(name,mode,dir_fd=self.fd)
+            except FileExistsError:
+                if not exist_ok: raise PermissionError("unsafe model filesystem")
+        fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=self.fd)
+        return OwnedDirectory(fd,mode)
+    def has_child(self,name):
+        try: st=os.stat(name,dir_fd=self.fd,follow_symlinks=False)
+        except FileNotFoundError: return False
+        if not stat.S_ISDIR(st.st_mode): raise PermissionError("unsafe model filesystem")
+        return True
+    def fsync(self): os.fsync(self.fd)
+    def chmod(self,mode): os.fchmod(self.fd,mode)
+    def close(self): os.close(self.fd)
+    def remove_private_stage(self,name,identity):
+        remove_exact_private_tree_at(self.fd,name,identity)
+    def remove_private_stages(self,prefix):
+        for name in os.listdir(self.fd):
+            if not name.startswith(prefix): continue
+            st=os.stat(name,dir_fd=self.fd,follow_symlinks=False)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.geteuid():
+                raise PermissionError("unsafe model filesystem")
+            remove_exact_private_tree_at(
+                self.fd,name,(st.st_dev,st.st_ino),
+            )
+    def lock(self,name,timeout_seconds):
+        return nofollow_flock(self.fd,name,timeout_seconds,mode=0o600)
+
+class _HeldLock:
+    def __init__(self,fd): self.fd=fd
+    def __enter__(self): return self
+    def __exit__(self,*_):
+        fcntl.flock(self.fd,fcntl.LOCK_UN); os.close(self.fd)
+
+def nofollow_flock(directory_fd,name,timeout_seconds,mode):
+    fd=os.open(name,os.O_RDWR|os.O_CREAT|os.O_CLOEXEC|os.O_NOFOLLOW,mode,dir_fd=directory_fd)
+    try:
+        st=os.fstat(fd)
+        if not _regular_owner(st,mode_mask=0o077) or stat.S_IMODE(st.st_mode)!=mode or st.st_nlink!=1:
+            raise PermissionError("unsafe model filesystem")
+        deadline=time.monotonic()+timeout_seconds
+        while True:
+            try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB); break
+            except BlockingIOError:
+                if time.monotonic()>=deadline: raise TimeoutError("model install lock timeout")
+                time.sleep(0.05)
+        owner=f"pid={os.getpid()} start={time.monotonic_ns()}\n".encode()
+        os.ftruncate(fd,0); os.write(fd,owner); os.fsync(fd)
+        return _HeldLock(fd)
+    except Exception: os.close(fd); raise
+
+def remove_exact_private_tree_at(parent_fd,name,identity):
+    fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=parent_fd)
+    try:
+        st=os.fstat(fd)
+        if (st.st_dev,st.st_ino)!=identity or st.st_uid!=os.geteuid():
+            raise PermissionError("unsafe model filesystem")
+        os.fchmod(fd,0o700)
+        for child in os.listdir(fd):
+            child_st=os.stat(child,dir_fd=fd,follow_symlinks=False)
+            if stat.S_ISDIR(child_st.st_mode):
+                remove_exact_private_tree_at(fd,child,(child_st.st_dev,child_st.st_ino))
+            elif stat.S_ISREG(child_st.st_mode) and child_st.st_uid==os.geteuid() and child_st.st_nlink==1:
+                os.unlink(child,dir_fd=fd)
+            else: raise PermissionError("unsafe model filesystem")
+    finally: os.close(fd)
+    os.rmdir(name,dir_fd=parent_fd)
+
+def open_regular_at(directory:OwnedDirectory,name:str,flags:int,mode:int=0o400):
+    fd=os.open(name,flags|os.O_CLOEXEC|os.O_NOFOLLOW,mode,dir_fd=directory.fd)
+    st=os.fstat(fd)
+    if not _regular_owner(st,mode_mask=0o077) or stat.S_IMODE(st.st_mode)!=mode or st.st_nlink!=1:
+        os.close(fd); raise PermissionError("unsafe model filesystem")
+    return fd
+
+def atomic_publish_dir_noreplace(parent:OwnedDirectory,source:str,destination:str):
+    # Platform adapter uses renameat2(RENAME_NOREPLACE) on Linux or
+    # renameatx_np(RENAME_EXCL) on macOS. ENOTSUP is fail-closed; there is no
+    # existence-check + rename fallback.
+    libc=ctypes.CDLL(None,use_errno=True)
+    if sys.platform=="darwin":
+        result=libc.renameatx_np(parent.fd,source.encode(),parent.fd,destination.encode(),0x00000004)
+    elif sys.platform.startswith("linux") and hasattr(libc,"renameat2"):
+        result=libc.renameat2(parent.fd,source.encode(),parent.fd,destination.encode(),0x1)
+    else: raise OSError("exclusive directory publication unsupported")
+    if result!=0:
+        error=ctypes.get_errno(); raise OSError(error,os.strerror(error))
+
+def hash_exact_fd(fd:int,expected_size:int,expected_sha256:str):
+    digest=hashlib.sha256(); total=0
+    while chunk:=os.pread(
+        fd,min(1_048_576,expected_size+1-total),total,
+    ):
+        total+=len(chunk)
+        if total>expected_size: raise RuntimeError("model size mismatch")
+        digest.update(chunk)
+    if total!=expected_size or digest.hexdigest()!=expected_sha256:
+        raise RuntimeError("model hash mismatch")
+    return total,digest.hexdigest()
+```
+
+`parse_yaml_no_duplicates_aliases_tags` first walks the bounded PyYAML event iterator, rejecting every alias, explicit/non-core tag, depth above 32, or event 16,385 before construction; its mapping constructor rejects a repeated scalar key before assignment. `open_componentwise_owned_dir`, `mkdir_and_open_componentwise`, and `open_owned_child_dir` use only no-follow descriptor-relative operations, compare pre/open identities, require the effective owner and exact leaf mode, and reject symlinks, non-directories, hard-linked artifact files, or replaced components. `nofollow_flock` creates/opens the lock with `O_NOFOLLOW|O_CREAT`, validates its descriptor before `flock`, records PID/start identity, uses a bounded timeout, and fails closed. Cleanup recursively enumerates only the exact private stage descriptor and verifies its recorded `(dev,ino)` before unlinking. Every helper has direct race/fault tests; no helper resolves or later reopens a security-qualified pathname.
+
+```python
 # apps/core/src/tuntun_core/services/models/registry.py
 from dataclasses import dataclass
 from pathlib import Path
-import re, yaml
+from urllib.parse import urlsplit
+import os,re
+from .fs import OwnedDirectory,hash_exact_fd,open_regular_at,read_bounded_strict_yaml
 
-SAFE_SUFFIXES = {".onnx", ".json", ".txt", ".tflite", ".safetensors"}
-@dataclass(frozen=True, slots=True)
-class ModelFile: path: str; size: int; sha256: str; url: str
-@dataclass(frozen=True, slots=True)
-class ActivatedModel: model_id: str; revision: str; root: Path
-@dataclass(frozen=True, slots=True)
+SAFE_SUFFIXES={".onnx",".json",".txt",".tflite",".safetensors"}
+MODEL_ID=re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
+REVISION=re.compile(r"^[0-9a-f]{40,64}$")
+DIGEST=re.compile(r"^[0-9a-f]{64}$")
+MAX_MODEL_FILE_BYTES=4_000_000_000
+MAX_MODEL_REVISION_BYTES=8_000_000_000
+MAX_MODEL_FILES=64
+
+class ModelVerificationError(PermissionError): pass
+
+@dataclass(frozen=True,slots=True)
+class ModelFile:
+    path:str; size:int; sha256:str; url:str
+    def __post_init__(self):
+        if not isinstance(self.path,str) or type(self.size) is not int or not isinstance(self.sha256,str) or not isinstance(self.url,str):
+            raise ValueError("invalid model manifest")
+        parsed=urlsplit(self.url)
+        if (
+            Path(self.path).name!=self.path or self.path in {".",".."}
+            or Path(self.path).suffix not in SAFE_SUFFIXES
+            or not 1<=self.size<=MAX_MODEL_FILE_BYTES
+            or DIGEST.fullmatch(self.sha256) is None
+            or parsed.scheme!="https" or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.port not in {None,443} or parsed.query or parsed.fragment
+            or not parsed.path.startswith("/")
+        ): raise ValueError("invalid model manifest")
+
+@dataclass(frozen=True,slots=True)
 class ModelEntry:
-    model_id: str; revision: str; license: str; provenance: str; redistribution: str
-    approved_purpose: str; runtime: str; architecture: str; input_contract: str; output_contract: str
-    benchmark_gate: str; review_date: str; files: tuple[ModelFile, ...]
+    model_id:str; revision:str; license:str; provenance:str; redistribution:str
+    approved_purpose:str; runtime:str; architecture:str; input_contract:str
+    output_contract:str; benchmark_gate:str; review_date:str
+    files:tuple[ModelFile,...]
+    def __post_init__(self):
+        scalar_values=(
+            self.model_id,self.revision,self.license,self.provenance,
+            self.redistribution,self.approved_purpose,self.runtime,
+            self.architecture,self.input_contract,self.output_contract,
+            self.benchmark_gate,self.review_date,
+        )
+        if any(not isinstance(value,str) for value in scalar_values):
+            raise ValueError("invalid model manifest")
+        names=tuple(file.path for file in self.files)
+        if (
+            MODEL_ID.fullmatch(self.model_id) is None
+            or REVISION.fullmatch(self.revision) is None
+            or not 1<=len(self.files)<=MAX_MODEL_FILES
+            or len(set(names))!=len(names)
+            or sum(file.size for file in self.files)>MAX_MODEL_REVISION_BYTES
+            or any(not value for value in scalar_values[2:])
+        ): raise ValueError("invalid model manifest")
+
+@dataclass(slots=True)
+class PreadOnlyModelReader:
+    __fd:int
+    size:int
+    def read_at(self,offset:int,length:int) -> bytes:
+        if (
+            type(offset) is not int or type(length) is not int
+            or not 0<=offset<=self.size or not 1<=length<=1_048_576
+        ): raise ValueError("invalid model reader range")
+        return os.pread(self.__fd,min(length,self.size-offset),offset)
+    def chunks(self,chunk_size:int=1_048_576):
+        offset=0
+        while offset<self.size:
+            chunk=self.read_at(offset,chunk_size)
+            if not chunk: raise RuntimeError("model descriptor truncated")
+            offset+=len(chunk); yield chunk
+    def close(self): os.close(self.__fd)
+
+@dataclass(slots=True)
+class VerifiedModelFile:
+    path:str; size:int; sha256:str; fd:int
+    def load_with(self,adapter):
+        # Adapter receives a bounded reader over this dup; the reader hashes the
+        # exact bytes it supplies, requires EOF/size/digest, and returns a signed
+        # per-file loader receipt. It has no pathname API.
+        reader=PreadOnlyModelReader(os.dup(self.fd),self.size)
+        try:
+            return adapter.load_verified_reader(
+                reader,self.path,self.size,self.sha256,
+            )
+        finally: reader.close()
+
+@dataclass(slots=True)
+class ActivatedModel:
+    model_id:str; revision:str; files:tuple[VerifiedModelFile,...]
+    def load_with(self,adapter,receipt_verifier):
+        receipts=[]
+        try:
+            for file in self.files: receipts.append(file.load_with(adapter))
+            expected=tuple((f.path,f.size,f.sha256) for f in self.files)
+            try: observed=tuple((r.path,r.size,r.sha256) for r in receipts)
+            except (AttributeError,TypeError,ValueError) as error:
+                raise ModelVerificationError("runtime model receipt mismatch") from error
+            if observed!=expected:
+                raise ModelVerificationError("runtime model receipt mismatch")
+            candidate=adapter.finish_model(self.model_id,self.revision,tuple(receipts))
+            try:
+                return receipt_verifier.require_exact_signed_current(
+                    candidate,signature_domain="tuntun.runtime-model-loader-receipt.v1",
+                    model_id=self.model_id,revision=self.revision,files=expected,
+                )
+            except Exception as error:
+                raise ModelVerificationError("runtime model receipt mismatch") from error
+        except Exception as error:
+            try: adapter.abort_model(self.model_id,self.revision,tuple(receipts))
+            except Exception as abort_error:
+                raise RuntimeError("runtime model abort failed; disable capability") from abort_error
+            raise
+    def close(self):
+        for file in self.files: os.close(file.fd)
 
 class ModelRegistry:
-    def __init__(self, entries: dict[str, ModelEntry], model_root: Path) -> None: self._entries=entries; self._root=model_root
+    def __init__(self,entries,model_root): self._entries,self._root=entries,model_root
     @classmethod
-    def load(cls, manifest: Path, model_root: Path = Path("var/models")) -> "ModelRegistry":
-        raw = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-        entries: dict[str, ModelEntry] = {}
-        for item in raw.get("models", []):
-            revision = str(item.get("revision", ""))
-            if not re.fullmatch(r"[0-9a-f]{40,64}", revision): raise ValueError("immutable revision required")
-            files = tuple(ModelFile(**file) for file in item["files"])
-            if any(Path(file.path).name != file.path or Path(file.path).suffix not in SAFE_SUFFIXES for file in files): raise ValueError("unsafe model serialization or path")
-            entry = ModelEntry(model_id=item["id"], revision=revision, license=item["license"], provenance=item["provenance"], redistribution=item["redistribution"], approved_purpose=item["approved_purpose"], runtime=item["runtime"], architecture=item["architecture"], input_contract=item["input_contract"], output_contract=item["output_contract"], benchmark_gate=item["benchmark_gate"], review_date=item["review_date"], files=files)
-            entries[entry.model_id] = entry
-        return cls(entries, model_root)
-    def activate(self, model_id: str) -> ActivatedModel:
-        if model_id not in self._entries: raise LookupError("model is not registered")
-        entry=self._entries[model_id]; root=self._root/model_id/entry.revision
-        for file in entry.files:
-            path=root/file.path
-            if not path.is_file() or path.stat().st_size != file.size: raise RuntimeError("model is not installed and verified")
-            import hashlib
-            if hashlib.sha256(path.read_bytes()).hexdigest() != file.sha256: raise RuntimeError("model hash mismatch")
-        return ActivatedModel(model_id, entry.revision, root)
+    def load(cls,manifest:Path,model_root:Path=Path("var/models")):
+        raw=read_bounded_strict_yaml(manifest)
+        if not isinstance(raw,dict) or set(raw)!={"schema_version","models"} or raw["schema_version"]!="1.0" or not isinstance(raw["models"],list) or len(raw["models"])>256:
+            raise ValueError("invalid model manifest")
+        entries={}
+        entry_keys={"id","revision","license","provenance","redistribution","approved_purpose","runtime","architecture","input_contract","output_contract","benchmark_gate","review_date","files"}
+        file_keys={"path","size","sha256","url"}
+        for item in raw["models"]:
+            if not isinstance(item,dict) or set(item)!=entry_keys or not isinstance(item["files"],list) or not 1<=len(item["files"])<=MAX_MODEL_FILES or any(not isinstance(file,dict) or set(file)!=file_keys for file in item["files"]):
+                raise ValueError("invalid model manifest")
+            try:
+                files=tuple(ModelFile(**file) for file in item["files"])
+                entry=ModelEntry(model_id=item["id"],files=files,**{key:item[key] for key in entry_keys-{"id","files"}})
+            except (TypeError,ValueError,OverflowError) as error:
+                raise ValueError("invalid model manifest") from error
+            if entry.model_id in entries: raise ValueError("invalid model manifest")
+            entries[entry.model_id]=entry
+        return cls(entries,model_root)
+    def entry(self,model_id):
+        try: return self._entries[model_id]
+        except KeyError as error: raise LookupError("model is not registered") from error
+    def activate(self,model_id):
+        entry=self.entry(model_id); handles=[]
+        try:
+            root=OwnedDirectory.open(self._root)
+            model=root.child(entry.model_id); revision=model.child(entry.revision,mode=0o500)
+            for item in entry.files:
+                fd=open_regular_at(revision,item.path,os.O_RDONLY)
+                hash_exact_fd(fd,item.size,item.sha256)
+                handles.append(VerifiedModelFile(item.path,item.size,item.sha256,fd))
+            return ActivatedModel(entry.model_id,entry.revision,tuple(handles))
+        except Exception:
+            for handle in handles: os.close(handle.fd)
+            raise RuntimeError("model is not installed and verified")
+        finally:
+            for directory in (locals().get("revision"),locals().get("model"),locals().get("root")):
+                if directory is not None: directory.close()
+```
+
+```python
+# apps/core/src/tuntun_core/services/models/network.py
+from contextlib import contextmanager
+import http.client,ipaddress,multiprocessing,socket,ssl,threading,time
+from urllib.parse import urlsplit
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self,hostname,pinned_ip,timeout):
+        super().__init__(hostname,443,timeout=timeout,context=ssl.create_default_context())
+        self._pinned_ip=pinned_ip
+    def connect(self):
+        raw=socket.create_connection((self._pinned_ip,443),self.timeout)
+        self.sock=self._context.wrap_socket(raw,server_hostname=self.host)
+
+def _resolver_child(send,hostname):
+    try:
+        values=sorted({
+            answer[4][0] for answer in socket.getaddrinfo(
+                hostname,443,type=socket.SOCK_STREAM,proto=socket.IPPROTO_TCP,
+            )
+        })
+        send.send(("ok",values))
+    except BaseException as error:
+        send.send(("error",type(error).__name__))
+    finally: send.close()
+
+def resolve_public_addresses_bounded(hostname,deadline):
+    remaining=deadline-time.monotonic()
+    if remaining<=0: raise TimeoutError("model download total deadline")
+    context=multiprocessing.get_context("spawn")
+    receive,send=context.Pipe(duplex=False)
+    process=context.Process(target=_resolver_child,args=(send,hostname),daemon=True)
+    process.start(); send.close()
+    try:
+        if not receive.poll(remaining):
+            process.terminate(); process.join(1)
+            if process.is_alive(): process.kill(); process.join()
+            raise TimeoutError("model DNS deadline")
+        status,payload=receive.recv(); process.join(1)
+        if process.is_alive(): process.kill(); process.join(); raise RuntimeError("model resolver did not exit")
+        if status!="ok" or not isinstance(payload,list) or any(not isinstance(value,str) for value in payload):
+            raise OSError("model DNS resolution failed")
+        return payload
+    finally:
+        receive.close()
+        if process.is_alive(): process.kill(); process.join()
+
+class _DeadlineBoundResponse:
+    def __init__(self,response,sock,deadline,per_read_timeout):
+        self._response,self._socket,self._deadline=response,sock,deadline
+        self._per_read_timeout=per_read_timeout
+        self.status,self.headers=response.status,response.headers
+    def read(self,size):
+        remaining=self._deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError("model download total deadline")
+        self._socket.settimeout(min(self._per_read_timeout,remaining))
+        try: chunk=self._response.read1(size)
+        except socket.timeout as error:
+            raise TimeoutError("model download deadline") from error
+        if time.monotonic()>self._deadline:
+            raise TimeoutError("model download total deadline")
+        return chunk
+
+class PinnedHttpsTransport:
+    @contextmanager
+    def stream_exact(self,url,allowed_hosts,deadline,per_read_timeout=30.0):
+        parsed=urlsplit(url); hostname=parsed.hostname
+        remaining=deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError("model download total deadline")
+        if (
+            parsed.scheme!="https" or hostname not in allowed_hosts
+            or parsed.username is not None or parsed.password is not None
+            or parsed.port not in {None,443} or parsed.query or parsed.fragment
+        ): raise PermissionError("model URL is not allowlisted HTTPS")
+        addresses=resolve_public_addresses_bounded(hostname,deadline)
+        if not addresses or any(not ipaddress.ip_address(value).is_global for value in addresses):
+            raise PermissionError("model host did not resolve only to public addresses")
+        # Connect to one already-validated IP, while TLS SNI/certificate and Host
+        # remain the exact allowlisted DNS name. There is no resolver TOCTOU.
+        remaining=deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError("model download total deadline")
+        connection=_PinnedHTTPSConnection(hostname,addresses[0],min(per_read_timeout,remaining))
+        deadline_timer=threading.Timer(remaining,connection.close)
+        deadline_timer.daemon=True; deadline_timer.start()
+        try:
+            target=parsed.path or "/"
+            connection.request(
+                "GET",target,
+                headers={"Host":hostname,"Accept-Encoding":"identity","Connection":"close"},
+            )
+            yield _DeadlineBoundResponse(
+                connection.getresponse(),connection.sock,deadline,per_read_timeout,
+            )
+        except OSError as error:
+            if time.monotonic()>=deadline:
+                raise TimeoutError("model download total deadline") from error
+            raise
+        finally:
+            deadline_timer.cancel(); connection.close()
 ```
 
 ```python
 # apps/core/src/tuntun_core/services/models/installer.py
-import hashlib, os, tempfile
-from pathlib import Path
-from urllib.parse import urlparse
-from urllib.request import urlopen
-from .registry import ActivatedModel, ModelRegistry
+import fcntl,hashlib,os,secrets,stat,time
+from urllib.parse import urlsplit
+from .fs import (
+    OwnedDirectory,atomic_publish_dir_noreplace,hash_exact_fd,open_regular_at,
+)
+from .network import PinnedHttpsTransport
+from .registry import ActivatedModel,VerifiedModelFile
 
 class ModelInstaller:
-    def __init__(self, registry: ModelRegistry, allowed_hosts: frozenset[str]) -> None: self.registry=registry; self.allowed_hosts=allowed_hosts
-    def install(self, model_id: str) -> ActivatedModel:
-        entry=self.registry._entries.get(model_id)
-        if entry is None: raise LookupError("model is not registered")
-        root=self.registry._root/model_id/entry.revision; root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for item in entry.files:
-            parsed=urlparse(item.url)
-            if parsed.scheme != "https" or parsed.hostname not in self.allowed_hosts: raise ValueError("model URL is not allowlisted HTTPS")
-            with urlopen(item.url, timeout=30) as response, tempfile.NamedTemporaryFile(dir=root, delete=False) as target:
-                final=urlparse(response.geturl())
-                if final.scheme != "https" or final.hostname != parsed.hostname: raise ValueError("model redirect changed origin")
-                digest=hashlib.sha256(); size=0
-                while chunk := response.read(65536): target.write(chunk); digest.update(chunk); size += len(chunk)
-                temporary=Path(target.name)
-            if size != item.size or digest.hexdigest() != item.sha256: temporary.unlink(); raise ValueError("model size/hash mismatch")
-            os.replace(temporary, root/item.path)
-        return self.registry.activate(model_id)
+    def __init__(self,registry,allowed_hosts,transport=None):
+        self.registry=registry; self.allowed_hosts=frozenset(allowed_hosts)
+        self.transport=transport or PinnedHttpsTransport()
+    MAX_TOTAL_DOWNLOAD_SECONDS=900.0
+    def _download(self,stage,item,deadline):
+        parsed=urlsplit(item.url)
+        if parsed.hostname not in self.allowed_hosts:
+            raise PermissionError("model URL is not allowlisted HTTPS")
+        write_fd=open_regular_at(
+            stage,item.path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,mode=0o600,
+        )
+        read_fd=None
+        try:
+            # Open the only retained descriptor before qualification, while the
+            # private owner-only stage and exclusive writer still name the new
+            # inode. The runtime never receives write authority.
+            read_fd=open_regular_at(stage,item.path,os.O_RDONLY,mode=0o600)
+            written_identity=os.fstat(write_fd); read_identity=os.fstat(read_fd)
+            if (
+                not stat.S_ISREG(written_identity.st_mode)
+                or written_identity.st_uid!=os.geteuid()
+                or written_identity.st_nlink!=1
+                or (written_identity.st_dev,written_identity.st_ino)!=
+                   (read_identity.st_dev,read_identity.st_ino)
+                or fcntl.fcntl(read_fd,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY
+            ):
+                raise PermissionError("model staged descriptor identity invalid")
+            digest=hashlib.sha256(); total=0
+            with self.transport.stream_exact(item.url,self.allowed_hosts,deadline) as response:
+                # No redirect is followed. Any 3xx, changed URL, non-200, or
+                # declared oversized length is rejected before response bytes.
+                if response.status!=200:
+                    raise PermissionError("model redirect or response rejected")
+                length=response.headers.get("content-length")
+                encoding=response.headers.get("content-encoding")
+                if encoding not in {None,"identity"}:
+                    raise ValueError("model response encoding rejected")
+                if length is not None and (not length.isascii() or not length.isdecimal() or int(length)!=item.size):
+                    raise ValueError("model size/hash mismatch")
+                while chunk:=response.read(65_536):
+                    total+=len(chunk)
+                    if total>item.size: raise ValueError("model size/hash mismatch")
+                    view=memoryview(chunk)
+                    while view:
+                        written=os.write(write_fd,view)
+                        if written<=0: raise OSError("model artifact write made no progress")
+                        view=view[written:]
+                    digest.update(chunk)
+            if total!=item.size or digest.hexdigest()!=item.sha256:
+                raise ValueError("model size/hash mismatch")
+            os.fchmod(write_fd,0o400); os.fsync(write_fd)
+            final_write=os.fstat(write_fd); final_read=os.fstat(read_fd)
+            if (
+                not stat.S_ISREG(final_write.st_mode)
+                or not stat.S_ISREG(final_read.st_mode)
+                or final_write.st_uid!=os.geteuid()
+                or final_read.st_uid!=os.geteuid()
+                or stat.S_IMODE(final_read.st_mode)!=0o400
+                or final_write.st_size!=item.size or final_read.st_size!=item.size
+                or final_write.st_nlink!=1 or final_read.st_nlink!=1
+                or (final_write.st_dev,final_write.st_ino)!=
+                   (written_identity.st_dev,written_identity.st_ino)
+                or (final_read.st_dev,final_read.st_ino)!=
+                   (written_identity.st_dev,written_identity.st_ino)
+            ):
+                raise ValueError("model size/hash mismatch")
+            hash_exact_fd(read_fd,item.size,item.sha256)
+            os.close(write_fd); write_fd=None
+            return read_fd
+        except Exception:
+            if read_fd is not None: os.close(read_fd)
+            if write_fd is not None: os.close(write_fd)
+            raise
+
+    def install(self,model_id):
+        entry=self.registry.entry(model_id)
+        root=OwnedDirectory.open_or_create(self.registry._root)
+        try:
+            with root.lock(".model-install.lock",timeout_seconds=30):
+                model=root.child(entry.model_id,create=True,exist_ok=True)
+                try:
+                    model.remove_private_stages(f".stage-{entry.revision}-")
+                    model.fsync()
+                    if model.has_child(entry.revision):
+                        # Existing revisions are immutable: validate and reuse an
+                        # exact complete revision, or fail for owner repair.
+                        return self.registry.activate(model_id)
+                    stage_name=f".stage-{entry.revision}-{secrets.token_hex(8)}"
+                    stage=model.child(stage_name,create=True)
+                    stage_identity=stage.identity
+                    published=False
+                    handles=[]
+                    try:
+                        download_deadline=time.monotonic()+self.MAX_TOTAL_DOWNLOAD_SECONDS
+                        for item in entry.files:
+                            fd=self._download(stage,item,download_deadline)
+                            handles.append(VerifiedModelFile(
+                                item.path,item.size,item.sha256,fd,
+                            ))
+                        # Rehash the retained same-inode O_RDONLY descriptions
+                        # that are handed to the runtime; publication never
+                        # qualifies one pathname and later reopens it.
+                        for item,handle in zip(entry.files,handles,strict=True):
+                            hash_exact_fd(handle.fd,item.size,item.sha256)
+                        stage.chmod(0o500)
+                        stage.fsync()
+                        atomic_publish_dir_noreplace(model,stage_name,entry.revision)
+                        published=True
+                        model.fsync()
+                        return ActivatedModel(
+                            entry.model_id,entry.revision,tuple(handles),
+                        )
+                    except Exception:
+                        for handle in handles: os.close(handle.fd)
+                        if not published:
+                            model.remove_private_stage(stage_name,stage_identity)
+                            model.fsync()
+                        # After an exclusive rename, the final name contains a
+                        # complete read-only revision. A parent-fsync failure is
+                        # reconciled on restart; it is never deleted or replaced.
+                        raise
+                    finally: stage.close()
+                finally: model.close()
+        finally: root.close()
+        raise RuntimeError("model install did not publish")
 ```
 
-Create `models/manifest.schema.json` as JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry` fields from the interface, revision pattern `^[0-9a-f]{40,64}$`, HTTPS URLs, positive file sizes, SHA-256 pattern, and a non-empty models array allowed to be empty only for the initial checked-in `models/manifest.yaml`. Set the initial manifest to `schema_version: "1.0"` and `models: []`. `scripts/check_model_manifest.py` loads YAML, validates it with `jsonschema.Draft202012Validator`, then calls `ModelRegistry.load`; exit 0 with `model manifest: PASS`. Add a Typer `models` sub-app with `list`, `verify`, and explicit `install MODEL_ID` commands; registering the sub-app in `cli/main.py` must not instantiate `ModelInstaller` or perform network I/O at import/startup.
+`models/manifest.schema.json` is JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry`/file fields, the same closed ID/revision/file/hash/size/URL bounds, and an array-size cap of 256 models and 64 files. Schema validation is defense in depth: `ModelRegistry.load` independently enforces every invariant, rejects booleans and every other wrong scalar type as `ValueError`, caps models before iteration and files before construction, detects duplicate IDs/files, checks total revision bytes, and uses strict YAML parsing. Only the checked-in bootstrap manifest may have `models: []`; release candidates with enabled local-model capabilities must contain their exact governed entries. `scripts/check_model_manifest.py` uses the same bounded strict read, then the schema and runtime loader; it never performs a second pathname read. Add a Typer `models` sub-app with `list`, `verify`, and explicit owner-presence `install MODEL_ID` commands; registering it must not instantiate the installer/client or perform network I/O. Startup accepts only an `ActivatedModel` whose retained handles are `O_RDONLY`; hashing and adapter reads use explicit-offset `pread`, so prior or concurrent descriptor offsets cannot truncate or redirect a load. The adapter receives only the bounded pread reader, and the runtime’s exact signed loader receipt is authoritative. `receipt_verifier` verifies the canonical signature, non-overlapping domain, exact current key generation, expiry, model/revision, and ordered `(path,size,sha256)` inventory; per-file receipts repeat that exact tuple. The adapter keeps any partly loaded runtime private until verification returns; every load, finish, or verification exception invokes mandatory `abort_model`, and abort failure disables/restarts the model capability rather than exposing the candidate. The installer has one 900-second monotonic deadline shared across bounded DNS resolution, connect, headers, and every artifact body; a deadline timer closes a slow-drip socket. Missing/rejected/unverified models produce a disabled capability.
 
 - [ ] **Step 4: Lock and run the green model gate**
 
 Run: `uv lock && uv run pytest tests/security/test_model_governance.py -q && uv run python scripts/check_model_manifest.py models/manifest.yaml && uv run tuntunctl models list`
 
-Expected: PASS with two tests, `model manifest: PASS`, and an empty JSON list from the CLI; no network request occurs.
+Expected: PASS with the full manifest/filesystem/network/race/fault matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, and conflicting publication never expose a revision or runtime bytes; two installers serialize and converge on one complete immutable revision; runtime loads repeatedly see the full exact bytes hashed through stable read-only descriptors regardless of prior offsets; list/verify/startup make zero network requests.
 
 - [ ] **Step 5: Commit exact Task 10 paths**
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/services/models/registry.py apps/core/src/tuntun_core/services/models/installer.py apps/core/src/tuntun_core/cli/commands/models.py apps/core/src/tuntun_core/cli/main.py models/manifest.schema.json models/manifest.yaml scripts/check_model_manifest.py tests/security/test_model_governance.py
+git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/services/models/fs.py apps/core/src/tuntun_core/services/models/network.py apps/core/src/tuntun_core/services/models/registry.py apps/core/src/tuntun_core/services/models/installer.py apps/core/src/tuntun_core/cli/commands/models.py apps/core/src/tuntun_core/cli/main.py models/manifest.schema.json models/manifest.yaml scripts/check_model_manifest.py tests/security/test_model_governance.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(models): add governed registry and explicit installer"
@@ -2767,6 +5796,7 @@ Add `sqlcipher3==0.6.2` and `cryptography>=45,<46` to core dependencies and run 
 ```python
 # tests/security/test_sqlcipher.py
 from pathlib import Path
+import json
 import sqlite3
 import pytest
 from sqlcipher3 import dbapi2 as sqlcipher3
@@ -2977,13 +6007,17 @@ git commit -m "feat(storage): add purpose-bound record encryption"
 **Interfaces:**
 - Consumes: `open_sqlcipher(path, key)` from Task 11.
 - Produces: `FOUNDATION_TABLE_NAMES: frozenset[str]`; SQLAlchemy `metadata`; `create_sqlcipher_engine(path: Path, key: bytes) -> Engine`; `encrypted_backup(source: Path, destination: Path, key: bytes) -> None`; `upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None`; Alembic revision `0001_foundation`, down revision `None`.
-- Migration owns exactly: `households`, `devices`, `sessions`, `event_receipts`, `idempotency_receipts`, `audit_receipts`, `audit_segments`, `redaction_receipts`, `provider_calls`, `provider_response_receipts`, `provider_prices`, `budget_reservations`, `cost_ledger`, `runtime_settings`.
-- `request_id` groups all attempts for one logical STT/reasoning/TTS request. `attempt_id` is the unique idempotency boundary for both `budget_reservations` and `provider_calls`; every retry receives a new attempt, authorization, and reservation while retaining its logical request ID. The `(month_key, state, amount_micros_sgd)` index supports the `BEGIN IMMEDIATE` atomic monthly sum over `reserved`, `sent`, and `settled` rows.
+- Migration owns exactly: `households`, `devices`, `sessions`, `event_receipts`, `idempotency_receipts`, `audit_receipts`, `audit_segments`, `redaction_receipts`, `provider_calls`, `provider_response_receipts`, `provider_prices`, `budget_reservations`, `cost_ledger`, `runtime_settings`, and the reserved content-free `reachy_core_tx_sequences|reachy_duplex_correlations` tables required by the later duplex repository task without a future-migration dependency.
+- `request_id` groups all attempts for one logical STT/reasoning/TTS/web-search request. `attempt_id` is the unique idempotency boundary for both `budget_reservations` and `provider_calls`; every retry receives a new attempt, authorization, and reservation while retaining its logical request ID. The `(month_key, state, reserved_micros_sgd, charged_micros_sgd)` index supports the `BEGIN IMMEDIATE` atomic monthly sum: use immutable reserved cost for `reserved|sent`, authoritative charged cost for `settled`, and exclude `released|denied`.
+- Budget pricing persistence is authoritative and bounded. `provider_prices` keys one exact provider/model/category/pricing-version/FX-version/tier-basis/tier-range record and stores input/output per-million, audio per-minute, and web-search per-call micro-USD rates; the closed primary accounting basis and missing-evidence policy; FX; both immutable version strings; the exact bounded HTTPS price-source URL; and both lowercase SHA-256 source digests. `tier_basis='flat'` requires the canonical `0,0` range; `tier_basis='llm_input_tokens'` is allowed only for LLM input-token ranges bounded by `0..10_000_000`. The catalog must reject overlapping, gapped, mixed-version, mixed-source-URL/digest, mixed-validity, or incomplete tier schedules before any row becomes current. Every signed reservation snapshot carries the complete schedule: reservation chooses the highest applicable rate for its signed input-token ceiling, while exact settlement reselects the tier from the verified provider input-token receipt and never applies a cheaper ceiling tier after a boundary crossing. TTS is `request_bound_exact` with no fabricated response usage. Web search is `provider_reported_exact`, reserves exactly one fixed tool call plus token ceilings, and alone permits `conservative_full_reservation` when missing evidence remains provably within that one-call ceiling. One allowed quote is in `1..1_000_000_000_000` micro-SGD; every denied row stores zero. Checked aggregate arithmetic is limited to `0..9_000_000_000_000_000`; overflow or an out-of-range result fails closed, freezes cloud egress, and requires owner repair.
+- Every reservation stores the closed usage ceiling plus an immutable price snapshot, accounting basis, missing-evidence policy, and purpose-specific HMAC. That complete quote/policy group is all-null only for `deny_unknown_price|deny_cloud_egress_frozen`; it is all-non-null for `allow|allow_soft_warning|deny_hard_limit`. `deny_hard_limit` retains the complete projected quote but reserves zero. `charged_micros_sgd` is null unless state is `settled`, `estimate_overrun` is exact truth for `charged > reserved`, and the reservation amount is never overwritten during settlement.
+- Budget proof persistence is exact: both reservation and provider-call rows store `gateway_ordering_version` plus the closed `transport_phase`; reservations also store `reconciled_at`, and `cost_ledger.month_key` copies the immutable Singapore month from the reservation. A provider call's nullable usage triple is all-or-none and contains the one authoritative full canonical `ProviderUsageReceiptV1` sealed union (`stt|llm|tts|web_search`) plus its locally verified receipt key/HMAC. The ledger repeats the immutable quote versions/digests and reserved/charged amounts, persists `accounting_basis` and the verified billable-unit/receipt evidence when present, and carries exact conservative-estimate, overrun, and hard-cap-exceeded booleans. The conversation budget task owns the only repository transitions over these foundation columns and the durable monthly cloud-egress freeze/owner-alert record.
 
 - [ ] **Step 1: Write the red upgrade/downgrade ownership test**
 
 ```python
 # tests/integration/storage/test_migrations.py
+import json
 from pathlib import Path
 import sqlite3
 import pytest
@@ -2991,7 +6025,7 @@ from alembic import command
 from alembic.config import Config
 from tuntun_core.adapters.sqlcipher.connection import open_sqlcipher
 
-EXPECTED={"alembic_version","households","devices","sessions","event_receipts","idempotency_receipts","audit_receipts","audit_segments","redaction_receipts","provider_calls","provider_response_receipts","provider_prices","budget_reservations","cost_ledger","runtime_settings"}
+EXPECTED={"alembic_version","households","devices","sessions","event_receipts","idempotency_receipts","audit_receipts","audit_segments","redaction_receipts","provider_calls","provider_response_receipts","provider_prices","budget_reservations","cost_ledger","runtime_settings","reachy_core_tx_sequences","reachy_duplex_correlations"}
 
 def _config(path: Path, key: bytes) -> Config:
     config=Config("apps/core/alembic.ini"); config.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
@@ -3020,21 +6054,187 @@ def test_existing_database_is_backed_up_encrypted_before_upgrade(tmp_path: Path)
 def test_budget_and_provider_attempt_ids_are_the_idempotency_boundary(tmp_path: Path) -> None:
     path=tmp_path/"attempts.db"; key=bytes(range(32)); command.upgrade(_config(path,key),"head")
     db=open_sqlcipher(path,key); request_id="00000000-0000-0000-0000-000000000010"
-    budget_sql="INSERT INTO budget_reservations (id,request_id,attempt_id,month_key,category,provider,model,outcome,amount_micros_sgd,state,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
-    base=(request_id,"2026-08","llm","openai","gpt-5.6-sol","allow",100,"reserved","2026-08-27T01:02:03.000004Z","2026-08-27T01:03:03.000004Z")
-    db.execute(budget_sql,("00000000-0000-0000-0000-000000000001",request_id,"00000000-0000-0000-0000-000000000101",*base[1:]))
-    db.execute(budget_sql,("00000000-0000-0000-0000-000000000002",request_id,"00000000-0000-0000-0000-000000000102",*base[1:]))
+    budget_sql="INSERT INTO budget_reservations (id,request_id,attempt_id,month_key,category,provider,model,outcome,reserved_micros_sgd,charged_micros_sgd,usage_ceiling_json,price_snapshot_json,primary_accounting_basis,missing_evidence_policy,pricing_version,price_source_sha256,fx_version,fx_source_sha256,pricing_commitment_key_id,pricing_commitment_hmac_b64,estimate_overrun,state,gateway_ordering_version,transport_phase,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    base=("2026-08","llm","openai","gpt-5.6-sol","allow",100,None,json.dumps({"category":"llm","input_tokens":10,"output_tokens":10}),json.dumps({"provider":"openai","model":"gpt-5.6-sol"}),"provider_reported_exact","freeze_unknown_overage","openai-2026-08-27","a"*64,"bootstrap-safety-factor-2026-08-27","b"*64,"pricing-v1","A"*43+"=",0,"reserved",1,"not_claimed","2026-08-27T01:02:03.000004Z","2026-08-27T01:03:03.000004Z")
+    db.execute(budget_sql,("00000000-0000-0000-0000-000000000001",request_id,"00000000-0000-0000-0000-000000000101",*base))
+    db.execute(budget_sql,("00000000-0000-0000-0000-000000000002",request_id,"00000000-0000-0000-0000-000000000102",*base))
     with pytest.raises(sqlite3.IntegrityError):
-        db.execute(budget_sql,("00000000-0000-0000-0000-000000000003",request_id,"00000000-0000-0000-0000-000000000102",*base[1:]))
-    call_sql="INSERT INTO provider_calls (id,request_id,attempt_id,authorization_id,budget_reservation_id,purpose,provider,model,request_hmac_key_id,request_hmac_b64,category,outcome,started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
-    call_base=(request_id,"cloud_reasoning","openai","gpt-5.6-sol","provider-request-v1","A"*44,"llm","started","2026-08-27T01:02:03.000004Z")
+        db.execute(budget_sql,("00000000-0000-0000-0000-000000000003",request_id,"00000000-0000-0000-0000-000000000102",*base))
+    call_sql="INSERT INTO provider_calls (id,request_id,attempt_id,authorization_id,budget_reservation_id,purpose,provider,model,request_hmac_key_id,request_hmac_b64,category,outcome,gateway_ordering_version,transport_phase,started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    call_base=(request_id,"cloud_reasoning","openai","gpt-5.6-sol","provider-request-v1","A"*43+"=","llm","started",1,"claim_begun","2026-08-27T01:02:03.000004Z")
     db.execute(call_sql,("00000000-0000-0000-0000-000000000201",request_id,"00000000-0000-0000-0000-000000000101","00000000-0000-0000-0000-000000000301","00000000-0000-0000-0000-000000000001",*call_base[1:]))
     db.execute(call_sql,("00000000-0000-0000-0000-000000000202",request_id,"00000000-0000-0000-0000-000000000102","00000000-0000-0000-0000-000000000302","00000000-0000-0000-0000-000000000002",*call_base[1:]))
     with pytest.raises(sqlite3.IntegrityError):
         db.execute(call_sql,("00000000-0000-0000-0000-000000000203",request_id,"00000000-0000-0000-0000-000000000102","00000000-0000-0000-0000-000000000303","00000000-0000-0000-0000-000000000002",*call_base[1:]))
     indexes={row[1] for row in db.execute("PRAGMA index_list('budget_reservations')")}
-    assert "ix_budget_month_state_amount" in indexes
+    assert "ix_budget_month_state_cost" in indexes
     assert "ix_provider_calls_request" in {row[1] for row in db.execute("PRAGMA index_list('provider_calls')")}
+    db.close()
+
+
+def test_authoritative_budget_quote_usage_and_overrun_columns_are_migrated(tmp_path: Path) -> None:
+    path=tmp_path/"proof.db"; key=bytes(range(32)); command.upgrade(_config(path,key),"head")
+    db=open_sqlcipher(path,key)
+    columns=lambda table: {row[1]: row for row in db.execute(f"PRAGMA table_info('{table}')")}
+    prices=columns("provider_prices"); reservations=columns("budget_reservations")
+    calls=columns("provider_calls"); ledger=columns("cost_ledger")
+    assert {"provider","tier_basis","tier_min_input_tokens","tier_max_input_tokens","input_micro_usd_per_million","output_micro_usd_per_million","audio_micro_usd_per_minute","web_search_micro_usd_per_call","primary_accounting_basis","missing_evidence_policy","pricing_version","price_source_url","price_source_sha256","fx_version","fx_source_sha256"} <= set(prices)
+    assert {"reserved_micros_sgd","charged_micros_sgd","usage_ceiling_json","price_snapshot_json","primary_accounting_basis","missing_evidence_policy","pricing_version","price_source_sha256","fx_version","fx_source_sha256","pricing_commitment_key_id","pricing_commitment_hmac_b64","estimate_overrun","gateway_ordering_version","transport_phase","reconciled_at"} <= set(reservations)
+    assert {"provider_usage_json","provider_usage_receipt_key_id","provider_usage_receipt_hmac_b64","gateway_ordering_version","transport_phase"} <= set(calls)
+    assert {"month_key","reserved_micros_sgd","charged_micros_sgd","provider_usage_receipt_json","provider_usage_receipt_key_id","provider_usage_receipt_hmac_b64","accounting_basis","conservative_estimate_used","estimate_overrun","hard_cap_exceeded","pricing_version","price_source_sha256","fx_version","fx_source_sha256"} <= set(ledger)
+    assert all(reservations[name][3] == 1 for name in ("reserved_micros_sgd","usage_ceiling_json","estimate_overrun","gateway_ordering_version","transport_phase"))
+    assert all(calls[name][3] == 0 for name in ("provider_usage_json","provider_usage_receipt_key_id","provider_usage_receipt_hmac_b64"))
+    assert all(ledger[name][3] == 1 for name in ("month_key","reserved_micros_sgd","charged_micros_sgd","conservative_estimate_used","estimate_overrun","hard_cap_exceeded"))
+    db.close()
+
+
+def test_budget_schema_rejects_unbounded_prices_partial_proofs_and_false_overrun(tmp_path: Path) -> None:
+    path=tmp_path/"budget-constraints.db"; key=bytes(range(32)); command.upgrade(_config(path,key),"head")
+    db=open_sqlcipher(path,key)
+    price_sql="""INSERT INTO provider_prices
+        (id,provider,model,category,native_currency,tier_basis,
+         tier_min_input_tokens,tier_max_input_tokens,input_micro_usd_per_million,
+         output_micro_usd_per_million,audio_micro_usd_per_minute,
+         web_search_micro_usd_per_call,primary_accounting_basis,
+         missing_evidence_policy,fx_micros_sgd,pricing_version,price_source_url,
+         price_source_sha256,fx_version,fx_source_sha256,effective_at,expires_at)
+        VALUES (:id,:provider,:model,:category,:currency,:tier_basis,:tier_min,:tier_max,:input_rate,:output_rate,
+         :audio_rate,:search_rate,:basis,:missing_policy,:fx_rate,:pricing_version,:source_url,
+         :price_sha,:fx_version,:fx_sha,:effective_at,:expires_at)"""
+    valid_price={
+        "id":"00000000-0000-0000-0000-000000000401","provider":"openai",
+        "model":"gpt-5.6-sol","category":"llm","currency":"USD",
+        "tier_basis":"flat","tier_min":0,"tier_max":0,
+        "input_rate":4_000_000,"output_rate":20_000_000,"audio_rate":0,
+        "search_rate":0,"basis":"provider_reported_exact",
+        "missing_policy":"freeze_unknown_overage","fx_rate":1_500_000,
+        "pricing_version":"openai-2026-08-27",
+        "source_url":"https://developers.openai.com/api/docs/pricing",
+        "price_sha":"a"*64,
+        "fx_version":"bootstrap-safety-factor-2026-08-27","fx_sha":"b"*64,
+        "effective_at":"2026-08-27T00:00:00.000000Z",
+        "expires_at":"2026-09-27T00:00:00.000000Z",
+    }
+    db.execute(price_sql,valid_price)
+    invalid_prices=(
+        valid_price|{"id":"00000000-0000-0000-0000-000000000402","price_sha":"A"*64},
+        valid_price|{"id":"00000000-0000-0000-0000-000000000403","input_rate":1_000_000_001},
+        valid_price|{"id":"00000000-0000-0000-0000-000000000404","effective_at":valid_price["expires_at"],"expires_at":valid_price["effective_at"]},
+        valid_price|{"id":"00000000-0000-0000-0000-000000000405","basis":"request_bound_exact"},
+        valid_price|{"id":"00000000-0000-0000-0000-000000000406","missing_policy":"conservative_full_reservation"},
+        valid_price|{"id":"00000000-0000-0000-0000-000000000409","audio_rate":1},
+        valid_price|{"id":"00000000-0000-0000-0000-000000000413","tier_basis":"flat","tier_max":1},
+        valid_price|{"id":"00000000-0000-0000-0000-000000000414","tier_basis":"llm_input_tokens","tier_min":256_001,"tier_max":256_000},
+        valid_price|{"id":"00000000-0000-0000-0000-000000000418","source_url":"http://127.0.0.1/price"},
+    )
+    for invalid in invalid_prices:
+        with pytest.raises(sqlite3.IntegrityError): db.execute(price_sql,invalid)
+    tts_price=valid_price|{
+        "id":"00000000-0000-0000-0000-000000000407","model":"tts-1",
+        "category":"tts","input_rate":15_000_000,"output_rate":0,
+        "basis":"request_bound_exact",
+    }
+    db.execute(price_sql,tts_price)
+    search_price=valid_price|{
+        "id":"00000000-0000-0000-0000-000000000408",
+        "category":"web_search","search_rate":10_000,
+        "missing_policy":"conservative_full_reservation",
+        "pricing_version":"openai-web-search-2026-08-27",
+    }
+    db.execute(price_sql,search_price)
+    for suffix,field in (("410","input_rate"),("411","output_rate"),("412","search_rate")):
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(price_sql,search_price|{
+                "id":f"00000000-0000-0000-0000-000000000{suffix}",field:0,
+            })
+    qwen_low=valid_price|{
+        "id":"00000000-0000-0000-0000-000000000415","provider":"qwen",
+        "model":"qwen3.7-plus","pricing_version":"qwen3.7-plus-sg-2026-08-28",
+        "source_url":"https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+        "tier_basis":"llm_input_tokens","tier_min":0,"tier_max":256_000,
+        "input_rate":400_000,"output_rate":1_600_000,
+    }
+    qwen_high=qwen_low|{
+        "id":"00000000-0000-0000-0000-000000000416",
+        "tier_min":256_001,"tier_max":1_000_000,
+        "input_rate":1_200_000,"output_rate":4_800_000,
+    }
+    db.execute(price_sql,qwen_low); db.execute(price_sql,qwen_high)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(price_sql,qwen_low|{"id":"00000000-0000-0000-0000-000000000417"})
+
+    reservation_sql="""INSERT INTO budget_reservations
+        (id,request_id,attempt_id,month_key,category,provider,model,outcome,reserved_micros_sgd,
+         charged_micros_sgd,usage_ceiling_json,price_snapshot_json,pricing_version,price_source_sha256,
+         primary_accounting_basis,missing_evidence_policy,fx_version,fx_source_sha256,
+         pricing_commitment_key_id,pricing_commitment_hmac_b64,
+         estimate_overrun,state,gateway_ordering_version,transport_phase,created_at,expires_at)
+        VALUES (:id,:request_id,:attempt_id,:month_key,:category,:provider,:model,:outcome,:reserved,
+         :charged,:usage,:snapshot,:pricing_version,:price_sha,:basis,:missing_policy,
+         :fx_version,:fx_sha,:commitment_key,
+         :commitment_hmac,:overrun,:state,1,:phase,:created_at,:expires_at)"""
+    quoted={
+        "id":"00000000-0000-0000-0000-000000000501","request_id":"00000000-0000-0000-0000-000000000502",
+        "attempt_id":"00000000-0000-0000-0000-000000000503","month_key":"2026-08","category":"llm",
+        "provider":"openai","model":"gpt-5.6-sol","outcome":"allow","reserved":100,"charged":None,
+        "usage":json.dumps({"category":"llm","input_tokens":10,"output_tokens":5}),
+        "snapshot":json.dumps({"provider":"openai","pricing_version":"openai-2026-08-27"}),
+        "pricing_version":"openai-2026-08-27","price_sha":"a"*64,
+        "basis":"provider_reported_exact","missing_policy":"freeze_unknown_overage",
+        "fx_version":"bootstrap-safety-factor-2026-08-27","fx_sha":"b"*64,
+        "commitment_key":"pricing-v1","commitment_hmac":"A"*43+"=","overrun":0,"state":"reserved",
+        "phase":"not_claimed","created_at":"2026-08-27T01:02:03.000004Z","expires_at":"2026-08-27T01:17:03.000004Z",
+    }
+    with pytest.raises(sqlite3.IntegrityError): db.execute(reservation_sql,quoted|{"snapshot":None})
+    with pytest.raises(sqlite3.IntegrityError): db.execute(reservation_sql,quoted|{"basis":None})
+    with pytest.raises(sqlite3.IntegrityError): db.execute(reservation_sql,quoted|{"reserved":1_000_000_000_001})
+    with pytest.raises(sqlite3.IntegrityError): db.execute(reservation_sql,quoted|{"state":"settled","charged":None})
+    db.execute(reservation_sql,quoted)
+    denied=quoted|{
+        "id":"00000000-0000-0000-0000-000000000504","attempt_id":"00000000-0000-0000-0000-000000000505",
+        "outcome":"deny_unknown_price","reserved":0,"snapshot":None,"pricing_version":None,"price_sha":None,
+        "basis":None,"missing_policy":None,"fx_version":None,"fx_sha":None,
+        "commitment_key":None,"commitment_hmac":None,"state":"denied",
+    }
+    db.execute(reservation_sql,denied)
+    search_reservation=quoted|{
+        "id":"00000000-0000-0000-0000-000000000506",
+        "attempt_id":"00000000-0000-0000-0000-000000000507",
+        "category":"web_search",
+        "usage":json.dumps({"category":"web_search","input_tokens":10,"output_tokens":5,"web_search_calls":1}),
+        "missing_policy":"conservative_full_reservation",
+    }
+    db.execute(reservation_sql,search_reservation)
+
+    call_sql="INSERT INTO provider_calls (id,request_id,attempt_id,authorization_id,budget_reservation_id,purpose,provider,model,request_hmac_key_id,request_hmac_b64,category,outcome,gateway_ordering_version,transport_phase,provider_usage_json,provider_usage_receipt_key_id,provider_usage_receipt_hmac_b64,started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(call_sql,("00000000-0000-0000-0000-000000000601",quoted["request_id"],quoted["attempt_id"],"00000000-0000-0000-0000-000000000602",quoted["id"],"cloud_reasoning","openai","gpt-5.6-sol","provider-request-v1","A"*43+"=","llm","succeeded",1,"finished","{}",None,None,"2026-08-27T01:02:03.000004Z"))
+    db.execute(call_sql,("00000000-0000-0000-0000-000000000603",search_reservation["request_id"],search_reservation["attempt_id"],"00000000-0000-0000-0000-000000000604",search_reservation["id"],"web_search","openai","gpt-5.6-sol","provider-request-v1","A"*43+"=","web_search","started",1,"claim_begun",None,None,None,"2026-08-27T01:02:03.000004Z"))
+
+    ledger_sql="INSERT INTO cost_ledger (id,reservation_id,month_key,reserved_micros_sgd,charged_micros_sgd,usage_json,provider_usage_receipt_json,provider_usage_receipt_key_id,provider_usage_receipt_hmac_b64,accounting_basis,conservative_estimate_used,estimate_overrun,hard_cap_exceeded,pricing_version,price_source_sha256,fx_version,fx_source_sha256,settled_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(ledger_sql,("00000000-0000-0000-0000-000000000701",quoted["id"],"2026-08",100,101,"{}","{}",None,None,"provider_reported_exact",0,1,1,"openai-2026-08-27","a"*64,"bootstrap-safety-factor-2026-08-27","b"*64,"2026-08-27T01:03:03.000004Z"))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(ledger_sql,("00000000-0000-0000-0000-000000000702",quoted["id"],"2026-08",100,101,"{}",None,None,None,None,0,0,1,"openai-2026-08-27","a"*64,"bootstrap-safety-factor-2026-08-27","b"*64,"2026-08-27T01:03:03.000004Z"))
+    db.execute(ledger_sql,("00000000-0000-0000-0000-000000000703",quoted["id"],"2026-08",100,100,"null",None,None,None,None,1,0,0,"openai-2026-08-27","a"*64,"bootstrap-safety-factor-2026-08-27","b"*64,"2026-08-27T01:03:03.000004Z"))
+    db.close()
+
+
+def test_foundation_reserves_content_free_reachy_duplex_state(tmp_path:Path) -> None:
+    path=tmp_path/"duplex.db"; key=bytes(range(32))
+    command.upgrade(_config(path,key),"0001_foundation")
+    db=open_sqlcipher(path,key)
+    assert {row[1] for row in db.execute("PRAGMA table_info('reachy_core_tx_sequences')")}=={
+        "device_id","last_sequence",
+    }
+    assert {row[1] for row in db.execute("PRAGMA table_info('reachy_duplex_correlations')")}=={
+        "device_id","correlation_id","purpose","request_direction","state",
+        "first_sequence","last_sequence","created_at","updated_at",
+    }
+    sql=" ".join(row[0] for row in db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name LIKE 'reachy_%'"
+    ))
+    assert "payload" not in sql and "transcript" not in sql and "content" not in sql
     db.close()
 ```
 
@@ -3089,7 +6289,7 @@ def upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None:
 from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, LargeBinary, MetaData, String, Table, Text, UniqueConstraint
 
 metadata=MetaData()
-FOUNDATION_TABLE_NAMES=frozenset({"households","devices","sessions","event_receipts","idempotency_receipts","audit_receipts","audit_segments","redaction_receipts","provider_calls","provider_response_receipts","provider_prices","budget_reservations","cost_ledger","runtime_settings"})
+FOUNDATION_TABLE_NAMES=frozenset({"households","devices","sessions","event_receipts","idempotency_receipts","audit_receipts","audit_segments","redaction_receipts","provider_calls","provider_response_receipts","provider_prices","budget_reservations","cost_ledger","runtime_settings","reachy_core_tx_sequences","reachy_duplex_correlations"})
 def uuid_pk(name: str="id") -> Column[str]: return Column(name,String(36),primary_key=True)
 def utc_text(name: str, nullable: bool=False) -> Column[str]: return Column(name,String(27),nullable=nullable)
 
@@ -3107,18 +6307,20 @@ idempotency_receipts=Table("idempotency_receipts",metadata,uuid_pk(),Column("ope
 audit_receipts=Table("audit_receipts",metadata,uuid_pk(),Column("ordinal",Integer,nullable=False,unique=True),Column("previous_public_hash_hex",String(64),nullable=True),Column("public_hash_hex",String(64),nullable=False),Column("hmac_key_id",String(128),nullable=False),Column("hmac_b64",String(128),nullable=False),Column("canonical_body_json",Text,nullable=False),utc_text("occurred_at"),CheckConstraint("ordinal >= 1"),CheckConstraint("length(public_hash_hex) = 64"),CheckConstraint("previous_public_hash_hex IS NULL OR length(previous_public_hash_hex) = 64"),CheckConstraint("json_valid(canonical_body_json)"))
 audit_segments=Table("audit_segments",metadata,uuid_pk(),Column("first_ordinal",Integer,nullable=False),Column("last_ordinal",Integer,nullable=False),Column("receipt_count",Integer,nullable=False),Column("terminal_public_hash_hex",String(64),nullable=False),Column("terminal_hmac_b64",String(128),nullable=False),Column("hmac_key_id",String(128),nullable=False),utc_text("sealed_at"),utc_text("exported_at",True),CheckConstraint("first_ordinal >= 1"),CheckConstraint("last_ordinal >= first_ordinal"),CheckConstraint("receipt_count >= 1"))
 redaction_receipts=Table("redaction_receipts",metadata,uuid_pk(),Column("purpose",String(64),nullable=False),Column("input_hmac_key_id",String(128),nullable=False),Column("input_hmac_b64",String(128),nullable=False),Column("output_hmac_key_id",String(128),nullable=False),Column("output_hmac_b64",String(128),nullable=False),Column("removed_categories_json",Text,nullable=False),Column("removed_count",Integer,nullable=False),Column("policy_version",String(128),nullable=False),Column("maximum_sensitivity",String(32),nullable=False),utc_text("occurred_at"),CheckConstraint("removed_count >= 0"),CheckConstraint("json_valid(removed_categories_json)"))
-provider_calls=Table("provider_calls",metadata,uuid_pk(),Column("request_id",String(36),nullable=False),Column("attempt_id",String(36),nullable=False,unique=True),Column("authorization_id",String(36),nullable=False,unique=True),Column("budget_reservation_id",String(36),ForeignKey("budget_reservations.id"),nullable=False,unique=True),Column("purpose",String(64),nullable=False),Column("provider",String(32),nullable=False),Column("model",String(128),nullable=False),Column("redaction_receipt_id",String(36),ForeignKey("redaction_receipts.id"),nullable=True),Column("request_hmac_key_id",String(128),nullable=False),Column("request_hmac_b64",String(128),nullable=False),Column("response_hmac_key_id",String(128),nullable=True),Column("response_hmac_b64",String(128),nullable=True),Column("category",String(32),nullable=False),Column("outcome",String(64),nullable=False),utc_text("started_at"),utc_text("finished_at",True),CheckConstraint("purpose IN ('cloud_stt','cloud_reasoning','cloud_tts')"),CheckConstraint("category IN ('stt','llm','tts')"),CheckConstraint("outcome IN ('started','succeeded','failed','cancelled','ambiguous')"),CheckConstraint("(response_hmac_key_id IS NULL) = (response_hmac_b64 IS NULL)"))
+provider_calls=Table("provider_calls",metadata,uuid_pk(),Column("request_id",String(36),nullable=False),Column("attempt_id",String(36),nullable=False,unique=True),Column("authorization_id",String(36),nullable=False,unique=True),Column("budget_reservation_id",String(36),ForeignKey("budget_reservations.id"),nullable=False,unique=True),Column("purpose",String(64),nullable=False),Column("provider",String(32),nullable=False),Column("model",String(128),nullable=False),Column("redaction_receipt_id",String(36),ForeignKey("redaction_receipts.id"),nullable=True),Column("request_hmac_key_id",String(128),nullable=False),Column("request_hmac_b64",String(128),nullable=False),Column("response_hmac_key_id",String(128),nullable=True),Column("response_hmac_b64",String(128),nullable=True),Column("category",String(32),nullable=False),Column("outcome",String(64),nullable=False),Column("gateway_ordering_version",Integer,nullable=False),Column("transport_phase",String(32),nullable=False),Column("provider_usage_json",Text,nullable=True),Column("provider_usage_receipt_key_id",String(128),nullable=True),Column("provider_usage_receipt_hmac_b64",String(128),nullable=True),utc_text("started_at"),utc_text("finished_at",True),CheckConstraint("purpose IN ('cloud_stt','cloud_reasoning','cloud_tts','web_search','experimental_web_search')"),CheckConstraint("provider IN ('openai','qwen')"),CheckConstraint("category IN ('stt','llm','tts','web_search')"),CheckConstraint("outcome IN ('started','succeeded','failed','cancelled','ambiguous')"),CheckConstraint("gateway_ordering_version = 1"),CheckConstraint("transport_phase IN ('claim_begun','marked_sent','network_invocation_starting','finished')"),CheckConstraint("(response_hmac_key_id IS NULL) = (response_hmac_b64 IS NULL)"),CheckConstraint("(provider_usage_json IS NULL AND provider_usage_receipt_key_id IS NULL AND provider_usage_receipt_hmac_b64 IS NULL) OR (provider_usage_json IS NOT NULL AND provider_usage_receipt_key_id IS NOT NULL AND provider_usage_receipt_hmac_b64 IS NOT NULL AND json_valid(provider_usage_json))"))
 Index("ix_provider_calls_request",provider_calls.c.request_id)
 provider_response_receipts=Table("provider_response_receipts",metadata,uuid_pk(),Column("request_id",String(36),nullable=False),Column("attempt_id",String(36),ForeignKey("provider_calls.attempt_id"),nullable=False,unique=True),Column("authorization_id",String(36),nullable=False,unique=True),Column("household_id",String(36),ForeignKey("households.id"),nullable=False),Column("subject_id",String(36),nullable=True),Column("session_id",String(36),ForeignKey("sessions.id"),nullable=False),Column("turn_id",String(36),nullable=False),Column("provider",String(32),nullable=False),Column("model",String(128),nullable=False),Column("output_schema_version",String(64),nullable=False),Column("response_hmac_key_id",String(128),nullable=False),Column("response_hmac_b64",String(128),nullable=False),Column("receipt_hmac_key_id",String(128),nullable=False),Column("receipt_hmac_b64",String(128),nullable=False),utc_text("produced_at"),CheckConstraint("output_schema_version = 'assistant-turn-v1'"))
-provider_prices=Table("provider_prices",metadata,uuid_pk(),Column("provider",String(32),nullable=False),Column("model",String(128),nullable=False),Column("category",String(32),nullable=False),Column("native_currency",String(3),nullable=False),Column("input_unit_micros",Integer,nullable=False),Column("output_unit_micros",Integer,nullable=False),Column("fx_micros_sgd",Integer,nullable=False),Column("pricing_version",String(128),nullable=False),utc_text("effective_at"),utc_text("expires_at"),CheckConstraint("input_unit_micros >= 0"),CheckConstraint("output_unit_micros >= 0"),CheckConstraint("fx_micros_sgd >= 0"),UniqueConstraint("provider","model","category","pricing_version",name="uq_provider_price_version"))
-budget_reservations=Table("budget_reservations",metadata,uuid_pk(),Column("request_id",String(36),nullable=False),Column("attempt_id",String(36),nullable=False,unique=True),Column("month_key",String(7),nullable=False),Column("category",String(32),nullable=False),Column("provider",String(32),nullable=False),Column("model",String(128),nullable=False),Column("outcome",String(32),nullable=False),Column("amount_micros_sgd",Integer,nullable=False),Column("state",String(32),nullable=False),utc_text("created_at"),utc_text("expires_at"),utc_text("settled_at",True),CheckConstraint("amount_micros_sgd >= 0"),CheckConstraint("outcome IN ('allow','allow_soft_warning','deny_hard_limit','deny_unknown_price')"),CheckConstraint("state IN ('reserved','sent','settled','released','denied')"),CheckConstraint("(outcome IN ('allow','allow_soft_warning') AND state IN ('reserved','sent','settled','released')) OR (outcome IN ('deny_hard_limit','deny_unknown_price') AND state = 'denied')"))
+provider_prices=Table("provider_prices",metadata,uuid_pk(),Column("provider",String(32),nullable=False),Column("model",String(128),nullable=False),Column("category",String(32),nullable=False),Column("native_currency",String(3),nullable=False),Column("tier_basis",String(32),nullable=False),Column("tier_min_input_tokens",Integer,nullable=False),Column("tier_max_input_tokens",Integer,nullable=False),Column("input_micro_usd_per_million",Integer,nullable=False),Column("output_micro_usd_per_million",Integer,nullable=False),Column("audio_micro_usd_per_minute",Integer,nullable=False),Column("web_search_micro_usd_per_call",Integer,nullable=False),Column("primary_accounting_basis",String(48),nullable=False),Column("missing_evidence_policy",String(48),nullable=False),Column("fx_micros_sgd",Integer,nullable=False),Column("pricing_version",String(128),nullable=False),Column("price_source_url",String(512),nullable=False),Column("price_source_sha256",String(64),nullable=False),Column("fx_version",String(128),nullable=False),Column("fx_source_sha256",String(64),nullable=False),utc_text("effective_at"),utc_text("expires_at"),CheckConstraint("provider IN ('openai','qwen')"),CheckConstraint("category IN ('stt','llm','tts','web_search')"),CheckConstraint("native_currency GLOB '[A-Z][A-Z][A-Z]'"),CheckConstraint("(tier_basis='flat' AND tier_min_input_tokens=0 AND tier_max_input_tokens=0) OR (tier_basis='llm_input_tokens' AND category='llm' AND tier_min_input_tokens BETWEEN 0 AND 10000000 AND tier_max_input_tokens BETWEEN tier_min_input_tokens AND 10000000)"),CheckConstraint("input_micro_usd_per_million BETWEEN 0 AND 1000000000"),CheckConstraint("output_micro_usd_per_million BETWEEN 0 AND 1000000000"),CheckConstraint("audio_micro_usd_per_minute BETWEEN 0 AND 1000000000"),CheckConstraint("web_search_micro_usd_per_call BETWEEN 0 AND 1000000000"),CheckConstraint("primary_accounting_basis IN ('provider_reported_exact','request_bound_exact')"),CheckConstraint("missing_evidence_policy IN ('freeze_unknown_overage','conservative_full_reservation')"),CheckConstraint("(category='tts' AND primary_accounting_basis='request_bound_exact' AND missing_evidence_policy='freeze_unknown_overage' AND input_micro_usd_per_million>0 AND output_micro_usd_per_million=0 AND audio_micro_usd_per_minute=0 AND web_search_micro_usd_per_call=0) OR (category='web_search' AND primary_accounting_basis='provider_reported_exact' AND missing_evidence_policy='conservative_full_reservation' AND input_micro_usd_per_million>0 AND output_micro_usd_per_million>0 AND audio_micro_usd_per_minute=0 AND web_search_micro_usd_per_call>0) OR (category='stt' AND primary_accounting_basis='provider_reported_exact' AND missing_evidence_policy='freeze_unknown_overage' AND input_micro_usd_per_million=0 AND output_micro_usd_per_million=0 AND audio_micro_usd_per_minute>0 AND web_search_micro_usd_per_call=0) OR (category='llm' AND primary_accounting_basis='provider_reported_exact' AND missing_evidence_policy='freeze_unknown_overage' AND input_micro_usd_per_million>0 AND output_micro_usd_per_million>0 AND audio_micro_usd_per_minute=0 AND web_search_micro_usd_per_call=0)"),CheckConstraint("fx_micros_sgd BETWEEN 1 AND 10000000"),CheckConstraint("length(price_source_url) BETWEEN 9 AND 512 AND price_source_url GLOB 'https://*'"),CheckConstraint("length(price_source_sha256)=64 AND price_source_sha256 NOT GLOB '*[^0-9a-f]*'"),CheckConstraint("length(fx_source_sha256)=64 AND fx_source_sha256 NOT GLOB '*[^0-9a-f]*'"),CheckConstraint("effective_at < expires_at"),UniqueConstraint("provider","model","category","pricing_version","fx_version","tier_basis","tier_min_input_tokens","tier_max_input_tokens",name="uq_provider_price_version_tier"))
+budget_reservations=Table("budget_reservations",metadata,uuid_pk(),Column("request_id",String(36),nullable=False),Column("attempt_id",String(36),nullable=False,unique=True),Column("month_key",String(7),nullable=False),Column("category",String(32),nullable=False),Column("provider",String(32),nullable=False),Column("model",String(128),nullable=False),Column("outcome",String(32),nullable=False),Column("reserved_micros_sgd",Integer,nullable=False),Column("charged_micros_sgd",Integer,nullable=True),Column("usage_ceiling_json",Text,nullable=False),Column("price_snapshot_json",Text,nullable=True),Column("primary_accounting_basis",String(48),nullable=True),Column("missing_evidence_policy",String(48),nullable=True),Column("pricing_version",String(128),nullable=True),Column("price_source_sha256",String(64),nullable=True),Column("fx_version",String(128),nullable=True),Column("fx_source_sha256",String(64),nullable=True),Column("pricing_commitment_key_id",String(128),nullable=True),Column("pricing_commitment_hmac_b64",String(128),nullable=True),Column("estimate_overrun",Integer,nullable=False,server_default="0"),Column("state",String(32),nullable=False),Column("gateway_ordering_version",Integer,nullable=False),Column("transport_phase",String(32),nullable=False),utc_text("created_at"),utc_text("expires_at"),utc_text("settled_at",True),utc_text("reconciled_at",True),CheckConstraint("reserved_micros_sgd BETWEEN 0 AND 1000000000000"),CheckConstraint("charged_micros_sgd IS NULL OR charged_micros_sgd BETWEEN 0 AND 1000000000000"),CheckConstraint("json_valid(usage_ceiling_json)"),CheckConstraint("price_snapshot_json IS NULL OR json_valid(price_snapshot_json)"),CheckConstraint("primary_accounting_basis IS NULL OR primary_accounting_basis IN ('provider_reported_exact','request_bound_exact')"),CheckConstraint("missing_evidence_policy IS NULL OR missing_evidence_policy IN ('freeze_unknown_overage','conservative_full_reservation')"),CheckConstraint("price_source_sha256 IS NULL OR (length(price_source_sha256)=64 AND price_source_sha256 NOT GLOB '*[^0-9a-f]*')"),CheckConstraint("fx_source_sha256 IS NULL OR (length(fx_source_sha256)=64 AND fx_source_sha256 NOT GLOB '*[^0-9a-f]*')"),CheckConstraint("(price_snapshot_json IS NULL AND primary_accounting_basis IS NULL AND missing_evidence_policy IS NULL AND pricing_version IS NULL AND price_source_sha256 IS NULL AND fx_version IS NULL AND fx_source_sha256 IS NULL AND pricing_commitment_key_id IS NULL AND pricing_commitment_hmac_b64 IS NULL) OR (price_snapshot_json IS NOT NULL AND primary_accounting_basis IS NOT NULL AND missing_evidence_policy IS NOT NULL AND pricing_version IS NOT NULL AND price_source_sha256 IS NOT NULL AND fx_version IS NOT NULL AND fx_source_sha256 IS NOT NULL AND pricing_commitment_key_id IS NOT NULL AND pricing_commitment_hmac_b64 IS NOT NULL)"),CheckConstraint("month_key GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'"),CheckConstraint("provider IN ('openai','qwen')"),CheckConstraint("category IN ('stt','llm','tts','web_search')"),CheckConstraint("gateway_ordering_version = 1"),CheckConstraint("transport_phase IN ('not_claimed','claim_begun','marked_sent','network_invocation_starting','finished')"),CheckConstraint("outcome IN ('allow','allow_soft_warning','deny_hard_limit','deny_unknown_price','deny_cloud_egress_frozen')"),CheckConstraint("state IN ('reserved','sent','settled','released','denied')"),CheckConstraint("(outcome IN ('allow','allow_soft_warning') AND reserved_micros_sgd BETWEEN 1 AND 1000000000000 AND price_snapshot_json IS NOT NULL AND state IN ('reserved','sent','settled','released')) OR (outcome='deny_hard_limit' AND reserved_micros_sgd=0 AND price_snapshot_json IS NOT NULL AND state='denied') OR (outcome IN ('deny_unknown_price','deny_cloud_egress_frozen') AND reserved_micros_sgd=0 AND price_snapshot_json IS NULL AND state='denied')"),CheckConstraint("(state='settled' AND charged_micros_sgd IS NOT NULL AND settled_at IS NOT NULL) OR (state<>'settled' AND charged_micros_sgd IS NULL AND settled_at IS NULL)"),CheckConstraint("estimate_overrun IN (0,1) AND estimate_overrun = CASE WHEN charged_micros_sgd IS NOT NULL AND charged_micros_sgd > reserved_micros_sgd THEN 1 ELSE 0 END"))
 Index("ix_budget_request",budget_reservations.c.request_id)
-Index("ix_budget_month_state_amount",budget_reservations.c.month_key,budget_reservations.c.state,budget_reservations.c.amount_micros_sgd)
-cost_ledger=Table("cost_ledger",metadata,uuid_pk(),Column("reservation_id",String(36),ForeignKey("budget_reservations.id"),nullable=False,unique=True),Column("charged_micros_sgd",Integer,nullable=False),Column("usage_json",Text,nullable=False),Column("conservative_estimate_used",Integer,nullable=False),utc_text("settled_at"),CheckConstraint("charged_micros_sgd >= 0"),CheckConstraint("conservative_estimate_used IN (0,1)"),CheckConstraint("json_valid(usage_json)"))
+Index("ix_budget_month_state_cost",budget_reservations.c.month_key,budget_reservations.c.state,budget_reservations.c.reserved_micros_sgd,budget_reservations.c.charged_micros_sgd)
+cost_ledger=Table("cost_ledger",metadata,uuid_pk(),Column("reservation_id",String(36),ForeignKey("budget_reservations.id"),nullable=False,unique=True),Column("month_key",String(7),nullable=False),Column("reserved_micros_sgd",Integer,nullable=False),Column("charged_micros_sgd",Integer,nullable=False),Column("usage_json",Text,nullable=False),Column("provider_usage_receipt_json",Text,nullable=True),Column("provider_usage_receipt_key_id",String(128),nullable=True),Column("provider_usage_receipt_hmac_b64",String(128),nullable=True),Column("accounting_basis",String(48),nullable=True),Column("conservative_estimate_used",Integer,nullable=False),Column("estimate_overrun",Integer,nullable=False),Column("hard_cap_exceeded",Integer,nullable=False),Column("pricing_version",String(128),nullable=False),Column("price_source_sha256",String(64),nullable=False),Column("fx_version",String(128),nullable=False),Column("fx_source_sha256",String(64),nullable=False),utc_text("settled_at"),CheckConstraint("month_key GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'"),CheckConstraint("reserved_micros_sgd BETWEEN 1 AND 1000000000000"),CheckConstraint("charged_micros_sgd BETWEEN 0 AND 1000000000000"),CheckConstraint("json_valid(usage_json)"),CheckConstraint("accounting_basis IS NULL OR accounting_basis IN ('provider_reported_exact','request_bound_exact','conservative_full_reservation')"),CheckConstraint("(provider_usage_receipt_json IS NULL AND provider_usage_receipt_key_id IS NULL AND provider_usage_receipt_hmac_b64 IS NULL AND accounting_basis IS NULL AND conservative_estimate_used=1) OR (provider_usage_receipt_json IS NOT NULL AND provider_usage_receipt_key_id IS NOT NULL AND provider_usage_receipt_hmac_b64 IS NOT NULL AND accounting_basis IS NOT NULL AND json_valid(provider_usage_receipt_json))"),CheckConstraint("conservative_estimate_used IN (0,1)"),CheckConstraint("estimate_overrun IN (0,1) AND estimate_overrun = CASE WHEN charged_micros_sgd > reserved_micros_sgd THEN 1 ELSE 0 END"),CheckConstraint("hard_cap_exceeded IN (0,1)"),CheckConstraint("length(price_source_sha256)=64 AND price_source_sha256 NOT GLOB '*[^0-9a-f]*'"),CheckConstraint("length(fx_source_sha256)=64 AND fx_source_sha256 NOT GLOB '*[^0-9a-f]*'"))
 runtime_settings=Table("runtime_settings",metadata,Column("key",String(128),primary_key=True),Column("value_json",Text,nullable=False),Column("version",Integer,nullable=False),utc_text("updated_at"),CheckConstraint("version >= 1"),CheckConstraint("json_valid(value_json)"))
+reachy_core_tx_sequences=Table("reachy_core_tx_sequences",metadata,Column("device_id",String(36),ForeignKey("devices.id"),primary_key=True),Column("last_sequence",Integer,nullable=False),CheckConstraint("last_sequence >= 0"))
+reachy_duplex_correlations=Table("reachy_duplex_correlations",metadata,Column("device_id",String(36),ForeignKey("devices.id"),primary_key=True),Column("correlation_id",String(36),primary_key=True),Column("purpose",String(64),nullable=False),Column("request_direction",String(16),nullable=False),Column("state",String(16),nullable=False),Column("first_sequence",Integer,nullable=False),Column("last_sequence",Integer,nullable=False),utc_text("created_at"),utc_text("updated_at"),CheckConstraint("request_direction IN ('edge_to_core','core_to_edge')"),CheckConstraint("state IN ('pending','completed','abandoned')"),CheckConstraint("first_sequence >= 1 AND last_sequence >= 1"))
 ```
 
-Every UUID is `String(36)`, every timestamp is `String(27)`, money/counts are `Integer`, booleans have `CHECK (value IN (0,1))` using the real column name, JSON columns have `CHECK json_valid(column_name)` using the real column name, and no table contains raw audio, transcript, frame, prompt, memory body, credential, or secret.
+Every UUID is `String(36)`, every timestamp is `String(27)`, money/counts are bounded `Integer` values, booleans have `CHECK (value IN (0,1))` using the real column name, JSON columns have `CHECK json_valid(column_name)` using the real column name, and no table contains raw audio, transcript, frame, prompt, memory body, credential, or secret. Budget rates, usage units, one-attempt charge, and aggregate arithmetic additionally use the exact frozen maxima above; application code performs checked multiply/add/ceil operations before SQLite and treats any overflow or out-of-range aggregate as `budget_arithmetic_out_of_bounds`. The two Reachy duplex tables are deliberately content-free foundation reservations: later transport work implements repositories against them and must not add another migration.
 
 ```python
 # apps/core/migrations/versions/0001_foundation.py
@@ -3209,7 +6411,7 @@ git commit -m "feat(storage): add reversible encrypted foundation schema"
 
 **Interfaces:**
 - Consumes: SQLAlchemy `Engine`; SQLite busy errors; one application-owned serialized database worker.
-- Produces: exact low-level `UnitOfWork` signature from the locked map; `AsyncUnitOfWorkFactory(repository_facades) -> AsyncUnitOfWork`; `AsyncRepositoryFacade`; and `AtomicMutationScope.open()/require_active_uow()`. Both unit-of-work layers use `BEGIN IMMEDIATE`, explicit commit/rollback, no implicit commit on context exit, and bounded busy retry of 3 attempts at 25/50/100 ms. The async facade runs enter, every repository operation, audit append, commit/rollback, and close on the same single worker/connection; it never moves a live transaction between threads. Each bounded context declares a typed structural protocol such as `IdentityUnitOfWork(AsyncUnitOfWork)` listing its async repository properties (`profiles`, `consent_receipts`, and so on); the factory installs matching `AsyncRepositoryFacade` instances, so the plan's `await uow.profiles.insert(...)` notation is typed and every call internally delegates through that exact unit's `run_sync`.
+- Produces: exact low-level `UnitOfWork` signature from the locked map; `AsyncUnitOfWorkFactory(repository_facades) -> AsyncUnitOfWork`; startup-only fixed `register_commit_signal(name, target.offer_nowait)` plus transaction-local `signal_after_commit(name)`; `AsyncRepositoryFacade`; and `AtomicMutationScope.open()/require_active_uow()`. Both unit-of-work layers use `BEGIN IMMEDIATE`, explicit commit/rollback, no implicit commit on context exit, and bounded busy retry of 3 attempts at 25/50/100 ms. The async facade runs enter, every repository operation, audit append, commit/rollback, and close on the same single worker/connection; it never moves a live transaction between threads. Each bounded context declares a typed structural protocol such as `IdentityUnitOfWork(AsyncUnitOfWork)` listing its async repository properties (`profiles`, `consent_receipts`, and so on); the factory installs matching `AsyncRepositoryFacade` instances, so the plan's `await uow.profiles.insert(...)` notation is typed and every call internally delegates through that exact unit's `run_sync`.
 
 - [ ] **Step 1: Write red rollback and explicit-commit tests**
 
@@ -3285,6 +6487,37 @@ async def test_concurrent_units_serialize_whole_transaction_lifetimes(migrated_d
             await uow.commit()
     await asyncio.gather(writer(first),writer(second))
     assert entered==[first,second]
+
+
+@pytest.mark.asyncio
+async def test_fixed_post_commit_signal_fires_only_after_successful_commit(
+    migrated_database,nonblocking_commit_signal,
+) -> None:
+    factory=AsyncUnitOfWorkFactory(migrated_database.engine)
+    factory.register_commit_signal("subject_revocation",nonblocking_commit_signal)
+    async with factory() as committed:
+        committed.signal_after_commit("subject_revocation")
+        await committed.commit()
+    assert nonblocking_commit_signal.offer_count==1
+    async with factory() as rolled_back:
+        rolled_back.signal_after_commit("subject_revocation")
+        await rolled_back.rollback()
+    assert nonblocking_commit_signal.offer_count==1
+
+
+@pytest.mark.asyncio
+async def test_post_commit_signal_failure_never_changes_committed_result(
+    migrated_database,failing_nonblocking_commit_signal,
+) -> None:
+    factory=AsyncUnitOfWorkFactory(migrated_database.engine)
+    factory.register_commit_signal(
+        "subject_revocation",failing_nonblocking_commit_signal,
+    )
+    async with factory() as uow:
+        uow.signal_after_commit("subject_revocation")
+        await uow.commit()
+    assert failing_nonblocking_commit_signal.offer_count==1
+    assert factory.failed_commit_signal_count("subject_revocation")==1
 ```
 
 ```python
@@ -3363,8 +6596,10 @@ from concurrent.futures import ThreadPoolExecutor
 from tuntun_core.adapters.sqlcipher.unit_of_work import UnitOfWork
 
 class AsyncUnitOfWork:
-    def __init__(self, engine, executor, transaction_lock, repository_facades):
+    def __init__(self, engine, executor, transaction_lock, repository_facades, commit_signals, signal_failures):
         self._engine,self._executor,self._transaction_lock,self._repository_facades=engine,executor,transaction_lock,repository_facades
+        self._commit_signals,self._signal_failures=commit_signals,signal_failures
+        self._signals_after_commit=set()
         self._sync=None
     async def _call(self,operation):
         loop=asyncio.get_running_loop()
@@ -3389,10 +6624,19 @@ class AsyncUnitOfWork:
     async def run_sync(self,operation):
         if self._sync is None: raise RuntimeError("async unit of work is not active")
         return await self._call(lambda: operation(self._sync))
+    def signal_after_commit(self,name):
+        if self._sync is None or name not in self._commit_signals:
+            raise RuntimeError("unregistered post-commit signal")
+        self._signals_after_commit.add(name)
     async def commit(self):
         if self._sync is None: raise RuntimeError("async unit of work is not active")
         await self._finish(self._sync.commit)
+        signals=tuple(sorted(self._signals_after_commit)); self._signals_after_commit.clear()
+        for name in signals:
+            try: self._commit_signals[name].offer_nowait()
+            except BaseException: self._signal_failures[name]=self._signal_failures.get(name,0)+1
     async def rollback(self):
+        self._signals_after_commit.clear()
         if self._sync is not None: await self._finish(self._sync.rollback)
     async def __aexit__(self,exc_type,exc,tb):
         try:
@@ -3405,16 +6649,27 @@ class AsyncUnitOfWork:
 class AsyncUnitOfWorkFactory:
     def __init__(self,engine,repository_facades=None):
         self._engine,self._repository_facades=engine,repository_facades or {}
+        self._commit_signals={}; self._signal_failures={}; self._opened=False
         self._executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix="tuntun-sqlcipher")
         self._transaction_lock=asyncio.Lock()
-    def __call__(self): return AsyncUnitOfWork(self._engine,self._executor,self._transaction_lock,self._repository_facades)
+    def register_commit_signal(self,name,target):
+        if self._opened or name in self._commit_signals or not hasattr(target,"offer_nowait"):
+            raise RuntimeError("post-commit signal registration closed")
+        self._commit_signals[name]=target
+    def failed_commit_signal_count(self,name): return self._signal_failures.get(name,0)
+    def __call__(self):
+        self._opened=True
+        return AsyncUnitOfWork(
+            self._engine,self._executor,self._transaction_lock,
+            self._repository_facades,self._commit_signals,self._signal_failures,
+        )
 ```
 
 `AsyncUnitOfWork.__aenter__` binds each registered facade to itself and exposes it under its typed repository property. `AsyncRepositoryFacade` contains no connection of its own: every method executes a synchronous repository operation as `await bound_uow.run_sync(lambda tx: sync_repository(tx).method(...))`. It rejects use before enter or after finish. Bounded-context protocols name every repository method and return type, and strict mypy verifies services against those protocols; there is no dynamic `Any`/string dispatch in application code.
 
 `AtomicMutationScope` is an async context manager backed by a task-local `ContextVar[AsyncUnitOfWork | None]`. `open()` rejects nesting, enters exactly one factory unit, installs it only for the current task, commits only when the coordinator explicitly calls `uow.commit()`, and always clears the context after cancellation, rollback, or close. `require_active_uow()` fails closed outside the scope. Child tasks receive no usable mutation authority: the stored scope token also binds the creating `asyncio.current_task()`, and a different task is rejected even if context variables were copied.
 
-The factory is a single application-lifecycle object and closes its worker only during orderly shutdown after all units of work finish. Its fair application-level async transaction lock is acquired before `BEGIN IMMEDIATE` and held through close, so operations from two live units can never interleave and a second writer waits instead of exhausting SQLite busy retries behind the first. Lock acquisition is cancellable; once acquired, enter failure or context exit always releases it. A transaction may await those local serialized repository/audit operations only; it must never await provider, robot, browser, timer, filesystem, or other unbounded I/O while holding `BEGIN IMMEDIATE`. Commit and rollback are cancellation-shielded and awaited to a terminal state before cancellation propagates.
+The factory is a single application-lifecycle object and closes its worker only during orderly shutdown after all units of work finish. Before the first unit opens, composition may register a closed set of fixed internal post-commit signals whose targets expose only constant-time `offer_nowait()`. A transaction can mark a registered signal by name; rollback/context failure clears it, while successful shielded commit invokes it only after the database commit is terminal. Signal failure is counted and swallowed so it cannot rewrite a committed mutation; the durable outbox plus periodic/startup drain remains authoritative. Arbitrary callbacks and late registration are forbidden. The fair application-level async transaction lock is acquired before `BEGIN IMMEDIATE` and held through close, so operations from two live units can never interleave and a second writer waits instead of exhausting SQLite busy retries behind the first. Lock acquisition is cancellable; once acquired, enter failure or context exit always releases it. A transaction may await those local serialized repository/audit operations only; it must never await provider, robot, browser, timer, filesystem, or other unbounded I/O while holding `BEGIN IMMEDIATE`. Commit and rollback are cancellation-shielded and awaited to a terminal state before cancellation propagates.
 
 - [ ] **Step 4: Run the green transaction gate**
 
@@ -3462,7 +6717,7 @@ from tuntun_contracts.base import Commitment
 from tuntun_core.services.audit.ledger import compute_chain_values
 
 def test_chain_formula_is_deterministic_and_purpose_separated() -> None:
-    draft=AuditDraft(event_id=UUID(int=1),occurred_at=datetime(2026,8,27,tzinfo=UTC),actor_pseudonym="synthetic-guest",action_code="foundation.init",outcome="allow",reason_code="initialized",correlation_id=UUID(int=2),payload_commitment=Commitment(algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64="A"*44))
+    draft=AuditDraft(event_id=UUID(int=1),occurred_at=datetime(2026,8,27,tzinfo=UTC),actor_pseudonym="synthetic-guest",action_code="foundation.init",outcome="allow",reason_code="initialized",correlation_id=UUID(int=2),payload_commitment=Commitment(algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64="A"*43+"="))
     first=compute_chain_values(None,draft,"audit-v1",b"K"*32)
     second=compute_chain_values(None,draft,"audit-v1",b"K"*32)
     assert first == second; assert len(first.public_hash_hex) == 64; assert first.hmac_b64 != first.public_hash_hex
@@ -3492,6 +6747,17 @@ def test_verifier_detects_offline_ciphertext_tamper(audited_database) -> None:
     with audited_database.engine.connect() as connection:
         result=AuditVerifier({"audit-v1":b"K"*32}).verify(connection)
     assert result.valid is True and result.count == 2
+
+@pytest.mark.parametrize("mutation",(
+    "duplicate_key","noncanonical_whitespace","overdeep_json",
+    "flat_json_overflow","body_over_64k",
+))
+def test_verifier_fails_closed_on_malformed_persisted_canonical_body(
+    audit_fixture,mutation,
+) -> None:
+    audit_fixture.replace_canonical_body_offline(mutation)
+    result=audit_fixture.verify({"audit-v1":b"K"*32})
+    assert result.valid is False and result.reason=="invalid-canonical-body"
 ```
 
 ```python
@@ -3562,10 +6828,10 @@ class AsyncAuditLedger:
 
 ```python
 # apps/core/src/tuntun_core/services/audit/verifier.py
-import json
 from dataclasses import dataclass
 from sqlalchemy import Connection, text
 from tuntun_contracts.audit import AuditDraft
+from tuntun_contracts.base import parse_contract_json
 from .ledger import compute_chain_values
 
 @dataclass(frozen=True, slots=True)
@@ -3580,7 +6846,15 @@ class AuditVerifier:
             if row["ordinal"] != count or row["previous_public_hash_hex"] != previous: return AuditVerification(False,count-1,previous,"ordinal-or-link-mismatch")
             key=self.keys.get(str(row["hmac_key_id"]))
             if key is None: return AuditVerification(False,count-1,previous,"missing-hmac-key")
-            draft=AuditDraft.model_validate(json.loads(str(row["canonical_body_json"])))
+            try:
+                draft=parse_contract_json(
+                    AuditDraft,str(row["canonical_body_json"]).encode("utf-8"),
+                    max_bytes=65_536,require_canonical=True,
+                )
+            except (TypeError,UnicodeError,ValueError):
+                return AuditVerification(
+                    False,count-1,previous,"invalid-canonical-body",
+                )
             values=compute_chain_values(previous,draft,str(row["hmac_key_id"]),key)
             if values.public_hash_hex != row["public_hash_hex"] or values.hmac_b64 != row["hmac_b64"]: return AuditVerification(False,count-1,previous,"hash-or-hmac-mismatch")
             previous=values.public_hash_hex
@@ -3618,14 +6892,14 @@ Run from a clean checkout on the target Intel Mac:
 ```bash
 make bootstrap
 make check
-uv run pytest tests/contract tests/unit/config tests/unit/testing tests/security/test_sqlcipher.py tests/security/test_record_crypto.py tests/integration/storage tests/unit/audit tests/security/test_audit_tamper.py tests/integration/audit -q
+uv run pytest tests/contract tests/unit/config tests/unit/testing tests/security/test_shared_assurance_tools.py tests/security/test_sqlcipher.py tests/security/test_record_crypto.py tests/integration/storage tests/unit/audit tests/security/test_audit_tamper.py tests/integration/audit -q
 uv run tuntunctl storage probe --path var/probe/foundation.db --json
 uv run python scripts/check_model_manifest.py models/manifest.yaml
 uv run python scripts/verify_private_data.py .
 git status --short
 ```
 
-Expected: every test and static gate passes; storage probe reports `sqlcipher3==0.6.2`, a non-empty cipher version, `integrity_ok: true`, mode `0o600`, and no path/key material; model/private-data scans print PASS; `git status --short` is empty. The encrypted DB contains exactly the 13 foundation-owned application tables plus `alembic_version`, rejects audit update/delete, reveals neither the SQLite header nor any sentinel, and downgrades to an empty schema before upgrading again.
+Expected: every test and static gate passes; the five shared assurance commands pass complete synthetic inventories and fail closed for incomplete ones; storage probe reports `sqlcipher3==0.6.2`, a non-empty cipher version, `integrity_ok: true`, mode `0o600`, and no path/key material; model/private-data scans print PASS; `git status --short` is empty. The encrypted DB contains exactly the 13 foundation-owned application tables plus `alembic_version`, rejects audit update/delete, reveals neither the SQLite header nor any sentinel, and downgrades to an empty schema before upgrading again.
 
 ## Execution Handoff
 
