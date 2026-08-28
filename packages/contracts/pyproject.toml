@@ -1,0 +1,9 @@
+[project]
+name = "tuntun-contracts"
+version = "0.1.0.dev0"
+requires-python = ">=3.11,<3.13"
+dependencies = ["pydantic>=2.11,<3", "rfc8785>=0.1.4,<0.2"]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
