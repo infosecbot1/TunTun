@@ -52,6 +52,20 @@ class SecretProvider(Protocol):
 def open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection: raise NotImplementedError
 def create_sqlcipher_engine(path: Path, key: bytes) -> sqlalchemy.Engine: raise NotImplementedError
 
+@runtime_checkable
+class UnitOfWorkProtocol(Protocol):
+    def execute(self, statement: Executable, parameters: Mapping[str, object] | None = None) -> CursorResult[Any]: raise NotImplementedError
+    def exec_driver_sql(self, statement: str, parameters: tuple[object, ...] | Mapping[str, object] = ()) -> CursorResult[Any]: raise NotImplementedError
+    def commit(self) -> None: raise NotImplementedError
+    def rollback(self) -> None: raise NotImplementedError
+
+@runtime_checkable
+class AsyncUnitOfWorkProtocol(Protocol):
+    async def run_sync(self, operation: Callable[[UnitOfWorkProtocol], T]) -> T: raise NotImplementedError
+    def signal_after_commit(self, name: str) -> None: raise NotImplementedError
+    async def commit(self) -> None: raise NotImplementedError
+    async def rollback(self) -> None: raise NotImplementedError
+
 class RecordCipher:
     def encrypt(self, plaintext: bytes, context: RecordContext) -> EncryptedRecord: raise NotImplementedError
     def decrypt(self, record: EncryptedRecord, context: RecordContext) -> bytes: raise NotImplementedError
@@ -73,14 +87,14 @@ class AsyncUnitOfWork:
     async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> bool: raise NotImplementedError
 
 class AtomicMutationScope:
-    def open(self) -> AsyncContextManager[AsyncUnitOfWork]: raise NotImplementedError
-    def require_active_uow(self) -> AsyncUnitOfWork: raise NotImplementedError
+    def open(self) -> AsyncContextManager[AsyncUnitOfWorkProtocol]: raise NotImplementedError
+    def require_active_uow(self) -> AsyncUnitOfWorkProtocol: raise NotImplementedError
 
 class AuditLedger:
-    def append(self, uow: UnitOfWork, draft: AuditDraft) -> AuditReceipt: raise NotImplementedError
+    def append(self, uow: UnitOfWorkProtocol, draft: AuditDraft) -> AuditReceipt: raise NotImplementedError
 
 class AsyncAuditLedger:
-    async def append(self, uow: AsyncUnitOfWork, draft: AuditDraft) -> AuditReceipt: raise NotImplementedError
+    async def append(self, uow: AsyncUnitOfWorkProtocol, draft: AuditDraft) -> AuditReceipt: raise NotImplementedError
 
 class AuditVerifier:
     def verify(self, connection: Connection) -> AuditVerification: raise NotImplementedError
@@ -289,6 +303,8 @@ git commit -m "build: bootstrap Tuntun Python workspace"
 **Estimated effort:** 0.5 person-day.
 
 **Files:**
+- Modify: `pyproject.toml`
+- Modify: `uv.lock`
 - Create: `package.json`
 - Create: `pnpm-workspace.yaml`
 - Create: `pnpm-lock.yaml`
@@ -302,11 +318,12 @@ git commit -m "build: bootstrap Tuntun Python workspace"
 - Create: `apps/admin/src/app.tsx`
 - Create: `apps/admin/src/test-setup.ts`
 - Test: `apps/admin/src/app.test.tsx`
+- Test: `tests/unit/test_cli.py`
 - Test: `tests/unit/admin/root-discovery.test.ts`
 - Test: `tests/e2e/admin-smoke.spec.ts`
 - Test: `tests/ui/admin-accessibility.spec.ts`
 - Create: `Makefile`
-- Create: `.gitignore`
+- Modify: `.gitignore`
 - Create: `.pre-commit-config.yaml`
 - Create: `.github/workflows/ci.yml`
 - Test: `tests/ci/test_workflow_policy.py`
@@ -314,7 +331,7 @@ git commit -m "build: bootstrap Tuntun Python workspace"
 
 **Interfaces:**
 - Consumes: Task 1 workspace commands.
-- Produces: `make bootstrap|format|lint|typecheck|test|test-security|test-contract|web-test|web-build|web-e2e|check|verify-private-data`; a non-networked admin page rendering `Tuntun setup in progress`; CI with read-only contents permission and no secrets/hardware/provider jobs.
+- Produces: root development dependencies `PyYAML>=6.0,<7` and `pytest-cov>=6.2,<7` locked in `uv.lock` before any Task 2 Python or coverage gate; working `make bootstrap|format|lint|typecheck|test|test-security|test-contract|web-test|web-build|web-e2e`; explicit fail-closed `make verify-private-data` and therefore fail-closed `make check` until Task 3 installs the required scanner; a non-networked admin page rendering `Tuntun setup in progress`; CI with exact root read-only contents permission, absent-or-exact-read-only job permissions, no secret forwarding/expression, and no hardware/provider jobs.
 
 - [ ] **Step 1: Write the failing admin smoke test**
 
@@ -337,6 +354,7 @@ Also write the workflow-policy test before adding CI. It treats workflow syntax 
 ```python
 # tests/ci/test_workflow_policy.py
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -360,20 +378,50 @@ def _assert_uses_is_immutable(value: str) -> None:
     assert FULL_SHA.fullmatch(value), value
 
 
+SECRET_EXPRESSION = re.compile(r"\bsecrets\s*(?:\.|\[)", re.IGNORECASE)
+
+
+def _assert_no_secret_channel(value: object) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            assert str(key).casefold() != "secrets"
+            _assert_no_secret_channel(item)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for item in value:
+            _assert_no_secret_channel(item)
+    elif isinstance(value, str):
+        assert value.casefold() != "inherit"
+        assert SECRET_EXPRESSION.search(value) is None
+
+
+def _assert_permissions(owner: Mapping[str, object], *, required: bool) -> None:
+    if "permissions" not in owner:
+        assert not required
+        return
+    assert owner["permissions"] == {"contents": "read"}
+
+
 def _assert_workflow_policy(path: Path) -> None:
     assert path.is_file() and not path.is_symlink()
     raw = path.read_text()
     lowered = raw.lower()
     for forbidden in (
         "contents: write", "pages: write", "gh release create", "git tag ",
-        "npm publish", "pnpm publish", "twine upload", "secrets.",
+        "npm publish", "pnpm publish", "twine upload",
         "reachy_hardware", "live_cloud",
     ):
         assert forbidden not in lowered, (path, forbidden)
     workflow = yaml.safe_load(raw)
     assert isinstance(workflow, dict) and isinstance(workflow.get("jobs"), dict)
+    _assert_permissions(workflow, required=True)
+    _assert_no_secret_channel(workflow)
     for job in workflow["jobs"].values():
+        assert isinstance(job, dict)
+        _assert_permissions(job, required=False)
         if "uses" in job:
+            assert set(job) <= {
+                "name", "needs", "if", "strategy", "uses", "with", "permissions",
+            }
             _assert_uses_is_immutable(job["uses"])
             continue
         runner = job["runs-on"]
@@ -412,6 +460,7 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
     root = tmp_path / ".github" / "workflows"
     root.mkdir(parents=True)
     valid = {
+        "permissions": {"contents": "read"},
         "jobs": {
             "check": {
                 "runs-on": "ubuntu-24.04",
@@ -427,8 +476,12 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
         ("release.yaml", {"steps": [{"uses": "actions/checkout@v4"}]}),
         ("security.yml", {"steps": [{"run": "gh release create v1"}]}),
         ("release.yaml", {"steps": [{"run": "echo ${{ secrets.TOKEN }}"}]}),
+        ("security.yml", {"steps": [{"run": "echo ${{ secrets['TOKEN'] }}"}]}),
+        ("release.yaml", {"permissions": {"contents": "write"}}),
+        ("security.yml", {"permissions": {"issues": "write"}}),
+        ("release.yaml", {"permissions": None}),
     ):
-        changed = {"jobs": {"check": {**valid["jobs"]["check"], **mutation}}}
+        changed = {**valid, "jobs": {"check": {**valid["jobs"]["check"], **mutation}}}
         path = root / name
         path.write_text(yaml.safe_dump(changed))
         with pytest.raises(AssertionError):
@@ -439,6 +492,33 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
     path.write_text(yaml.safe_dump(privileged))
     with pytest.raises(AssertionError):
         _assert_workflow_policy(path)
+
+    for reusable in (
+        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+         "secrets": "inherit"},
+        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+         "secrets": {"token": "${{ secrets['TOKEN'] }}"}},
+        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+         "permissions": {"actions": "write"}},
+    ):
+        path.write_text(yaml.safe_dump({"permissions": {"contents": "read"}, "jobs": {"reuse": reusable}}))
+        with pytest.raises(AssertionError):
+            _assert_workflow_policy(path)
+```
+
+Add the Python CLI coverage sentinel before any coverage-bearing `make test` gate:
+
+```python
+# tests/unit/test_cli.py
+from typer.testing import CliRunner
+
+from tuntun_core.cli.main import app
+
+
+def test_version_command_exercises_the_bootstrap_cli() -> None:
+    result = CliRunner().invoke(app, ["version"])
+    assert result.exit_code == 0
+    assert result.stdout == "0.1.0.dev0\n"
 ```
 
 - [ ] **Step 2: Run the red web test**
@@ -448,6 +528,15 @@ Run: `corepack enable && pnpm --filter @tuntun/admin test`
 Expected: FAIL with `No projects matched the filters` because the pnpm workspace is absent.
 
 - [ ] **Step 3: Add the minimal web application and command surface**
+
+Before running any Task 2 Python policy test or any `make test` coverage command, add these two entries to the existing root `[dependency-groups].dev` array in `pyproject.toml`, run `uv lock`, and retain the resulting `uv.lock` change in this task:
+
+```toml
+  "PyYAML>=6.0,<7",
+  "pytest-cov>=6.2,<7",
+```
+
+`PyYAML` is the direct owner of the `yaml` import used by both Task 2 CI-policy tests. `pytest-cov` is the direct owner of the `--cov`, `--cov-branch`, and later `--cov-fail-under` pytest options; `coverage[toml]` alone does not provide those pytest options. Do not defer either dependency to Task 7 or Task 15.
 
 `package.json`
 
@@ -471,7 +560,7 @@ packages:
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4173",
-    "lint": "eslint . ../../tests/unit/admin ../../tests/ui --max-warnings 0",
+    "lint": "eslint . ../../tests/unit/admin ../../tests/e2e ../../tests/ui --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "pnpm run typecheck && vite build",
@@ -530,7 +619,11 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["**/*.{ts,tsx}"],
+    files: [
+      "**/*.{ts,tsx}",
+      "../../tests/e2e/**/*.{ts,tsx}",
+      "../../tests/ui/**/*.{ts,tsx}",
+    ],
     languageOptions: {ecmaVersion: 2022, globals: {...globals.browser, ...globals.node}},
     plugins: {"react-hooks": reactHooks, "react-refresh": reactRefresh},
     rules: {
@@ -581,7 +674,7 @@ import "@testing-library/jest-dom/vitest";
 `apps/admin/tsconfig.json`
 
 ```json
-{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":true,"noEmit":true,"skipLibCheck":true,"types":["vite/client","vitest/globals"]},"include":["src","vite.config.ts","../../tests/unit/admin/**/*.ts","../../tests/unit/admin/**/*.tsx","../../tests/ui/**/*.spec.tsx"]}
+{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","jsx":"react-jsx","strict":true,"noEmit":true,"skipLibCheck":true,"types":["vite/client","vitest/globals"]},"include":["src","vite.config.ts","../../tests/unit/admin/**/*.ts","../../tests/unit/admin/**/*.tsx","../../tests/e2e/**/*.ts","../../tests/e2e/**/*.tsx","../../tests/ui/**/*.ts","../../tests/ui/**/*.tsx"]}
 ```
 
 ```html
@@ -693,6 +786,20 @@ def test_playwright_discovers_root_e2e_and_ui_suites() -> None:
     assert "tests/ui/admin-accessibility.spec.ts" in output
     discovered = re.search(r"Total:\s+(\d+)\s+tests?", output)
     assert discovered and int(discovered.group(1)) >= 2, output
+
+
+def test_typecheck_and_lint_scope_every_root_e2e_and_ui_typescript_file() -> None:
+    tsconfig = json.loads((ROOT / "apps/admin/tsconfig.json").read_text())
+    assert {
+        "../../tests/e2e/**/*.ts", "../../tests/e2e/**/*.tsx",
+        "../../tests/ui/**/*.ts", "../../tests/ui/**/*.tsx",
+    } <= set(tsconfig["include"])
+    eslint = (ROOT / "apps/admin/eslint.config.js").read_text()
+    for required in (
+        '"../../tests/e2e/**/*.{ts,tsx}"',
+        '"../../tests/ui/**/*.{ts,tsx}"',
+    ):
+        assert required in eslint
 ```
 
 ```make
@@ -712,9 +819,9 @@ typecheck:
 test:
 	uv run pytest -m "not live_cloud and not reachy_hardware" --cov --cov-branch
 test-security:
-	uv run pytest tests/security -m "not live_cloud and not reachy_hardware"
+	@files="$$(find tests/security -type f -name 'test_*.py' -print 2>/dev/null | sort)"; count="$$(printf '%s\n' "$$files" | sed '/^$$/d' | wc -l | tr -d ' ')"; echo "test-security: $$count discovered files"; if [ "$$count" -gt 0 ]; then uv run pytest $$files -m "not live_cloud and not reachy_hardware"; fi
 test-contract:
-	uv run pytest tests/contract
+	@files="$$(find tests/contract -type f -name 'test_*.py' -print 2>/dev/null | sort)"; count="$$(printf '%s\n' "$$files" | sed '/^$$/d' | wc -l | tr -d ' ')"; echo "test-contract: $$count discovered files"; if [ "$$count" -gt 0 ]; then uv run pytest $$files; fi
 web-test:
 	pnpm --filter @tuntun/admin test
 web-build:
@@ -722,14 +829,22 @@ web-build:
 web-e2e:
 	pnpm --filter @tuntun/admin e2e
 verify-private-data:
-	uv run python scripts/verify_private_data.py .
-check: lint typecheck test web-test web-build verify-private-data
+	@echo "verify-private-data: UNAVAILABLE until Task 3 installs the required fail-closed scanner" >&2
+	@exit 2
+check: lint typecheck test test-security test-contract web-test web-build verify-private-data
 ```
 
 ```gitignore
 # .gitignore
+.worktrees/
+.superpowers/sdd/
 .env
 .venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 node_modules/
 dist/
 var/
@@ -752,6 +867,8 @@ test-results/
 *.safetensors
 *.bin
 ```
+
+The file already contains `.worktrees/` and `.superpowers/sdd/` from reviewed-document/worktree setup. Modify it in place and preserve those two lines exactly while adding the remaining ignores above; losing either line makes the isolated worktree or durable SDD ledger trackable and fails Task 2.
 
 ```yaml
 # .pre-commit-config.yaml
@@ -785,24 +902,24 @@ jobs:
         with: {version: "10.15.0", run_install: false}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: {node-version: "22", cache: pnpm}
-      - run: uv sync --all-packages --frozen
+      - run: uv sync --all-packages --locked
       - run: pnpm install --frozen-lockfile
-      - run: make lint typecheck test web-test web-build
+      - run: make lint typecheck test test-security test-contract web-test web-build
 ```
 
 The four action revisions are full reviewed commit SHAs and the comments are informational only. The policy test enumerates the union of `.github/workflows/*.yml` and `.github/workflows/*.yaml` on every run, so later security/release workflows cannot escape review by using the other suffix. It checks job-level reusable workflows and every step-level third-party `uses`, while allowing only repository-local `./` actions, and validates every literal or matrix-expanded runner against the fixed set. Dependabot may propose an update, but CI rejects a tag, branch, abbreviated SHA, `*-latest` runner, unreviewed runner label, secret reference, or hardware/provider job. Linux remains the portable gate; `macos-15-intel` proves hosted Intel compatibility only. It is not evidence for the household Mac, Reachy, network, reboot, thermal, firewall, or lifecycle qualification gates.
 
 - [ ] **Step 4: Run the green web/build gate**
 
-Run: `pnpm install && pnpm --filter @tuntun/admin test && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/admin e2e -- --list && uv run pytest tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py -q && make lint && make typecheck`
+Run: `uv lock && uv sync --all-packages --locked && pnpm install && pnpm --filter @tuntun/admin test && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/admin e2e -- --list && uv run python -c "import coverage, pytest_cov, yaml" && uv run pytest tests/unit/test_package_smoke.py tests/unit/test_cli.py tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py -q && make test && make test-security test-contract && make lint && make typecheck && sh -c 'make verify-private-data; code=$?; test "$code" -eq 2' && sh -c 'make check; code=$?; test "$code" -eq 2'`
 
-Expected: PASS on Linux and Intel macOS with the app-local and root-unit Vitest sentinels, both root Playwright suites listed and a nonzero discovery total, a successful Vite production build, fixed runner labels, only full-SHA third-party actions, and zero ESLint/TypeScript/Ruff/mypy errors. These discovery sentinels are mandatory because skipped root trees or a zero-test runner invocation are not acceptance evidence; browser execution remains the explicit `make web-e2e` gate after Chromium is installed.
+Expected: PASS on Linux and Intel macOS; `uv.lock` contains resolved `PyYAML` and `pytest-cov`, `uv sync --locked` accepts it as current, the direct import probe exits 0, the CLI test prints exactly `0.1.0.dev0` and `make test` meets the 85% branch-coverage gate, and both Python policy modules reject root/job write permissions, reusable-job secret forwarding, and dot/index secret expressions. `test-security` and `test-contract` print an explicit zero-file count now and automatically execute every matching future file once its owning directory exists. `verify-private-data` and `check` exit exactly 2 until Task 3 installs the scanner, so Task 2 CI runs only the complete current gates. The app-local/root-unit Vitest sentinels pass, both root Playwright suites are listed with a nonzero discovery total, all `.ts`/`.tsx` e2e/UI files are in ESLint and TypeScript scopes, the Vite build succeeds, and static checks report zero errors. `git diff -- .gitignore` retains `.worktrees/` and `.superpowers/sdd/` and adds every listed runtime/build/Python-cache ignore.
 
 - [ ] **Step 5: Commit exact Task 2 paths**
 
 ```bash
 git status --short
-git add package.json pnpm-workspace.yaml pnpm-lock.yaml apps/admin/package.json apps/admin/index.html apps/admin/vite.config.ts apps/admin/tsconfig.json apps/admin/eslint.config.js apps/admin/playwright.config.ts apps/admin/src/main.tsx apps/admin/src/app.tsx apps/admin/src/app.test.tsx apps/admin/src/test-setup.ts tests/unit/admin/root-discovery.test.ts tests/e2e/admin-smoke.spec.ts tests/ui/admin-accessibility.spec.ts Makefile .gitignore .pre-commit-config.yaml .github/workflows/ci.yml tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py
+git add pyproject.toml uv.lock package.json pnpm-workspace.yaml pnpm-lock.yaml apps/admin/package.json apps/admin/index.html apps/admin/vite.config.ts apps/admin/tsconfig.json apps/admin/eslint.config.js apps/admin/playwright.config.ts apps/admin/src/main.tsx apps/admin/src/app.tsx apps/admin/src/app.test.tsx apps/admin/src/test-setup.ts tests/unit/test_cli.py tests/unit/admin/root-discovery.test.ts tests/e2e/admin-smoke.spec.ts tests/ui/admin-accessibility.spec.ts Makefile .gitignore .pre-commit-config.yaml .github/workflows/ci.yml tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "build: add web workspace and baseline CI"
@@ -829,7 +946,10 @@ git commit -m "build: add web workspace and baseline CI"
 - Create: `scripts/check_migration_graph.py`
 - Test: `tests/security/test_private_data_scanner.py`
 - Test: `tests/security/test_shared_assurance_tools.py`
+- Create: `tests/security/conftest.py`
+- Create: `tests/security/assurance_cases.py`
 - Create: `tests/fixtures/synthetic/README.md`
+- Modify: `Makefile`
 - Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
@@ -837,6 +957,7 @@ git commit -m "build: add web workspace and baseline CI"
 - Produces: `scan(roots: Path | Sequence[Path]) -> tuple[Finding, ...]`; CLI exits 1 and prints root-qualified relative paths/reason codes for forbidden content or an incomplete scan, otherwise prints `private-data scan: PASS` and exits 0.
 - Produces the first and only owners of the shared commands already consumed by later phase plans: `check_feature_absence.py`, `check_import_boundaries.py`, `check_migration_ownership.py`, `scan_browser_artifacts.py`, and `scan_network_surface.py`. Each exposes `main(argv: Sequence[str] | None = None) -> int`, accepts an optional lexical `--root PATH` that defaults to the current repository, returns `0` only for a complete passing scan, returns `1` for a policy finding, and returns `2` for invalid arguments, a missing/unreadable/changing input, parser/structure exhaustion, or an unavailable required inventory. They perform no network access and no repository/runtime mutation.
 - `scripts/assurance_common.py` produces descriptor-bound `read_regular_file(path: Path, *, max_bytes: int) -> bytes`, duplicate-safe `parse_json_object(raw: bytes, *, max_depth: int, max_containers: int, max_tokens: int) -> Mapping[str, object]`, bounded `walk_regular_files(roots: Sequence[Path], *, max_files: int, max_total_bytes: int) -> Iterator[FrozenRegularFile]`, `CsvSet.parse(value: str) -> tuple[str, ...]`, and `AssuranceFinding(path: Path, code: str, detail: str | None)`. Every tool uses these primitives; symlinks, special files, duplicate JSON keys, non-UTF-8, input replacement, duplicate CSV values, excess depth/count/bytes, and partial subprocess output block rather than pass.
+- Every shared assurance module exposes `evaluate(argv: Sequence[str] | None = None) -> AssuranceResult`; `main()` is exactly `finish(evaluate(argv))`. Tests use `evaluate` to inspect completeness receipts and `main` to assert the public exit code, so no fixture infers completeness from an exit code.
 - `check_feature_absence.py` supports exactly one selector mode: `--manifest PATH --feature ID`, `--manifest PATH --features CSV`, `--feature ID --phase N`, `--features CSV --phase N`, or `--all-canonically-absent --direct-and-replay`. It checks source/route/config/OpenAPI/package/chunk/IPC/launchd registration plus direct and replay reachability where requested; an unknown feature or missing required surface inventory is a blocking incomplete scan.
 - `check_import_boundaries.py` supports exactly one of `--domain NAME` or `--all`, builds a bounded Python AST import graph from workspace `src` roots, resolves absolute and relative imports, and rejects domain/service/workflow imports of adapter implementations, cross-domain private modules, dynamic imports with non-literal targets, and modules that cannot be parsed.
 - `check_migration_ownership.py` accepts `--revisions REV [REV ...]`, optional `--exact-head REVISION_NAME`, and optional `--forbid-branch-merge-orphan`. It parses Alembic modules without importing them, requires each requested numeric revision to have exactly one file/`revision` value, validates `down_revision`, rejects duplicate/edited/unknown ancestry and, under the strict flag, requires one linear reachable head with no branch, merge, or orphan.
@@ -1380,6 +1501,53 @@ def test_network_checker_requires_complete_pid_owner_snapshot(
         "--forbid-wildcard",
     ]) == 2
 ```
+
+Own the three named fixtures at the `tests/security` pytest scope. `tests/security/conftest.py` is executable fixture registration, not a declaration-only placeholder:
+
+```python
+# tests/security/conftest.py
+from pathlib import Path
+
+import pytest
+
+from tests.security.assurance_cases import (
+    MigrationWorkspace,
+    NetworkInventory,
+    SharedAssuranceHarness,
+)
+
+
+@pytest.fixture
+def shared_assurance_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> SharedAssuranceHarness:
+    return SharedAssuranceHarness(tmp_path / "shared", monkeypatch)
+
+
+@pytest.fixture
+def migration_workspace(tmp_path: Path) -> MigrationWorkspace:
+    return MigrationWorkspace.create_linear(
+        tmp_path / "migrations", ("0013", "0014", "0015")
+    )
+
+
+@pytest.fixture
+def network_inventory(tmp_path: Path) -> NetworkInventory:
+    return NetworkInventory.complete(
+        tmp_path / "network",
+        listeners=(("tcp", "127.0.0.1", 8787, 4101, "python", "owner_ingress"),),
+    )
+```
+
+`tests/security/assurance_cases.py` implements these exact mutation interfaces:
+
+- `SharedAssuranceHarness.complete_positive_workspace_for(tool) -> Path` creates a fresh descriptor-safe repository containing every inventory that the selected tool requires. It uses only regular UTF-8/duplicate-free files and, for network checks, installs a complete `capture_inventory() -> InventorySnapshot` probe through the captured `MonkeyPatch` before returning.
+- `SharedAssuranceHarness.run_every_tool_with(fault) -> HarnessRun` creates a separate positive workspace per tool, applies exactly the named fault to that tool's required input/probe, calls both `tool.evaluate(argv)` and `tool.main(argv)`, and returns `HarnessRun(exit_codes: tuple[int, ...], receipts: tuple[AssuranceResult, ...])`. `exit_codes` contains the actual `main` result; `receipts` contains the actual `evaluate` result. The fault vocabulary is the eleven strings parameterized in the test; filesystem faults use lexical nofollow paths, parser faults mutate raw bytes, size/depth/count faults cross the production constant by exactly one, and process/socket faults alter the injected snapshot.
+- `SharedAssuranceHarness.feature_present_only_on(surface) -> FeatureCase` begins from the complete feature-absence workspace, introduces `selected_frame_perception` on exactly one of the ten named registration/reachability surfaces, and returns `FeatureCase(argv: tuple[str, ...])` containing `--root`, `--feature selected_frame_perception`, `--phase 3`, and `--direct-and-replay` when the selected surface is direct/replay.
+- `MigrationWorkspace.create_linear(root, revisions)` writes one import-free Alembic module per revision with a single linear `down_revision` and exposes `root: Path`. `add_duplicate_revision(revision)` writes a second module with the same `revision` value and a distinct filename while preserving the hidden fork, so the production AST inventory—not fixture metadata—causes exit 1.
+- `NetworkInventory.complete(...)` stores normalized socket and process rows separately. `truncate_between_socket_and_process_tables()` removes the process row after the socket snapshot generation is fixed and marks the join incomplete. `install_as_probe(monkeypatch)` replaces only `scan_network_surface.capture_inventory` with a zero-argument callable returning that immutable snapshot; it does not replace the checker or its decision logic.
+
+Implement the helper with concrete dataclasses (`HarnessRun`, `FeatureCase`, `MigrationWorkspace`, `NetworkInventory`) and literal file/probe mutations matching the contracts above. Its constructors reject an unknown fault/surface and never catch a tool assertion or synthesize a receipt. This makes all three fixtures available to `tests/security/test_shared_assurance_tools.py` without global fixture leakage.
 
 - [ ] **Step 2: Run the red scanner tests**
 
@@ -2131,11 +2299,11 @@ Create `tests/fixtures/synthetic/README.md` stating that fixtures use generated 
 
 Only exact generated directories at a verified Git worktree root are skipped during the filesystem walk; an explicitly supplied `var`, or a nested `src/dist`, `src/var`, or `src/node_modules`, is ordinary scannable content. Before skipping a root generated directory, a bounded streaming `git ls-files -z` inventory adds every tracked file beneath it to the same scan, and a malformed, overlong, or failed tracked inventory blocks. Every explicitly named file or directory—including `dist/` and `var/` evidence—is scanned, and CLI normalization remains lexical so an explicitly supplied symlink reaches the nofollow check. One mutable `ScanBudget` spans every explicit root: it caps path entries, regular files, physical input bytes, archive members at every nesting level, and actual decompressed bytes rather than trusting declared member sizes. Raw ordinary files remain capped at 4 GiB, compressed ZIP/GZip inputs at 4 GiB, one expanded member at 2 GiB, total physical input at 16 GiB, and total actual expansion at 12 GiB across 50,000 members. Directory traversal opens the lexical root and every child through descriptor-relative `O_DIRECTORY|O_NOFOLLOW`, scans depth-first with at most 64 directory descriptors, opens each file relative to its still-open parent, and rechecks the first directory-entry metadata, opened descriptor, and final file/directory name against the same device/inode/type/size/change timestamps before attesting. New, removed, renamed, symlink-swapped, special-file-swapped, or changed queued paths therefore block instead of redirecting the walk. Each file's opened size is charged to the shared input budget, and all parsers receive a frozen view that cannot seek or read beyond that size. The descriptor-relative `os.scandir` walk charges an entry before yielding it and never materializes or sorts the complete tree. Before `ZipFile` may allocate its member list, the EOCD is found by its exact comment boundary, multi-disk/ZIP64 sentinels are blocked, and the central-directory size is capped at 64 MiB and required to end exactly at the EOCD. A bounded streaming header walk then proves every complete central record and requires its actual count to equal the capped EOCD count, so a forged small count cannot make `ZipFile` allocate an oversized list. ZIP virtual names must be unique, canonical, relative, and safe; a directory requires directory mode plus zero compressed/uncompressed size, while a directory-mode non-directory or payload-bearing trailing-slash entry blocks. TAR/GZip uses a bounded single-member deflate reader and a conservative streaming USTAR parser instead of `tarfile`: GZip optional headers, compressed padding, every decompressed TAR header/body/padding byte, member metadata, and trailing TAR padding are capped and charged before further parsing, and FHCRC is verified when present. Concatenated GZip, PAX/GNU long-name/extended metadata, sparse entries, links, devices, and every non-USTAR/special member are blocked before any declared special-member body is read; release archives are already required to be deterministic USTAR. Every bounded physical archive byte is pattern-scanned before parsing, in addition to each expanded regular member, so ZIP comments/extras, GZip names/comments/extra fields, TAR names/owner/reserved header bytes, and parser-ignored metadata cannot carry an unreported literal credential. Pattern matching retains a 256-byte overlap so a credential split across chunks is still found. A bounded file or member is read completely; exceeding any per-object or scan-wide bound is a blocking finding and stops traversal. Filesystem symlinks, FIFOs, devices, sockets, and archive symlink/hardlink/device/special members are blocking inputs. ZIP, wheel, TAR, GZip, and magic-identified regular members recurse through bounded anonymous temporary storage under the same depth/member/byte budget, so a secret inside the Reachy wheelhouse cannot hide in an archive-inside-archive. Archive paths remain virtual and nothing is extracted into the candidate or repository tree. An intended archive that cannot be parsed returns blocking `corrupt-archive`, never an ordinary passing file. Corrupt, changing, or unreadable explicit inputs also block.
 
-Change the final CI command in `.github/workflows/ci.yml` from `make lint typecheck test web-test web-build` to `make check`; Task 3 now owns the scanner that makes the full command available.
+Replace Task 2's fail-closed `verify-private-data` recipe in `Makefile` with `uv run python scripts/verify_private_data.py .`; retain `verify-private-data` as a prerequisite of `check`. Then change the final CI command in `.github/workflows/ci.yml` from `make lint typecheck test test-security test-contract web-test web-build` to `make check`. Task 3 now owns the scanner that activates the full repository gate; before this exact change Task 2 intentionally keeps `check` unavailable.
 
 - [ ] **Step 4: Run the green scanner and shared assurance gate**
 
-Run: `uv run pytest tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py -q && mkdir -p dist var && uv run python scripts/verify_private_data.py . && uv run python scripts/verify_private_data.py dist var && uv run ruff check scripts/verify_private_data.py scripts/assurance_common.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_ownership.py scripts/check_migration_graph.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_backup_artifacts.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py && uv run mypy scripts`
+Run: `uv run pytest tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py -q && mkdir -p dist var && uv run python scripts/verify_private_data.py . && uv run python scripts/verify_private_data.py dist var && uv run ruff check scripts/verify_private_data.py scripts/assurance_common.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_ownership.py scripts/check_migration_graph.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_backup_artifacts.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py && uv run mypy scripts && make check`
 
 Expected: PASS after the test gate creates the two bounded empty artifact/evidence roots. The scanner fails closed for a missing/unreadable/changing or rename-substituted root/file/directory, a regular/symlink/special replacement between entry stat and open, explicit symlink, filesystem/archive special entry, unsafe/duplicate/payload-directory ZIP entry, nested-archive leak, malformed or oversized ZIP central directory, invalid GZip FHCRC, hostile PAX/GNU metadata, nonzero special-member body, nonzero or excessive TAR/GZip padding, or any per-object/scan-wide path, file, physical-input, member, metadata, header, directory-depth, archive-depth, or actual-expansion limit. Literal credential patterns in ZIP comments/extras, GZip optional headers, and TAR header fields are reported. The lazy million-entry fixture stops after the first over-limit entry, exact generated-root skips still scan tracked files, explicit/nested generated roots do not skip content, and two individually small archives share one cumulative expansion budget. Complete streaming includes every bounded nested wheel member and a realistic Reachy wheelhouse beyond the old 16 MiB ceiling without extracting into a public tree. All five structural tools pass their synthetic positive cases, reject every injected finding, and return `2` for incomplete/raced/unparseable inventories.
 
@@ -2143,7 +2311,7 @@ Expected: PASS after the test gate creates the two bounded empty artifact/eviden
 
 ```bash
 git status --short
-git add scripts/verify_private_data.py scripts/assurance_common.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_ownership.py scripts/check_migration_graph.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_backup_artifacts.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py tests/fixtures/synthetic/README.md .github/workflows/ci.yml
+git add scripts/verify_private_data.py scripts/assurance_common.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_ownership.py scripts/check_migration_graph.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_backup_artifacts.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py tests/security/conftest.py tests/security/assurance_cases.py tests/fixtures/synthetic/README.md Makefile .github/workflows/ci.yml
 git diff --cached --name-only
 git diff --cached
 git commit -m "security: add fail-closed assurance scanners"
@@ -4067,6 +4235,7 @@ git commit -m "feat(contracts): define versioned DTOs and ports"
 - Create: `packages/contracts/fixtures/v1/budget.json`
 - Create: `packages/contracts/fixtures/v1/audit.json`
 - Create: `packages/contracts/fixtures/v1/reachy.json`
+- Create: `scripts/contract_fixture_builders.py`
 - Create: `scripts/generate_contract_fixtures.py`
 - Test: `tests/contract/test_v1_fixtures.py`
 - Create: `docs/privacy/threat-model.md`
@@ -4085,32 +4254,51 @@ from pathlib import Path
 
 import pytest
 
-from tuntun_contracts.base import Commitment, canonical_bytes, parse_contract_json
-from tuntun_contracts.events import EventEnvelope, SignedEventEnvelope, StopRequestedPayload, WakeDetectedPayload
-from tuntun_contracts.speech import AudioFormat, AuthorizedTranscriptionRequest, TranscriptResult, AuthorizedSynthesisRequest, SpeechChunk
-from tuntun_contracts.identity import IdentityEvidence, IdentityRequest, IdentityDecision
-from tuntun_contracts.actions import ActionBinding, ActionProposalDraft, ActionReceipt, ValidatedActionProposal
-from tuntun_contracts.memory import WorkingContent, EpisodicContent, SemanticContent, PreferenceContent, ProceduralContent, RelationalContent, PolicyContent, MemoryProposalDraft, MemoryProposal, MemoryRecord, MemoryQuery, ApprovedMemory, ProposalContext, DecideMemoryProposal
-from tuntun_contracts.policy import PolicyRequest, PolicyDecision, AuthenticationRequest, AuthenticationChallenge, AuthenticationResponse, AuthGrant, AuthContext, CurrentOwnerAuthority, AdminSessionPrincipal, TimerIntent
-from tuntun_contracts.provider import RouteAuthorization, RouteAuthorizationRequest, RouteConsumption, ProviderResponseReceipt, SanitizedProviderMessage, SanitizedToolReference, SanitizedProviderRequest, ProviderResponse, RedactionReceipt
-from tuntun_contracts.budget import BudgetReservationRequest, BudgetReservation, BudgetSettlementRequest, BudgetSettlement, LlmUsageUnits, ProviderUsageReceiptV1, SttUsageUnits, TransportProof, TtsUsageUnits, WebSearchUsageUnits, BudgetReconciliationRequest
-from tuntun_contracts.audit import AuditDraft, AuditReceipt
-from tuntun_contracts.reachy import ReachyCommand, ReachyReceipt, ReachyHealth, SafetyReceipt, StopSignal, CameraWindowGrant
-from tuntun_contracts.ports import TurnInput, TurnOutput
+from scripts.contract_fixture_builders import BUILDERS, FixtureFactory, semantic_specs
+from tuntun_contracts import (
+    actions, audit, budget, events, identity, memory, policy, ports, provider, reachy, speech,
+)
+from tuntun_contracts.base import (
+    Commitment, ContractModel, canonical_bytes, parse_contract_json,
+    registered_contract_models,
+)
+from tuntun_contracts.events import EventEnvelope
 
 FIXTURE_ROOT = Path("packages/contracts/fixtures/v1")
-MODEL_REGISTRY = {
-    "actions":{"ActionProposalDraft":ActionProposalDraft,"ActionBinding":ActionBinding,"ValidatedActionProposal":ValidatedActionProposal,"ActionReceipt":ActionReceipt},
-    "events":{"Commitment":Commitment,"WakeDetectedPayload":WakeDetectedPayload,"StopRequestedPayload":StopRequestedPayload,"EventEnvelope":EventEnvelope,"SignedEventEnvelope":SignedEventEnvelope,"TurnInput":TurnInput,"TurnOutput":TurnOutput},
-    "speech":{"AudioFormat":AudioFormat,"AuthorizedTranscriptionRequest":AuthorizedTranscriptionRequest,"TranscriptResult":TranscriptResult,"AuthorizedSynthesisRequest":AuthorizedSynthesisRequest,"SpeechChunk":SpeechChunk},
-    "identity":{"IdentityEvidence":IdentityEvidence,"IdentityRequest":IdentityRequest,"IdentityDecision":IdentityDecision},
-    "memory":{"WorkingContent":WorkingContent,"EpisodicContent":EpisodicContent,"SemanticContent":SemanticContent,"PreferenceContent":PreferenceContent,"ProceduralContent":ProceduralContent,"RelationalContent":RelationalContent,"PolicyContent":PolicyContent,"MemoryProposalDraft":MemoryProposalDraft,"MemoryProposal":MemoryProposal,"MemoryRecord":MemoryRecord,"MemoryQuery":MemoryQuery,"ApprovedMemory":ApprovedMemory,"ProposalContext":ProposalContext,"DecideMemoryProposal":DecideMemoryProposal},
-    "policy":{"PolicyRequest":PolicyRequest,"PolicyDecision":PolicyDecision,"AuthenticationRequest":AuthenticationRequest,"AuthenticationChallenge":AuthenticationChallenge,"AuthenticationResponse":AuthenticationResponse,"AuthGrant":AuthGrant,"AuthContext":AuthContext,"CurrentOwnerAuthority":CurrentOwnerAuthority,"AdminSessionPrincipal":AdminSessionPrincipal,"TimerIntent":TimerIntent},
-    "provider":{"RouteAuthorization":RouteAuthorization,"RouteAuthorizationRequest":RouteAuthorizationRequest,"RouteConsumption":RouteConsumption,"ProviderResponseReceipt":ProviderResponseReceipt,"SanitizedProviderMessage":SanitizedProviderMessage,"SanitizedToolReference":SanitizedToolReference,"SanitizedProviderRequest":SanitizedProviderRequest,"ProviderResponse":ProviderResponse,"RedactionReceipt":RedactionReceipt},
-    "budget":{"LlmUsageUnits":LlmUsageUnits,"SttUsageUnits":SttUsageUnits,"TtsUsageUnits":TtsUsageUnits,"WebSearchUsageUnits":WebSearchUsageUnits,"BudgetReservationRequest":BudgetReservationRequest,"BudgetReservation":BudgetReservation,"BudgetSettlementRequest":BudgetSettlementRequest,"BudgetSettlement":BudgetSettlement,"ProviderUsageReceiptV1":ProviderUsageReceiptV1,"TransportProof":TransportProof,"BudgetReconciliationRequest":BudgetReconciliationRequest},
-    "audit":{"AuditDraft":AuditDraft,"AuditReceipt":AuditReceipt},
-    "reachy":{"ReachyCommand":ReachyCommand,"ReachyReceipt":ReachyReceipt,"ReachyHealth":ReachyHealth,"SafetyReceipt":SafetyReceipt,"StopSignal":StopSignal,"CameraWindowGrant":CameraWindowGrant},
+MODULES = {
+    "actions": (actions,), "events": (events, ports), "speech": (speech,),
+    "identity": (identity,), "memory": (memory,), "policy": (policy,),
+    "provider": (provider,), "budget": (budget,), "audit": (audit,),
+    "reachy": (reachy,),
 }
+
+
+def fixture_registry() -> dict[str, dict[str, type[ContractModel]]]:
+    result: dict[str, dict[str, type[ContractModel]]] = {}
+    for group, owning_modules in MODULES.items():
+        result[group] = {
+            name: value
+            for module in owning_modules
+            for name, value in vars(module).items()
+            if isinstance(value, type)
+            and issubclass(value, ContractModel)
+            and value is not ContractModel
+            and value.__module__ == module.__name__
+        }
+    result["events"]["Commitment"] = Commitment
+    return result
+
+
+MODEL_REGISTRY = fixture_registry()
+
+
+def test_fixture_registry_is_the_complete_public_contract_registry() -> None:
+    fixture_models = {
+        model for models in MODEL_REGISTRY.values() for model in models.values()
+    }
+    assert fixture_models == set(registered_contract_models()) | {Commitment}
+    assert set(BUILDERS) == fixture_models
+    assert set(semantic_specs(FixtureFactory.preview())) <= fixture_models
 
 
 @pytest.mark.parametrize("name", ["actions","events","speech","identity","memory","policy","provider","budget","audit","reachy"])
@@ -4139,99 +4327,185 @@ def test_event_fixture_round_trips_to_identical_canonical_bytes() -> None:
 
 Run: `uv run pytest tests/contract/test_v1_fixtures.py -q`
 
-Expected: FAIL with `FileNotFoundError: packages/contracts/fixtures/v1/events.json`.
+Expected: FAIL during collection with `ModuleNotFoundError: No module named 'scripts.contract_fixture_builders'`; after that builder registry exists but before fixture generation, the failure advances to `FileNotFoundError: packages/contracts/fixtures/v1/events.json`.
 
 - [ ] **Step 3: Add deterministic fixtures and privacy documents**
 
+`scripts/contract_fixture_builders.py` owns one exhaustive builder registry. Schema-derived fields may use a deterministic schema builder, but every field participating in a field/model validator, discriminator correlation, or nested semantically constrained union is supplied by an explicit `SemanticSpec`; those fields are never guessed from JSON Schema.
+
 ```python
-# scripts/generate_contract_fixtures.py
-from __future__ import annotations
-import json
-from pathlib import Path
-from typing import Any
-from tuntun_contracts import actions, audit, budget, events, identity, memory, policy, ports, provider, reachy, speech
-from tuntun_contracts.base import Commitment, ContractModel, canonical_bytes, parse_contract_json
+# core of scripts/contract_fixture_builders.py
+@dataclass(frozen=True)
+class SemanticSpec:
+    fields: frozenset[str]
+    values: Callable[["FixtureFactory"], dict[str, object]]
 
-MODULES = {
-    "actions": (actions,),
-    "events": (events, ports), "speech": (speech,), "identity": (identity,), "memory": (memory,),
-    "policy": (policy,), "provider": (provider,), "budget": (budget,), "audit": (audit,), "reachy": (reachy,),
-}
 
-def registry() -> dict[str, dict[str, type[ContractModel]]]:
-    result: dict[str, dict[str, type[ContractModel]]] = {}
-    for group, modules in MODULES.items():
-        models: dict[str, type[ContractModel]] = {}
-        for module in modules:
-            for name, value in vars(module).items():
-                if isinstance(value, type) and issubclass(value, ContractModel) and value is not ContractModel and value.__module__ == module.__name__:
-                    models[name] = value
-        result[group] = models
-    result["events"]["Commitment"] = Commitment
-    return result
+def action_base(factory, action_name, resource_type, resource_id=None):
+    return {
+        "action_name": action_name,
+        "resource_type": resource_type,
+        "resource_id": resource_id if resource_id is not None else factory.uuid(),
+    }
 
-def sample(schema: dict[str, Any], definitions: dict[str, Any], field_name: str, counter: list[int]) -> Any:
-    if "$ref" in schema: return sample(definitions[schema["$ref"].split("/")[-1]], definitions, field_name, counter)
-    if "const" in schema: return schema["const"]
-    if "enum" in schema: return schema["enum"][0]
-    if field_name == "subject_id" and any(choice.get("type") == "null" for choice in schema.get("anyOf", [])): return None
-    for union_key in ("oneOf", "anyOf"):
-        if union_key in schema:
-            choices=[choice for choice in schema[union_key] if choice.get("type") != "null"]
-            return sample(choices[0], definitions, field_name, counter)
-    kind=schema.get("type")
-    if kind == "object" or "properties" in schema:
-        return {name: sample(child, definitions, name, counter) for name, child in schema.get("properties", {}).items() if name in schema.get("required", [])}
-    if kind == "array": return []
-    if kind == "integer": return int(schema.get("minimum", 0))
-    if kind == "number": return int(schema.get("minimum", 0))
-    if kind == "boolean": return False
-    if kind == "string":
-        if schema.get("format") == "uuid": counter[0]+=1; return f"00000000-0000-0000-0000-{counter[0]:012d}"
-        if schema.get("format") == "date-time": return "2026-08-27T01:02:03.000004Z"
-        pattern=str(schema.get("pattern", ""))
-        if "0-9a-f" in pattern: return "0" * 64
-        if "A-Za-z0-9+/" in pattern: return "A" * 43 + "="
-        length=max(int(schema.get("minLength", 1)), len("status")); return ("status" + "x" * length)[:length]
-    if kind == "null": return None
-    raise ValueError(f"unsupported fixture schema for {field_name}: {schema}")
 
-def main() -> None:
-    root=Path("packages/contracts/fixtures/v1"); root.mkdir(parents=True,exist_ok=True)
-    counter=[100]
-    for group, models in registry().items():
-        examples: dict[str, object]={}; canonical: dict[str, str]={}
-        for name, model_type in sorted(models.items()):
-            schema=model_type.model_json_schema(); value=sample(schema, schema.get("$defs",{}), name, counter)
-            if name == "AuthGrant": value.update({"assurance":"confirmed","assurance_source":"explicit_confirmation"})
-            if name == "AuthContext": value.update({"grant_id":None,"assurance":"guest","assurance_source":"guest"})
-            if name == "BudgetReservationRequest": value.update({"category":"llm","month_key":"2026-08","usage_ceiling":{"category":"llm","input_tokens":1,"output_tokens":0}})
-            if name == "BudgetReservation": value.update({"outcome":"allow","amount_micros_sgd":1,"pricing_commitment":{"algorithm":"HMAC-SHA-256","key_id":"pricing-v1","value_b64":"A"*43+"="}})
-            if name == "ProviderUsageReceiptV1": value.update({"category":"llm","accounting_basis":"provider_reported_exact","billable_usage":{"category":"llm","input_tokens":1,"output_tokens":0}})
-            model=parse_contract_json(
-                model_type,json.dumps(value,separators=(",",":")).encode("utf-8"),
-                max_bytes=1_048_576,require_canonical=False,
-            ); examples[name]=model.model_dump(mode="json"); canonical[name]=canonical_bytes(model).decode("utf-8")
-        (root/f"{group}.json").write_text(json.dumps({"schema_version":"1.0","examples":examples,"canonical_examples":canonical},indent=2,sort_keys=True)+"\n",encoding="utf-8")
-
-if __name__ == "__main__": main()
+def semantic_specs(factory: "FixtureFactory") -> dict[type[ContractModel], SemanticSpec]:
+    timer_id=factory.uuid(); subject_id=factory.uuid()
+    return {
+        Commitment: SemanticSpec(frozenset({"algorithm","key_id","value_b64"}),lambda f:{"algorithm":"HMAC-SHA-256","key_id":"fixture-v1","value_b64":"A"*43+"="}),
+        events.EventEnvelope: SemanticSpec(frozenset({"event_type","payload"}),lambda f:{"event_type":"speech.wake_detected","payload":f.build(events.WakeDetectedPayload)}),
+        speech.AuthorizedTranscriptionRequest: SemanticSpec(frozenset({"language_hints"}),lambda f:{"language_hints":("en","hi")}),
+        identity.IdentityRequest: SemanticSpec(frozenset({"evidence"}),lambda f:{"evidence":()}),
+        memory.EpisodicContent: SemanticSpec(frozenset({"participant_ids"}),lambda f:{"participant_ids":()}),
+        memory.MemoryProposalDraft: SemanticSpec(frozenset({"operation","content","audience","target_memory_id","expected_version"}),lambda f:{"operation":"delete","content":None,"audience":None,"target_memory_id":f.uuid(),"expected_version":1}),
+        memory.MemoryProposal: SemanticSpec(frozenset({"draft"}),lambda f:{"draft":f.build(memory.MemoryProposalDraft)}),
+        memory.MemoryQuery: SemanticSpec(frozenset({"kinds"}),lambda f:{"kinds":("working",)}),
+        memory.ApprovedMemory: SemanticSpec(frozenset({"source_receipt_ids"}),lambda f:{"source_receipt_ids":(f.uuid(),)}),
+        actions.TimerCreateActionDraft: SemanticSpec(frozenset({"action_name","resource_type","resource_id"}),lambda f:action_base(f,"timer.create","timer")),
+        actions.TimerTargetActionDraft: SemanticSpec(frozenset({"action_name","resource_type","resource_id","timer_id"}),lambda f:{**action_base(f,"timer.cancel","timer",timer_id),"timer_id":timer_id}),
+        actions.SafetyActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:{**action_base(f,"privacy.on","privacy"),"reason_code":"fixture"}),
+        actions.PrivacyReductionActionDraft: SemanticSpec(frozenset({"action_name","resource_type","typed_confirmation"}),lambda f:{**action_base(f,"privacy.off","privacy"),"typed_confirmation":"TURN OFF PRIVACY"}),
+        actions.ComponentStatusActionDraft: SemanticSpec(frozenset({"action_name","resource_type","component"}),lambda f:{**action_base(f,"system.status","system"),"component":"system"}),
+        actions.DiagnosticActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:{**action_base(f,"reachy.gesture_test","reachy"),"registered_asset_id":"fixture.asset"}),
+        actions.MemoryActionDraft: SemanticSpec(frozenset({"action_name","resource_type","resource_id","subject_id","proposal_id_ref","memory_id","expected_version","decision","edited_content","memory_proposal","export_format"}),lambda f:{**action_base(f,"memory.delete","memory"),"subject_id":f.uuid(),"proposal_id_ref":None,"memory_id":f.uuid(),"expected_version":1,"decision":None,"edited_content":None,"memory_proposal":None,"export_format":None}),
+        actions.ProfileActionDraft: SemanticSpec(frozenset({"action_name","resource_type","subject_id","profile_class","target_profile_class","display_label","guardian_id","persona_traits","clear_persona_traits","expected_version","guardian_generation"}),lambda f:{**action_base(f,"profile.revoke","profile",subject_id),"subject_id":subject_id,"profile_class":None,"target_profile_class":None,"display_label":None,"guardian_id":None,"persona_traits":None,"clear_persona_traits":False,"expected_version":1,"guardian_generation":None}),
+        actions.ConsentActionDraft: SemanticSpec(frozenset({"action_name","resource_type","subject_id","expected_latest_receipt_id","guardian_generation"}),lambda f:{**action_base(f,"consent.grant","consent",subject_id),"subject_id":subject_id,"purpose":"personalization","expected_latest_receipt_id":None,"guardian_generation":None}),
+        actions.IdentityActionDraft: SemanticSpec(frozenset({"action_name","resource_type","resource_id","subject_id","modality","enrollment_id","expected_profile_version","expected_consent_receipt_id","reenrollment_days"}),lambda f:{**action_base(f,"identity.enroll","identity",subject_id),"subject_id":subject_id,"modality":"face","enrollment_id":None,"expected_profile_version":1,"expected_consent_receipt_id":f.uuid(),"reenrollment_days":180}),
+        actions.ProviderActionDraft: SemanticSpec(frozenset({"action_name","resource_type","provider","enabled","review_record_id","hard_limit_micros_sgd","access_mode","expected_provider_version","expected_budget_version","expected_access_version"}),lambda f:{**action_base(f,"provider.review","provider"),"provider":"openai","enabled":None,"review_record_id":None,"hard_limit_micros_sgd":None,"access_mode":None,"expected_provider_version":1,"expected_budget_version":None,"expected_access_version":None}),
+        actions.CredentialActionDraft: SemanticSpec(frozenset({"action_name","resource_type","credential_id","capability","ceremony_id","expected_version"}),lambda f:{**action_base(f,"credential.recovery.rotate","credential"),"credential_id":None,"capability":None,"ceremony_id":None,"expected_version":1}),
+        actions.AuditActionDraft: SemanticSpec(frozenset({"action_name","resource_type","from_ordinal"}),lambda f:{**action_base(f,"audit.verify","audit"),"from_ordinal":1}),
+        actions.BackupActionDraft: SemanticSpec(frozenset({"action_name","resource_type","backup_id","recipient_key_id","manifest_sha256"}),lambda f:{**action_base(f,"backup.recovery_key.create","backup"),"backup_id":None,"recipient_key_id":"fixture-key","manifest_sha256":None}),
+        actions.SearchActionDraft: SemanticSpec(frozenset({"action_name","resource_type","subject_id","mode","expected_web_consent_receipt_id","provider_review_version","pricing_version","privacy_generation","feature_generation","activation_issued_at","activation_expires_at","max_passes","max_sources","max_duration_seconds","no_memory","no_authenticated_sites","no_files","no_tools"}),lambda f:{**action_base(f,"search.profile_mode.change","search",subject_id),"subject_id":subject_id,"expected_profile_version":1,"mode":"no_web","expected_web_consent_receipt_id":None,"provider_review_version":None,"pricing_version":None,"privacy_generation":None,"feature_generation":None,"activation_issued_at":None,"activation_expires_at":None,"max_passes":None,"max_sources":None,"max_duration_seconds":None,"no_memory":None,"no_authenticated_sites":None,"no_files":None,"no_tools":None}),
+        actions.SecurityFindingActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:action_base(f,"security.finding.suppress","security")),
+        actions.ReleaseP1R0ActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:action_base(f,"release.p1r0","release")),
+        actions.LatencyDeviationActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:action_base(f,"release.latency.accept","release")),
+        actions.FamilyStageReviewActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:action_base(f,"release.family_stage.review","release")),
+        actions.ValidatedActionProposal: SemanticSpec(frozenset({"draft"}),lambda f:{"draft":f.build(actions.TimerCreateActionDraft)}),
+        policy.PolicyRequest: SemanticSpec(frozenset({"action"}),lambda f:{"action":f.build(actions.TimerCreateActionDraft)}),
+        policy.AuthGrant: SemanticSpec(frozenset({"assurance","assurance_source"}),lambda f:{"assurance":"confirmed","assurance_source":"explicit_confirmation"}),
+        policy.AuthContext: SemanticSpec(frozenset({"grant_id","assurance","assurance_source"}),lambda f:{"grant_id":None,"assurance":"guest","assurance_source":"guest"}),
+        provider.RedactionReceipt: SemanticSpec(frozenset({"removed_categories"}),lambda f:{"removed_categories":()}),
+        budget.BudgetReservationRequest: SemanticSpec(frozenset({"category","usage_ceiling","month_key"}),lambda f:{"category":"llm","usage_ceiling":{"category":"llm","input_tokens":1,"output_tokens":0},"month_key":"2026-08"}),
+        budget.BudgetReservation: SemanticSpec(frozenset({"outcome","amount_micros_sgd","pricing_commitment"}),lambda f:{"outcome":"allow","amount_micros_sgd":1,"pricing_commitment":f.build(Commitment)}),
+        budget.ProviderUsageReceiptV1: SemanticSpec(frozenset({"category","billable_usage"}),lambda f:{"category":"llm","billable_usage":{"category":"llm","input_tokens":1,"output_tokens":0}}),
+        budget.BudgetReconciliationRequest: SemanticSpec(frozenset({"proofs"}),lambda f:{"proofs":()}),
+        reachy.ReachyCommand: SemanticSpec(frozenset({"kind","state","media_stream_id","gesture_id"}),lambda f:{"kind":"state","state":"idle","media_stream_id":None,"gesture_id":None}),
+        reachy.CameraWindowGrant: SemanticSpec(frozenset({"subject_id","action_name","purpose","max_frames","max_frame_bytes","max_total_bytes","max_frames_per_second","issued_at","expires_at"}),lambda f:{"subject_id":f.uuid(),"action_name":"identity.enroll","purpose":"explicit_enrollment","max_frames":2,"max_frame_bytes":1024,"max_total_bytes":2048,"max_frames_per_second":1,"issued_at":f.time(),"expires_at":f.time(offset_microseconds=5_000_000)}),
+    }
 ```
 
-This generator discovers every public `ContractModel` declared in the owning modules, assigns fixed UUIDs beginning at `00000000-0000-0000-0000-000000000101`, uses only `status`-derived synthetic strings and the fixed timestamp, validates every generated object, and writes canonical oracles. Review the generated diff once, then retain both the generator and fixtures; CI reruns the generator and fails if `git diff --exit-code packages/contracts/fixtures/v1` is non-empty. No fixture contains audio, a conversation transcript, names, addresses, credentials, or provider prose.
+`FixtureFactory` owns a deterministic UUID counter and `time(*, offset_microseconds: int = 0)`, which returns the fixed UTC fixture epoch plus the requested `timedelta`; it never reads the clock, random source, environment, or model schema. The schema-only classification is equally explicit, so a newly registered model cannot silently fall into generic generation:
+
+```python
+SCHEMA_ONLY_MODELS=frozenset({
+    events.WakeDetectedPayload,events.StopRequestedPayload,events.SignedEventEnvelope,
+    ports.TurnInput,ports.TurnOutput,
+    speech.AudioFormat,speech.TranscriptResult,speech.AuthorizedSynthesisRequest,
+    speech.SpeechChunk,
+    identity.IdentityEvidence,identity.IdentityDecision,identity.PersonaTraits,
+    identity.PersonaProjection,
+    memory.WorkingContent,memory.SemanticContent,memory.PreferenceContent,
+    memory.ProceduralContent,memory.RelationalContent,memory.PolicyContent,
+    memory.MemoryRecord,memory.ProposalContext,memory.DecideMemoryProposal,
+    actions.ActionDraftBase,actions.ActionBinding,actions.ActionReceipt,
+    policy.PolicyDecision,policy.AuthenticationRequest,policy.AuthenticationChallenge,
+    policy.AuthenticationResponse,policy.CurrentOwnerAuthority,
+    policy.AdminSessionPrincipal,policy.TimerIntent,
+    provider.RouteAuthorization,provider.RouteAuthorizationRequest,
+    provider.RouteConsumption,provider.ProviderResponseReceipt,
+    provider.SanitizedProviderMessage,provider.SanitizedToolReference,
+    provider.SanitizedProviderRequest,provider.ProviderResponse,
+    budget.LlmUsageUnits,budget.SttUsageUnits,budget.TtsUsageUnits,
+    budget.WebSearchUsageUnits,budget.BudgetSettlementRequest,
+    budget.BudgetSettlement,budget.TransportProof,
+    audit.AuditDraft,audit.AuditReceipt,
+    reachy.ReachyReceipt,reachy.ReachyHealth,reachy.SafetyReceipt,
+    reachy.StopAllReceiptBundleV1,reachy.StopSignal,
+})
+```
+
+`FixtureFactory.schema_payload(model_type)` is limited to those models. It follows `const`, `enum`, required fields, non-null union branches, `minItems`, numeric minima, UUID/date-time formats, and the closed regex cases used by these contracts. When `$ref` or a union branch names another registered `ContractModel`, it calls `self.build(referenced_model)` and embeds that normally validated result instead of recursively guessing the nested semantic model. It increments UUIDs for every item so schema-level uniqueness is deterministic. `FixtureFactory.build` is exactly:
+
+```python
+def build(self, model_type: type[ContractModel]) -> ContractModel:
+    builder = BUILDERS[model_type]
+    model = builder(self)
+    if type(model) is not model_type:
+        raise TypeError(f"fixture builder returned wrong type for {model_type.__name__}")
+    # Exercise the ordinary hostile-ingress validation path again; no
+    # model_construct, model_copy(update=...), or skipped validation is allowed.
+    return parse_contract_json(
+        model_type, canonical_bytes(model), max_bytes=1_048_576,
+        require_canonical=True,
+    )
+
+
+SEMANTIC_BUILDERS = {
+    model: (lambda current: lambda factory: factory.validated_semantic(current))(model)
+    for model in semantic_specs(FixtureFactory.preview()).keys()
+}
+SCHEMA_ONLY_BUILDERS = {
+    model: (lambda current: lambda factory: factory.validated_schema_only(current))(model)
+    for model in SCHEMA_ONLY_MODELS
+}
+BUILDERS = SEMANTIC_BUILDERS | SCHEMA_ONLY_BUILDERS
+PUBLIC_MODELS = {
+    model for models in fixture_registry().values() for model in models.values()
+}
+assert not (set(SEMANTIC_BUILDERS) & set(SCHEMA_ONLY_BUILDERS))
+assert set(BUILDERS) == PUBLIC_MODELS
+```
+
+`validated_semantic` renders the schema-derived independent fields, requires `spec.fields <= set(spec.values(self))`, rejects every supplied key that is not a real model field, replaces the supplied explicit values, and calls `model_type.model_validate(payload)`. Extra supplied real fields are allowed only to make a complete explicit variant easier to review; an omitted correlated field is not. Thus a new public model, an unclassified model, a semantic model accidentally placed in the schema-only set, an omitted correlated field, or an unknown override fails before any fixture file is written. `tests/contract/test_v1_fixtures.py` imports `BUILDERS` and adds `assert set(BUILDERS) == fixture_models`; it also asserts `set(semantic_specs(FixtureFactory.preview())) == set(SEMANTIC_BUILDERS)`.
+
+```python
+# scripts/generate_contract_fixtures.py
+import json
+from pathlib import Path
+
+from scripts.contract_fixture_builders import BUILDERS, FixtureFactory, fixture_registry
+from tuntun_contracts.base import canonical_bytes
+
+
+def main() -> None:
+    root=Path("packages/contracts/fixtures/v1")
+    root.mkdir(parents=True,exist_ok=True)
+    factory=FixtureFactory(first_uuid=101)
+    registry=fixture_registry()
+    assert set(BUILDERS)=={
+        model for models in registry.values() for model in models.values()
+    }
+    for group,models in registry.items():
+        examples={}; canonical={}
+        for name,model_type in sorted(models.items()):
+            model=factory.build(model_type)
+            examples[name]=model.model_dump(mode="json")
+            canonical[name]=canonical_bytes(model).decode("utf-8")
+        output={"schema_version":"1.0","examples":examples,"canonical_examples":canonical}
+        (root/f"{group}.json").write_text(
+            json.dumps(output,indent=2,sort_keys=True,ensure_ascii=False)+"\n",
+            encoding="utf-8",
+        )
+
+
+if __name__=="__main__": main()
+```
+
+The generator assigns fixed UUIDs beginning at `00000000-0000-0000-0000-000000000101`, uses only synthetic closed strings and the fixed timestamp, normally validates every object before serialization, and writes canonical oracles. Review the generated diff once, then retain the builder registry, generator, and fixtures; CI reruns the generator and fails if `git diff --exit-code packages/contracts/fixtures/v1` is non-empty. No fixture contains audio, a conversation transcript, names, addresses, credentials, or provider prose.
 
 Write `docs/privacy/threat-model.md` with assets (database/key roots, audit authenticity, contracts/model manifest, availability), actors (owner, family subject, Guest, LAN attacker, malicious model output, compromised dependency), trust boundaries (Reachy↔LAN↔Mac, browser↔API, Mac↔provider, build↔dependency/model sources), and foundation mitigations mapped to Task 3 scanning, strict contracts, Keychain, SQLCipher, AEAD, manifest hashes, and audit triggers. Write `docs/privacy/data-flow-inventory.md` as a table with columns `Data class | Source | Purpose | Processor | Durable location | Egress | Retention/deletion | Key`; include configuration, secrets, event receipts, audit receipts, provider-price/budget metadata, model metadata, and synthetic fixtures. Mark raw audio/transcripts/frames as “not processed by foundation; durable location none.”
 
 - [ ] **Step 4: Run the green fixture/privacy gate**
 
-Run: `uv run python scripts/generate_contract_fixtures.py && uv run pytest tests/contract/test_v1_fixtures.py -q && uv run python scripts/generate_contract_fixtures.py && git diff --exit-code packages/contracts/fixtures/v1 && uv run python scripts/verify_private_data.py packages/contracts/fixtures/v1 docs/privacy`
+Run: `uv run python scripts/generate_contract_fixtures.py && uv run pytest tests/contract/test_v1_fixtures.py -q && uv run python scripts/generate_contract_fixtures.py && git diff --exit-code packages/contracts/fixtures/v1 && uv run ruff check scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py tests/contract/test_v1_fixtures.py && uv run mypy scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py && uv run python scripts/verify_private_data.py packages/contracts/fixtures/v1 docs/privacy`
 
-Expected: PASS with 11 fixture tests and `private-data scan: PASS`.
+Expected: PASS with 12 fixture/registry tests, `set(BUILDERS)` exactly equal to the complete public registry, every semantic class owned by an explicit `SemanticSpec`, two byte-identical generations, zero Ruff/mypy errors, and `private-data scan: PASS`.
 
 - [ ] **Step 5: Commit exact Task 6 paths**
 
 ```bash
 git status --short
-git add packages/contracts/fixtures/v1/actions.json packages/contracts/fixtures/v1/events.json packages/contracts/fixtures/v1/speech.json packages/contracts/fixtures/v1/identity.json packages/contracts/fixtures/v1/memory.json packages/contracts/fixtures/v1/policy.json packages/contracts/fixtures/v1/provider.json packages/contracts/fixtures/v1/budget.json packages/contracts/fixtures/v1/audit.json packages/contracts/fixtures/v1/reachy.json scripts/generate_contract_fixtures.py tests/contract/test_v1_fixtures.py docs/privacy/threat-model.md docs/privacy/data-flow-inventory.md
+git add packages/contracts/fixtures/v1/actions.json packages/contracts/fixtures/v1/events.json packages/contracts/fixtures/v1/speech.json packages/contracts/fixtures/v1/identity.json packages/contracts/fixtures/v1/memory.json packages/contracts/fixtures/v1/policy.json packages/contracts/fixtures/v1/provider.json packages/contracts/fixtures/v1/budget.json packages/contracts/fixtures/v1/audit.json packages/contracts/fixtures/v1/reachy.json scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py tests/contract/test_v1_fixtures.py docs/privacy/threat-model.md docs/privacy/data-flow-inventory.md
 git diff --cached --name-only
 git diff --cached
 git commit -m "test(contracts): freeze version-one fixtures and privacy inventory"
@@ -4253,6 +4527,7 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 - Create: `.env.example`
 - Test: `tests/unit/config/test_settings.py`
 - Test: `tests/unit/config/test_paths.py`
+- Create: `tests/unit/config/conftest.py`
 
 **Interfaces:**
 - Consumes: YAML file and explicit `TUNTUN_` environment overrides.
@@ -4328,6 +4603,74 @@ def test_paths_are_created_owner_only(tmp_path: Path) -> None:
     paths = ApplicationPaths.create(tmp_path / "Tuntun")
     for path in (paths.root, paths.data, paths.logs, paths.models, paths.backups):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700
+```
+
+Define `strict_settings_case` in the config subtree where it is consumed. It begins as an owner-only regular valid settings file; every mutation changes exactly one loader invariant:
+
+```python
+# tests/unit/config/conftest.py
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+
+@dataclass
+class StrictSettingsCase:
+    path: Path
+    monkeypatch: pytest.MonkeyPatch
+
+    def mutate(self, mutation: str) -> None:
+        if mutation == "duplicate_key":
+            self.path.write_text("memory:\n  max_items_per_turn: 5\nmemory: {}\n")
+        elif mutation == "yaml_alias":
+            self.path.write_text("memory: &m {max_items_per_turn: 5}\ncopy: *m\n")
+        elif mutation == "explicit_tag":
+            self.path.write_text("memory: !custom {max_items_per_turn: 5}\n")
+        elif mutation == "overdeep":
+            self.path.write_text("unknown: " + "[" * 33 + "0" + "]" * 33 + "\n")
+        elif mutation == "too_many_events":
+            self.path.write_text("unknown: [" + ",".join("0" for _ in range(16_385)) + "]\n")
+        elif mutation == "oversized_file":
+            self.path.write_bytes(b"#" * 262_145)
+        elif mutation == "symlink":
+            target = self.path.with_name("target.yaml")
+            target.write_text("{}\n"); self.path.unlink(); self.path.symlink_to(target.name)
+        elif mutation == "fifo":
+            self.path.unlink(); os.mkfifo(self.path, 0o600)
+        elif mutation == "group_writable":
+            self.path.chmod(0o620)
+        elif mutation == "changed_during_read":
+            from tuntun_core.config import loader
+            replacement = self.path.with_name("replacement.yaml")
+            replacement.write_text("memory:\n  max_items_per_turn: 4\n")
+            replacement.chmod(0o600)
+            original_read = loader.os.read
+            swapped = False
+            def replacing_read(fd: int, size: int) -> bytes:
+                nonlocal swapped
+                chunk = original_read(fd, size)
+                if chunk and not swapped:
+                    swapped = True
+                    self.path.replace(self.path.with_name("original.yaml"))
+                    replacement.replace(self.path)
+                return chunk
+            self.monkeypatch.setattr(loader.os, "read", replacing_read)
+        else:
+            raise AssertionError(f"unknown strict-settings mutation: {mutation}")
+
+
+@pytest.fixture
+def strict_settings_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> StrictSettingsCase:
+    path = tmp_path / "settings.yaml"
+    path.write_text("memory:\n  max_items_per_turn: 5\n", encoding="utf-8")
+    path.chmod(0o600)
+    return StrictSettingsCase(path, monkeypatch)
 ```
 
 - [ ] **Step 2: Run the red settings tests**
@@ -4439,7 +4782,10 @@ def parse_bounded_strict_yaml(
         raise ValueError("invalid configuration") from error
 
 def read_bounded_strict_yaml(path:Path,*,max_bytes:int=MAX_SETTINGS_BYTES):
-    fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC|getattr(os,"O_NOFOLLOW",0))
+    try:
+        fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_CLOEXEC|getattr(os,"O_NOFOLLOW",0))
+    except OSError as error:
+        raise PermissionError("unsafe configuration file") from error
     try:
         before=os.fstat(fd)
         if (
@@ -4514,7 +4860,7 @@ Expected: PASS with all settings/path tests passing and Ruff/mypy exiting 0.
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/config/settings.py apps/core/src/tuntun_core/config/loader.py apps/core/src/tuntun_core/config/paths.py config/tuntun.example.yaml .env.example tests/unit/config/test_settings.py tests/unit/config/test_paths.py
+git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/config/settings.py apps/core/src/tuntun_core/config/loader.py apps/core/src/tuntun_core/config/paths.py config/tuntun.example.yaml .env.example tests/unit/config/test_settings.py tests/unit/config/test_paths.py tests/unit/config/conftest.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(core): add fail-closed settings and paths"
@@ -4929,10 +5275,12 @@ git commit -m "test: add deterministic foundation scenario"
 - Create: `models/manifest.yaml`
 - Create: `scripts/check_model_manifest.py`
 - Test: `tests/security/test_model_governance.py`
+- Modify: `tests/security/conftest.py`
+- Create: `tests/security/model_governance_cases.py`
 
 **Interfaces:**
 - Consumes: owner-invoked immutable HTTPS URL on an exact host allowlist, declared bounded byte size/SHA-256, a bounded duplicate-free manifest, and owner-only no-follow model directory descriptors.
-- Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only verified stable read-only file descriptors; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
+- Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only a verified exact nonempty tuple of stable read-only file descriptors; derived read-only property `ActivatedModel.all_files_verified: bool`; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. `all_files_verified` rechecks the descriptor type/mode/size/access mode and exact manifest hash when read; it is not a dataclass field, constructor argument, mutable latch, or caller-authored trust bit. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
 
 - [ ] **Step 1: Write red model-governance tests**
 
@@ -5135,6 +5483,57 @@ def test_crash_or_error_never_exposes_a_mixed_revision(governed_model_case,fault
     assert governed_model_case.final_revision_is_absent_or_complete_and_verified()
     assert governed_model_case.previous_revision_unchanged()
 ```
+
+Register every named model/runtime fixture in the existing security-scope conftest. The fixture functions are exact and executable:
+
+```python
+# append to tests/security/conftest.py
+from tests.security.model_governance_cases import (
+    GovernedModelCase,
+    ScriptedReceiptVerifier,
+    ScriptedRuntimeAdapter,
+)
+
+
+@pytest.fixture
+def governed_model_case(tmp_path, monkeypatch):
+    return GovernedModelCase.create(tmp_path / "governed-model", monkeypatch)
+
+
+@pytest.fixture
+def installed_model(governed_model_case):
+    governed_model_case.install()
+    return governed_model_case.as_installed_model()
+
+
+@pytest.fixture
+def runtime_adapter():
+    return ScriptedRuntimeAdapter()
+
+
+@pytest.fixture
+def failing_runtime_adapter():
+    adapter = ScriptedRuntimeAdapter()
+    adapter.fail_at("load_verified_reader", None)
+    return adapter
+
+
+@pytest.fixture
+def runtime_receipt_verifier():
+    return ScriptedReceiptVerifier.current(
+        domain="tuntun.runtime-model-loader-receipt.v1",
+        key_generation=1,
+    )
+
+
+@pytest.fixture
+def concurrent_model_case(governed_model_case):
+    return governed_model_case.concurrent_view()
+```
+
+`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`: `manifest`, `model_id`, `expected_bytes`, `expected_sha256`, `network.inject()/followed_redirects`, `mutate_manifest`, `apply_filesystem_mutation`, `registry_or_activate`, `inject_os_write_result`, `inject_repeated_os_write_result`, `install`, `as_installed_model`, `concurrent_view`, `race_activation`, `crash_install_at`, `restart_and_reconcile`, `rehash_exact_descriptor`, and every asserted state/identity/count query. Each mutation/race/fault string in the test has one explicit dispatch-table entry; unknown names raise `AssertionError`. Filesystem mutations use real symlinks/FIFOs/modes/inode replacements, write faults monkeypatch only `os.write`, and network faults drive the injected transport/child-resolver seam. State queries inspect the real staged/final filesystem and live descriptors rather than booleans set by the case.
+
+`InstalledModel` exposes only `registry`, `model_id`, `expected_bytes`, `expected_sha256`, and `replace_every_named_path_with_attacker_bytes()`. `ScriptedRuntimeAdapter.load_verified_reader` consumes the bounded reader to EOF, records bytes and open duplicate count, returns an exact per-file receipt, and never accepts a path; `finish_model` returns an unpublished signed candidate; the verifier publishes only after checking the exact domain/generation/expiry/model/revision/ordered file tuple. `mutate_receipt`, `fail_at`, and `abort_model` are closed dispatch methods for the test strings and maintain the asserted `path_opens`, `open_duplicate_fd_count`, `abort_calls`, `published_runtime_count`, and `last_loaded_bytes`. The concurrent view uses two real `ModelInstaller` instances plus a barrier only before lock acquisition, measures lock ownership around the production lock, and derives publication/stage results from disk. This helper contains no pass-through fake of `ModelRegistry`, `ModelInstaller`, descriptor hashing, publication, or receipt comparison.
 
 - [ ] **Step 2: Run the red model tests**
 
@@ -5353,7 +5752,7 @@ def hash_exact_fd(fd:int,expected_size:int,expected_sha256:str):
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
-import os,re
+import fcntl,os,re,stat
 from .fs import OwnedDirectory,hash_exact_fd,open_regular_at,read_bounded_strict_yaml
 
 SAFE_SUFFIXES={".onnx",".json",".txt",".tflite",".safetensors"}
@@ -5444,6 +5843,24 @@ class VerifiedModelFile:
 @dataclass(slots=True)
 class ActivatedModel:
     model_id:str; revision:str; files:tuple[VerifiedModelFile,...]
+    @property
+    def all_files_verified(self) -> bool:
+        if not self.files:
+            return False
+        try:
+            for file in self.files:
+                metadata=os.fstat(file.fd)
+                if (
+                    fcntl.fcntl(file.fd,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY
+                    or not stat.S_ISREG(metadata.st_mode)
+                    or stat.S_IMODE(metadata.st_mode)!=0o400
+                    or metadata.st_size!=file.size
+                ):
+                    return False
+                hash_exact_fd(file.fd,file.size,file.sha256)
+        except (OSError,RuntimeError):
+            return False
+        return True
     def load_with(self,adapter,receipt_verifier):
         receipts=[]
         try:
@@ -5763,7 +6180,7 @@ Expected: PASS with the full manifest/filesystem/network/race/fault matrix, `mod
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/services/models/fs.py apps/core/src/tuntun_core/services/models/network.py apps/core/src/tuntun_core/services/models/registry.py apps/core/src/tuntun_core/services/models/installer.py apps/core/src/tuntun_core/cli/commands/models.py apps/core/src/tuntun_core/cli/main.py models/manifest.schema.json models/manifest.yaml scripts/check_model_manifest.py tests/security/test_model_governance.py
+git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/services/models/fs.py apps/core/src/tuntun_core/services/models/network.py apps/core/src/tuntun_core/services/models/registry.py apps/core/src/tuntun_core/services/models/installer.py apps/core/src/tuntun_core/cli/commands/models.py apps/core/src/tuntun_core/cli/main.py models/manifest.schema.json models/manifest.yaml scripts/check_model_manifest.py tests/security/test_model_governance.py tests/security/conftest.py tests/security/model_governance_cases.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(models): add governed registry and explicit installer"
@@ -5772,7 +6189,7 @@ git commit -m "feat(models): add governed registry and explicit installer"
 ### Task 11: Prove key-first SQLCipher compatibility and add the storage probe
 
 **Master package:** 05
-**Depends on:** Task 8.
+**Depends on:** Tasks 4 and 8.
 **Estimated effort:** 0.5 person-day.
 
 **Files:**
@@ -5891,7 +6308,7 @@ git commit -m "feat(storage): verify SQLCipher compatibility"
 ### Task 12: Implement purpose-bound record encryption and nonce-reuse defense
 
 **Master package:** 05
-**Depends on:** Task 8.
+**Depends on:** Tasks 4 and 8.
 **Estimated effort:** 0.5 person-day.
 
 **Files:**
@@ -5899,31 +6316,67 @@ git commit -m "feat(storage): verify SQLCipher compatibility"
 - Test: `tests/security/test_record_crypto.py`
 
 **Interfaces:**
-- Consumes: 32-byte purpose-specific root key and `RecordContext(household_id, table, row_id, purpose, schema_version)`.
-- Produces: `RecordCipher.encrypt(plaintext: bytes, context: RecordContext) -> EncryptedRecord`, `RecordCipher.decrypt(record: EncryptedRecord, context: RecordContext) -> bytes`; random 32-byte DEK, random 96-bit data nonce, random 96-bit wrap nonce, AES-256-GCM, exact canonical associated data.
+- Consumes: 32-byte purpose-specific root key; Task 4 `canonical_mapping_bytes`; and frozen `RecordContext(household_id, table, row_id, purpose, schema_version)` whose `table` is exactly `biometric_templates|memory_embeddings|recovery_sensitive_values`, whose `purpose` is exactly `face-template|voice-template|memory-embedding|recovery-sensitive`, whose table/purpose pair is valid, and whose schema version is exactly `1.0`.
+- Produces: `RecordCipher.encrypt(plaintext: bytes, context: RecordContext) -> EncryptedRecord`, `RecordCipher.decrypt(record: EncryptedRecord, context: RecordContext) -> bytes`; random 32-byte DEK, distinct random 96-bit data/wrap nonces, AES-256-GCM, and Task 4 canonical NFC associated data with closed domain `record-data|dek-wrap`. One reuse set spans both AES-GCM key domains, so a repeated nonce is rejected before either encryption call that would consume it.
 
 - [ ] **Step 1: Write red round-trip, binding, and duplicate-nonce tests**
 
 ```python
 # tests/security/test_record_crypto.py
-from collections import deque
 from uuid import UUID
 import pytest
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from pydantic import ValidationError
 from tuntun_core.adapters.sqlcipher.crypto import RecordCipher, RecordContext
 
-CTX=RecordContext(UUID(int=1), "biometric_templates", UUID(int=2), "voice-template", "1.0")
+CTX=RecordContext(
+    household_id=UUID(int=1),table="biometric_templates",row_id=UUID(int=2),
+    purpose="voice-template",schema_version="1.0",
+)
 def test_record_round_trip_and_context_binding() -> None:
     cipher=RecordCipher(bytes(range(32)))
     encrypted=cipher.encrypt(b"private-template-sentinel", CTX)
     assert b"private-template-sentinel" not in encrypted.ciphertext
     assert cipher.decrypt(encrypted, CTX) == b"private-template-sentinel"
-    with pytest.raises(InvalidTag): cipher.decrypt(encrypted, RecordContext(UUID(int=1), "biometric_templates", UUID(int=3), "voice-template", "1.0"))
+    other_contexts=(
+        RecordContext.model_validate(CTX.model_dump() | {"household_id":UUID(int=9)}),
+        RecordContext.model_validate(CTX.model_dump() | {"row_id":UUID(int=3)}),
+        RecordContext.model_validate(CTX.model_dump() | {"purpose":"face-template"}),
+        RecordContext(household_id=UUID(int=1),table="memory_embeddings",row_id=UUID(int=2),purpose="memory-embedding",schema_version="1.0"),
+    )
+    for other in other_contexts:
+        with pytest.raises(InvalidTag): cipher.decrypt(encrypted, other)
 
-def test_nonce_reuse_is_rejected() -> None:
-    repeated=b"N"*12; cipher=RecordCipher(bytes(range(32)), nonce_source=lambda: repeated)
+def test_record_context_is_closed_nfc_normalized_and_canonical() -> None:
+    assert CTX.associated_data("record-data") == (
+        b'{"domain":"record-data","household_id":"00000000-0000-0000-0000-000000000001",'
+        b'"purpose":"voice-template","row_id":"00000000-0000-0000-0000-000000000002",'
+        b'"schema_version":"1.0","table":"biometric_templates"}'
+    )
+    with pytest.raises(ValueError, match="associated-data domain"):
+        CTX.associated_data("caller-authored")
+    for hostile in (
+        {"purpose":"voice-te\u0301mplate"},
+        {"purpose":"status"},
+        {"table":"biometric_templates-extra"},
+        {"schema_version":"1.1"},
+        {"extra":"caller-authored-aad"},
+        {"table":"memory_embeddings","purpose":"voice-template"},
+    ):
+        with pytest.raises(ValidationError):
+            RecordContext.model_validate(CTX.model_dump() | hostile)
+
+def test_nonce_reuse_is_rejected_before_second_encryption(monkeypatch) -> None:
+    scripted=iter((b"D"*12,b"W"*12,b"D"*12,b"X"*12))
+    encrypt_calls=[]; original=AESGCM.encrypt
+    def tracking_encrypt(self,nonce,data,aad):
+        encrypt_calls.append(nonce); return original(self,nonce,data,aad)
+    monkeypatch.setattr(AESGCM,"encrypt",tracking_encrypt)
+    cipher=RecordCipher(bytes(range(32)), nonce_source=lambda: next(scripted))
     cipher.encrypt(b"first", CTX)
     with pytest.raises(RuntimeError, match="nonce reuse detected"): cipher.encrypt(b"second", CTX)
+    assert encrypt_calls == [b"D"*12,b"W"*12]
 ```
 
 - [ ] **Step 2: Run the red record-crypto test**
@@ -5936,17 +6389,34 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 
 ```python
 # apps/core/src/tuntun_core/adapters/sqlcipher/crypto.py
-import json, os
+import os
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 from uuid import UUID
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from pydantic import model_validator
+from tuntun_contracts.base import ContractModel, canonical_mapping_bytes
 
-@dataclass(frozen=True, slots=True)
-class RecordContext:
-    household_id: UUID; table: str; row_id: UUID; purpose: str; schema_version: str
-    def associated_data(self) -> bytes:
-        return json.dumps({"household_id":str(self.household_id),"purpose":self.purpose,"row_id":str(self.row_id),"schema_version":self.schema_version,"table":self.table}, sort_keys=True, separators=(",", ":")).encode()
+class RecordContext(ContractModel):
+    household_id: UUID
+    table: Literal["biometric_templates","memory_embeddings","recovery_sensitive_values"]
+    row_id: UUID
+    purpose: Literal["face-template","voice-template","memory-embedding","recovery-sensitive"]
+    schema_version: Literal["1.0"]
+    @model_validator(mode="after")
+    def exact_table_purpose(self) -> "RecordContext":
+        allowed={
+            "biometric_templates":{"face-template","voice-template"},
+            "memory_embeddings":{"memory-embedding"},
+            "recovery_sensitive_values":{"recovery-sensitive"},
+        }
+        if self.purpose not in allowed[self.table]:
+            raise ValueError("record table/purpose mismatch")
+        return self
+    def associated_data(self,domain:Literal["record-data","dek-wrap"]) -> bytes:
+        if domain not in {"record-data","dek-wrap"}:
+            raise ValueError("unknown associated-data domain")
+        return canonical_mapping_bytes({"domain":domain,**self.model_dump(mode="python")})
 @dataclass(frozen=True, slots=True)
 class EncryptedRecord:
     ciphertext: bytes; nonce: bytes; wrapped_dek: bytes; wrap_nonce: bytes; root_key_id: str
@@ -5961,19 +6431,22 @@ class RecordCipher:
         if nonce in self._used: raise RuntimeError("nonce reuse detected")
         self._used.add(nonce); return nonce
     def encrypt(self, plaintext: bytes, context: RecordContext) -> EncryptedRecord:
-        dek=os.urandom(32); nonce=self._nonce(); wrap_nonce=self._nonce(); aad=context.associated_data()
-        return EncryptedRecord(AESGCM(dek).encrypt(nonce, plaintext, aad), nonce, self._root.encrypt(wrap_nonce, dek, aad+b"|dek"), wrap_nonce, self._root_key_id)
+        dek=os.urandom(32)
+        nonce=self._nonce(); wrap_nonce=self._nonce()
+        data_aad=context.associated_data("record-data")
+        wrap_aad=context.associated_data("dek-wrap")
+        return EncryptedRecord(AESGCM(dek).encrypt(nonce,plaintext,data_aad),nonce,self._root.encrypt(wrap_nonce,dek,wrap_aad),wrap_nonce,self._root_key_id)
     def decrypt(self, record: EncryptedRecord, context: RecordContext) -> bytes:
         if record.root_key_id != self._root_key_id: raise ValueError("record root key id mismatch")
-        aad=context.associated_data(); dek=self._root.decrypt(record.wrap_nonce, record.wrapped_dek, aad+b"|dek")
-        return AESGCM(dek).decrypt(record.nonce, record.ciphertext, aad)
+        dek=self._root.decrypt(record.wrap_nonce,record.wrapped_dek,context.associated_data("dek-wrap"))
+        return AESGCM(dek).decrypt(record.nonce,record.ciphertext,context.associated_data("record-data"))
 ```
 
 - [ ] **Step 4: Run the green record-crypto gate**
 
 Run: `uv run pytest tests/security/test_record_crypto.py -q && uv run ruff check apps/core/src/tuntun_core/adapters/sqlcipher/crypto.py tests/security/test_record_crypto.py && uv run mypy apps/core/src/tuntun_core/adapters/sqlcipher/crypto.py`
 
-Expected: PASS with two tests and zero Ruff/mypy errors.
+Expected: PASS with three tests and zero Ruff/mypy errors. The first encryption consumes distinct data/wrap nonces; the repeated data nonce on the second call is rejected before `AESGCM.encrypt`. Hostile extra/unknown/non-NFC context values fail validation, the golden AAD is Task 4 canonical NFC bytes, and changing any valid context identity fails authentication.
 
 - [ ] **Step 5: Commit exact Task 12 paths**
 
@@ -6007,7 +6480,7 @@ git commit -m "feat(storage): add purpose-bound record encryption"
 **Interfaces:**
 - Consumes: `open_sqlcipher(path, key)` from Task 11.
 - Produces: `FOUNDATION_TABLE_NAMES: frozenset[str]`; SQLAlchemy `metadata`; `create_sqlcipher_engine(path: Path, key: bytes) -> Engine`; `encrypted_backup(source: Path, destination: Path, key: bytes) -> None`; `upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None`; Alembic revision `0001_foundation`, down revision `None`.
-- Migration owns exactly: `households`, `devices`, `sessions`, `event_receipts`, `idempotency_receipts`, `audit_receipts`, `audit_segments`, `redaction_receipts`, `provider_calls`, `provider_response_receipts`, `provider_prices`, `budget_reservations`, `cost_ledger`, `runtime_settings`, and the reserved content-free `reachy_core_tx_sequences|reachy_duplex_correlations` tables required by the later duplex repository task without a future-migration dependency.
+- Migration owns exactly 16 application tables: `households`, `devices`, `sessions`, `event_receipts`, `idempotency_receipts`, `audit_receipts`, `audit_segments`, `redaction_receipts`, `provider_calls`, `provider_response_receipts`, `provider_prices`, `budget_reservations`, `cost_ledger`, `runtime_settings`, and the reserved content-free `reachy_core_tx_sequences|reachy_duplex_correlations` tables required by the later duplex repository task without a future-migration dependency. The complete post-upgrade table inventory is those 16 plus Alembic's `alembic_version`, for exactly 17 non-`sqlite_` tables.
 - `request_id` groups all attempts for one logical STT/reasoning/TTS/web-search request. `attempt_id` is the unique idempotency boundary for both `budget_reservations` and `provider_calls`; every retry receives a new attempt, authorization, and reservation while retaining its logical request ID. The `(month_key, state, reserved_micros_sgd, charged_micros_sgd)` index supports the `BEGIN IMMEDIATE` atomic monthly sum: use immutable reserved cost for `reserved|sent`, authoritative charged cost for `settled`, and exclude `released|denied`.
 - Budget pricing persistence is authoritative and bounded. `provider_prices` keys one exact provider/model/category/pricing-version/FX-version/tier-basis/tier-range record and stores input/output per-million, audio per-minute, and web-search per-call micro-USD rates; the closed primary accounting basis and missing-evidence policy; FX; both immutable version strings; the exact bounded HTTPS price-source URL; and both lowercase SHA-256 source digests. `tier_basis='flat'` requires the canonical `0,0` range; `tier_basis='llm_input_tokens'` is allowed only for LLM input-token ranges bounded by `0..10_000_000`. The catalog must reject overlapping, gapped, mixed-version, mixed-source-URL/digest, mixed-validity, or incomplete tier schedules before any row becomes current. Every signed reservation snapshot carries the complete schedule: reservation chooses the highest applicable rate for its signed input-token ceiling, while exact settlement reselects the tier from the verified provider input-token receipt and never applies a cheaper ceiling tier after a boundary crossing. TTS is `request_bound_exact` with no fabricated response usage. Web search is `provider_reported_exact`, reserves exactly one fixed tool call plus token ceilings, and alone permits `conservative_full_reservation` when missing evidence remains provably within that one-call ceiling. One allowed quote is in `1..1_000_000_000_000` micro-SGD; every denied row stores zero. Checked aggregate arithmetic is limited to `0..9_000_000_000_000_000`; overflow or an out-of-range result fails closed, freezes cloud egress, and requires owner repair.
 - Every reservation stores the closed usage ceiling plus an immutable price snapshot, accounting basis, missing-evidence policy, and purpose-specific HMAC. That complete quote/policy group is all-null only for `deny_unknown_price|deny_cloud_egress_frozen`; it is all-non-null for `allow|allow_soft_warning|deny_hard_limit`. `deny_hard_limit` retains the complete projected quote but reserves zero. `charged_micros_sgd` is null unless state is `settled`, `estimate_overrun` is exact truth for `charged > reserved`, and the reservation amount is never overwritten during settlement.
@@ -6023,9 +6496,11 @@ import sqlite3
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import Engine
 from tuntun_core.adapters.sqlcipher.connection import open_sqlcipher
 
 EXPECTED={"alembic_version","households","devices","sessions","event_receipts","idempotency_receipts","audit_receipts","audit_segments","redaction_receipts","provider_calls","provider_response_receipts","provider_prices","budget_reservations","cost_ledger","runtime_settings","reachy_core_tx_sequences","reachy_duplex_correlations"}
+assert len(EXPECTED)==17
 
 def _config(path: Path, key: bytes) -> Config:
     config=Config("apps/core/alembic.ini"); config.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
@@ -6290,6 +6765,7 @@ from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, Larg
 
 metadata=MetaData()
 FOUNDATION_TABLE_NAMES=frozenset({"households","devices","sessions","event_receipts","idempotency_receipts","audit_receipts","audit_segments","redaction_receipts","provider_calls","provider_response_receipts","provider_prices","budget_reservations","cost_ledger","runtime_settings","reachy_core_tx_sequences","reachy_duplex_correlations"})
+assert len(FOUNDATION_TABLE_NAMES)==16
 def uuid_pk(name: str="id") -> Column[str]: return Column(name,String(36),primary_key=True)
 def utc_text(name: str, nullable: bool=False) -> Column[str]: return Column(name,String(27),nullable=nullable)
 
@@ -6404,14 +6880,17 @@ git commit -m "feat(storage): add reversible encrypted foundation schema"
 - Create: `apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py`
 - Create: `apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py`
 - Create: `apps/core/src/tuntun_core/adapters/sqlcipher/repository_facade.py`
+- Create: `apps/core/src/tuntun_core/services/transactions/protocols.py`
 - Create: `apps/core/src/tuntun_core/services/transactions/mutation_scope.py`
+- Modify: `tests/integration/storage/conftest.py`
 - Test: `tests/integration/storage/test_transactions.py`
 - Test: `tests/integration/storage/test_async_transactions.py`
+- Create: `tests/unit/transactions/conftest.py`
 - Test: `tests/unit/transactions/test_mutation_scope.py`
 
 **Interfaces:**
 - Consumes: SQLAlchemy `Engine`; SQLite busy errors; one application-owned serialized database worker.
-- Produces: exact low-level `UnitOfWork` signature from the locked map; `AsyncUnitOfWorkFactory(repository_facades) -> AsyncUnitOfWork`; startup-only fixed `register_commit_signal(name, target.offer_nowait)` plus transaction-local `signal_after_commit(name)`; `AsyncRepositoryFacade`; and `AtomicMutationScope.open()/require_active_uow()`. Both unit-of-work layers use `BEGIN IMMEDIATE`, explicit commit/rollback, no implicit commit on context exit, and bounded busy retry of 3 attempts at 25/50/100 ms. The async facade runs enter, every repository operation, audit append, commit/rollback, and close on the same single worker/connection; it never moves a live transaction between threads. Each bounded context declares a typed structural protocol such as `IdentityUnitOfWork(AsyncUnitOfWork)` listing its async repository properties (`profiles`, `consent_receipts`, and so on); the factory installs matching `AsyncRepositoryFacade` instances, so the plan's `await uow.profiles.insert(...)` notation is typed and every call internally delegates through that exact unit's `run_sync`.
+- Produces: project-owned runtime-checkable structural `UnitOfWorkProtocol` and `AsyncUnitOfWorkProtocol` in `tuntun_core.services.transactions.protocols`; exact low-level adapter `UnitOfWork` signature from the locked map conforming structurally without services importing adapters; `AsyncUnitOfWorkFactory(repository_facades) -> AsyncUnitOfWork`; startup-only fixed `register_commit_signal(name, target.offer_nowait)` plus transaction-local `signal_after_commit(name)`; `AsyncRepositoryFacade`; and `AtomicMutationScope.open()/require_active_uow()`. Both unit-of-work layers use `BEGIN IMMEDIATE`, explicit commit/rollback, no implicit commit on context exit, and bounded busy retry of 3 attempts at 25/50/100 ms. The async facade runs enter, every repository operation, audit append, commit/rollback, and close on the same single worker/connection; it never moves a live transaction between threads. Each bounded context declares a typed structural protocol such as `IdentityUnitOfWork(AsyncUnitOfWorkProtocol)` listing its async repository properties (`profiles`, `consent_receipts`, and so on); the factory installs matching `AsyncRepositoryFacade` instances, so the plan's `await uow.profiles.insert(...)` notation is typed and every call internally delegates through that exact unit's `run_sync`.
 
 - [ ] **Step 1: Write red rollback and explicit-commit tests**
 
@@ -6539,7 +7018,90 @@ async def test_scope_is_task_local_rejects_nesting_and_rolls_back_on_failure(asy
     assert await asyncio.create_task(async_uow_factory.probe_scope_is_absent(scope)) is True
 ```
 
-Use the exact `migrated_database` fixture created by Task 13.
+Use the exact `migrated_database` fixture created by Task 13. Extend that same storage conftest with the integration-only facade and commit-signal fixtures:
+
+```python
+# append to tests/integration/storage/conftest.py
+from dataclasses import dataclass
+from threading import get_ident
+
+from sqlalchemy import text
+
+
+@dataclass(frozen=True,slots=True)
+class CreatedHousehold:
+    household_id:str; worker_ident:int
+
+
+class BoundHouseholdFacade:
+    def __init__(self,uow): self._uow=uow
+    async def insert_synthetic(self,household_id:str) -> CreatedHousehold:
+        def insert(transaction):
+            transaction.execute(text("INSERT INTO households(id,display_label_ciphertext,timezone,created_at) VALUES(:id,:label,'Asia/Singapore',:now)"),{"id":household_id,"label":b"ciphertext","now":"2026-08-27T01:02:03.000004Z"})
+            return CreatedHousehold(household_id,get_ident())
+        return await self._uow.run_sync(insert)
+
+
+class HouseholdFacadeFactory:
+    def bind(self,uow) -> BoundHouseholdFacade:
+        return BoundHouseholdFacade(uow)
+
+
+class CommitSignalProbe:
+    def __init__(self,fail:bool=False): self.offer_count=0; self._fail=fail
+    def offer_nowait(self) -> None:
+        self.offer_count+=1
+        if self._fail: raise RuntimeError("synthetic post-commit signal failure")
+
+
+@pytest.fixture
+def household_repository_facade() -> HouseholdFacadeFactory:
+    return HouseholdFacadeFactory()
+
+
+@pytest.fixture
+def nonblocking_commit_signal() -> CommitSignalProbe:
+    return CommitSignalProbe()
+
+
+@pytest.fixture
+def failing_nonblocking_commit_signal() -> CommitSignalProbe:
+    return CommitSignalProbe(fail=True)
+```
+
+Own the unit-only `async_uow_factory` at the subtree where `test_mutation_scope.py` consumes it. This fake tests task-local scope behavior only and does not impersonate SQLAlchemy storage:
+
+```python
+# tests/unit/transactions/conftest.py
+import pytest
+
+
+class ScopeProbeUnit:
+    def __init__(self,factory): self.factory=factory; self.finished=False
+    async def __aenter__(self): self.factory.active+=1; return self
+    async def commit(self): self.factory.persisted+=1; self.finished=True
+    async def rollback(self): self.finished=True
+    async def __aexit__(self,exc_type,exc,tb):
+        if not self.finished: await self.rollback()
+        self.factory.active-=1
+        return False
+
+
+class ScopeProbeFactory:
+    def __init__(self): self.active=0; self.persisted=0
+    def __call__(self): return ScopeProbeUnit(self)
+    async def persisted_probe_count(self) -> int: return self.persisted
+    async def probe_scope_is_absent(self,scope) -> bool:
+        try: scope.require_active_uow()
+        except RuntimeError as error:
+            return "no active atomic mutation scope" in str(error)
+        return False
+
+
+@pytest.fixture
+def async_uow_factory() -> ScopeProbeFactory:
+    return ScopeProbeFactory()
+```
 
 - [ ] **Step 2: Run the red transaction tests**
 
@@ -6548,6 +7110,32 @@ Run: `uv run pytest tests/integration/storage/test_transactions.py -q`
 Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_core.adapters.sqlcipher.unit_of_work'`.
 
 - [ ] **Step 3: Implement explicit transactions and bounded retry**
+
+```python
+# apps/core/src/tuntun_core/services/transactions/protocols.py
+from collections.abc import Callable,Mapping
+from typing import Any,Protocol,TypeVar,runtime_checkable
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.sql import Executable
+
+T=TypeVar("T")
+
+@runtime_checkable
+class UnitOfWorkProtocol(Protocol):
+    def execute(self,statement:Executable,parameters:Mapping[str,object]|None=None) -> CursorResult[Any]: raise NotImplementedError
+    def exec_driver_sql(self,statement:str,parameters:tuple[object,...]|Mapping[str,object]=()) -> CursorResult[Any]: raise NotImplementedError
+    def commit(self) -> None: raise NotImplementedError
+    def rollback(self) -> None: raise NotImplementedError
+
+@runtime_checkable
+class AsyncUnitOfWorkProtocol(Protocol):
+    async def run_sync(self,operation:Callable[[UnitOfWorkProtocol],T]) -> T: raise NotImplementedError
+    def signal_after_commit(self,name:str) -> None: raise NotImplementedError
+    async def commit(self) -> None: raise NotImplementedError
+    async def rollback(self) -> None: raise NotImplementedError
+```
+
+The SQLCipher adapter does not inherit from or import this services module; its already exact public methods satisfy the protocol structurally. Add `assert isinstance(UnitOfWork(migrated_database.engine),UnitOfWorkProtocol)` to `test_transactions.py`, and add a source-direction assertion that `tuntun_core.services.transactions.protocols` contains no `tuntun_core.adapters` import.
 
 ```python
 # apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py
@@ -6667,7 +7255,7 @@ class AsyncUnitOfWorkFactory:
 
 `AsyncUnitOfWork.__aenter__` binds each registered facade to itself and exposes it under its typed repository property. `AsyncRepositoryFacade` contains no connection of its own: every method executes a synchronous repository operation as `await bound_uow.run_sync(lambda tx: sync_repository(tx).method(...))`. It rejects use before enter or after finish. Bounded-context protocols name every repository method and return type, and strict mypy verifies services against those protocols; there is no dynamic `Any`/string dispatch in application code.
 
-`AtomicMutationScope` is an async context manager backed by a task-local `ContextVar[AsyncUnitOfWork | None]`. `open()` rejects nesting, enters exactly one factory unit, installs it only for the current task, commits only when the coordinator explicitly calls `uow.commit()`, and always clears the context after cancellation, rollback, or close. `require_active_uow()` fails closed outside the scope. Child tasks receive no usable mutation authority: the stored scope token also binds the creating `asyncio.current_task()`, and a different task is rejected even if context variables were copied.
+`AtomicMutationScope` is an async context manager backed by a task-local `ContextVar[AsyncUnitOfWorkProtocol | None]`. `open()` rejects nesting, enters exactly one factory unit, installs it only for the current task, commits only when the coordinator explicitly calls `uow.commit()`, and always clears the context after cancellation, rollback, or close. `require_active_uow()` returns `AsyncUnitOfWorkProtocol` and fails closed outside the scope. Child tasks receive no usable mutation authority: the stored scope token also binds the creating `asyncio.current_task()`, and a different task is rejected even if context variables were copied.
 
 The factory is a single application-lifecycle object and closes its worker only during orderly shutdown after all units of work finish. Before the first unit opens, composition may register a closed set of fixed internal post-commit signals whose targets expose only constant-time `offer_nowait()`. A transaction can mark a registered signal by name; rollback/context failure clears it, while successful shielded commit invokes it only after the database commit is terminal. Signal failure is counted and swallowed so it cannot rewrite a committed mutation; the durable outbox plus periodic/startup drain remains authoritative. Arbitrary callbacks and late registration are forbidden. The fair application-level async transaction lock is acquired before `BEGIN IMMEDIATE` and held through close, so operations from two live units can never interleave and a second writer waits instead of exhausting SQLite busy retries behind the first. Lock acquisition is cancellable; once acquired, enter failure or context exit always releases it. A transaction may await those local serialized repository/audit operations only; it must never await provider, robot, browser, timer, filesystem, or other unbounded I/O while holding `BEGIN IMMEDIATE`. Commit and rollback are cancellation-shielded and awaited to a terminal state before cancellation propagates.
 
@@ -6675,13 +7263,13 @@ The factory is a single application-lifecycle object and closes its worker only 
 
 Run: `uv run pytest tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/test_mutation_scope.py -q && uv run ruff check apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/repository_facade.py apps/core/src/tuntun_core/services/transactions/mutation_scope.py tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/test_mutation_scope.py && uv run mypy apps/core/src/tuntun_core/adapters/sqlcipher apps/core/src/tuntun_core/services/transactions`
 
-Expected: PASS with two transaction tests and zero Ruff/mypy errors.
+Expected: PASS for all transaction and mutation-scope tests and zero Ruff/mypy errors.
 
 - [ ] **Step 5: Commit exact Task 14 paths**
 
 ```bash
 git status --short
-git add apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/repository_facade.py apps/core/src/tuntun_core/services/transactions/mutation_scope.py tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/test_mutation_scope.py
+git add apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/repository_facade.py apps/core/src/tuntun_core/services/transactions/protocols.py apps/core/src/tuntun_core/services/transactions/mutation_scope.py tests/integration/storage/conftest.py tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/conftest.py tests/unit/transactions/test_mutation_scope.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(storage): add explicit encrypted unit of work"
@@ -6696,13 +7284,14 @@ git commit -m "feat(storage): add explicit encrypted unit of work"
 **Files:**
 - Create: `apps/core/src/tuntun_core/services/audit/ledger.py`
 - Create: `apps/core/src/tuntun_core/services/audit/verifier.py`
+- Create: `tests/conftest.py`
 - Test: `tests/unit/audit/test_chain.py`
 - Test: `tests/security/test_audit_tamper.py`
 - Test: `tests/integration/audit/test_concurrency.py`
 - Create: `docs/operations/foundation-storage.md`
 
 **Interfaces:**
-- Consumes: `AuditDraft`, `AuditReceipt`, `canonical_bytes`, HMAC key ID/key, and active `UnitOfWork` or `AsyncUnitOfWork`.
+- Consumes: `AuditDraft`, `AuditReceipt`, `canonical_bytes`, HMAC key ID/key, and Task 14 project-owned `UnitOfWorkProtocol` or `AsyncUnitOfWorkProtocol`. Audit service modules never import `tuntun_core.adapters`; composition supplies the structurally conforming SQLCipher adapters.
 - Produces: `AuditLedger.append(uow, draft) -> AuditReceipt`; `AsyncAuditLedger.append(uow, draft) -> Awaitable[AuditReceipt]`; `AuditLedger.seal(uow, first_ordinal: int, last_ordinal: int) -> AuditSegment`; `AuditVerifier.verify(connection) -> AuditVerification(valid: bool, count: int, terminal_public_hash_hex: str | None, reason: str)`. `AsyncAuditLedger` delegates through `uow.run_sync` and never opens or commits a transaction. A rotated ledger may append with a new `hmac_key_id`; verification requires every key ID still referenced by a retained receipt/segment.
 - Chain formula: `public_hash = SHA256(previous_public_hash_bytes || canonical_body_bytes)`; `hmac = HMAC-SHA-256(key, b"tuntun:audit:v1\x00" || public_hash_bytes || canonical_body_bytes)`.
 
@@ -6729,6 +7318,13 @@ def test_rotation_and_segment_sealing_require_all_retained_keys(audit_fixture) -
     assert (segment.first_ordinal,segment.last_ordinal,segment.receipt_count) == (1,2,2)
     assert audit_fixture.verify({"audit-v1":b"K"*32,"audit-v2":b"R"*32}).valid is True
     assert audit_fixture.verify({"audit-v2":b"R"*32}).reason == "missing-hmac-key"
+
+def test_audit_service_depends_only_on_project_owned_transaction_protocol() -> None:
+    import inspect
+    import tuntun_core.services.audit.ledger as ledger_module
+    source=inspect.getsource(ledger_module)
+    assert "tuntun_core.adapters" not in source
+    assert "tuntun_core.services.transactions.protocols" in source
 ```
 
 ```python
@@ -6769,7 +7365,116 @@ def test_parallel_append_assigns_unique_contiguous_ordinals(audit_fixture) -> No
     assert audit_fixture.verify().valid is True
 ```
 
-The shared `audited_database`/`audit_fixture` fixture creates and migrates an encrypted temporary DB, instantiates `AuditLedger("audit-v1", b"K"*32)`, appends two synthetic receipts in separate committed units of work, and exposes an `append_index(index: int)` method whose draft uses UUID(int=700+index), correlation UUID(int=800+index), and fixed aware time plus `index` microseconds. Its teardown disposes the engine and removes DB/WAL/SHM.
+Own both cross-tree fixtures in root `tests/conftest.py`, the only pytest scope visible to unit, security, and integration audit tests. `audited_database` creates one migrated encrypted database and appends exactly two synthetic receipts in separate committed adapter units. `audit_fixture` creates a separate empty migrated encrypted database so its first append is ordinal 1; it is not layered on `audited_database`.
+
+```python
+# tests/conftest.py
+from dataclasses import dataclass
+from datetime import UTC,datetime,timedelta
+from pathlib import Path
+from uuid import UUID
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import Engine
+
+from tuntun_contracts.audit import AuditDraft
+from tuntun_contracts.base import Commitment
+from tuntun_core.adapters.sqlcipher.engine import create_sqlcipher_engine
+from tuntun_core.adapters.sqlcipher.unit_of_work import UnitOfWork
+from tuntun_core.services.audit.ledger import AuditLedger
+from tuntun_core.services.audit.verifier import AuditVerifier
+
+
+@dataclass(frozen=True,slots=True)
+class AuditedDatabase:
+    engine:Engine; path:Path; key:bytes
+
+
+def _create_database(path:Path) -> AuditedDatabase:
+    key=bytes(range(32)); config=Config("apps/core/alembic.ini")
+    config.attributes["sqlcipher_path"]=path
+    config.attributes["sqlcipher_key"]=key
+    command.upgrade(config,"head")
+    return AuditedDatabase(create_sqlcipher_engine(path,key),path,key)
+
+
+def _draft(index:int) -> AuditDraft:
+    return AuditDraft(
+        event_id=UUID(int=700+index),
+        occurred_at=datetime(2026,8,27,tzinfo=UTC)+timedelta(microseconds=index),
+        actor_pseudonym="synthetic-guest",action_code="foundation.fixture",
+        outcome="allow",reason_code=f"fixture-{index}",
+        correlation_id=UUID(int=800+index),
+        payload_commitment=Commitment(
+            algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64="A"*43+"=",
+        ),
+    )
+
+
+def _append(database:AuditedDatabase,key_id:str,key:bytes,index:int):
+    with UnitOfWork(database.engine) as uow:
+        receipt=AuditLedger(key_id,key).append(uow,_draft(index)); uow.commit()
+    return receipt
+
+
+def _dispose(database:AuditedDatabase) -> None:
+    database.engine.dispose()
+    for candidate in (database.path,Path(f"{database.path}-wal"),Path(f"{database.path}-shm")):
+        candidate.unlink(missing_ok=True)
+
+
+class AuditFixture:
+    def __init__(self,database:AuditedDatabase):
+        self.database=database; self.keys={"audit-v1":b"K"*32}
+    def append_with_key(self,key_id: str,key:bytes,index:int):
+        self.keys[key_id]=key; return _append(self.database,key_id,key,index)
+    def append_index(self,index:int):
+        return self.append_with_key("audit-v1",b"K"*32,index)
+    def seal(self,first_ordinal:int,last_ordinal:int):
+        with UnitOfWork(self.database.engine) as uow:
+            segment=AuditLedger("audit-v1",b"K"*32).seal(uow,first_ordinal,last_ordinal)
+            uow.commit(); return segment
+    def verify(self,keys=None):
+        with self.database.engine.connect() as connection:
+            return AuditVerifier(self.keys if keys is None else keys).verify(connection)
+    def replace_canonical_body_offline(self,mutation:str) -> None:
+        bodies={
+            "duplicate_key":'{"event_id":"x","event_id":"y"}',
+            "noncanonical_whitespace":'{ "event_id" : "x" }',
+            "overdeep_json":"["*33+"0"+"]"*33,
+            "flat_json_overflow":"["+",".join("0" for _ in range(16_385))+"]",
+            "body_over_64k":'"'+"x"*65_537+'"',
+        }
+        try: body=bodies[mutation]
+        except KeyError as error: raise AssertionError(f"unknown audit mutation: {mutation}") from error
+        if self.verify().count==0:
+            self.append_index(1)
+        with self.database.engine.begin() as connection:
+            connection.exec_driver_sql("DROP TRIGGER audit_receipts_no_update")
+            connection.exec_driver_sql(
+                "UPDATE audit_receipts SET canonical_body_json=? WHERE ordinal=1",(body,),
+            )
+
+
+@pytest.fixture
+def audited_database(tmp_path:Path):
+    database=_create_database(tmp_path/"audited.db")
+    _append(database,"audit-v1",b"K"*32,1); _append(database,"audit-v1",b"K"*32,2)
+    try: yield database
+    finally: _dispose(database)
+
+
+@pytest.fixture
+def audit_fixture(tmp_path:Path):
+    database=_create_database(tmp_path/"audit-fixture.db")
+    fixture=AuditFixture(database)
+    try: yield fixture
+    finally: _dispose(database)
+```
+
+The helper methods above are the full fixture interface consumed by the shown tests. Mutation bodies are injected only after migration by dropping the update trigger inside that fixture database, modeling an offline attacker; production ledger/verifier code is never monkeypatched. `append_index(index)` uses `UUID(int=700+index)`, correlation `UUID(int=800+index)`, and the fixed aware time plus `index` microseconds. Every teardown disposes the engine and removes DB/WAL/SHM.
 
 - [ ] **Step 2: Run the red audit tests**
 
@@ -6788,7 +7493,9 @@ from uuid import uuid4
 from sqlalchemy import text
 from tuntun_contracts.audit import AuditDraft, AuditReceipt
 from tuntun_contracts.base import canonical_bytes
-from tuntun_core.adapters.sqlcipher.unit_of_work import UnitOfWork
+from tuntun_core.services.transactions.protocols import (
+    AsyncUnitOfWorkProtocol,UnitOfWorkProtocol,
+)
 
 PURPOSE=b"tuntun:audit:v1\x00"
 @dataclass(frozen=True, slots=True)
@@ -6805,13 +7512,13 @@ class AuditLedger:
     def __init__(self, key_id: str, key: bytes) -> None:
         if len(key)<32: raise ValueError("audit HMAC key must be at least 32 bytes")
         self.key_id=key_id; self.key=key
-    def append(self, uow: UnitOfWork, draft: AuditDraft) -> AuditReceipt:
+    def append(self, uow: UnitOfWorkProtocol, draft: AuditDraft) -> AuditReceipt:
         row=uow.execute(text("SELECT ordinal,public_hash_hex FROM audit_receipts ORDER BY ordinal DESC LIMIT 1")).mappings().first()
         ordinal=1 if row is None else int(row["ordinal"])+1; previous=None if row is None else str(row["public_hash_hex"])
         values=compute_chain_values(previous,draft,self.key_id,self.key); receipt_id=uuid4()
         uow.execute(text("INSERT INTO audit_receipts(id,ordinal,previous_public_hash_hex,public_hash_hex,hmac_key_id,hmac_b64,canonical_body_json,occurred_at) VALUES(:id,:ordinal,:previous,:public,:key_id,:mac,:body,:occurred)"), {"id":str(receipt_id),"ordinal":ordinal,"previous":previous,"public":values.public_hash_hex,"key_id":self.key_id,"mac":values.hmac_b64,"body":values.canonical_body_json,"occurred":draft.occurred_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")})
         return AuditReceipt(receipt_id=receipt_id,ordinal=ordinal,public_hash_hex=values.public_hash_hex,hmac_key_id=self.key_id,hmac_b64=values.hmac_b64,occurred_at=draft.occurred_at)
-    def seal(self, uow: UnitOfWork, first_ordinal: int, last_ordinal: int) -> AuditSegment:
+    def seal(self, uow: UnitOfWorkProtocol, first_ordinal: int, last_ordinal: int) -> AuditSegment:
         rows=uow.execute(text("SELECT ordinal,public_hash_hex,hmac_b64,hmac_key_id FROM audit_receipts WHERE ordinal BETWEEN :first AND :last ORDER BY ordinal"),{"first":first_ordinal,"last":last_ordinal}).mappings().all()
         if not rows or rows[0]["ordinal"] != first_ordinal or rows[-1]["ordinal"] != last_ordinal or len(rows) != last_ordinal-first_ordinal+1: raise ValueError("segment range is not contiguous")
         terminal=rows[-1]; segment_id=str(uuid4())
@@ -6820,9 +7527,9 @@ class AuditLedger:
 
 class AsyncAuditLedger:
     def __init__(self, ledger: AuditLedger) -> None: self._ledger=ledger
-    async def append(self, uow, draft: AuditDraft) -> AuditReceipt:
+    async def append(self, uow:AsyncUnitOfWorkProtocol, draft: AuditDraft) -> AuditReceipt:
         return await uow.run_sync(lambda transaction: self._ledger.append(transaction,draft))
-    async def seal(self, uow, first_ordinal: int, last_ordinal: int) -> AuditSegment:
+    async def seal(self, uow:AsyncUnitOfWorkProtocol, first_ordinal: int, last_ordinal: int) -> AuditSegment:
         return await uow.run_sync(lambda transaction: self._ledger.seal(transaction,first_ordinal,last_ordinal))
 ```
 
@@ -6879,7 +7586,7 @@ Expected: PASS for migration, rollback, chain, trigger, concurrency, initializat
 
 ```bash
 git status --short
-git add apps/core/src/tuntun_core/services/audit/ledger.py apps/core/src/tuntun_core/services/audit/verifier.py tests/unit/audit/test_chain.py tests/security/test_audit_tamper.py tests/integration/audit/test_concurrency.py docs/operations/foundation-storage.md
+git add apps/core/src/tuntun_core/services/audit/ledger.py apps/core/src/tuntun_core/services/audit/verifier.py tests/conftest.py tests/unit/audit/test_chain.py tests/security/test_audit_tamper.py tests/integration/audit/test_concurrency.py docs/operations/foundation-storage.md
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(storage): add tamper-evident foundation audit"
@@ -6899,7 +7606,7 @@ uv run python scripts/verify_private_data.py .
 git status --short
 ```
 
-Expected: every test and static gate passes; the five shared assurance commands pass complete synthetic inventories and fail closed for incomplete ones; storage probe reports `sqlcipher3==0.6.2`, a non-empty cipher version, `integrity_ok: true`, mode `0o600`, and no path/key material; model/private-data scans print PASS; `git status --short` is empty. The encrypted DB contains exactly the 13 foundation-owned application tables plus `alembic_version`, rejects audit update/delete, reveals neither the SQLite header nor any sentinel, and downgrades to an empty schema before upgrading again.
+Expected: every test and static gate passes; the five shared assurance commands pass complete synthetic inventories and fail closed for incomplete ones; storage probe reports `sqlcipher3==0.6.2`, a non-empty cipher version, `integrity_ok: true`, mode `0o600`, and no path/key material; model/private-data scans print PASS; `git status --short` is empty. The encrypted DB contains exactly the 16 application tables enumerated by Task 13 plus `alembic_version` (17 non-`sqlite_` tables total), rejects audit update/delete, reveals neither the SQLite header nor any sentinel, and downgrades to only `alembic_version` before upgrading again. The exact-set assertion in `test_foundation_upgrade_downgrade_upgrade` is authoritative; no count-only gate may replace it.
 
 ## Execution Handoff
 
