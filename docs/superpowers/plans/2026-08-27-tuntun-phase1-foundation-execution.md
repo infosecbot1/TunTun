@@ -4175,9 +4175,21 @@ git commit -m "security: add fail-closed assurance scanners"
 - Create: `scripts/contract_generator_common.py`
 - Create: `scripts/generate_schemas.py`
 - Create: `scripts/generate_openapi.py`
+- Create: `scripts/__init__.py`
+- Create: `packages/contracts/src/tuntun_contracts/py.typed`
 - Create: `packages/contracts/schema/v1/contracts.schema.json`
 - Create: `packages/contracts/openapi/admin-v1.yaml`
 - Modify: `packages/contracts/src/tuntun_contracts/__init__.py`
+- Modify: `scripts/check_feature_absence.py`
+- Modify: `scripts/check_import_boundaries.py`
+- Modify: `scripts/check_migration_graph.py`
+- Modify: `scripts/check_migration_ownership.py`
+- Modify: `scripts/scan_backup_artifacts.py`
+- Modify: `scripts/scan_browser_artifacts.py`
+- Modify: `scripts/scan_network_surface.py`
+- Modify: `scripts/scan_private_data.py`
+- Modify: `scripts/scan_sandbox_residue.py`
+- Modify: `scripts/scan_sql_schema.py`
 - Test: `tests/contract/test_strict_models.py`
 - Test: `tests/contract/test_event_canonicalization.py`
 - Test: `tests/contract/test_contract_generators.py`
@@ -4187,11 +4199,12 @@ git commit -m "security: add fail-closed assurance scanners"
 - Produces: Python 3.11-compatible recursive `JSONValue`; `JCS_MIN_SAFE_INTEGER == -(2**53 - 1)` and `JCS_MAX_SAFE_INTEGER == 2**53 - 1`; `ContractParseError`; bounded duplicate-safe `parse_bounded_json_value(raw, *, max_bytes, max_depth=32, max_containers=4096, max_structure_tokens=16384)`; `ContractModel`; closed package-owned `registered_contract_models()`; `Sensitivity`; `Commitment`; `canonical_bytes(model: ContractModel) -> bytes`; `canonical_mapping_bytes(value: Mapping[str, Any]) -> bytes`; `parse_contract_json(model_type, raw: bytes, *, max_bytes, require_canonical=False)`; `EventType`; `WakeDetectedPayload`; `StopRequestedPayload`; `EventEnvelope`; and `SignedEventEnvelope` exactly as shown below.
 - The Task 4 registry is the immutable, explicitly named tuple in `tuntun_contracts/__init__.py`; at the end of Task 4 it contains exactly these five fully qualified names in sorted order: `tuntun_contracts.base.Commitment`, `tuntun_contracts.events.EventEnvelope`, `tuntun_contracts.events.SignedEventEnvelope`, `tuntun_contracts.events.StopRequestedPayload`, and `tuntun_contracts.events.WakeDetectedPayload`. There is no subclass hook, mutable set/list, import-time callback, or reflective subclass walk. Task 5 already owns `tuntun_contracts/__init__.py`; when it adds public DTOs, it must replace this tuple with the new explicit complete sorted tuple. The Task 4 test oracle independently derives the exhaustive expected tuple from public `ContractModel` class exports named by `tuntun_contracts.__all__`, excludes only `ContractModel` itself, and separately requires the five Task 4 names, package ownership, sorted uniqueness, tuple identity, and equality to the package-owned tuple. It never derives its expected set from `registered_contract_models()`, so omitting a later public model fails while a correctly exported and explicitly registered Task 5 model passes without editing the Task 4 test. `registered_contract_models()` remains importable from `tuntun_contracts.base` for the already-frozen Task 5 consumer.
 - Task 1 remains the owner of the package version. Task 4 must preserve `__version__: str = "0.1.0.dev0"`, test it, and explicitly import and re-export every Task 4 event type from the package root. Task 4 owns `scripts/contract_generator_common.py` as the single shared schema/OpenAPI generation helper; Task 5 and later contract tasks consume it and may not fork its registry, reference rewriting, checking, or publication logic.
-- Hostile bytes (size, UTF-8, syntax, duplicate, shape, unsafe integer, non-finite/range, schema, or canonicality faults) normalize to `ContractParseError`. `model_type` is validated before any hostile byte is decoded. Caller/programmer errors such as an invalid parser configuration, a non-`bytes` raw value, a non-contract model type, or a non-string canonical mapping key remain ordinary `TypeError`/`ValueError`. RFC 8785 canonicalizer domain failures, including nested unsafe integers, non-finite floats, and invalid Unicode code points, normalize to `ContractParseError`.
+- Hostile bytes (size, UTF-8, syntax, duplicate, shape, unsafe integer, non-finite/range, schema, or canonicality faults) normalize to `ContractParseError`. `model_type` is validated before any hostile byte is decoded. Caller/programmer errors such as an invalid parser configuration, a non-`bytes` raw value, a non-contract model type, or a non-string canonical mapping key remain ordinary `TypeError`/`ValueError`. RFC 8785 canonicalizer domain failures, including nested unsafe integers, non-finite floats, and invalid Unicode code points, normalize to `ContractParseError`. Recursive NFC normalization, post-normalization mapping/set collision detection, and safe-integer checks run before every Pydantic field/model constraint, so normalization cannot expand or contract a value around a length bound. Strict JSON ingress first preserves Pydantic's supported JSON forms for UUID, datetime, tuple, nested-model, and discriminated-union fields through per-field `TypeAdapter.validate_json`, then applies the same pre-constraint normalization; Python-origin strictness remains unchanged.
 - A `SignedEventEnvelope` signs exactly `canonical_bytes(signed.envelope)`; neither `signing_key_id` nor `signature_b64` is part of the signing input. Its key ID grammar is exactly `ed25519:<label>:v<positive-version>`, where `<label>` matches `[a-z0-9][a-z0-9._-]{0,63}` and the version matches `[1-9][0-9]{0,8}`. Its signature is standard canonical base64 of exactly 64 bytes: exactly 88 ASCII characters matching `[A-Za-z0-9+/]{86}==`, strict-decoding to 64 bytes, and byte-for-byte equal to its own re-encoding.
-- This task owns the sole deterministic `generate_schemas.py` and `generate_openapi.py` and their complete generated outputs. Each exposes exactly `OUTPUT_PATH`, `render() -> bytes`, and `main(argv: Sequence[str] | None = None) -> int`; each supports exactly one of `--check` or explicit maintainer-only `--write`, with success `0` and every usage, drift, unsafe-input, render, race, or publication failure `1`. Check mode performs two renders in a private temporary tree, nofollow/race-safely reads and walks the checked output using Task 3 helpers, byte-compares the exact sole artifact, and never mutates the repository. Write mode rejects symlink/special/changing outputs and siblings; `_ensure_output_parent()` returns one retained nofollow descriptor plus its captured device/inode identity, `_capture_output_baseline()` retains the exact prior bytes and mode, and publication never reopens the parent by path. The helper revalidates the retained identity after baseline capture, immediately after descriptor-relative atomic replacement, during final artifact verification, and at one terminal postcondition after the parent fsync. Any parent substitution observed before that terminal point triggers descriptor-relative rollback: an existing output is restored atomically with its exact bytes and mode, or a newly published output is unlinked; rollback-owned temporary entries are cleaned and the retained parent descriptor is fsynced. Successful rollback therefore leaves both the lexical replacement tree and renamed old tree equal to their full pre-run snapshots. A rollback-operation failure follows the distinct `publication failed and rollback failed` path, still returns `1`, cleans any rollback temporary entry and fsyncs when those cleanup operations remain available, but may leave the renamed old tree requiring operator handling; no non-mutation claim applies to a failed rollback. The terminal identity check is the end of the bounded publication operation, and this contract makes no impossible claim about an unobservable directory substitution after that final postcondition point. Missing/stale/nondeterministic outputs, either tested parent-swap seam, and any extra regular/symlink/special entry below the owned output parent fail closed.
-- The JSON Schema artifact has exactly top-level `$schema`, `schema_version`, and `models`; `$schema` is `https://json-schema.org/draft/2020-12/schema` and `schema_version` is `1.0`. The OpenAPI artifact has exactly top-level `openapi`, `info`, `paths`, and `components`; `openapi` is `3.1.0`; `info` is exactly `{title: "Tuntun Admin API", version: "1.0.0", description: "Foundation contract components; no HTTP paths are owned yet."}`; and `paths` is empty. Both model maps use exact sorted FQNs. For each independently generated Pydantic model schema, the shared helper recursively rewrites only `#/$defs/...` references to that model's escaped JSON Pointer location under `#/models/<FQN>/$defs/...` or `#/components/schemas/<FQN>/$defs/...`; any other local reference fails generation. Tests walk every `$ref` and prove that every local JSON Pointer resolves.
+- This task owns the sole deterministic `generate_schemas.py` and `generate_openapi.py` and their complete generated outputs. Each exposes exactly `OUTPUT_PATH`, `render() -> bytes`, and `main(argv: Sequence[str] | None = None) -> int`; each supports exactly one of `--check` or explicit maintainer-only `--write`, with success `0` and every usage, drift, unsafe-input, render, race, or publication failure `1`. Check mode performs two renders in a private temporary tree, opens only an already-existing output parent without creating missing path components, retains that nofollow descriptor across two exact inventories plus the byte comparison, checks the terminal pathname identity, and never mutates either the repository or a missing path. Write mode rejects symlink/special/changing outputs and siblings; `_ensure_output_parent()` returns one retained nofollow descriptor plus its captured device/inode identity, `_capture_output_baseline()` retains the exact prior bytes and mode, and publication never reopens the parent by path. The helper revalidates the retained identity after baseline capture, immediately after descriptor-relative atomic replacement, during final artifact verification, and at one terminal postcondition after the parent fsync. Any parent substitution observed before that terminal point triggers descriptor-relative rollback: an existing output is restored atomically with its exact bytes and mode, or a newly published output is unlinked; rollback-owned temporary entries are cleaned and the retained parent descriptor is fsynced. Successful rollback therefore leaves both the lexical replacement tree and renamed old tree equal to their full pre-run snapshots. A rollback-operation failure follows the distinct `publication failed and rollback failed` path, still returns `1`, cleans any rollback temporary entry and fsyncs when those cleanup operations remain available, but may leave the renamed old tree requiring operator handling; no non-mutation claim applies to a failed rollback. The terminal identity check is the end of the bounded publication operation, and this contract makes no impossible claim about an unobservable directory substitution after that final postcondition point. Missing/stale/nondeterministic outputs, either tested parent-swap seam, and any extra regular/symlink/special entry below the owned output parent fail closed.
+- The JSON Schema artifact has exactly top-level `$schema`, `schema_version`, and `models`; `$schema` is `https://json-schema.org/draft/2020-12/schema` and `schema_version` is `1.0`. The OpenAPI artifact has exactly top-level `openapi`, `info`, `paths`, and `components`; `openapi` is `3.1.0`; `info` is exactly `{title: "Tuntun Admin API", version: "1.0.0", description: "Foundation contract components; no HTTP paths are owned yet."}`; and `paths` is empty. Both model maps use exact sorted FQNs. For each independently generated Pydantic model schema, the shared helper recursively rewrites only literal `$ref` values and mapping targets inside structurally recognized discriminator objects from `#/$defs/...` to that model's escaped JSON Pointer location under `#/models/<FQN>/$defs/...` or `#/components/schemas/<FQN>/$defs/...`; any unsupported local target fails generation, while unrelated strings/mappings remain untouched. Tests exhaustively walk both `$ref` values and discriminator mappings and prove that every local JSON Pointer resolves.
 - `PyYAML` remains the Task 3-pinned runtime dependency. Because PyYAML 6 does not publish a `py.typed` marker, only its two import sites carry the fully scoped `# type: ignore[import-untyped]` annotation; Task 4 does not add `types-PyYAML`, edit dependency metadata, or churn `uv.lock`.
+- `scripts/__init__.py` establishes one static `scripts.*` namespace. In the ten listed legacy dual-mode scripts, only imports under `TYPE_CHECKING` become package-qualified (`scripts.assurance_common`, plus `scripts.check_migration_ownership` or `scripts.verify_private_data` where consumed); the package-relative `elif __package__` and direct-execution `else` runtime branches remain behaviorally unchanged. `packages/contracts/src/tuntun_contracts/py.typed` marks the contracts wheel as typed, and the built wheel plus its `RECORD` must contain that marker. No mypy flag, project configuration, or ignore is weakened.
 - Neither generator imports app bootstrap, reads household state/credentials, opens listeners, performs network access, or reads private-data matcher fixtures.
 
 - [ ] **Step 1: Write strictness, signing, registry, generator, and non-mutation tests**
@@ -4208,7 +4221,7 @@ from uuid import UUID
 
 import pytest
 import tuntun_contracts
-from pydantic import ValidationError
+from pydantic import AwareDatetime, Field, ValidationError
 from tuntun_contracts.base import (
     JCS_MAX_SAFE_INTEGER,
     JCS_MIN_SAFE_INTEGER,
@@ -4460,6 +4473,55 @@ class _NFCProbe(ContractModel):
 
 class _IntegerProbe(ContractModel):
     value: dict[str, list[int]]
+
+
+class _NFCMaxLengthProbe(ContractModel):
+    value: str = Field(max_length=1)
+
+
+class _NFCMinLengthProbe(ContractModel):
+    value: str = Field(min_length=2)
+
+
+class _StrictJSONModeProbe(ContractModel):
+    identifier: UUID
+    occurred_at: AwareDatetime
+    labels: tuple[str, ...]
+
+
+def test_before_normalization_preserves_strict_json_native_conversions() -> None:
+    parsed = _StrictJSONModeProbe.model_validate_json(
+        b'{"identifier":"00000000-0000-0000-0000-000000000001",'
+        b'"occurred_at":"2026-08-27T01:02:03Z","labels":["e\\u0301"]}',
+        strict=True,
+    )
+    assert parsed.identifier == UUID(int=1)
+    assert parsed.occurred_at == datetime(2026, 8, 27, 1, 2, 3, tzinfo=UTC)
+    assert parsed.labels == ("\u00e9",)
+
+
+def test_nfc_expansion_is_validated_before_max_length_in_python_and_json_modes() -> None:
+    assert len("\u0344") == 1
+    assert len("\u0308\u0301") == 2
+    with pytest.raises(ValidationError):
+        _NFCMaxLengthProbe(value="\u0344")
+    with pytest.raises(ValidationError):
+        _NFCMaxLengthProbe.model_validate_json(
+            b'{"value":"\\u0344"}',
+            strict=True,
+        )
+
+
+def test_nfc_contraction_is_validated_before_min_length_in_python_and_json_modes() -> None:
+    assert len("e\u0301") == 2
+    assert len("\u00e9") == 1
+    with pytest.raises(ValidationError):
+        _NFCMinLengthProbe(value="e\u0301")
+    with pytest.raises(ValidationError):
+        _NFCMinLengthProbe.model_validate_json(
+            b'{"value":"e\\u0301"}',
+            strict=True,
+        )
 
 
 def test_contract_ingress_normalizes_nfc_recursively_in_python_and_json_modes() -> None:
@@ -4732,6 +4794,8 @@ def test_signed_event_rejects_every_key_id_outside_the_closed_grammar(
 # tests/contract/test_contract_generators.py
 from __future__ import annotations
 
+# The import split below deliberately bootstraps the uninstalled root namespace.
+# ruff: noqa: E402
 import hashlib
 import json
 import os
@@ -4742,10 +4806,15 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, cast
 
+# The root project is not an installed package; preserve package-import coverage
+# without changing workspace metadata or adding a suite-wide import side effect.
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import pytest
 import tuntun_contracts
 import yaml  # type: ignore[import-untyped]  # PyYAML 6 has no py.typed marker.
-from scripts.contract_generator_common import GeneratorError
 from tuntun_contracts.base import ContractModel, registered_contract_models
 
 from scripts import contract_generator_common, generate_openapi, generate_schemas
@@ -4755,8 +4824,8 @@ from scripts.assurance_common import (
     lexical_path,
     read_regular_file,
 )
+from scripts.contract_generator_common import GeneratorError
 
-ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_OUTPUT = Path("packages/contracts/schema/v1/contracts.schema.json")
 OPENAPI_OUTPUT = Path("packages/contracts/openapi/admin-v1.yaml")
 REQUIRED_TASK4_MODELS = frozenset(
@@ -4850,6 +4919,13 @@ def _subprocess_cli(
 
 def _walk_refs(value: object) -> Iterator[str]:
     if isinstance(value, dict):
+        if "propertyName" in value and "mapping" in value:
+            assert isinstance(value["propertyName"], str)
+            mapping = value["mapping"]
+            assert isinstance(mapping, dict)
+            for target in mapping.values():
+                assert isinstance(target, str)
+                yield target
         for key, child in value.items():
             if key == "$ref":
                 assert isinstance(child, str)
@@ -5003,6 +5079,8 @@ def test_every_generated_local_reference_resolves() -> None:
     documents = (
         json.loads(generate_schemas.render()),
         yaml.safe_load(generate_openapi.render()),
+        json.loads(read_regular_file(ROOT / SCHEMA_OUTPUT, max_bytes=4 * 1024 * 1024)),
+        yaml.safe_load(read_regular_file(ROOT / OPENAPI_OUTPUT, max_bytes=4 * 1024 * 1024)),
     )
     for document in documents:
         references = tuple(_walk_refs(document))
@@ -5010,6 +5088,50 @@ def test_every_generated_local_reference_resolves() -> None:
         for reference in references:
             assert reference.startswith("#/")
             assert _resolve_local_ref(document, reference) is not None
+
+
+def test_schema_reference_rewrite_is_limited_to_supported_reference_positions() -> None:
+    source: dict[str, object] = {
+        "$ref": "#/$defs/Root",
+        "discriminator": {
+            "propertyName": "kind",
+            "mapping": {
+                "one": "#/$defs/One",
+                "two": "#/$defs/Two",
+            },
+        },
+        "default": "#/$defs/MustRemainLiteral",
+        "metadata": {"mapping": {"literal": "#/$defs/AlsoLiteral"}},
+    }
+    assert contract_generator_common._rewrite_local_refs(
+        source,
+        model_pointer="#/models/example.Model",
+    ) == {
+        "$ref": "#/models/example.Model/$defs/Root",
+        "discriminator": {
+            "propertyName": "kind",
+            "mapping": {
+                "one": "#/models/example.Model/$defs/One",
+                "two": "#/models/example.Model/$defs/Two",
+            },
+        },
+        "default": "#/$defs/MustRemainLiteral",
+        "metadata": {"mapping": {"literal": "#/$defs/AlsoLiteral"}},
+    }
+
+
+@pytest.mark.parametrize("target", (None, 1, "#/unsupported/Target"))
+def test_schema_reference_rewrite_rejects_invalid_discriminator_mapping_targets(
+    target: object,
+) -> None:
+    with pytest.raises(GeneratorError, match="schema reference"):
+        contract_generator_common._rewrite_local_refs(
+            {
+                "propertyName": "kind",
+                "mapping": {"sample": target},
+            },
+            model_pointer="#/models/example.Model",
+        )
 
 
 def test_duplicate_fully_qualified_model_names_fail_before_schema_render(
@@ -5210,6 +5332,56 @@ def test_write_rejects_parent_swap_between_baseline_and_publication(
 
 
 @pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+def test_check_rejects_parent_swap_after_clean_inventory_without_mutation(
+    generator: _GeneratorModule,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / generator.__name__
+    parent.mkdir()
+    replacement = tmp_path / f"{generator.__name__}-replacement"
+    replacement.mkdir()
+    old_tree = tmp_path / f"{generator.__name__}-old"
+    output = parent / generator.OUTPUT_PATH.name
+    replacement_output = replacement / generator.OUTPUT_PATH.name
+    rendered = generator.render()
+    output.write_bytes(rendered)
+    output.chmod(0o600)
+    replacement_output.write_bytes(rendered)
+    replacement_output.chmod(0o600)
+    (replacement / "extra.generated").write_bytes(b"unexpected\n")
+    monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+    old_before = _tree_snapshot(parent)
+    replacement_before = _tree_snapshot(replacement)
+    original_snapshot = contract_generator_common._owned_snapshot
+    swapped = False
+
+    def swap_after_inventory(
+        output_path: Path,
+        *,
+        allow_missing: bool,
+        output_parent: contract_generator_common.OutputParent | None = None,
+    ) -> tuple[FrozenRegularFile, ...]:
+        nonlocal swapped
+        result = original_snapshot(
+            output_path,
+            allow_missing=allow_missing,
+            output_parent=output_parent,
+        )
+        if not allow_missing and not swapped:
+            parent.rename(old_tree)
+            replacement.rename(parent)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(contract_generator_common, "_owned_snapshot", swap_after_inventory)
+    assert generator.main(["--check"]) == 1
+    assert swapped
+    assert _tree_snapshot(parent) == replacement_before
+    assert _tree_snapshot(old_tree) == old_before
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
 @pytest.mark.parametrize("baseline", (None, b"prior bytes\n"))
 def test_write_rolls_back_parent_swap_inside_atomic_replace(
     generator: _GeneratorModule,
@@ -5355,7 +5527,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum, StrEnum
-from typing import Any, Literal, NoReturn, Self, TypeAlias, TypeVar, cast
+from typing import Any, Literal, NoReturn, TypeAlias, TypeVar, cast
 from unicodedata import normalize
 from uuid import UUID
 
@@ -5364,7 +5536,9 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -5437,12 +5611,33 @@ class ContractModel(BaseModel):
         validate_assignment=True,
     )
 
-    @model_validator(mode="after")
-    def normalize_and_validate_contract_value(self) -> Self:
-        for field_name in type(self).model_fields:
-            normalized = _normalize_contract_input(getattr(self, field_name))
-            object.__setattr__(self, field_name, normalized)
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_and_validate_contract_value(
+        cls,
+        value: Any,
+        info: ValidationInfo,
+    ) -> Any:
+        normalized = _normalize_contract_input(value)
+        if info.mode != "json" or not isinstance(normalized, Mapping):
+            return normalized
+        result = dict(normalized)
+        for field_name, field in cls.model_fields.items():
+            input_name = field.alias or field_name
+            if input_name not in result:
+                continue
+            field_json = json.dumps(
+                result[input_name],
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            result[input_name] = TypeAdapter(field.rebuild_annotation()).validate_json(
+                field_json,
+                strict=True,
+                context=info.context,
+            )
+        return result
 
 
 def registered_contract_models() -> tuple[type[ContractModel], ...]:
@@ -5857,18 +6052,37 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
-from typing import Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from tuntun_contracts.base import ContractModel
 
-from scripts.assurance_common import (
-    AssuranceInputError,
-    FrozenRegularFile,
-    lexical_path,
-    read_regular_file,
-    validate_root,
-    walk_regular_files,
-)
+if TYPE_CHECKING:
+    from scripts.assurance_common import (
+        AssuranceInputError,
+        FrozenRegularFile,
+        lexical_path,
+        read_regular_file,
+        validate_root,
+        walk_regular_files,
+    )
+elif __package__:
+    from .assurance_common import (
+        AssuranceInputError,
+        FrozenRegularFile,
+        lexical_path,
+        read_regular_file,
+        validate_root,
+        walk_regular_files,
+    )
+else:
+    from assurance_common import (
+        AssuranceInputError,
+        FrozenRegularFile,
+        lexical_path,
+        read_regular_file,
+        validate_root,
+        walk_regular_files,
+    )
 
 MAX_GENERATED_BYTES = 4 * 1024 * 1024
 MAX_PARENT_FILES = 3
@@ -5902,6 +6116,14 @@ def _json_pointer_escape(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
 
 
+def _rewrite_local_ref(value: object, *, model_pointer: str) -> str:
+    if not isinstance(value, str):
+        raise GeneratorError("generated schema reference is not a string")
+    if not value.startswith("#/$defs/"):
+        raise GeneratorError(f"unsupported generated schema reference: {value}")
+    return f"{model_pointer}/$defs/{value.removeprefix('#/$defs/')}"
+
+
 def _registered_model_map(
     models: Sequence[type[ContractModel]],
 ) -> dict[str, type[ContractModel]]:
@@ -5918,16 +6140,28 @@ def _registered_model_map(
 
 def _rewrite_local_refs(value: object, *, model_pointer: str) -> object:
     if isinstance(value, dict):
+        is_discriminator = "propertyName" in value and "mapping" in value
+        if is_discriminator:
+            if not isinstance(value["propertyName"], str):
+                raise GeneratorError("generated discriminator propertyName is not a string")
+            if not isinstance(value["mapping"], dict):
+                raise GeneratorError("generated discriminator mapping is not an object")
         result: dict[str, object] = {}
         for key, child in value.items():
             if not isinstance(key, str):
                 raise GeneratorError("generated schema key is not a string")
             if key == "$ref":
-                if not isinstance(child, str):
-                    raise GeneratorError("generated schema reference is not a string")
-                if not child.startswith("#/$defs/"):
-                    raise GeneratorError(f"unsupported generated schema reference: {child}")
-                result[key] = f"{model_pointer}/$defs/{child.removeprefix('#/$defs/')}"
+                result[key] = _rewrite_local_ref(child, model_pointer=model_pointer)
+            elif is_discriminator and key == "mapping":
+                mapping: dict[str, object] = {}
+                for discriminator_value, reference in child.items():
+                    if not isinstance(discriminator_value, str):
+                        raise GeneratorError("generated discriminator value is not a string")
+                    mapping[discriminator_value] = _rewrite_local_ref(
+                        reference,
+                        model_pointer=model_pointer,
+                    )
+                result[key] = mapping
             else:
                 result[key] = _rewrite_local_refs(child, model_pointer=model_pointer)
         return result
@@ -6090,7 +6324,11 @@ def _capture_output_baseline(output: Path, output_parent: OutputParent) -> Outpu
     return OutputBaseline(snapshot=snapshot, mode=stat.S_IMODE(metadata.st_mode))
 
 
-def _ensure_output_parent(output_path: Path) -> OutputParent:
+def _bind_output_parent(
+    output_path: Path,
+    *,
+    create_missing: bool,
+) -> OutputParent:
     parent = lexical_path(output_path).parent
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     current_fd = os.open(os.path.sep, flags)
@@ -6101,6 +6339,8 @@ def _ensure_output_parent(output_path: Path) -> OutputParent:
             try:
                 before = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
             except FileNotFoundError:
+                if not create_missing:
+                    raise AssuranceInputError(display, "missing-input") from None
                 os.mkdir(part, mode=0o700, dir_fd=current_fd)
                 before = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
             if stat.S_ISLNK(before.st_mode):
@@ -6129,6 +6369,14 @@ def _ensure_output_parent(output_path: Path) -> OutputParent:
     finally:
         if not keep_descriptor:
             os.close(current_fd)
+
+
+def _ensure_output_parent(output_path: Path) -> OutputParent:
+    return _bind_output_parent(output_path, create_missing=True)
+
+
+def _open_existing_output_parent(output_path: Path) -> OutputParent:
+    return _bind_output_parent(output_path, create_missing=False)
 
 
 def _atomic_replace(source_name: str, destination_name: str, parent_fd: int) -> None:
@@ -6271,6 +6519,28 @@ def _write_atomically(output_path: Path, rendered: bytes) -> None:
         os.close(output_parent.descriptor)
 
 
+def _check_current_output(output_path: Path, rendered: bytes) -> bool:
+    output = lexical_path(output_path)
+    output_parent = _open_existing_output_parent(output)
+    try:
+        initial = _owned_snapshot(
+            output,
+            allow_missing=False,
+            output_parent=output_parent,
+        )
+        final = _owned_snapshot(
+            output,
+            allow_missing=False,
+            output_parent=output_parent,
+        )
+        matches = initial == final and final[0].raw == rendered
+        if not _output_parent_is_current(output_parent):
+            raise GeneratorError("output parent changed at check postcondition")
+        return matches
+    finally:
+        os.close(output_parent.descriptor)
+
+
 def _parse_mode(argv: Sequence[str] | None) -> GeneratorMode:
     arguments = tuple(sys.argv[1:] if argv is None else argv)
     if arguments == ("--check",):
@@ -6290,8 +6560,7 @@ def run_generator(
         mode = _parse_mode(argv)
         rendered = _render_twice_in_private_tree(renderer, output_path.name)
         if mode == "check":
-            actual = _owned_snapshot(output_path, allow_missing=False)[0].raw
-            return 0 if actual == rendered else 1
+            return 0 if _check_current_output(output_path, rendered) else 1
         _write_atomically(output_path, rendered)
         return 0
     except Exception:
@@ -6304,14 +6573,28 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
-from scripts.contract_generator_common import (
-    build_model_schemas,
-    render_json_document,
-    run_generator,
-)
 from tuntun_contracts.base import registered_contract_models
+
+if TYPE_CHECKING:
+    from scripts.contract_generator_common import (
+        build_model_schemas,
+        render_json_document,
+        run_generator,
+    )
+elif __package__:
+    from .contract_generator_common import (
+        build_model_schemas,
+        render_json_document,
+        run_generator,
+    )
+else:
+    from contract_generator_common import (
+        build_model_schemas,
+        render_json_document,
+        run_generator,
+    )
 
 OUTPUT_PATH: Final = Path("packages/contracts/schema/v1/contracts.schema.json")
 
@@ -6346,11 +6629,17 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import yaml  # type: ignore[import-untyped]  # PyYAML 6 has no py.typed marker.
-from scripts.contract_generator_common import build_model_schemas, run_generator
 from tuntun_contracts.base import registered_contract_models
+
+if TYPE_CHECKING:
+    from scripts.contract_generator_common import build_model_schemas, run_generator
+elif __package__:
+    from .contract_generator_common import build_model_schemas, run_generator
+else:
+    from contract_generator_common import build_model_schemas, run_generator
 
 OUTPUT_PATH: Final = Path("packages/contracts/openapi/admin-v1.yaml")
 
@@ -6396,6 +6685,8 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
+Create empty `scripts/__init__.py` and `packages/contracts/src/tuntun_contracts/py.typed` marker files. Apply only the package-qualified `TYPE_CHECKING` imports described above to the ten listed legacy scripts; do not change their package-relative or direct-execution branches.
+
 Generate `packages/contracts/schema/v1/contracts.schema.json` only with `uv run python scripts/generate_schemas.py --write`, and generate `packages/contracts/openapi/admin-v1.yaml` only with `uv run python scripts/generate_openapi.py --write`. Do not hand-edit either artifact.
 
 - [ ] **Step 4: Run the green canonical-contract gate, prove check-mode non-mutation, and run the repository gate**
@@ -6406,9 +6697,40 @@ Run:
 uv run python scripts/generate_schemas.py --write
 uv run python scripts/generate_openapi.py --write
 uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py -q
-uv run ruff format --check packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
-uv run ruff check packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
+uv run ruff format --check packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/__init__.py scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_graph.py scripts/check_migration_ownership.py scripts/scan_backup_artifacts.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
+uv run ruff check packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/__init__.py scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_graph.py scripts/check_migration_ownership.py scripts/scan_backup_artifacts.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
 MYPYPATH=packages/contracts/src:. uv run mypy --explicit-package-bases --python-version 3.11 packages/contracts/src scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
+uv run mypy scripts
+
+uv run python - <<'PY'
+from pathlib import Path
+from subprocess import run
+from tempfile import TemporaryDirectory
+from zipfile import ZipFile
+
+with TemporaryDirectory(prefix="tuntun-contract-wheel-") as temporary:
+    output = Path(temporary)
+    run(
+        [
+            "uv",
+            "build",
+            "--offline",
+            "--wheel",
+            "packages/contracts",
+            "--out-dir",
+            str(output),
+        ],
+        check=True,
+    )
+    wheels = tuple(output.glob("*.whl"))
+    assert len(wheels) == 1
+    with ZipFile(wheels[0]) as archive:
+        names = set(archive.namelist())
+        assert "tuntun_contracts/py.typed" in names
+        record_name = next(name for name in names if name.endswith(".dist-info/RECORD"))
+        record = archive.read(record_name).decode("utf-8")
+        assert "tuntun_contracts/py.typed," in record
+PY
 
 before_diff="$(git diff --binary HEAD -- . | shasum -a 256)"
 before_status="$(git status --porcelain=v1 --untracked-files=all | shasum -a 256)"
@@ -6423,13 +6745,13 @@ make check
 git diff --check
 ```
 
-Expected: PASS with `76 passed` from the focused pytest command. The package smoke assertion still reports `tuntun_contracts.__version__ == "0.1.0.dev0"`; both independent generator processes report the exact exhaustive public model registry (the five required Task 4 FQNs now, with correctly exported and explicitly registered later models admitted automatically); the deliberate omission oracle fails for every public model; and all local `$ref` pointers resolve. Unsafe-integer/signature/key-ID/coercion/duplicate-FQN/CLI/symlink/special/race/mutation/error-code cases fail exactly as asserted. The seeded nondeterminism regression observes exactly two renderer calls, and replacing the second call with a reuse of the first render makes that test fail. Replacing the output parent immediately after baseline capture returns `1` without mutation. Replacing it inside `_atomic_replace`, immediately before the real descriptor-relative `os.replace`, returns `1`; normal rollback leaves both the lexical replacement and renamed old tree equal to their full pre-run snapshots for both missing and existing baselines, restoring the latter's exact bytes and `0640` mode. Injected rollback-unlink and rollback-replace failures each return `1`, expose the distinct `publication failed and rollback failed` evidence, leave the lexical replacement unchanged, and leave no rollback temporary entry; the test explicitly records that the renamed old tree differs and therefore requires operator handling rather than claiming non-mutation. Both generators return `0` only for current/write success and `1` for every asserted failure. The three before/after values are identical, proving check mode changed neither tracked diffs, worktree inventory, nor either owned artifact. Ruff, strict mypy under Python 3.11 semantics, `make check`, and `git diff --check` exit 0.
+Expected: PASS with `85 passed` from the focused pytest command. The package smoke assertion still reports `tuntun_contracts.__version__ == "0.1.0.dev0"`; both independent generator processes report the exact exhaustive public model registry (the five required Task 4 FQNs now, with correctly exported and explicitly registered later models admitted automatically); the deliberate omission oracle fails for every public model; and all literal `$ref` plus structurally recognized discriminator-mapping targets resolve. Unsafe-integer/signature/key-ID/coercion/duplicate-FQN/CLI/symlink/special/race/mutation/error-code cases fail exactly as asserted. NFC expansion/contraction cannot bypass Python or strict-JSON field constraints, while strict JSON UUID/datetime/tuple/nested/discriminated-union forms remain supported. The seeded nondeterminism regression observes exactly two renderer calls, and replacing the second call with a reuse of the first render makes that test fail. Replacing the output parent immediately after baseline capture returns `1` without mutation. Replacing it after either clean check-mode snapshot or inside `_atomic_replace`, immediately before the real descriptor-relative `os.replace`, returns `1`; normal rollback leaves both the lexical replacement and renamed old tree equal to their full pre-run snapshots for both missing and existing baselines, restoring the latter's exact bytes and `0640` mode. Check mode never creates a missing parent. Injected rollback-unlink and rollback-replace failures each return `1`, expose the distinct `publication failed and rollback failed` evidence, leave the lexical replacement unchanged, and leave no rollback temporary entry; the test explicitly records that the renamed old tree differs and therefore requires operator handling rather than claiming non-mutation. Both generators return `0` only for current/write success and `1` for every asserted failure. The three before/after values are identical, proving check mode changed neither tracked diffs, worktree inventory, nor either owned artifact. The contracts wheel contains `tuntun_contracts/py.typed` and lists it in `RECORD`; both the Task 4 strict Python 3.11 mypy gate and the exact predecessor `uv run mypy scripts` gate pass under one static script namespace. Ruff, `make check`, and `git diff --check` exit 0.
 
 - [ ] **Step 5: Commit exact Task 4 paths**
 
 ```bash
 git status --short
-git add packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
+git add packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py packages/contracts/src/tuntun_contracts/py.typed scripts/__init__.py scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_graph.py scripts/check_migration_ownership.py scripts/scan_backup_artifacts.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
 git diff --cached --name-only
 git diff --cached
 git diff --cached --check
