@@ -4172,6 +4172,7 @@ git commit -m "security: add fail-closed assurance scanners"
 **Files:**
 - Create: `packages/contracts/src/tuntun_contracts/base.py`
 - Create: `packages/contracts/src/tuntun_contracts/events.py`
+- Create: `scripts/contract_generator_common.py`
 - Create: `scripts/generate_schemas.py`
 - Create: `scripts/generate_openapi.py`
 - Create: `packages/contracts/schema/v1/contracts.schema.json`
@@ -4182,217 +4183,453 @@ git commit -m "security: add fail-closed assurance scanners"
 - Test: `tests/contract/test_contract_generators.py`
 
 **Interfaces:**
-- Consumes: Pydantic v2 and `rfc8785.dumps(value) -> bytes`.
-- Produces: `JSONValue`, `ContractParseError`, bounded duplicate-safe `parse_bounded_json_value(raw, *, max_bytes, max_depth=32, max_containers=4096, max_structure_tokens=16384)`, `ContractModel`, `registered_contract_models()`, `Sensitivity`, `Commitment`, `canonical_bytes(model: ContractModel) -> bytes`, `canonical_mapping_bytes(value: Mapping[str, Any]) -> bytes`, `parse_contract_json(model_type, raw: bytes, *, max_bytes, require_canonical=False)`, `EventType`, `WakeDetectedPayload`, `StopRequestedPayload`, `EventEnvelope`, and `SignedEventEnvelope` exactly as shown below. Hostile bytes (size, UTF-8, syntax, duplicate, shape, numeric, schema, or canonicality faults) normalize to `ContractParseError`; caller/programmer errors such as an invalid parser configuration or non-contract model type remain visible as their ordinary `TypeError`/`ValueError`. This task also owns the sole deterministic `generate_schemas.py` and `generate_openapi.py` plus their complete generated outputs: the single JSON Schema bundle `packages/contracts/schema/v1/contracts.schema.json` and the single OpenAPI document `packages/contracts/openapi/admin-v1.yaml`. Each generator exposes one exact `OUTPUT_PATH`, renders every `registered_contract_models()` entry under its fully qualified name, and supports exactly one of `--check` or explicit maintainer-only `--write`; check mode renders the bounded complete registered inventory into a private temporary tree and byte-compares the exact output without repository mutation. Missing/stale/nondeterministic/symlinked/changing outputs and any extra regular/symlink/special entry beside the sole owned output fail closed. OpenAPI has `openapi: 3.1.0`, an empty foundation `paths` mapping, and the same complete model inventory under `components.schemas`; no route is invented. Neither generator imports app bootstrap, reads household state/credentials, opens listeners, or performs network access.
+- Consumes: Task 1's existing `tuntun_contracts.__version__: str = "0.1.0.dev0"`; Task 3's root `PyYAML>=6.0,<7` development dependency and `scripts.assurance_common.AssuranceInputError`, `lexical_path`, `read_regular_file`, `validate_root`, and `walk_regular_files`; Pydantic v2; and `rfc8785.dumps(value) -> bytes` plus `rfc8785.CanonicalizationError`.
+- Produces: Python 3.11-compatible recursive `JSONValue`; `JCS_MIN_SAFE_INTEGER == -(2**53 - 1)` and `JCS_MAX_SAFE_INTEGER == 2**53 - 1`; `ContractParseError`; bounded duplicate-safe `parse_bounded_json_value(raw, *, max_bytes, max_depth=32, max_containers=4096, max_structure_tokens=16384)`; `ContractModel`; closed package-owned `registered_contract_models()`; `Sensitivity`; `Commitment`; `canonical_bytes(model: ContractModel) -> bytes`; `canonical_mapping_bytes(value: Mapping[str, Any]) -> bytes`; `parse_contract_json(model_type, raw: bytes, *, max_bytes, require_canonical=False)`; `EventType`; `WakeDetectedPayload`; `StopRequestedPayload`; `EventEnvelope`; and `SignedEventEnvelope` exactly as shown below.
+- The Task 4 registry is the immutable, explicitly named tuple in `tuntun_contracts/__init__.py`; it contains exactly these five fully qualified names in sorted order: `tuntun_contracts.base.Commitment`, `tuntun_contracts.events.EventEnvelope`, `tuntun_contracts.events.SignedEventEnvelope`, `tuntun_contracts.events.StopRequestedPayload`, and `tuntun_contracts.events.WakeDetectedPayload`. There is no subclass hook, mutable set/list, import-time callback, or reflective subclass walk. Task 5 already owns `tuntun_contracts/__init__.py`; when it adds DTOs, it must replace this tuple with the new explicit complete sorted tuple. `registered_contract_models()` remains importable from `tuntun_contracts.base` for the already-frozen Task 5 consumer.
+- Task 1 remains the owner of the package version. Task 4 must preserve `__version__: str = "0.1.0.dev0"`, test it, and explicitly import and re-export every Task 4 event type from the package root. Task 4 owns `scripts/contract_generator_common.py` as the single shared schema/OpenAPI generation helper; Task 5 and later contract tasks consume it and may not fork its registry, reference rewriting, checking, or publication logic.
+- Hostile bytes (size, UTF-8, syntax, duplicate, shape, unsafe integer, non-finite/range, schema, or canonicality faults) normalize to `ContractParseError`. `model_type` is validated before any hostile byte is decoded. Caller/programmer errors such as an invalid parser configuration, a non-`bytes` raw value, a non-contract model type, or a non-string canonical mapping key remain ordinary `TypeError`/`ValueError`. RFC 8785 canonicalizer domain failures, including nested unsafe integers, non-finite floats, and invalid Unicode code points, normalize to `ContractParseError`.
+- A `SignedEventEnvelope` signs exactly `canonical_bytes(signed.envelope)`; neither `signing_key_id` nor `signature_b64` is part of the signing input. Its key ID grammar is exactly `ed25519:<label>:v<positive-version>`, where `<label>` matches `[a-z0-9][a-z0-9._-]{0,63}` and the version matches `[1-9][0-9]{0,8}`. Its signature is standard canonical base64 of exactly 64 bytes: exactly 88 ASCII characters matching `[A-Za-z0-9+/]{86}==`, strict-decoding to 64 bytes, and byte-for-byte equal to its own re-encoding.
+- This task owns the sole deterministic `generate_schemas.py` and `generate_openapi.py` and their complete generated outputs. Each exposes exactly `OUTPUT_PATH`, `render() -> bytes`, and `main(argv: Sequence[str] | None = None) -> int`; each supports exactly one of `--check` or explicit maintainer-only `--write`, with success `0` and every usage, drift, unsafe-input, render, race, or publication failure `1`. Check mode performs two renders in a private temporary tree, nofollow/race-safely reads and walks the checked output using Task 3 helpers, byte-compares the exact sole artifact, and never mutates the repository. Write mode rejects symlink/special/changing outputs and siblings, writes a same-directory `0600` temporary regular file, fsyncs it, detects an output-directory race, atomically replaces, fsyncs the parent, and verifies the sole final bytes. Missing/stale/nondeterministic outputs and any extra regular/symlink/special entry below the owned output parent fail closed.
+- The JSON Schema artifact has exactly top-level `$schema`, `schema_version`, and `models`; `$schema` is `https://json-schema.org/draft/2020-12/schema` and `schema_version` is `1.0`. The OpenAPI artifact has exactly top-level `openapi`, `info`, `paths`, and `components`; `openapi` is `3.1.0`; `info` is exactly `{title: "Tuntun Admin API", version: "1.0.0", description: "Foundation contract components; no HTTP paths are owned yet."}`; and `paths` is empty. Both model maps use exact sorted FQNs. For each independently generated Pydantic model schema, the shared helper recursively rewrites only `#/$defs/...` references to that model's escaped JSON Pointer location under `#/models/<FQN>/$defs/...` or `#/components/schemas/<FQN>/$defs/...`; any other local reference fails generation. Tests walk every `$ref` and prove that every local JSON Pointer resolves.
+- `PyYAML` remains the Task 3-pinned runtime dependency. Because PyYAML 6 does not publish a `py.typed` marker, only its two import sites carry the fully scoped `# type: ignore[import-untyped]` annotation; Task 4 does not add `types-PyYAML`, edit dependency metadata, or churn `uv.lock`.
+- Neither generator imports app bootstrap, reads household state/credentials, opens listeners, performs network access, or reads private-data matcher fixtures.
 
-- [ ] **Step 1: Write strictness and canonical-byte tests**
+- [ ] **Step 1: Write strictness, signing, registry, generator, and non-mutation tests**
 
 ```python
 # tests/contract/test_strict_models.py
+from __future__ import annotations
+
 import json
 from datetime import UTC, datetime, timedelta, timezone
 from enum import StrEnum
+from typing import cast
 from uuid import UUID
 
 import pytest
+import tuntun_contracts
 from pydantic import ValidationError
-
 from tuntun_contracts.base import (
-    Commitment,ContractModel,ContractParseError,Sensitivity,canonical_bytes,canonical_mapping_bytes,
+    JCS_MAX_SAFE_INTEGER,
+    JCS_MIN_SAFE_INTEGER,
+    Commitment,
+    ContractModel,
+    ContractParseError,
+    Sensitivity,
+    canonical_bytes,
+    canonical_mapping_bytes,
     parse_bounded_json_value,
     parse_contract_json,
 )
 from tuntun_contracts.events import EventEnvelope, EventType, WakeDetectedPayload
 
-def valid_python_event() -> dict:
+
+def valid_python_event() -> dict[str, object]:
     return {
-        "schema_version":"1.0","event_id":UUID(int=1),"event_type":EventType.WAKE_DETECTED,
-        "household_id":UUID(int=2),"device_id":UUID(int=3),"session_id":None,
-        "correlation_id":UUID(int=4),"causation_id":None,"device_sequence":1,
-        "occurred_at":datetime(2026,8,27,1,2,3,tzinfo=UTC),"sensitivity":Sensitivity.HOUSEHOLD,
-        "payload_commitment":Commitment(algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64="A"*43+"="),
-        "payload":WakeDetectedPayload(kind="speech.wake_detected",turn_id=UUID(int=5),score_micros=900000),
+        "schema_version": "1.0",
+        "event_id": UUID(int=1),
+        "event_type": EventType.WAKE_DETECTED,
+        "household_id": UUID(int=2),
+        "device_id": UUID(int=3),
+        "session_id": None,
+        "correlation_id": UUID(int=4),
+        "causation_id": None,
+        "device_sequence": 1,
+        "occurred_at": datetime(2026, 8, 27, 1, 2, 3, tzinfo=UTC),
+        "sensitivity": Sensitivity.HOUSEHOLD,
+        "payload_commitment": Commitment(
+            algorithm="HMAC-SHA-256",
+            key_id="audit-v1",
+            value_b64="A" * 43 + "=",
+        ),
+        "payload": WakeDetectedPayload(
+            kind="speech.wake_detected",
+            turn_id=UUID(int=5),
+            score_micros=900_000,
+        ),
     }
+
+
+def test_task1_version_and_task4_event_exports_are_preserved() -> None:
+    assert tuntun_contracts.__version__ == "0.1.0.dev0"
+    assert tuntun_contracts.EventEnvelope is EventEnvelope
+    assert tuntun_contracts.WakeDetectedPayload is WakeDetectedPayload
 
 
 def test_contracts_reject_extra_fields_and_naive_time() -> None:
     with pytest.raises(ValidationError):
-        Commitment(algorithm="HMAC-SHA-256", key_id="audit-v1", value_b64="A" * 43 + "=", extra=True)
-    with pytest.raises(ValidationError, match="timezone-aware"):
-        EventEnvelope(
-            schema_version="1.0",event_id=UUID(int=1),event_type=EventType.WAKE_DETECTED,
-            household_id=UUID(int=2),device_id=UUID(int=3),session_id=None,
-            correlation_id=UUID(int=4),causation_id=None,device_sequence=1,
-            occurred_at=datetime(2026,8,27,1,2,3),sensitivity=Sensitivity.HOUSEHOLD,
-            payload_commitment=Commitment(algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64="A"*43+"="),
-            payload=WakeDetectedPayload(kind="speech.wake_detected",turn_id=UUID(int=5),score_micros=900000),
+        Commitment.model_validate(
+            {
+                "algorithm": "HMAC-SHA-256",
+                "key_id": "audit-v1",
+                "value_b64": "A" * 43 + "=",
+                "extra": True,
+            }
+        )
+    with pytest.raises(ValidationError, match="timezone"):
+        EventEnvelope.model_validate(
+            {
+                **valid_python_event(),
+                "occurred_at": datetime(2026, 8, 27, 1, 2, 3),
+            }
         )
 
 
-@pytest.mark.parametrize("field,value",(
-    ("device_sequence","1"),("device_sequence",True),("schema_version",1),
-    ("event_id",str(UUID(int=1))),("occurred_at","2026-08-27T01:02:03Z"),
-    ("event_type","speech.wake_detected"),
-))
-def test_python_contract_path_rejects_all_coercion(field,value) -> None:
-    with pytest.raises(ValidationError): EventEnvelope.model_validate({**valid_python_event(),field:value})
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("device_sequence", "1"),
+        ("device_sequence", True),
+        ("schema_version", 1),
+        ("event_id", str(UUID(int=1))),
+        ("occurred_at", "2026-08-27T01:02:03Z"),
+        ("event_type", "speech.wake_detected"),
+    ),
+)
+def test_python_contract_path_rejects_all_coercion(field: str, value: object) -> None:
+    with pytest.raises(ValidationError):
+        EventEnvelope.model_validate({**valid_python_event(), field: value})
+
+
+class _StringProbe(ContractModel):
+    value: str
+
+
+@pytest.mark.parametrize("value", (1, True, b"text", ["text"]))
+def test_string_fields_never_coerce_non_strings(value: object) -> None:
+    with pytest.raises(ValidationError):
+        _StringProbe(value=value)  # type: ignore[arg-type]
 
 
 def test_strict_json_path_accepts_only_json_native_uuid_and_time_strings() -> None:
-    valid_wake_json=json.loads(canonical_bytes(EventEnvelope(**valid_python_event())))
-    parsed=EventEnvelope.model_validate_json(json.dumps(valid_wake_json))
-    assert parsed.event_id==UUID(valid_wake_json["event_id"])
-    for field,value in (("device_sequence","1"),("device_sequence",True),("schema_version",1)):
+    valid_wake_json = json.loads(
+        canonical_bytes(EventEnvelope.model_validate(valid_python_event()))
+    )
+    parsed = EventEnvelope.model_validate_json(json.dumps(valid_wake_json), strict=True)
+    assert parsed.event_id == UUID(valid_wake_json["event_id"])
+    for field, value in (
+        ("device_sequence", "1"),
+        ("device_sequence", True),
+        ("schema_version", 1),
+    ):
         with pytest.raises(ValidationError):
-            EventEnvelope.model_validate_json(json.dumps({**valid_wake_json,field:value}))
+            EventEnvelope.model_validate_json(
+                json.dumps({**valid_wake_json, field: value}),
+                strict=True,
+            )
 
 
-@pytest.mark.parametrize("value",(
-    "A"*44,"A"*42+"==","A"*43,"A"*43+"==","_"*43+"=","A"*42+"B=",
-))
-def test_commitment_requires_canonical_base64_of_exactly_32_bytes(value) -> None:
+@pytest.mark.parametrize(
+    "value",
+    (
+        "A" * 44,
+        "A" * 42 + "==",
+        "A" * 43,
+        "A" * 43 + "==",
+        "_" * 43 + "=",
+        "A" * 42 + "B=",
+    ),
+)
+def test_commitment_requires_canonical_base64_of_exactly_32_bytes(value: str) -> None:
     with pytest.raises(ValidationError):
-        Commitment(algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64=value)
+        Commitment(
+            algorithm="HMAC-SHA-256",
+            key_id="audit-v1",
+            value_b64=value,
+        )
 
 
 def test_contract_json_ingress_rejects_duplicates_nonfinite_size_and_noncanonical() -> None:
-    commitment=Commitment(
-        algorithm="HMAC-SHA-256",key_id="audit-v1",value_b64="A"*43+"=",
+    commitment = Commitment(
+        algorithm="HMAC-SHA-256",
+        key_id="audit-v1",
+        value_b64="A" * 43 + "=",
     )
-    canonical=canonical_bytes(commitment)
-    assert parse_contract_json(
-        Commitment,canonical,max_bytes=1024,require_canonical=True,
-    )==commitment
-    duplicate=b'{"algorithm":"HMAC-SHA-256","algorithm":"HMAC-SHA-256","key_id":"audit-v1","value_b64":"'+b"A"*43+b'="}'
-    giant_decimal=b'{"x":0.'+b"1"*65+b'}'
-    too_deep=b"["*33+b"0"+b"]"*33
-    too_many=b"["+b",".join((b"[]",)*4_097)+b"]"
-    too_flat=b"["+b",".join((b"0",)*16_385)+b"]"
-    for raw in (
-        duplicate,b'{"x":NaN}',b'{"x":Infinity}',b'{"x":-Infinity}',
-        giant_decimal,b'{"x":1e999999}',b'{"x":1e-999999}',
-        too_deep,too_many,too_flat,
-    ):
-        with pytest.raises(ValueError): parse_contract_json(
-            Commitment,raw,max_bytes=32_000,require_canonical=False,
+    canonical = canonical_bytes(commitment)
+    assert (
+        parse_contract_json(
+            Commitment,
+            canonical,
+            max_bytes=1_024,
+            require_canonical=True,
         )
-    with pytest.raises(ValueError): parse_contract_json(
-        Commitment,canonical,max_bytes=len(canonical)-1,require_canonical=False,
+        == commitment
     )
-    noncanonical=json.dumps(commitment.model_dump(mode="json"),sort_keys=False).encode("utf-8")
-    with pytest.raises(ValueError,match="not canonical"):
-        parse_contract_json(Commitment,noncanonical,max_bytes=1024,require_canonical=True)
-    assert parse_contract_json(
-        Commitment,noncanonical,max_bytes=1024,require_canonical=False,
-    )==commitment
+    duplicate = (
+        b'{"algorithm":"HMAC-SHA-256","algorithm":"HMAC-SHA-256",'
+        b'"key_id":"audit-v1","value_b64":"' + b"A" * 43 + b'="}'
+    )
+    giant_decimal = b'{"x":0.' + b"1" * 65 + b"}"
+    too_deep = b"[" * 33 + b"0" + b"]" * 33
+    too_many = b"[" + b",".join((b"[]",) * 4_097) + b"]"
+    too_flat = b"[" + b",".join((b"0",) * 16_385) + b"]"
+    for raw in (
+        duplicate,
+        b'{"x":NaN}',
+        b'{"x":Infinity}',
+        b'{"x":-Infinity}',
+        giant_decimal,
+        b'{"x":1e999999}',
+        b'{"x":1e-999999}',
+        too_deep,
+        too_many,
+        too_flat,
+    ):
+        with pytest.raises(ContractParseError):
+            parse_contract_json(
+                Commitment,
+                raw,
+                max_bytes=32_000,
+                require_canonical=False,
+            )
+    with pytest.raises(ContractParseError):
+        parse_contract_json(
+            Commitment,
+            canonical,
+            max_bytes=len(canonical) - 1,
+            require_canonical=False,
+        )
+    noncanonical = json.dumps(
+        commitment.model_dump(mode="json"),
+        sort_keys=False,
+    ).encode("utf-8")
+    with pytest.raises(ContractParseError, match="not canonical"):
+        parse_contract_json(
+            Commitment,
+            noncanonical,
+            max_bytes=1_024,
+            require_canonical=True,
+        )
+    assert (
+        parse_contract_json(
+            Commitment,
+            noncanonical,
+            max_bytes=1_024,
+            require_canonical=False,
+        )
+        == commitment
+    )
 
 
 def test_bounded_json_value_is_reusable_without_a_contract_model() -> None:
     assert parse_bounded_json_value(
-        b'{"vendor":true,"ports":[443,8443]}',max_bytes=64,
-    )=={"vendor":True,"ports":[443,8443]}
-    at_limit=b"["+b",".join((b"0",)*16_384)+b"]"
-    assert len(parse_bounded_json_value(at_limit,max_bytes=65_536))==16_384
-    flat=b"["+b",".join((b"0",)*16_385)+b"]"
-    with pytest.raises(ValueError,match="shape limit"):
-        parse_bounded_json_value(flat,max_bytes=65_536)
-    for raw in (b'{"x":1e999999}',b'{"x":1e-999999}'):
-        with pytest.raises(ValueError,match="decimal range"):
-            parse_bounded_json_value(raw,max_bytes=64)
+        b'{"vendor":true,"ports":[443,8443]}',
+        max_bytes=64,
+    ) == {"vendor": True, "ports": [443, 8443]}
+    at_limit = b"[" + b",".join((b"0",) * 16_384) + b"]"
+    parsed_at_limit = parse_bounded_json_value(at_limit, max_bytes=65_536)
+    assert isinstance(parsed_at_limit, list)
+    assert len(parsed_at_limit) == 16_384
+    flat = b"[" + b",".join((b"0",) * 16_385) + b"]"
+    with pytest.raises(ContractParseError, match="ingress rejected"):
+        parse_bounded_json_value(flat, max_bytes=65_536)
+    for raw in (b'{"x":1e999999}', b'{"x":1e-999999}'):
+        with pytest.raises(ContractParseError, match="ingress rejected"):
+            parse_bounded_json_value(raw, max_bytes=64)
+
+
+@pytest.mark.parametrize("value", (JCS_MIN_SAFE_INTEGER, JCS_MAX_SAFE_INTEGER))
+def test_jcs_safe_integer_boundaries_are_recursive_and_inclusive(value: int) -> None:
+    raw = f'{{"nested":[{{"value":{value}}}]}}'.encode()
+    assert parse_bounded_json_value(raw, max_bytes=128) == {"nested": [{"value": value}]}
+    assert canonical_mapping_bytes({"nested": [{"value": value}]}) == raw
+
+
+@pytest.mark.parametrize(
+    "value",
+    (JCS_MIN_SAFE_INTEGER - 1, JCS_MAX_SAFE_INTEGER + 1),
+)
+def test_jcs_unsafe_integers_fail_at_parse_model_and_canonical_boundaries(value: int) -> None:
+    raw = f'{{"nested":[{{"value":{value}}}]}}'.encode()
+    with pytest.raises(ContractParseError, match="ingress rejected"):
+        parse_bounded_json_value(raw, max_bytes=128)
+    with pytest.raises(ValidationError, match="safe integer"):
+        _IntegerProbe(value={"nested": [value]})
+    with pytest.raises(ContractParseError, match="canonicalization rejected"):
+        canonical_mapping_bytes({"nested": [{"value": value}]})
 
 
 class _CanonicalKind(StrEnum):
-    SAMPLE="sample"
+    SAMPLE = "sample"
+
 
 class _NFCProbe(ContractModel):
-    text:str
-    nested:dict[str,tuple[str,...]]
+    text: str
+    nested: dict[str, tuple[str, ...]]
+
+
+class _IntegerProbe(ContractModel):
+    value: dict[str, list[int]]
+
 
 def test_contract_ingress_normalizes_nfc_recursively_in_python_and_json_modes() -> None:
-    python_value=_NFCProbe(text="e\u0301",nested={"a\u030a":("n\u0303",)})
-    json_value=_NFCProbe.model_validate_json(
-        b'{"text":"e\\u0301","nested":{"a\\u030a":["n\\u0303"]}}',strict=True,
+    python_value = _NFCProbe(text="e\u0301", nested={"a\u030a": ("n\u0303",)})
+    json_value = _NFCProbe.model_validate_json(
+        b'{"text":"e\\u0301","nested":{"a\\u030a":["n\\u0303"]}}',
+        strict=True,
     )
-    assert python_value==json_value==_NFCProbe(
-        text="\u00e9",nested={"\u00e5":("\u00f1",)},
-    )
-    with pytest.raises(ValidationError,match="collide after NFC"):
-        _NFCProbe(text="ok",nested={"e\u0301":("one",),"\u00e9":("two",)})
+    expected = _NFCProbe(text="\u00e9", nested={"\u00e5": ("\u00f1",)})
+    assert python_value == json_value == expected
+    with pytest.raises(ValidationError, match="collide after NFC"):
+        _NFCProbe(
+            text="ok",
+            nested={"e\u0301": ("one",), "\u00e9": ("two",)},
+        )
 
 
 def test_shared_canonical_mapping_has_one_cross_phase_golden_encoding() -> None:
-    value={
-        "text":"e\u0301",
-        "time":datetime(2026,8,27,9,2,3,4,tzinfo=timezone(timedelta(hours=8))),
-        "id":UUID(int=1),
-        "kind":_CanonicalKind.SAMPLE,
-        "blob":b"\x00\xff",
+    value = {
+        "text": "e\u0301",
+        "time": datetime(
+            2026,
+            8,
+            27,
+            9,
+            2,
+            3,
+            4,
+            tzinfo=timezone(timedelta(hours=8)),
+        ),
+        "id": UUID(int=1),
+        "kind": _CanonicalKind.SAMPLE,
+        "blob": b"\x00\xff",
     }
-    assert canonical_mapping_bytes(value)==(
+    assert canonical_mapping_bytes(value) == (
         b'{"blob":"AP8=","id":"00000000-0000-0000-0000-000000000001",'
         b'"kind":"sample","text":"\xc3\xa9","time":"2026-08-27T01:02:03.000004Z"}'
     )
 
 
-@pytest.mark.parametrize("value",(
-    {1:"non-string-key"},
-    {"e\u0301":1,"\u00e9":2},
-))
-def test_shared_canonical_mapping_rejects_key_coercion_or_nfc_collision(value) -> None:
-    with pytest.raises((TypeError,ValueError)):
-        canonical_mapping_bytes(value)
+@pytest.mark.parametrize(
+    "value",
+    (
+        {1: "non-string-key"},
+        {"e\u0301": 1, "\u00e9": 2},
+    ),
+)
+def test_shared_canonical_mapping_rejects_key_coercion_or_nfc_collision(
+    value: object,
+) -> None:
+    mapping = cast(dict[str, object], value)
+    with pytest.raises((TypeError, ValueError)):
+        canonical_mapping_bytes(mapping)
 
-def test_hostile_parse_faults_normalize_but_programmer_faults_propagate(monkeypatch) -> None:
-    import tuntun_contracts.base as base
+
+def test_rfc8785_canonicalizer_faults_normalize_to_contract_parse_error() -> None:
+    with pytest.raises(ContractParseError, match="canonicalization rejected"):
+        canonical_mapping_bytes({"nested": [float("inf")]})
+    with pytest.raises(ContractParseError, match="canonicalization rejected"):
+        canonical_mapping_bytes({"nested": [chr(0xD800)]})
+
+
+def test_model_type_is_validated_before_hostile_bytes() -> None:
+    non_contract_type = cast(type[ContractModel], dict)
+    with pytest.raises(TypeError, match="ContractModel"):
+        parse_contract_json(non_contract_type, b"\xff", max_bytes=1)
+
+
+def test_hostile_parse_faults_normalize_but_programmer_faults_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(ContractParseError):
-        parse_bounded_json_value(b'\xff',max_bytes=64)
+        parse_bounded_json_value(b"\xff", max_bytes=64)
     with pytest.raises(ContractParseError):
-        parse_contract_json(Commitment,b'{}',max_bytes=64)
+        parse_contract_json(Commitment, b"{}", max_bytes=64)
     with pytest.raises(TypeError):
-        parse_bounded_json_value("{}",max_bytes=64)
-    with pytest.raises(ValueError,match="configuration"):
-        parse_bounded_json_value(b'{}',max_bytes=0)
-    with pytest.raises(TypeError,match="ContractModel"):
-        parse_contract_json(dict,b'{}',max_bytes=64)
-    def unexpected_programmer_failure(*args,**kwargs):
+        parse_bounded_json_value("{}", max_bytes=64)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="configuration"):
+        parse_bounded_json_value(b"{}", max_bytes=0)
+
+    def unexpected_programmer_failure(*args: object, **kwargs: object) -> object:
         raise ValueError("injected programmer failure")
-    monkeypatch.setattr(base.json,"loads",unexpected_programmer_failure)
-    with pytest.raises(ValueError,match="injected programmer failure") as raised:
-        parse_bounded_json_value(b'{}',max_bytes=64)
+
+    monkeypatch.setattr(
+        "tuntun_contracts.base.json.loads",
+        unexpected_programmer_failure,
+    )
+    with pytest.raises(ValueError, match="injected programmer failure") as raised:
+        parse_bounded_json_value(b"{}", max_bytes=64)
     assert type(raised.value) is ValueError
 ```
 
 ```python
 # tests/contract/test_event_canonicalization.py
+from __future__ import annotations
+
+import base64
 import json
 from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
+from tuntun_contracts.base import (
+    Commitment,
+    Sensitivity,
+    canonical_bytes,
+    parse_contract_json,
+)
+from tuntun_contracts.events import (
+    EventEnvelope,
+    EventType,
+    SignedEventEnvelope,
+    WakeDetectedPayload,
+)
 
-from tuntun_contracts.base import Commitment, Sensitivity, canonical_bytes
-from tuntun_contracts.events import EventEnvelope, EventType, WakeDetectedPayload
-
-VALID_WAKE = {
-    "schema_version":"1.0","event_id":str(UUID(int=1)),"event_type":"speech.wake_detected",
-    "household_id":str(UUID(int=2)),"device_id":str(UUID(int=3)),"session_id":None,
-    "correlation_id":str(UUID(int=4)),"causation_id":None,"device_sequence":1,
-    "occurred_at":"2026-08-27T01:02:03.000004Z","sensitivity":"household",
-    "payload_commitment":{"algorithm":"HMAC-SHA-256","key_id":"audit-v1","value_b64":"A" * 43 + "="},
-    "payload":{"kind":"speech.wake_detected","turn_id":str(UUID(int=5)),"score_micros":900000},
+VALID_SIGNATURE = base64.b64encode(bytes(range(64))).decode("ascii")
+VALID_WAKE: dict[str, object] = {
+    "schema_version": "1.0",
+    "event_id": str(UUID(int=1)),
+    "event_type": "speech.wake_detected",
+    "household_id": str(UUID(int=2)),
+    "device_id": str(UUID(int=3)),
+    "session_id": None,
+    "correlation_id": str(UUID(int=4)),
+    "causation_id": None,
+    "device_sequence": 1,
+    "occurred_at": "2026-08-27T01:02:03.000004Z",
+    "sensitivity": "household",
+    "payload_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "audit-v1",
+        "value_b64": "A" * 43 + "=",
+    },
+    "payload": {
+        "kind": "speech.wake_detected",
+        "turn_id": str(UUID(int=5)),
+        "score_micros": 900_000,
+    },
 }
 
 
-def test_event_canonical_bytes_use_nfc_and_six_utc_digits() -> None:
-    envelope = EventEnvelope(
-        schema_version="1.0", event_id=UUID(int=1), event_type=EventType.WAKE_DETECTED,
-        household_id=UUID(int=2), device_id=UUID(int=3), session_id=None,
-        correlation_id=UUID(int=4), causation_id=None, device_sequence=7,
-        occurred_at=datetime(2026, 8, 27, 1, 2, 3, 4, UTC), sensitivity=Sensitivity.HOUSEHOLD,
-        payload_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="audit-v1", value_b64="A" * 43 + "="),
-        payload=WakeDetectedPayload(kind="speech.wake_detected", turn_id=UUID(int=5), score_micros=900000),
+def make_envelope() -> EventEnvelope:
+    return EventEnvelope(
+        schema_version="1.0",
+        event_id=UUID(int=1),
+        event_type=EventType.WAKE_DETECTED,
+        household_id=UUID(int=2),
+        device_id=UUID(int=3),
+        session_id=None,
+        correlation_id=UUID(int=4),
+        causation_id=None,
+        device_sequence=7,
+        occurred_at=datetime(2026, 8, 27, 1, 2, 3, 4, UTC),
+        sensitivity=Sensitivity.HOUSEHOLD,
+        payload_commitment=Commitment(
+            algorithm="HMAC-SHA-256",
+            key_id="audit-v1",
+            value_b64="A" * 43 + "=",
+        ),
+        payload=WakeDetectedPayload(
+            kind="speech.wake_detected",
+            turn_id=UUID(int=5),
+            score_micros=900_000,
+        ),
     )
+
+
+def test_event_canonical_bytes_use_nfc_and_six_utc_digits() -> None:
+    envelope = make_envelope()
     encoded = canonical_bytes(envelope)
     assert b'"occurred_at":"2026-08-27T01:02:03.000004Z"' in encoded
     assert encoded == canonical_bytes(envelope)
@@ -4402,264 +4639,778 @@ def test_event_type_must_equal_payload_kind() -> None:
     data = EventEnvelope.model_json_schema()
     assert data["title"] == "EventEnvelope"
     with pytest.raises(ValidationError, match="event_type must equal payload.kind"):
-        EventEnvelope.model_validate_json(json.dumps({**VALID_WAKE, "event_type":"safety.stop_requested"}))
+        EventEnvelope.model_validate_json(
+            json.dumps({**VALID_WAKE, "event_type": "safety.stop_requested"}),
+            strict=True,
+        )
+
+
+def test_signed_event_signing_input_is_exactly_the_canonical_envelope() -> None:
+    envelope = make_envelope()
+    first = SignedEventEnvelope(
+        envelope=envelope,
+        signing_key_id="ed25519:reachy-edge-01:v1",
+        signature_b64=VALID_SIGNATURE,
+    )
+    second = SignedEventEnvelope(
+        envelope=envelope,
+        signing_key_id="ed25519:reachy-edge-02:v2",
+        signature_b64=base64.b64encode(bytes(reversed(range(64)))).decode("ascii"),
+    )
+    expected = canonical_bytes(envelope)
+    assert first.signing_bytes() == second.signing_bytes() == expected
+    assert b"signing_key_id" not in expected
+    assert b"signature_b64" not in expected
+
+
+def test_signed_event_accepts_one_canonical_64_byte_ed25519_signature() -> None:
+    signed = SignedEventEnvelope(
+        envelope=make_envelope(),
+        signing_key_id="ed25519:reachy-edge-01:v1",
+        signature_b64=VALID_SIGNATURE,
+    )
+    assert len(signed.signature_b64) == 88
+    assert len(base64.b64decode(signed.signature_b64, validate=True)) == 64
+    encoded = canonical_bytes(signed)
+    assert (
+        parse_contract_json(
+            SignedEventEnvelope,
+            encoded,
+            max_bytes=8_192,
+            require_canonical=True,
+        )
+        == signed
+    )
+
+
+@pytest.mark.parametrize(
+    "signature",
+    (
+        base64.b64encode(bytes(63)).decode("ascii"),
+        base64.b64encode(bytes(65)).decode("ascii"),
+        VALID_SIGNATURE.rstrip("="),
+        base64.urlsafe_b64encode(bytes([255]) * 64).decode("ascii"),
+        "A" * 86 + "=A",
+        "!" + VALID_SIGNATURE[1:],
+    ),
+)
+def test_signed_event_rejects_wrong_length_alphabet_padding_or_noncanonical_base64(
+    signature: str,
+) -> None:
+    with pytest.raises(ValidationError, match="signature"):
+        SignedEventEnvelope(
+            envelope=make_envelope(),
+            signing_key_id="ed25519:reachy-edge-01:v1",
+            signature_b64=signature,
+        )
+
+
+@pytest.mark.parametrize(
+    "key_id",
+    (
+        "ED25519:reachy-edge-01:v1",
+        "ed25519:-reachy:v1",
+        "ed25519:reachy edge:v1",
+        "ed25519:reachy:v0",
+        "ed25519:reachy:v01",
+        "ed25519:reachy:extra:v1",
+        "ed25519:" + "a" * 65 + ":v1",
+    ),
+)
+def test_signed_event_rejects_every_key_id_outside_the_closed_grammar(
+    key_id: str,
+) -> None:
+    with pytest.raises(ValidationError, match="signing_key_id"):
+        SignedEventEnvelope(
+            envelope=make_envelope(),
+            signing_key_id=key_id,
+            signature_b64=VALID_SIGNATURE,
+        )
 ```
 
 ```python
 # tests/contract/test_contract_generators.py
+from __future__ import annotations
+
+import hashlib
 import json
+import os
+import stat
+import subprocess
+import sys
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Protocol, cast
 
-import yaml
+import pytest
+import yaml  # type: ignore[import-untyped]  # PyYAML 6 has no py.typed marker.
+from tuntun_contracts.base import ContractModel, registered_contract_models
 
-from scripts import generate_openapi, generate_schemas
-from tuntun_contracts.base import registered_contract_models
+from scripts import contract_generator_common, generate_openapi, generate_schemas
+from scripts.assurance_common import AssuranceInputError, lexical_path, read_regular_file
+from scripts.contract_generator_common import GeneratorError
 
-SCHEMA_OUTPUT=Path("packages/contracts/schema/v1/contracts.schema.json")
-OPENAPI_OUTPUT=Path("packages/contracts/openapi/admin-v1.yaml")
+ROOT = Path(__file__).resolve().parents[2]
+SCHEMA_OUTPUT = Path("packages/contracts/schema/v1/contracts.schema.json")
+OPENAPI_OUTPUT = Path("packages/contracts/openapi/admin-v1.yaml")
+EXPECTED_TASK4_MODELS = (
+    "tuntun_contracts.base.Commitment",
+    "tuntun_contracts.events.EventEnvelope",
+    "tuntun_contracts.events.SignedEventEnvelope",
+    "tuntun_contracts.events.StopRequestedPayload",
+    "tuntun_contracts.events.WakeDetectedPayload",
+)
 
 
-def _registered_names() -> set[str]:
-    return {
-        f"{model.__module__}.{model.__qualname__}"
-        for model in registered_contract_models()
-    }
+class _GeneratorModule(Protocol):
+    __name__: str
+    OUTPUT_PATH: Path
+
+    def render(self) -> bytes: ...
+
+    def main(self, argv: Sequence[str] | None = None) -> int: ...
 
 
-def test_generators_own_exact_complete_outputs_and_are_deterministic() -> None:
+def _mapping(value: object) -> Mapping[str, object]:
+    assert isinstance(value, dict)
+    assert all(isinstance(key, str) for key in value)
+    return cast(dict[str, object], value)
+
+
+def _registered_names() -> tuple[str, ...]:
+    return tuple(
+        f"{model.__module__}.{model.__qualname__}" for model in registered_contract_models()
+    )
+
+
+def _subprocess_render(module_name: str, *, hash_seed: str) -> bytes:
+    source = (
+        "import sys\n"
+        f"from scripts import {module_name} as generator\n"
+        "sys.stdout.buffer.write(generator.render())\n"
+    )
+    environment = {**os.environ, "PYTHONHASHSEED": hash_seed}
+    completed = subprocess.run(
+        [sys.executable, "-c", source],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+    )
+    assert completed.stderr == b""
+    return completed.stdout
+
+
+def _subprocess_cli(
+    script: str,
+    arguments: Sequence[str],
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [sys.executable, script, *arguments],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONHASHSEED": "1"},
+        check=False,
+        capture_output=True,
+    )
+
+
+def _walk_refs(value: object) -> Iterator[str]:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "$ref":
+                assert isinstance(child, str)
+                yield child
+            else:
+                yield from _walk_refs(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_refs(child)
+
+
+def _resolve_local_ref(document: object, reference: str) -> object:
+    assert reference.startswith("#/")
+    current = document
+    for encoded in reference[2:].split("/"):
+        token = encoded.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict):
+            current = current[token]
+        elif isinstance(current, list):
+            current = current[int(token)]
+        else:
+            raise AssertionError(f"reference traversed a scalar: {reference}")
+    return current
+
+
+def _tree_snapshot(root: Path) -> tuple[tuple[str, int, int, bytes], ...]:
+    if not root.exists() and not root.is_symlink():
+        return ()
+    snapshot: list[tuple[str, int, int, bytes]] = []
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        metadata = path.lstat()
+        payload = b""
+        if stat.S_ISREG(metadata.st_mode):
+            payload = read_regular_file(path, max_bytes=4 * 1024 * 1024)
+        elif stat.S_ISLNK(metadata.st_mode):
+            payload = os.readlink(path).encode("utf-8")
+        snapshot.append(
+            (
+                path.relative_to(root).as_posix(),
+                metadata.st_mode,
+                metadata.st_size,
+                hashlib.sha256(payload).digest(),
+            )
+        )
+    return tuple(snapshot)
+
+
+def test_task4_registry_is_closed_exact_and_package_owned() -> None:
+    assert _registered_names() == EXPECTED_TASK4_MODELS
+    assert isinstance(registered_contract_models(), tuple)
+    assert registered_contract_models() is registered_contract_models()
+
+
+def test_generators_freeze_metadata_exact_models_and_independent_process_determinism() -> None:
     assert generate_schemas.OUTPUT_PATH == SCHEMA_OUTPUT
     assert generate_openapi.OUTPUT_PATH == OPENAPI_OUTPUT
-    assert generate_schemas.render() == generate_schemas.render()
-    assert generate_openapi.render() == generate_openapi.render()
-    schema=json.loads(generate_schemas.render())
-    openapi=yaml.safe_load(generate_openapi.render())
-    assert set(schema["models"]) == _registered_names()
-    assert set(openapi["components"]["schemas"]) == _registered_names()
+
+    schema_first = _subprocess_render("generate_schemas", hash_seed="1")
+    schema_second = _subprocess_render("generate_schemas", hash_seed="987654")
+    openapi_first = _subprocess_render("generate_openapi", hash_seed="1")
+    openapi_second = _subprocess_render("generate_openapi", hash_seed="987654")
+    assert schema_first == schema_second == generate_schemas.render()
+    assert openapi_first == openapi_second == generate_openapi.render()
+
+    schema = _mapping(json.loads(schema_first))
+    assert set(schema) == {"$schema", "schema_version", "models"}
+    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert schema["schema_version"] == "1.0"
+    assert tuple(_mapping(schema["models"])) == EXPECTED_TASK4_MODELS
+
+    openapi = _mapping(yaml.safe_load(openapi_first))
+    assert set(openapi) == {"openapi", "info", "paths", "components"}
+    assert openapi["openapi"] == "3.1.0"
+    assert openapi["info"] == {
+        "title": "Tuntun Admin API",
+        "version": "1.0.0",
+        "description": "Foundation contract components; no HTTP paths are owned yet.",
+    }
     assert openapi["paths"] == {}
+    components = _mapping(openapi["components"])
+    assert set(components) == {"schemas"}
+    assert tuple(_mapping(components["schemas"])) == EXPECTED_TASK4_MODELS
 
 
-def test_check_rejects_missing_stale_symlink_or_extra_output(
-    tmp_path: Path, monkeypatch,
+@pytest.mark.parametrize(
+    ("script", "output"),
+    (
+        ("scripts/generate_schemas.py", SCHEMA_OUTPUT),
+        ("scripts/generate_openapi.py", OPENAPI_OUTPUT),
+    ),
+)
+def test_generator_process_cli_has_closed_error_codes_and_nonmutating_check(
+    script: str,
+    output: Path,
 ) -> None:
-    for generator in (generate_schemas,generate_openapi):
-        parent=tmp_path/generator.__name__; parent.mkdir()
-        owned=parent/generator.OUTPUT_PATH.name
-        monkeypatch.setattr(generator,"OUTPUT_PATH",owned)
-        assert generator.main(["--check"]) == 1
-        owned.write_bytes(b"stale\n")
-        assert generator.main(["--check"]) == 1
-        owned.unlink(); owned.symlink_to(parent/"missing")
-        assert generator.main(["--check"]) == 1
-        owned.unlink(); owned.write_bytes(generator.render())
-        (parent/"extra.generated").write_text("unexpected\n")
-        assert generator.main(["--check"]) == 1
-        (parent/"extra.generated").unlink()
-        assert generator.main(["--check"]) == 0
+    before = _tree_snapshot(ROOT / output.parent)
+    for arguments in (
+        (),
+        ("--check", "--write"),
+        ("--check", "--check"),
+        ("--chec",),
+        ("--unknown",),
+    ):
+        completed = _subprocess_cli(script, arguments)
+        assert completed.returncode == 1
+        assert completed.stdout == completed.stderr == b""
+        assert _tree_snapshot(ROOT / output.parent) == before
+    completed = _subprocess_cli(script, ("--check",))
+    assert completed.returncode == 0
+    assert completed.stdout == completed.stderr == b""
+    assert _tree_snapshot(ROOT / output.parent) == before
+
+
+def test_every_generated_local_reference_resolves() -> None:
+    documents = (
+        json.loads(generate_schemas.render()),
+        yaml.safe_load(generate_openapi.render()),
+    )
+    for document in documents:
+        references = tuple(_walk_refs(document))
+        assert references
+        for reference in references:
+            assert reference.startswith("#/")
+            assert _resolve_local_ref(document, reference) is not None
+
+
+def test_duplicate_fully_qualified_model_names_fail_before_schema_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def make_collision() -> type[ContractModel]:
+        class Collision(ContractModel):
+            value: str
+
+        return Collision
+
+    duplicate_models = (make_collision(), make_collision())
+
+    def duplicate_registry() -> tuple[type[ContractModel], ...]:
+        return duplicate_models
+
+    for generator in (generate_schemas, generate_openapi):
+        monkeypatch.setattr(generator, "registered_contract_models", duplicate_registry)
+        with pytest.raises(GeneratorError, match="duplicate fully qualified"):
+            generator.render()
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+def test_nondeterministic_render_fails_without_output_mutation(
+    generator: _GeneratorModule,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / generator.__name__
+    parent.mkdir()
+    output = parent / generator.OUTPUT_PATH.name
+    monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+    renders = iter((b"first render\n", b"second render\n"))
+
+    def nondeterministic_render() -> bytes:
+        return next(renders)
+
+    monkeypatch.setattr(generator, "render", nondeterministic_render)
+    before = _tree_snapshot(parent)
+    assert generator.main(["--check"]) == 1
+    assert _tree_snapshot(parent) == before
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+def test_generator_cli_is_closed_and_check_mode_never_mutates(
+    generator: _GeneratorModule,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / generator.__name__
+    parent.mkdir()
+    owned = parent / generator.OUTPUT_PATH.name
+    monkeypatch.setattr(generator, "OUTPUT_PATH", owned)
+    main = generator.main
+    render = generator.render
+
+    for argv in ([], ["--check", "--write"], ["--check", "--check"], ["--chec"], ["--unknown"]):
+        assert main(argv) == 1
+
+    before_missing = _tree_snapshot(parent)
+    assert main(["--check"]) == 1
+    assert _tree_snapshot(parent) == before_missing
+
+    owned.write_bytes(b"stale\n")
+    before_stale = _tree_snapshot(parent)
+    assert main(["--check"]) == 1
+    assert _tree_snapshot(parent) == before_stale
+
+    assert main(["--write"]) == 0
+    assert stat.S_IMODE(owned.stat().st_mode) == 0o600
+    assert owned.read_bytes() == render()
+    before_current = _tree_snapshot(parent)
+    assert main(["--check"]) == 0
+    assert _tree_snapshot(parent) == before_current
+
+    extra = parent / "extra.generated"
+    extra.write_text("unexpected\n", encoding="utf-8")
+    before_extra = _tree_snapshot(parent)
+    assert main(["--check"]) == 1
+    assert _tree_snapshot(parent) == before_extra
+    extra.unlink()
+
+    target = tmp_path / f"{generator.__name__}-outside"
+    target.write_bytes(b"outside\n")
+    extra.symlink_to(target)
+    before_extra_symlink = _tree_snapshot(parent)
+    assert main(["--check"]) == 1
+    assert _tree_snapshot(parent) == before_extra_symlink
+    assert target.read_bytes() == b"outside\n"
+    extra.unlink()
+
+    os.mkfifo(extra, mode=0o600)
+    before_special = _tree_snapshot(parent)
+    assert main(["--check"]) == 1
+    assert _tree_snapshot(parent) == before_special
+    extra.unlink()
+
+    owned.unlink()
+    owned.symlink_to(target)
+    before_output_symlink = _tree_snapshot(parent)
+    assert main(["--check"]) == 1
+    assert _tree_snapshot(parent) == before_output_symlink
+    assert target.read_bytes() == b"outside\n"
+    owned.unlink()
+
+    os.mkfifo(owned, mode=0o600)
+    before_output_special = _tree_snapshot(parent)
+    assert main(["--check"]) == 1
+    assert _tree_snapshot(parent) == before_output_special
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+def test_generator_rejects_symlinked_output_parent_without_mutation(
+    generator: _GeneratorModule,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_parent, target_is_directory=True)
+    output = alias / "must-not-be-created" / generator.OUTPUT_PATH.name
+    monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+    before = _tree_snapshot(real_parent)
+    assert generator.main(["--check"]) == 1
+    assert generator.main(["--write"]) == 1
+    assert _tree_snapshot(real_parent) == before
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+def test_write_failure_preserves_prior_output_and_removes_private_temp(
+    generator: _GeneratorModule,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / generator.__name__
+    parent.mkdir()
+    output = parent / generator.OUTPUT_PATH.name
+    output.write_bytes(b"prior bytes\n")
+    output.chmod(0o600)
+    monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+
+    def fail_replace(source_name: str, destination_name: str, parent_fd: int) -> None:
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(contract_generator_common, "_atomic_replace", fail_replace)
+    before = _tree_snapshot(parent)
+    assert generator.main(["--write"]) == 1
+    assert _tree_snapshot(parent) == before
+    assert output.read_bytes() == b"prior bytes\n"
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+def test_task3_race_signal_fails_check_closed_without_generator_mutation(
+    generator: _GeneratorModule,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / generator.__name__
+    parent.mkdir()
+    output = parent / generator.OUTPUT_PATH.name
+    monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+    assert generator.main(["--write"]) == 0
+    before = _tree_snapshot(parent)
+    original_read = read_regular_file
+
+    def race_read(path: Path, *, max_bytes: int) -> bytes:
+        if lexical_path(path) == lexical_path(output):
+            raise AssuranceInputError(path, "input-changed-during-scan")
+        return original_read(path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(contract_generator_common, "read_regular_file", race_read)
+    assert generator.main(["--check"]) == 1
+    assert _tree_snapshot(parent) == before
 ```
 
-- [ ] **Step 2: Run the red contract tests**
+- [ ] **Step 2: Run the focused red contract test**
 
-Run: `uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py -q`
+Run: `uv run pytest tests/contract/test_strict_models.py -q`
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_contracts.base'`.
+Expected: collection ERROR with `ModuleNotFoundError: No module named 'tuntun_contracts.base'`. Task 1 already supplies and installs `tuntun_contracts`; the missing Task 4 submodule—not the package itself—is the exact red condition.
 
-- [ ] **Step 3: Implement strict base types and event validation**
+- [ ] **Step 3: Implement strict base/event types, the closed registry, and both generators**
 
 ```python
 # packages/contracts/src/tuntun_contracts/base.py
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum, StrEnum
-from typing import Any, Literal, TypeAlias, TypeVar
+from typing import Any, Literal, NoReturn, Self, TypeAlias, TypeVar, cast
 from unicodedata import normalize
 from uuid import UUID
 
 import rfc8785
-from pydantic import BaseModel, ConfigDict, Field,ValidationError,field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-_CONTRACT_MODEL_REGISTRY: set[type[BaseModel]] = set()
+JCS_MAX_SAFE_INTEGER = 2**53 - 1
+JCS_MIN_SAFE_INTEGER = -JCS_MAX_SAFE_INTEGER
 
-def _normalize_contract_input(value:Any) -> Any:
-    if isinstance(value,Enum):
+JSONValue: TypeAlias = (  # noqa: UP040 -- contracts remain Python 3.11 compatible.
+    str | int | Decimal | bool | None | list["JSONValue"] | dict[str, "JSONValue"]
+)
+ContractT = TypeVar("ContractT", bound="ContractModel")
+
+
+class ContractParseError(ValueError):
+    """Untrusted contract input or canonicalization failed closed."""
+
+
+class _HostileJSONError(Exception):
+    pass
+
+
+def _is_jcs_safe_integer(value: int) -> bool:
+    return JCS_MIN_SAFE_INTEGER <= value <= JCS_MAX_SAFE_INTEGER
+
+
+def _normalize_contract_input(value: Any) -> Any:
+    if isinstance(value, Enum):
         return value
-    if isinstance(value,str):
-        return normalize("NFC",value)
-    if isinstance(value,Mapping):
-        result={}
-        for key,item in value.items():
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise ValueError("datetime must be timezone-aware")
+        return value
+    if type(value) is int and not _is_jcs_safe_integer(value):
+        raise ValueError("integer must be in the RFC 8785 safe integer domain")
+    if isinstance(value, str):
+        return normalize("NFC", value)
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
             if type(key) is not str:
                 raise ValueError("contract mapping keys must be strings")
-            normalized_key=normalize("NFC",key)
+            normalized_key = normalize("NFC", key)
             if normalized_key in result:
                 raise ValueError("contract mapping keys collide after NFC")
-            result[normalized_key]=_normalize_contract_input(item)
+            result[normalized_key] = _normalize_contract_input(item)
         return result
-    if isinstance(value,tuple):
+    if isinstance(value, tuple):
         return tuple(_normalize_contract_input(item) for item in value)
-    if isinstance(value,list):
+    if isinstance(value, list):
         return [_normalize_contract_input(item) for item in value]
-    if isinstance(value,frozenset):
-        normalized=frozenset(_normalize_contract_input(item) for item in value)
-        if len(normalized)!=len(value):
+    if isinstance(value, frozenset):
+        frozen_normalized = frozenset(_normalize_contract_input(item) for item in value)
+        if len(frozen_normalized) != len(value):
             raise ValueError("contract set values collide after NFC")
-        return normalized
-    if isinstance(value,set):
-        normalized={_normalize_contract_input(item) for item in value}
-        if len(normalized)!=len(value):
+        return frozen_normalized
+    if isinstance(value, set):
+        mutable_normalized = {_normalize_contract_input(item) for item in value}
+        if len(mutable_normalized) != len(value):
             raise ValueError("contract set values collide after NFC")
-        return normalized
+        return mutable_normalized
     return value
 
 
 class ContractModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False, validate_assignment=True, str_strip_whitespace=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        allow_inf_nan=False,
+        validate_assignment=True,
+    )
 
-    @classmethod
-    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
-        super().__pydantic_init_subclass__(**kwargs)
-        _CONTRACT_MODEL_REGISTRY.add(cls)
-
-    @field_validator("*", mode="before")
-    @classmethod
-    def require_aware_datetimes(cls, value: Any) -> Any:
-        value=_normalize_contract_input(value)
-        if isinstance(value, datetime) and value.tzinfo is None:
-            raise ValueError("datetime must be timezone-aware")
-        return value
-
-
-def registered_contract_models() -> tuple[type[BaseModel], ...]:
-    return tuple(sorted(_CONTRACT_MODEL_REGISTRY,key=lambda item:(item.__module__,item.__qualname__)))
+    @model_validator(mode="after")
+    def normalize_and_validate_contract_value(self) -> Self:
+        for field_name in type(self).model_fields:
+            normalized = _normalize_contract_input(getattr(self, field_name))
+            object.__setattr__(self, field_name, normalized)
+        return self
 
 
-ContractT=TypeVar("ContractT",bound=ContractModel)
-JSONValue:TypeAlias=(
-    str|int|Decimal|bool|None|list["JSONValue"]|dict[str,"JSONValue"]
-)
+def registered_contract_models() -> tuple[type[ContractModel], ...]:
+    # Import after package initialization so Task 5 can replace the one closed,
+    # package-owned tuple while preserving this already-frozen import path.
+    from . import _REGISTERED_CONTRACT_MODELS
 
-class ContractParseError(ValueError):
-    """Hostile/untrusted contract bytes failed closed at an ingress boundary."""
+    return _REGISTERED_CONTRACT_MODELS
 
-class _HostileJSONError(Exception): pass
 
-def _unique_json_object(pairs):
-    result={}
-    for key,value in pairs:
-        if key in result: raise _HostileJSONError("duplicate JSON key")
-        result[key]=value
+def _unique_json_object(
+    pairs: list[tuple[str, JSONValue]],
+) -> dict[str, JSONValue]:
+    result: dict[str, JSONValue] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _HostileJSONError("duplicate JSON key")
+        result[key] = value
     return result
 
-def _bounded_json_int(value:str) -> int:
-    if len(value.removeprefix("-"))>20: raise _HostileJSONError("JSON integer too large")
-    return int(value)
 
-def _bounded_json_decimal(value:str) -> Decimal:
-    if len(value)>64: raise _HostileJSONError("JSON decimal too large")
-    result=Decimal(value)
-    if not result.is_finite(): raise _HostileJSONError("non-finite JSON number")
-    if len(result.as_tuple().digits)>64 or not -308<=result.adjusted()<=308:
+def _bounded_json_int(value: str) -> int:
+    if len(value.removeprefix("-")) > 16:
+        raise _HostileJSONError("JSON integer outside JCS safe domain")
+    parsed = int(value)
+    if not _is_jcs_safe_integer(parsed):
+        raise _HostileJSONError("JSON integer outside JCS safe domain")
+    return parsed
+
+
+def _bounded_json_decimal(value: str) -> Decimal:
+    if len(value) > 64:
+        raise _HostileJSONError("JSON decimal too large")
+    result = Decimal(value)
+    if not result.is_finite():
+        raise _HostileJSONError("non-finite JSON number")
+    if len(result.as_tuple().digits) > 64 or not -308 <= result.adjusted() <= 308:
         raise _HostileJSONError("JSON decimal range exceeded")
     return result
 
-def _reject_json_constant(value:str):
+
+def _reject_json_constant(value: str) -> NoReturn:
     raise _HostileJSONError(f"non-finite JSON number: {value}")
 
+
 def _require_bounded_json_shape(
-    text:str,*,max_depth:int,max_containers:int,max_structure_tokens:int,
+    text: str,
+    *,
+    max_depth: int,
+    max_containers: int,
+    max_structure_tokens: int,
 ) -> None:
-    # Count the root value plus each outside-string comma/colon. This makes a
-    # flat array admit at most max_structure_tokens scalar members; objects are
-    # stricter because both member separators and key/value separators count.
-    depth=containers=0; structure_tokens=1; in_string=escaped=False
+    depth = 0
+    containers = 0
+    structure_tokens = 1
+    in_string = False
+    escaped = False
     for character in text:
         if in_string:
-            if escaped: escaped=False
-            elif character=="\\": escaped=True
-            elif character=='"': in_string=False
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
             continue
-        if character=='"': in_string=True
+        if character == '"':
+            in_string = True
         elif character in "[{":
-            depth+=1; containers+=1
-            if depth>max_depth or containers>max_containers:
+            depth += 1
+            containers += 1
+            if depth > max_depth or containers > max_containers:
                 raise _HostileJSONError("contract JSON shape limit exceeded")
         elif character in "]}":
-            depth-=1
-            if depth<0: raise _HostileJSONError("contract JSON shape invalid")
+            depth -= 1
+            if depth < 0:
+                raise _HostileJSONError("contract JSON shape invalid")
         elif character in ",:":
-            structure_tokens+=1
-            if structure_tokens>max_structure_tokens:
+            structure_tokens += 1
+            if structure_tokens > max_structure_tokens:
                 raise _HostileJSONError("contract JSON shape limit exceeded")
-    if in_string or depth!=0: raise _HostileJSONError("contract JSON shape invalid")
+    if in_string or depth != 0:
+        raise _HostileJSONError("contract JSON shape invalid")
+
 
 def parse_bounded_json_value(
-    raw:bytes,*,max_bytes:int,max_depth:int=32,max_containers:int=4_096,
-    max_structure_tokens:int=16_384,
+    raw: bytes,
+    *,
+    max_bytes: int,
+    max_depth: int = 32,
+    max_containers: int = 4_096,
+    max_structure_tokens: int = 16_384,
 ) -> JSONValue:
-    limits=(max_bytes,max_depth,max_containers,max_structure_tokens)
-    ceilings=(8_388_608,32,4_096,16_384)
+    limits = (max_bytes, max_depth, max_containers, max_structure_tokens)
+    ceilings = (8_388_608, 32, 4_096, 16_384)
     if type(raw) is not bytes:
         raise TypeError("contract JSON raw input must be bytes")
-    if (
-        any(type(value) is not int for value in limits)
-        or any(not 1<=value<=ceiling for value,ceiling in zip(limits,ceilings,strict=True))
+    if any(type(value) is not int for value in limits) or any(
+        not 1 <= value <= ceiling for value, ceiling in zip(limits, ceilings, strict=True)
     ):
         raise ValueError("invalid contract JSON parser configuration")
-    if not 1<=len(raw)<=max_bytes:
+    if not 1 <= len(raw) <= max_bytes:
         raise ContractParseError("contract JSON size invalid")
     try:
-        text=raw.decode("utf-8",errors="strict")
+        text = raw.decode("utf-8", errors="strict")
         _require_bounded_json_shape(
-            text,max_depth=max_depth,max_containers=max_containers,
+            text,
+            max_depth=max_depth,
+            max_containers=max_containers,
             max_structure_tokens=max_structure_tokens,
         )
-        return json.loads(
-            text,object_pairs_hook=_unique_json_object,parse_int=_bounded_json_int,
-            parse_float=_bounded_json_decimal,parse_constant=_reject_json_constant,
+        return cast(
+            JSONValue,
+            json.loads(
+                text,
+                object_pairs_hook=_unique_json_object,
+                parse_int=_bounded_json_int,
+                parse_float=_bounded_json_decimal,
+                parse_constant=_reject_json_constant,
+            ),
         )
-    except (UnicodeError,json.JSONDecodeError,RecursionError,_HostileJSONError) as error:
+    except (UnicodeError, json.JSONDecodeError, RecursionError, _HostileJSONError) as error:
         raise ContractParseError("contract JSON ingress rejected") from error
 
-def parse_contract_json(
-    model_type:type[ContractT],raw:bytes,*,max_bytes:int,require_canonical:bool=False,
+
+def parse_contract_json(  # noqa: UP047 -- contracts remain Python 3.11 compatible.
+    model_type: type[ContractT],
+    raw: bytes,
+    *,
+    max_bytes: int,
+    require_canonical: bool = False,
 ) -> ContractT:
-    # The bounded first pass rejects parser-amplification shapes, duplicates,
-    # and non-standard numbers before Pydantic sees the same immutable bytes.
-    parse_bounded_json_value(raw,max_bytes=max_bytes)
-    if not isinstance(model_type,type) or not issubclass(model_type,ContractModel):
+    if not isinstance(model_type, type) or not issubclass(model_type, ContractModel):
         raise TypeError("model_type must be a ContractModel subclass")
-    try: model=model_type.model_validate_json(raw,strict=True)
-    except (ValidationError,RecursionError) as error:
+    parse_bounded_json_value(raw, max_bytes=max_bytes)
+    try:
+        model = model_type.model_validate_json(raw, strict=True)
+    except (ValidationError, RecursionError) as error:
         raise ContractParseError("contract JSON schema rejected") from error
-    if require_canonical and canonical_bytes(model)!=raw:
+    if require_canonical and canonical_bytes(model) != raw:
         raise ContractParseError("contract JSON is not canonical JCS")
     return model
 
 
 class Sensitivity(StrEnum):
-    PUBLIC = "public"; HOUSEHOLD = "household"; PERSONAL = "personal"
-    SENSITIVE = "sensitive"; RESTRICTED = "restricted"
+    PUBLIC = "public"
+    HOUSEHOLD = "household"
+    PERSONAL = "personal"
+    SENSITIVE = "sensitive"
+    RESTRICTED = "restricted"
+
+
+def validate_canonical_base64(
+    value: str,
+    *,
+    expected_bytes: int,
+    label: str,
+) -> str:
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ValueError(f"{label} must be canonical base64") from error
+    if len(decoded) != expected_bytes or base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError(f"{label} must encode exactly {expected_bytes} bytes canonically")
+    return value
 
 
 class Commitment(ContractModel):
     algorithm: Literal["HMAC-SHA-256"]
-    key_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
-    value_b64: str = Field(min_length=44, max_length=44, pattern=r"^[A-Za-z0-9+/]{43}=$")
+    key_id: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_.:-]+$",
+    )
+    value_b64: str = Field(
+        min_length=44,
+        max_length=44,
+        pattern=r"^[A-Za-z0-9+/]{43}=$",
+    )
 
     @field_validator("value_b64")
     @classmethod
     def canonical_hmac_sha256(cls, value: str) -> str:
-        try:
-            decoded = base64.b64decode(value, validate=True)
-        except (ValueError, base64.binascii.Error) as error:
-            raise ValueError("commitment must be canonical base64") from error
-        if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
-            raise ValueError("commitment must encode exactly 32 bytes canonically")
-        return value
+        return validate_canonical_base64(
+            value,
+            expected_bytes=32,
+            label="commitment",
+        )
 
 
 def _canonical_value(value: Any) -> Any:
@@ -4675,51 +5426,58 @@ def _canonical_value(value: Any) -> Any:
         return _canonical_value(value.value)
     if isinstance(value, bytes):
         return base64.b64encode(value).decode("ascii")
+    if type(value) is int:
+        if not _is_jcs_safe_integer(value):
+            raise rfc8785.IntegerDomainError(value)
+        return value
     if isinstance(value, Mapping):
-        result={}
-        for key,item in value.items():
+        result: dict[str, Any] = {}
+        for key, item in value.items():
             if type(key) is not str:
                 raise TypeError("canonical JSON mapping keys must be strings")
-            normalized_key=normalize("NFC",key)
+            normalized_key = normalize("NFC", key)
             if normalized_key in result:
                 raise ValueError("canonical JSON mapping keys collide after NFC")
-            result[normalized_key]=_canonical_value(item)
+            result[normalized_key] = _canonical_value(item)
         return result
     if isinstance(value, (list, tuple)):
         return [_canonical_value(item) for item in value]
     return value
 
 
-def canonical_mapping_bytes(value: Mapping[str,Any]) -> bytes:
-    if not isinstance(value,Mapping):
+def canonical_mapping_bytes(value: Mapping[str, Any]) -> bytes:
+    if not isinstance(value, Mapping):
         raise TypeError("canonical JSON root must be a mapping")
-    return rfc8785.dumps(_canonical_value(value))
+    try:
+        return rfc8785.dumps(_canonical_value(value))
+    except rfc8785.CanonicalizationError as error:
+        raise ContractParseError("contract canonicalization rejected") from error
 
 
 def canonical_bytes(model: ContractModel) -> bytes:
-    if not isinstance(model,ContractModel):
+    if not isinstance(model, ContractModel):
         raise TypeError("canonical_bytes requires a ContractModel")
     return canonical_mapping_bytes(model.model_dump(mode="python"))
 ```
 
 ```python
-# packages/contracts/src/tuntun_contracts/__init__.py
-from .base import (
-    JSONValue,Commitment,ContractModel,ContractParseError,Sensitivity,canonical_bytes,
-    canonical_mapping_bytes,parse_bounded_json_value,parse_contract_json,
-    registered_contract_models,
-)
-```
-
-```python
 # packages/contracts/src/tuntun_contracts/events.py
+from __future__ import annotations
+
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self, TypeAlias
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
-from .base import Commitment, ContractModel, Sensitivity
+from .base import (
+    JCS_MAX_SAFE_INTEGER,
+    Commitment,
+    ContractModel,
+    Sensitivity,
+    canonical_bytes,
+    validate_canonical_base64,
+)
 
 
 class EventType(StrEnum):
@@ -4736,22 +5494,37 @@ class WakeDetectedPayload(ContractModel):
 class StopRequestedPayload(ContractModel):
     kind: Literal["safety.stop_requested"]
     turn_id: UUID | None
-    source: Literal["edge_keyword", "physical_input", "owner_console", "watchdog"]
+    source: Literal[
+        "edge_keyword",
+        "physical_input",
+        "owner_console",
+        "watchdog",
+    ]
 
 
-EventPayload = Annotated[WakeDetectedPayload | StopRequestedPayload, Field(discriminator="kind")]
+EventPayload: TypeAlias = Annotated[  # noqa: UP040 -- Python 3.11 compatibility.
+    WakeDetectedPayload | StopRequestedPayload,
+    Field(discriminator="kind"),
+]
 
 
 class EventEnvelope(ContractModel):
     schema_version: Literal["1.0"]
-    event_id: UUID; event_type: EventType; household_id: UUID; device_id: UUID
-    session_id: UUID | None; correlation_id: UUID; causation_id: UUID | None
-    device_sequence: Annotated[int, Field(ge=0)]
-    occurred_at: AwareDatetime; sensitivity: Sensitivity
-    payload_commitment: Commitment; payload: EventPayload
+    event_id: UUID
+    event_type: EventType
+    household_id: UUID
+    device_id: UUID
+    session_id: UUID | None
+    correlation_id: UUID
+    causation_id: UUID | None
+    device_sequence: Annotated[int, Field(ge=0, le=JCS_MAX_SAFE_INTEGER)]
+    occurred_at: AwareDatetime
+    sensitivity: Sensitivity
+    payload_commitment: Commitment
+    payload: EventPayload
 
     @model_validator(mode="after")
-    def matching_type(self) -> "EventEnvelope":
+    def matching_type(self) -> Self:
         if self.event_type.value != self.payload.kind:
             raise ValueError("event_type must equal payload.kind")
         return self
@@ -4759,25 +5532,552 @@ class EventEnvelope(ContractModel):
 
 class SignedEventEnvelope(ContractModel):
     envelope: EventEnvelope
-    signing_key_id: Annotated[str, Field(min_length=8, max_length=128)]
-    signature_b64: Annotated[str, Field(min_length=80, max_length=128)]
+    signing_key_id: Annotated[
+        str,
+        Field(
+            min_length=12,
+            max_length=83,
+            pattern=r"^ed25519:[a-z0-9][a-z0-9._-]{0,63}:v[1-9][0-9]{0,8}$",
+        ),
+    ]
+    signature_b64: Annotated[
+        str,
+        Field(
+            min_length=88,
+            max_length=88,
+            pattern=r"^[A-Za-z0-9+/]{86}==$",
+        ),
+    ]
+
+    @field_validator("signature_b64")
+    @classmethod
+    def canonical_ed25519_signature(cls, value: str) -> str:
+        return validate_canonical_base64(
+            value,
+            expected_bytes=64,
+            label="signature",
+        )
+
+    def signing_bytes(self) -> bytes:
+        """Return the sole Ed25519 signing input; wrapper fields are excluded."""
+        return canonical_bytes(self.envelope)
 ```
 
-Implement both generator modules with these exact public values/functions: `OUTPUT_PATH`, `render() -> bytes`, and `main(argv: Sequence[str] | None = None) -> int`. `render()` imports the complete public `tuntun_contracts` package before reading `registered_contract_models()`, rejects duplicate fully qualified names, sorts that name map, and serializes deterministically. The JSON bundle has exactly `$schema`, `schema_version`, and `models`; the OpenAPI document has exactly `openapi`, `info`, `paths`, and `components`, with the same schemas. Shared write/check code creates the parent privately, rejects a symlink or non-regular output, writes a same-directory `0600` temporary file followed by `fsync` and atomic replace for `--write`, and for `--check` compares two independent renders plus the checked-in bytes and scans the output parent for any entry outside `{OUTPUT_PATH.name}`. Exactly one of `--write|--check` is mandatory; every error returns 1 without mutating in check mode.
+```python
+# packages/contracts/src/tuntun_contracts/__init__.py
+from typing import Final
 
-- [ ] **Step 4: Run the green canonical-contract gate**
+from .base import (
+    JCS_MAX_SAFE_INTEGER,
+    JCS_MIN_SAFE_INTEGER,
+    Commitment,
+    ContractModel,
+    ContractParseError,
+    JSONValue,
+    Sensitivity,
+    canonical_bytes,
+    canonical_mapping_bytes,
+    parse_bounded_json_value,
+    parse_contract_json,
+    registered_contract_models,
+)
+from .events import (
+    EventEnvelope,
+    EventPayload,
+    EventType,
+    SignedEventEnvelope,
+    StopRequestedPayload,
+    WakeDetectedPayload,
+)
 
-Run: `uv run python scripts/generate_schemas.py --write && uv run python scripts/generate_openapi.py --write && uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py -q && uv run python scripts/generate_schemas.py --check && uv run python scripts/generate_openapi.py --check && uv run ruff check packages/contracts/src scripts/generate_schemas.py scripts/generate_openapi.py tests/contract && uv run mypy packages/contracts/src scripts/generate_schemas.py scripts/generate_openapi.py`
+__version__: str = "0.1.0.dev0"
 
-Expected: PASS with both owned artifacts present, all contract/generator tests passing, each artifact inventory exactly equal to the Task 4 public registry, two consecutive renders byte-identical, drift/missing/extra/symlink inputs rejected, check mode leaving the worktree byte-identical, and Ruff/mypy exiting 0.
+_REGISTERED_CONTRACT_MODELS: Final[tuple[type[ContractModel], ...]] = (
+    Commitment,
+    EventEnvelope,
+    SignedEventEnvelope,
+    StopRequestedPayload,
+    WakeDetectedPayload,
+)
+
+__all__ = (
+    "JCS_MAX_SAFE_INTEGER",
+    "JCS_MIN_SAFE_INTEGER",
+    "JSONValue",
+    "Commitment",
+    "ContractModel",
+    "ContractParseError",
+    "EventEnvelope",
+    "EventPayload",
+    "EventType",
+    "Sensitivity",
+    "SignedEventEnvelope",
+    "StopRequestedPayload",
+    "WakeDetectedPayload",
+    "__version__",
+    "canonical_bytes",
+    "canonical_mapping_bytes",
+    "parse_bounded_json_value",
+    "parse_contract_json",
+    "registered_contract_models",
+)
+```
+
+```python
+# scripts/contract_generator_common.py
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import stat
+import sys
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from tempfile import TemporaryDirectory, gettempdir
+from typing import Literal, TypeAlias
+
+from tuntun_contracts.base import ContractModel
+
+from scripts.assurance_common import (
+    AssuranceInputError,
+    FrozenRegularFile,
+    lexical_path,
+    read_regular_file,
+    validate_root,
+    walk_regular_files,
+)
+
+MAX_GENERATED_BYTES = 4 * 1024 * 1024
+MAX_PARENT_FILES = 3
+GeneratorMode: TypeAlias = Literal["check", "write"]  # noqa: UP040
+Renderer: TypeAlias = Callable[[], bytes]  # noqa: UP040
+
+
+class GeneratorError(RuntimeError):
+    """Generation, inventory, determinism, or publication failed closed."""
+
+
+def _json_pointer_escape(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def _registered_model_map(
+    models: Sequence[type[ContractModel]],
+) -> dict[str, type[ContractModel]]:
+    result: dict[str, type[ContractModel]] = {}
+    for model in models:
+        name = f"{model.__module__}.{model.__qualname__}"
+        if name in result:
+            raise GeneratorError(f"duplicate fully qualified contract model: {name}")
+        result[name] = model
+    if not result:
+        raise GeneratorError("contract registry must not be empty")
+    return dict(sorted(result.items()))
+
+
+def _rewrite_local_refs(value: object, *, model_pointer: str) -> object:
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise GeneratorError("generated schema key is not a string")
+            if key == "$ref":
+                if not isinstance(child, str):
+                    raise GeneratorError("generated schema reference is not a string")
+                if not child.startswith("#/$defs/"):
+                    raise GeneratorError(f"unsupported generated schema reference: {child}")
+                result[key] = f"{model_pointer}/$defs/{child.removeprefix('#/$defs/')}"
+            else:
+                result[key] = _rewrite_local_refs(child, model_pointer=model_pointer)
+        return result
+    if isinstance(value, list):
+        return [_rewrite_local_refs(child, model_pointer=model_pointer) for child in value]
+    return value
+
+
+def build_model_schemas(
+    models: Sequence[type[ContractModel]],
+    *,
+    container_pointer: str,
+) -> dict[str, object]:
+    if not container_pointer.startswith("/") or container_pointer.endswith("/"):
+        raise ValueError("container_pointer must be one nonempty absolute JSON Pointer")
+    result: dict[str, object] = {}
+    for name, model in _registered_model_map(models).items():
+        model_pointer = f"#{container_pointer}/{_json_pointer_escape(name)}"
+        raw_schema = model.model_json_schema(
+            mode="validation",
+            ref_template="#/$defs/{model}",
+        )
+        result[name] = _rewrite_local_refs(raw_schema, model_pointer=model_pointer)
+    return result
+
+
+def render_json_document(document: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(
+            document,
+            allow_nan=False,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _require_rendered_bytes(value: object) -> bytes:
+    if type(value) is not bytes:
+        raise GeneratorError("renderer must return bytes")
+    rendered = value
+    if not 1 <= len(rendered) <= MAX_GENERATED_BYTES:
+        raise GeneratorError("rendered artifact byte limit exceeded")
+    return rendered
+
+
+def _write_all(descriptor: int, value: bytes) -> None:
+    view = memoryview(value)
+    offset = 0
+    while offset < len(view):
+        written = os.write(descriptor, view[offset:])
+        if written <= 0:
+            raise OSError("short generated-artifact write")
+        offset += written
+
+
+def _render_twice_in_private_tree(renderer: Renderer, filename: str) -> bytes:
+    first = _require_rendered_bytes(renderer())
+    second = _require_rendered_bytes(renderer())
+    if first != second:
+        raise GeneratorError("nondeterministic generator render")
+    system_temporary_root = validate_root(Path(os.path.realpath(gettempdir())))
+    with TemporaryDirectory(
+        prefix="tuntun-contract-generator-",
+        dir=system_temporary_root,
+    ) as temporary:
+        candidate = Path(temporary) / filename
+        descriptor = os.open(
+            candidate,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            _write_all(descriptor, first)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        if read_regular_file(candidate, max_bytes=MAX_GENERATED_BYTES) != first:
+            raise GeneratorError("private render verification failed")
+    return first
+
+
+def _scan_parent(parent: Path) -> tuple[FrozenRegularFile, ...]:
+    return tuple(
+        sorted(
+            walk_regular_files(
+                (parent,),
+                max_files=MAX_PARENT_FILES,
+                max_total_bytes=MAX_GENERATED_BYTES * MAX_PARENT_FILES,
+            ),
+            key=lambda item: item.path.as_posix(),
+        )
+    )
+
+
+def _owned_snapshot(
+    output_path: Path,
+    *,
+    allow_missing: bool,
+) -> tuple[FrozenRegularFile, ...]:
+    expected = lexical_path(output_path)
+    files = _scan_parent(expected.parent)
+    if not files and allow_missing:
+        return ()
+    if len(files) != 1 or files[0].path != expected:
+        raise GeneratorError("owned output inventory is not exact")
+    if read_regular_file(expected, max_bytes=MAX_GENERATED_BYTES) != files[0].raw:
+        raise AssuranceInputError(expected, "input-changed-during-scan")
+    return files
+
+
+def _ensure_output_parent(output_path: Path) -> Path:
+    parent = lexical_path(output_path).parent
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current_fd = os.open(os.path.sep, flags)
+    try:
+        for index, part in enumerate(parent.parts[1:]):
+            display = Path(os.path.sep).joinpath(*parent.parts[1 : index + 2])
+            try:
+                before = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                before = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+            if stat.S_ISLNK(before.st_mode):
+                raise AssuranceInputError(display, "symlink-input")
+            if not stat.S_ISDIR(before.st_mode):
+                raise AssuranceInputError(display, "not-directory")
+            child_fd = os.open(part, flags, dir_fd=current_fd)
+            opened = os.fstat(child_fd)
+            if before.st_dev != opened.st_dev or before.st_ino != opened.st_ino:
+                os.close(child_fd)
+                raise AssuranceInputError(display, "input-changed-during-scan")
+            os.close(current_fd)
+            current_fd = child_fd
+        return validate_root(parent)
+    finally:
+        os.close(current_fd)
+
+
+def _directory_matches_descriptor(path: Path, descriptor: int) -> bool:
+    named = os.stat(path, follow_symlinks=False)
+    opened = os.fstat(descriptor)
+    return (
+        stat.S_ISDIR(named.st_mode)
+        and named.st_dev == opened.st_dev
+        and named.st_ino == opened.st_ino
+    )
+
+
+def _open_parent_descriptor(parent: Path) -> int:
+    descriptor = os.open(
+        parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    if not _directory_matches_descriptor(parent, descriptor):
+        os.close(descriptor)
+        raise GeneratorError("output parent changed during generation")
+    return descriptor
+
+
+def _atomic_replace(source_name: str, destination_name: str, parent_fd: int) -> None:
+    os.replace(
+        source_name,
+        destination_name,
+        src_dir_fd=parent_fd,
+        dst_dir_fd=parent_fd,
+    )
+
+
+def _write_atomically(output_path: Path, rendered: bytes) -> None:
+    output = lexical_path(output_path)
+    parent = _ensure_output_parent(output)
+    baseline = _owned_snapshot(output, allow_missing=True)
+    parent_fd = _open_parent_descriptor(parent)
+    temporary_name = f".{output.name}.{secrets.token_hex(16)}.tmp"
+    temporary_path = parent / temporary_name
+    temporary_fd: int | None = None
+    published = False
+    try:
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        os.fchmod(temporary_fd, 0o600)
+        _write_all(temporary_fd, rendered)
+        os.fsync(temporary_fd)
+        os.close(temporary_fd)
+        temporary_fd = None
+
+        current = _scan_parent(parent)
+        temporary_entries = tuple(
+            item for item in current if item.path == lexical_path(temporary_path)
+        )
+        remaining = tuple(item for item in current if item.path != lexical_path(temporary_path))
+        if (
+            len(temporary_entries) != 1
+            or temporary_entries[0].raw != rendered
+            or stat.S_IMODE(os.stat(temporary_path, follow_symlinks=False).st_mode) != 0o600
+        ):
+            raise GeneratorError("private publication file verification failed")
+        if remaining != baseline or not _directory_matches_descriptor(parent, parent_fd):
+            raise GeneratorError("output changed during generation")
+
+        _atomic_replace(temporary_name, output.name, parent_fd)
+        published = True
+        os.fsync(parent_fd)
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if not published:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            except FileNotFoundError:
+                pass
+        os.close(parent_fd)
+
+    final = _owned_snapshot(output, allow_missing=False)
+    if final[0].raw != rendered:
+        raise GeneratorError("published generated artifact verification failed")
+
+
+def _parse_mode(argv: Sequence[str] | None) -> GeneratorMode:
+    arguments = tuple(sys.argv[1:] if argv is None else argv)
+    if arguments == ("--check",):
+        return "check"
+    if arguments == ("--write",):
+        return "write"
+    raise ValueError("exactly one of --check or --write is required")
+
+
+def run_generator(
+    *,
+    output_path: Path,
+    renderer: Renderer,
+    argv: Sequence[str] | None,
+) -> int:
+    try:
+        mode = _parse_mode(argv)
+        rendered = _render_twice_in_private_tree(renderer, output_path.name)
+        if mode == "check":
+            actual = _owned_snapshot(output_path, allow_missing=False)[0].raw
+            return 0 if actual == rendered else 1
+        _write_atomically(output_path, rendered)
+        return 0
+    except Exception:
+        return 1
+```
+
+```python
+# scripts/generate_schemas.py
+from __future__ import annotations
+
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Final
+
+from tuntun_contracts.base import registered_contract_models
+
+from scripts.contract_generator_common import (
+    build_model_schemas,
+    render_json_document,
+    run_generator,
+)
+
+OUTPUT_PATH: Final = Path("packages/contracts/schema/v1/contracts.schema.json")
+
+
+def render() -> bytes:
+    document: dict[str, object] = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "schema_version": "1.0",
+        "models": build_model_schemas(
+            registered_contract_models(),
+            container_pointer="/models",
+        ),
+    }
+    return render_json_document(document)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    return run_generator(
+        output_path=OUTPUT_PATH,
+        renderer=render,
+        argv=argv,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+```python
+# scripts/generate_openapi.py
+from __future__ import annotations
+
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Final, cast
+
+import yaml  # type: ignore[import-untyped]  # PyYAML 6 has no py.typed marker.
+from tuntun_contracts.base import registered_contract_models
+
+from scripts.contract_generator_common import build_model_schemas, run_generator
+
+OUTPUT_PATH: Final = Path("packages/contracts/openapi/admin-v1.yaml")
+
+
+def render() -> bytes:
+    document: dict[str, object] = {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Tuntun Admin API",
+            "version": "1.0.0",
+            "description": "Foundation contract components; no HTTP paths are owned yet.",
+        },
+        "paths": {},
+        "components": {
+            "schemas": build_model_schemas(
+                registered_contract_models(),
+                container_pointer="/components/schemas",
+            )
+        },
+    }
+    rendered = cast(
+        str,
+        yaml.safe_dump(
+            document,
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+            width=100,
+        ),
+    )
+    return rendered.encode("utf-8")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    return run_generator(
+        output_path=OUTPUT_PATH,
+        renderer=render,
+        argv=argv,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+Generate `packages/contracts/schema/v1/contracts.schema.json` only with `uv run python scripts/generate_schemas.py --write`, and generate `packages/contracts/openapi/admin-v1.yaml` only with `uv run python scripts/generate_openapi.py --write`. Do not hand-edit either artifact.
+
+- [ ] **Step 4: Run the green canonical-contract gate, prove check-mode non-mutation, and run the repository gate**
+
+Run:
+
+```bash
+uv run python scripts/generate_schemas.py --write
+uv run python scripts/generate_openapi.py --write
+uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py -q
+uv run ruff format --check packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
+uv run ruff check packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
+MYPYPATH=packages/contracts/src:. uv run mypy --explicit-package-bases --python-version 3.11 packages/contracts/src scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
+
+before_diff="$(git diff --binary HEAD -- . | shasum -a 256)"
+before_status="$(git status --porcelain=v1 --untracked-files=all | shasum -a 256)"
+before_outputs="$(shasum -a 256 packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml)"
+uv run python scripts/generate_schemas.py --check
+uv run python scripts/generate_openapi.py --check
+test "$before_diff" = "$(git diff --binary HEAD -- . | shasum -a 256)"
+test "$before_status" = "$(git status --porcelain=v1 --untracked-files=all | shasum -a 256)"
+test "$before_outputs" = "$(shasum -a 256 packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml)"
+
+make check
+git diff --check
+```
+
+Expected: PASS with `65 passed` from the focused pytest command. The package smoke assertion still reports `tuntun_contracts.__version__ == "0.1.0.dev0"`; both independent generator processes report exactly the five Task 4 FQNs; all local `$ref` pointers resolve; unsafe-integer/signature/key-ID/coercion/duplicate-FQN/CLI/symlink/special/race/mutation/error-code cases fail exactly as asserted; both generators return `0` only for current/write success and `1` for every asserted failure. The three before/after values are identical, proving check mode changed neither tracked diffs, worktree inventory, nor either owned artifact. Ruff, strict mypy under Python 3.11 semantics, `make check`, and `git diff --check` exit 0.
 
 - [ ] **Step 5: Commit exact Task 4 paths**
 
 ```bash
 git status --short
-git add packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/generate_schemas.py scripts/generate_openapi.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
+git add packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/contract_generator_common.py scripts/generate_schemas.py scripts/generate_openapi.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
 git diff --cached --name-only
 git diff --cached
+git diff --cached --check
 git commit -m "feat(contracts): freeze canonical event primitives"
 ```
 
