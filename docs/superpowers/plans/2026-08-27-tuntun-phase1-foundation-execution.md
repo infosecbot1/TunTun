@@ -24191,248 +24191,3429 @@ Record only the commit SHA, UTC timestamp, OS/Python/keyring versions, the conte
 ### Task 9: Build deterministic fakes and a network-free scenario runner
 
 **Master package:** 04
-**Depends on:** Tasks 6 and 8.
-**Estimated effort:** 2 person-days.
+**Depends on:** Tasks 5–8. Begin only from the accepted Task 8 SHA with a clean worktree; the Task 7 dual-host matrix and Task 8 secret/logging tests must already pass.
+**Estimated effort:** 3 person-days.
 
 **Files:**
+- Modify: `Makefile`
+- Modify: `apps/core/pyproject.toml`
 - Modify: `packages/testing/pyproject.toml`
 - Modify: `uv.lock`
 - Create: `packages/testing/src/tuntun_testing/fake_clock.py`
 - Create: `packages/testing/src/tuntun_testing/fake_providers.py`
 - Create: `packages/testing/src/tuntun_testing/fake_reachy.py`
+- Create: `packages/testing/src/tuntun_testing/network_guard.py`
+- Create: `packages/testing/src/tuntun_testing/scenario_io.py`
 - Create: `packages/testing/src/tuntun_testing/scenario.py`
 - Modify: `packages/testing/src/tuntun_testing/__init__.py`
 - Create: `scripts/run_scenarios.py`
 - Create: `apps/core/src/tuntun_core/cli/commands/simulate.py`
 - Modify: `apps/core/src/tuntun_core/cli/main.py`
 - Create: `tests/fixtures/scenarios/guest-hinglish.yaml`
+- Modify: `tests/fixtures/synthetic/README.md`
 - Test: `tests/unit/testing/test_scenario.py`
 - Test: `tests/unit/testing/test_scenario_cli.py`
 - Test: `tests/integration/test_deterministic_turn.py`
+- Test: `tests/security/test_scenario_guard.py`
 
 **Interfaces:**
-- Consumes: Task 5 DTOs and ports; synthetic audio tokens are UUIDs, never media.
-- Produces: `FakeClock(start: datetime)`, read-only-observation counter `calls: int`, and `advance(delta: timedelta) -> None`; `FakeSpeechToText`, `FakeTextToSpeech`, `FakeLanguageModel`, `FakeIdentity`, `FakeMemory`, `FakePolicy`, `FakeAuthentication`, `FakeAudit`, `FakeBudget`, and `FakeReachy`, each rejecting unexpected calls; `ScenarioRunner.run(path: Path) -> ScenarioResult`; `ScenarioResult.canonical_json() -> bytes`; CLI `tuntunctl simulate --scenario PATH --json`; and the repository gate `scripts/run_scenarios.py [--scenario PATH ...] --turns N [--assert-resource-bounds] [--json]`.
-- `run_scenarios.py` accepts `1 <= N <= 10_000`, rejects duplicate/non-regular/symlink scenario paths and over-limit YAML before parsing, sorts either the explicit paths or the default `tests/fixtures/scenarios/*.yaml` set by normalized repository-relative name, installs the test-suite socket/DNS deny guard before loading application code, uses only synthetic fakes, and exits 2 for invalid input or 1 for a failed assertion. Its versioned `scenario_gate.v1` JSON is emitted only to stdout; diagnostics go to stderr. Task C23 extends this same owned executable with the complete fault/privacy/resource measurements used by B2.
+- Consumes the frozen Task 5 DTOs/ports, Task 6 canonical JCS function, Task 7 dual-host gate, and Task 8 fail-closed logging/secret baseline. Scenario audio is exactly one canonical UUID encoded as 16 synthetic bytes; it is never PCM, recorded speech, or household media.
+- Produces a callback-capable `FakeClock`; immutable `ExpectedCall`/`ObservedCall`; exact-signature scripted STT, TTS, LLM, identity, memory, proposal, policy, authentication, action, audit, budget, route-authorizer, and Reachy fakes; immediate unexpected-call rejection; injected return/raise/malformed outcomes; and `assert_exhausted()` including abandoned TTS streams.
+- Produces descriptor-relative `read_scenario_input`/`load_scenario_inputs`, strict bounded YAML, `ScenarioRunner.run(...)` plus `run_async(...)`, canonical-JCS `ScenarioResult`, and `guest_hinglish_scenario()` with stable `.ports`, `.wav_bytes`, mutable shared `.events`, and async `.context_provider` seams. The Guest workflow ports implement both Task 07's `generate(transcript, identity)` path and Task 14/16's `prepare(turn_id, transcript)` then `generate(context)` path with the exact later event vocabulary.
+- `scripts/run_scenarios.py [--scenario PATH ...] --turns N [--assert-resource-bounds] [--json]` interprets `N` as turns per sorted scenario and accepts exactly `1 <= N <= 10_000`, at most 32 selected scenarios, and at most 10,000 aggregate measured scenario-turns. It installs the socket/DNS guard before importing YAML, contracts, scenario, or application modules; uses one new runner/fake container per warm-up or measured turn; and emits exactly one `scenario_gate.v1` JCS document to stdout in JSON mode. Invalid arguments/input exit `2`; assertion, network, unexpected-call, exhaustion, FD, or task failures exit `1`; diagnostics are bounded content-free reason codes on stderr.
+- `scenario_gate.v1` fixes the C23 extension contract now. Its closed `b2` object has exactly `status`, `warmup_turns`, `terminal_rss_growth_bytes`, `peak_rss_growth_bytes`, `privacy_block_p95_ms`, `private_sentinel_count`, and `duplicate_effect_count`. Task 9 emits `status="not_measured"` with all six metric values `null`; C23 fills the same fields with `status="pass"`, `warmup_turns=50`, and nonnegative measured integers without changing arguments, exit codes, or the schema version. Foundation FD/task evidence is measured only when requested.
+- Core declares `tuntun-testing` only in optional extra `simulation`; `main.py` and `simulate.py` have no eager testing import. The production Core wheel imports and runs `version` without the extra. Repository/CI installs all workspace packages, so `tuntunctl simulate` remains available to developers.
 
-- [ ] **Step 1: Write red deterministic tests**
+- [ ] **Step 1: Write the complete red deterministic, adversarial-input, CLI, privacy, and packaging tests**
+
+Create the four files below exactly. They deliberately exercise the real Task 5 protocol
+signatures at mypy time, the actual route-authorized STT → identity → LLM → TTS → Reachy → audit chain,
+all CLI exit classes, canonical JCS, the future C23 extension fields, and adversarial filesystem,
+YAML, network, FD, and asyncio-task cases. The subprocess helpers pass a repository root only
+through the private Python `main(...)` seam; there is no public flag that can widen the trusted
+root.
 
 ```python
 # tests/unit/testing/test_scenario.py
-from datetime import UTC, datetime, timedelta
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncGenerator
+from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime
+from typing import Literal, cast
+from uuid import UUID
+
+import pytest
+from tuntun_contracts.identity import IdentityDecision, IdentityRequest, IdentityStatus
+from tuntun_contracts.ports import (
+    ActionProviderPort,
+    AsyncTransactionBoundary,
+    AuditPort,
+    AuthenticationPort,
+    BudgetPort,
+    ClockPort,
+    IdentityFusionPort,
+    LanguageModelPort,
+    MemoryProposalServicePort,
+    MemoryRepositoryPort,
+    PolicyEnginePort,
+    ReachyPort,
+    RouteAuthorizerPort,
+    SpeechToTextPort,
+    TextToSpeechPort,
+)
+from tuntun_contracts.speech import AuthorizedSynthesisRequest, SpeechChunk
 from tuntun_testing.fake_clock import FakeClock
-from tuntun_testing.fake_providers import FakeActionProvider, FakeAuthentication, FakeBudget, FakeMemory, FakeMemoryProposalService, FakeRouteAuthorizer
+from tuntun_testing.fake_providers import (
+    ExpectedCall,
+    FakeActionProvider,
+    FakeAudit,
+    FakeAuthentication,
+    FakeBudget,
+    FakeIdentityFusion,
+    FakeLanguageModel,
+    FakeMemoryProposalService,
+    FakeMemoryRepository,
+    FakePolicyEngine,
+    FakeRouteAuthorizer,
+    FakeSpeechToText,
+    FakeTextToSpeech,
+    ObservedCall,
+    RaiseError,
+    ReturnValue,
+    ScriptExhaustionError,
+    UnexpectedCallError,
+)
+from tuntun_testing.fake_reachy import FakeReachy
+from tuntun_testing.scenario import B2Evidence, guest_hinglish_scenario, parse_scenario
+from tuntun_testing.scenario_io import ScenarioInput
 
-def test_fake_clock_advances_without_sleep() -> None:
+_VALID_SCENARIO = (
+    b"schema_version: '1.0'\n"
+    b"name: guest-hinglish\n"
+    b"identity: guest\n"
+    b"transcript: synthetic-a\n"
+    b"response: synthetic-b\n"
+    b"language: hinglish\n"
+    b"outcome: completed\n"
+)
+
+
+def _input(raw: bytes, name: str = "guest-hinglish.yaml") -> ScenarioInput:
+    return ScenarioInput(name, raw, 1, 1)
+
+
+def _accept_exact_ports(
+    clock: ClockPort,
+    stt: SpeechToTextPort,
+    tts: TextToSpeechPort,
+    llm: LanguageModelPort,
+    identity: IdentityFusionPort,
+    memory: MemoryRepositoryPort,
+    proposal: MemoryProposalServicePort,
+    policy: PolicyEnginePort,
+    authentication: AuthenticationPort,
+    action: ActionProviderPort,
+    audit: AuditPort[AsyncTransactionBoundary],
+    budget: BudgetPort,
+    route: RouteAuthorizerPort,
+    reachy: ReachyPort,
+) -> None:
+    assert all(
+        value is not None
+        for value in (
+            clock,
+            stt,
+            tts,
+            llm,
+            identity,
+            memory,
+            proposal,
+            policy,
+            authentication,
+            action,
+            audit,
+            budget,
+            route,
+            reachy,
+        )
+    )
+
+
+def test_all_fakes_satisfy_the_frozen_task_5_ports() -> None:
+    _accept_exact_ports(
+        FakeClock(datetime(2026, 8, 27, tzinfo=UTC)),
+        FakeSpeechToText(()),
+        FakeTextToSpeech(()),
+        FakeLanguageModel(()),
+        FakeIdentityFusion(()),
+        FakeMemoryRepository(()),
+        FakeMemoryProposalService(()),
+        FakePolicyEngine(()),
+        FakeAuthentication(()),
+        FakeActionProvider(()),
+        FakeAudit(()),
+        FakeBudget(()),
+        FakeRouteAuthorizer(()),
+        FakeReachy(()),
+    )
+
+
+def test_fake_clock_orders_callbacks_and_returns_immutable_calls() -> None:
     clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
-    before = clock.monotonic()
-    clock.advance(timedelta(seconds=5))
-    assert clock.now() == datetime(2026, 8, 27, 0, 0, 5, tzinfo=UTC)
-    assert clock.monotonic() == before + 5
+    observed: list[str] = []
+    cancelled = clock.call_later(1.0, lambda: observed.append("cancelled"))
+    clock.call_later(1.0, lambda: observed.append("first"))
+    clock.call_later(1.0, lambda: observed.append("second"))
+    cancelled.cancel()
+    clock.advance(1.0)
+    assert observed == ["first", "second"]
+    assert clock.now() == datetime(2026, 8, 27, 0, 0, 1, tzinfo=UTC)
+    assert clock.monotonic() == 1.0
+    assert clock.calls == ("now", "monotonic")
+    with pytest.raises(ValueError, match="finite"):
+        clock.advance(float("nan"))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        FakeClock(datetime(2026, 8, 27))
 
-def test_fakes_expose_the_frozen_v1_port_operations() -> None:
-    assert all(hasattr(FakeAuthentication([]), name) for name in ("start","verify","consume"))
-    assert all(hasattr(FakeMemory([]), name) for name in ("create","replace","delete","query"))
-    assert all(hasattr(FakeMemoryProposalService([]), name) for name in ("stage","decide"))
-    assert hasattr(FakeActionProvider([]), "execute")
-    assert all(hasattr(FakeBudget([]), name) for name in ("reserve","mark_sent","settle","release_unsent","reconcile_turn"))
-    assert all(hasattr(FakeRouteAuthorizer([]), name) for name in ("authorize","consume"))
+
+@pytest.mark.asyncio
+async def test_scripted_fake_checks_arguments_faults_and_exhaustion() -> None:
+    request = cast(IdentityRequest, object())
+    other = cast(IdentityRequest, object())
+    decision = IdentityDecision(
+        status=IdentityStatus.UNKNOWN,
+        subject_id=None,
+        reason_code="synthetic.guest",
+        expires_at=datetime(2026, 8, 27, tzinfo=UTC),
+    )
+    fake = FakeIdentityFusion(
+        (ExpectedCall("identity.resolve", (request,), ReturnValue(decision)),)
+    )
+    with pytest.raises(UnexpectedCallError, match="unexpected-call"):
+        await fake.resolve(other)
+    before_calls = fake.calls
+    assert before_calls == ()
+    assert await fake.resolve(request) == decision
+    fake.assert_exhausted()
+    observed = fake.calls[0]
+    with pytest.raises(FrozenInstanceError):
+        observed.operation = "changed"  # type: ignore[misc]
+
+    timeout = FakeIdentityFusion(
+        (ExpectedCall("identity.resolve", (request,), RaiseError(TimeoutError())),)
+    )
+    with pytest.raises(TimeoutError):
+        await timeout.resolve(request)
+    timeout.assert_exhausted()
+
+    malformed = FakeIdentityFusion(
+        (ExpectedCall("identity.resolve", (request,), ReturnValue(object())),)
+    )
+    assert await malformed.resolve(request) is not decision
+    malformed.assert_exhausted()
+
+    pending = FakeIdentityFusion(
+        (ExpectedCall("identity.resolve", (request,), ReturnValue(decision)),)
+    )
+    with pytest.raises(ScriptExhaustionError, match="script-not-exhausted"):
+        pending.assert_exhausted()
+    assert "request" not in repr(pending)
+
+
+@pytest.mark.asyncio
+async def test_abandoned_tts_stream_is_not_silently_exhausted() -> None:
+    request = cast(AuthorizedSynthesisRequest, object())
+    chunk = SpeechChunk(
+        request_id=UUID("00000000-0000-0000-0000-000000000901"),
+        sequence=0,
+        pcm=b"x",
+        final=True,
+    )
+    fake = FakeTextToSpeech((ExpectedCall("tts.synthesize", (request,), ReturnValue((chunk,))),))
+    stream = fake.synthesize(request)
+    with pytest.raises(ScriptExhaustionError, match="stream-not-exhausted"):
+        fake.assert_exhausted()
+    assert [item async for item in stream] == [chunk]
+    fake.assert_exhausted()
+
+    partial = FakeTextToSpeech(
+        (ExpectedCall("tts.synthesize", (request,), ReturnValue((chunk, chunk))),)
+    )
+    partial_stream = cast(AsyncGenerator[SpeechChunk, None], partial.synthesize(request))
+    assert await anext(partial_stream) == chunk
+    await partial_stream.aclose()
+    with pytest.raises(ScriptExhaustionError, match="stream-not-exhausted"):
+        partial.assert_exhausted()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        _VALID_SCENARIO.replace(
+            b"name: guest-hinglish\n",
+            b"name: guest-hinglish\nname: guest-hinglish\n",
+        ),
+        _VALID_SCENARIO.replace(
+            b"transcript: synthetic-a\nresponse: synthetic-b\n",
+            b"transcript: &text synthetic-a\nresponse: *text\n",
+        ),
+        _VALID_SCENARIO.replace(b"'1.0'", b"!!str '1.0'"),
+        b"%YAML 1.2\n---\n" + _VALID_SCENARIO,
+        _VALID_SCENARIO.replace(b"'1.0'", b"'2.0'"),
+        _VALID_SCENARIO.replace(b"synthetic-a", b'"synthetic-\\uD800"'),
+        _VALID_SCENARIO.replace(b"synthetic-a", b"9" * 5_000),
+        _VALID_SCENARIO.replace(b"synthetic-a", b"2026-99-99"),
+        b"\xff",
+        b"#" * 65_537,
+    ],
+)
+def test_strict_yaml_rejects_noncanonical_or_ambiguous_documents(raw: bytes) -> None:
+    with pytest.raises(ValueError, match="invalid-scenario-schema"):
+        parse_scenario(_input(raw))
+
+
+def test_guest_hinglish_downstream_api_is_stable() -> None:
+    guest = guest_hinglish_scenario()
+    assert len(guest.wav_bytes) == 16
+    assert guest.events == []
+    assert callable(guest.context_provider.prepare)
+    assert isinstance(ObservedCall("operation", ()), ObservedCall)
+    asyncio.run(FakeClock(datetime(2026, 8, 27, tzinfo=UTC)).sleep(0))
+
+
+def test_b2_placeholder_is_exact_and_fillable_without_a_schema_change() -> None:
+    assert B2Evidence().to_mapping() == {
+        "duplicate_effect_count": None,
+        "peak_rss_growth_bytes": None,
+        "privacy_block_p95_ms": None,
+        "private_sentinel_count": None,
+        "status": "not_measured",
+        "terminal_rss_growth_bytes": None,
+        "warmup_turns": None,
+    }
+    measured = B2Evidence(
+        status="pass",
+        warmup_turns=50,
+        terminal_rss_growth_bytes=32 * 1024 * 1024,
+        peak_rss_growth_bytes=128 * 1024 * 1024,
+        privacy_block_p95_ms=250,
+        private_sentinel_count=0,
+        duplicate_effect_count=0,
+    )
+    assert measured.to_mapping()["warmup_turns"] == 50
+    with pytest.raises(ValueError, match="invalid-b2-evidence"):
+        B2Evidence(status="pass")
+    with pytest.raises(ValueError, match="invalid-b2-evidence"):
+        B2Evidence(warmup_turns=50)
+    with pytest.raises(ValueError, match="invalid-b2-evidence"):
+        B2Evidence(
+            status=cast(Literal["pass", "not_measured"], "invalid"),
+            warmup_turns=50,
+            terminal_rss_growth_bytes=0,
+            peak_rss_growth_bytes=0,
+            privacy_block_p95_ms=0,
+            private_sentinel_count=0,
+            duplicate_effect_count=0,
+        )
+    with pytest.raises(ValueError, match="invalid-b2-evidence"):
+        B2Evidence(
+            status="pass",
+            warmup_turns=49,
+            terminal_rss_growth_bytes=0,
+            peak_rss_growth_bytes=0,
+            privacy_block_p95_ms=0,
+            private_sentinel_count=0,
+            duplicate_effect_count=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guest_hinglish_drives_task_07_and_task_14_downstream_shapes() -> None:
+    guest = guest_hinglish_scenario()
+    turn_id = UUID("00000000-0000-0000-0000-000000000903")
+    await guest.ports.start(turn_id)
+    transcript = await guest.ports.transcribe(guest.wav_bytes)
+    identity = await guest.ports.guest_identity()
+    answer = await guest.ports.generate(transcript, identity)
+    pcm = await guest.ports.synthesize(answer)
+    await guest.ports.play(turn_id, pcm)
+    await guest.ports.finish(turn_id)
+    assert guest.events == [
+        "session.start",
+        "stt.reserve",
+        "stt.authorize",
+        "stt.call",
+        "identity.guest",
+        "reasoning.sanitize",
+        "reasoning.reserve",
+        "reasoning.authorize",
+        "reasoning.call",
+        "tts.dlp",
+        "tts.reserve",
+        "tts.authorize",
+        "tts.call",
+        "reachy.play",
+        "turn.clear",
+    ]
+
+    personalized = guest_hinglish_scenario(turn_index=1)
+    second_transcript = await personalized.ports.transcribe(personalized.wav_bytes)
+    context = await personalized.context_provider.prepare(turn_id, second_transcript)
+    assert context.reply_mode == "hinglish"
+    assert await personalized.ports.generate(context) == "synthetic-namaste-welcome"
+    assert personalized.events[:4] == [
+        "stt.reserve",
+        "stt.authorize",
+        "stt.call",
+        "identity.guest",
+    ]
+```
+
+```python
+# tests/unit/testing/test_scenario_cli.py
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from tuntun_contracts.base import canonical_mapping_bytes
+from tuntun_testing import scenario_io
+from tuntun_testing.scenario_io import (
+    ScenarioInput,
+    ScenarioInputError,
+    load_scenario_inputs,
+    read_scenario_input,
+)
+
+ROOT = Path(__file__).absolute().parents[3]
+SCRIPT = ROOT / "scripts/run_scenarios.py"
+PYTHON_PATH = os.pathsep.join(
+    str(ROOT / path) for path in ("packages/testing/src", "packages/contracts/src", "apps/core/src")
+)
+CUSTOM_ROOT_CODE = (
+    "import sys; from pathlib import Path; "
+    "from scripts.run_scenarios import main; "
+    "raise SystemExit(main(sys.argv[2:], _repository_root=Path(sys.argv[1])))"
+)
+
+
+def _environment(seed: str = "1", timezone: str = "UTC") -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update({"PYTHONHASHSEED": seed, "PYTHONPATH": PYTHON_PATH, "TZ": timezone})
+    return environment
+
+
+def _run(
+    *arguments: str,
+    seed: str = "1",
+    timezone: str = "UTC",
+    timeout: float = 120,
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *arguments],
+        cwd=ROOT,
+        env=_environment(seed, timezone),
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
+def _run_at(
+    root: Path,
+    *arguments: str,
+    code: str = CUSTOM_ROOT_CODE,
+    timeout: float = 20,
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        [sys.executable, "-c", code, str(root), *arguments],
+        cwd=ROOT,
+        env=_environment(),
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
+def _yaml(name: str = "case") -> bytes:
+    return (
+        'schema_version: "1.0"\n'
+        f"name: {name}\n"
+        "identity: guest\n"
+        "transcript: synthetic-namaste\n"
+        "response: synthetic-welcome\n"
+        "language: hinglish\n"
+        "outcome: completed\n"
+    ).encode()
+
+
+def test_json_is_canonical_and_process_deterministic() -> None:
+    arguments = ("--turns", "2", "--assert-resource-bounds", "--json")
+    first = _run(*arguments, seed="1", timezone="UTC")
+    second = _run(*arguments, seed="98765", timezone="Asia/Singapore")
+    assert first.returncode == second.returncode == 0
+    assert first.stdout == second.stdout
+    assert first.stderr == second.stderr == b""
+    decoded = json.loads(first.stdout)
+    assert set(decoded) == {
+        "b2",
+        "foundation_resources",
+        "scenarios",
+        "schema_version",
+        "status",
+    }
+    assert decoded["schema_version"] == "scenario_gate.v1"
+    assert decoded["status"] == "pass"
+    assert decoded["b2"] == {
+        "duplicate_effect_count": None,
+        "peak_rss_growth_bytes": None,
+        "privacy_block_p95_ms": None,
+        "private_sentinel_count": None,
+        "status": "not_measured",
+        "terminal_rss_growth_bytes": None,
+        "warmup_turns": None,
+    }
+    resources = decoded["foundation_resources"]
+    assert set(resources) == {
+        "fd_after",
+        "fd_baseline",
+        "fd_delta",
+        "pending_tasks_after",
+        "pending_tasks_baseline",
+        "pending_tasks_delta",
+        "status",
+    }
+    assert resources["status"] == "pass"
+    assert resources["fd_delta"] == 0
+    assert resources["pending_tasks_delta"] == 0
+    assert len(decoded["scenarios"]) == 1
+    assert set(decoded["scenarios"][0]) == {
+        "name",
+        "result_chain_sha256",
+        "turns",
+    }
+    assert decoded["scenarios"][0] == {
+        "name": "guest-hinglish",
+        "result_chain_sha256": ("59477a0065a6700cbc68456ad3dcb7b33a7172403a16ea35b261940d8d7c9e40"),
+        "turns": 2,
+    }
+    assert b"synthetic-" not in first.stdout
+    assert b"transcript" not in first.stdout
+    assert b"response" not in first.stdout
+    assert canonical_mapping_bytes(decoded) + b"\n" == first.stdout
+
+
+def test_core_simulate_command_runs_with_the_optional_workspace_package() -> None:
+    code = """
+import json
+from typer.testing import CliRunner
+from tuntun_core.cli.main import app
+result = CliRunner().invoke(
+    app,
+    ["simulate", "--scenario", "tests/fixtures/scenarios/guest-hinglish.yaml", "--json"],
+)
+assert result.exit_code == 0, result.stderr
+assert json.loads(result.stdout)["schema_version"] == "scenario_result.v1"
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        env=_environment(),
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == b""
+
+
+@pytest.mark.parametrize(
+    ("turns", "expected"),
+    [("0", 2), ("1", 0), ("10000", 0), ("10001", 2)],
+)
+def test_turn_bounds_are_executed_or_rejected(turns: str, expected: int) -> None:
+    result = _run("--turns", turns, "--json", timeout=180)
+    assert result.returncode == expected
+    if expected == 0:
+        assert json.loads(result.stdout)["scenarios"][0]["turns"] == int(turns)
+    else:
+        assert result.stdout == b""
+        assert result.stderr == b"scenario-gate: invalid-input\n"
+
+
+def test_aggregate_turn_cap_accepts_10000_and_rejects_10002(tmp_path: Path) -> None:
+    (tmp_path / "first.yaml").write_bytes(_yaml("first"))
+    (tmp_path / "second.yaml").write_bytes(_yaml("second"))
+    arguments = (
+        "--scenario",
+        "first.yaml",
+        "--scenario",
+        "second.yaml",
+        "--turns",
+    )
+    accepted = _run_at(tmp_path, *arguments, "5000", "--json", timeout=180)
+    assert accepted.returncode == 0
+    assert [item["turns"] for item in json.loads(accepted.stdout)["scenarios"]] == [
+        5000,
+        5000,
+    ]
+    rejected = _run_at(tmp_path, *arguments, "5001", "--json")
+    assert rejected.returncode == 2
+    assert rejected.stdout == b""
+    assert rejected.stderr == b"scenario-gate: invalid-input\n"
+
+
+def test_descriptor_reader_rejects_escape_links_fifo_duplicates_and_hardlinks(
+    tmp_path: Path,
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    scenario = trusted / "case.yaml"
+    scenario.write_bytes(_yaml())
+    outside = tmp_path / "outside.yaml"
+    outside.write_bytes(_yaml("outside"))
+    terminal_target = trusted / "terminal-target.data"
+    terminal_target.write_bytes(_yaml("terminal"))
+    terminal_link = trusted / "terminal.yaml"
+    terminal_link.symlink_to(terminal_target)
+    real_directory = trusted / "real"
+    real_directory.mkdir()
+    (real_directory / "nested.yaml").write_bytes(_yaml("nested"))
+    parent_link = trusted / "linked"
+    parent_link.symlink_to(real_directory, target_is_directory=True)
+    fifo = trusted / "fifo.yaml"
+    os.mkfifo(fifo)
+    duplicate = _run_at(
+        trusted,
+        "--scenario",
+        "case.yaml",
+        "--scenario",
+        str(scenario),
+        "--turns",
+        "1",
+        "--json",
+    )
+    assert duplicate.returncode == 2
+    hardlink = trusted / "hardlink.yaml"
+    os.link(scenario, hardlink)
+    candidates = (
+        "../outside.yaml",
+        "terminal.yaml",
+        "linked/nested.yaml",
+        "fifo.yaml",
+        "case.yaml",
+        "hardlink.yaml",
+    )
+    for candidate in candidates:
+        result = _run_at(trusted, "--scenario", candidate, "--turns", "1", "--json")
+        assert result.returncode == 2
+        assert result.stdout == b""
+        assert result.stderr == b"scenario-gate: invalid-input\n"
+
+
+def test_size_encoding_and_yaml_ambiguity_are_bounded(tmp_path: Path) -> None:
+    alias = _yaml("alias").replace(
+        b"transcript: synthetic-namaste\nresponse: synthetic-welcome\n",
+        b"transcript: &text synthetic-namaste\nresponse: *text\n",
+    )
+    cases = {
+        "malformed.yaml": b"schema_version: [\n",
+        "nonutf8.yaml": b"\xff",
+        "alias.yaml": alias,
+        "tag.yaml": _yaml("tag").replace(b'"1.0"', b"!!str '1.0'"),
+        "directive.yaml": b"%YAML 1.2\n---\n" + _yaml("directive"),
+        "duplicate.yaml": _yaml("duplicate").replace(
+            b"name: duplicate\n",
+            b"name: duplicate\nname: duplicate\n",
+        ),
+        "surrogate.yaml": _yaml("surrogate").replace(b"synthetic-namaste", b'"synthetic-\\uD800"'),
+        "integer.yaml": _yaml("integer").replace(b"synthetic-namaste", b"9" * 5_000),
+        "timestamp.yaml": _yaml("timestamp").replace(b"synthetic-namaste", b"2026-99-99"),
+        "version.yaml": _yaml("version").replace(b'"1.0"', b'"2.0"'),
+        "oversized.yaml": b"#" * 65_537,
+    }
+    for name, raw in cases.items():
+        (tmp_path / name).write_bytes(raw)
+        result = _run_at(tmp_path, "--scenario", name, "--turns", "1", "--json")
+        assert result.returncode == 2
+        assert result.stdout == b""
+        assert b"synthetic-" not in result.stderr
+    exact = _yaml("exact")
+    exact += b"#" + b"x" * (65_536 - len(exact) - 2) + b"\n"
+    assert len(exact) == 65_536
+    (tmp_path / "exact.yaml").write_bytes(exact)
+    accepted = _run_at(tmp_path, "--scenario", "exact.yaml", "--turns", "1", "--json")
+    assert accepted.returncode == 0
+    with pytest.raises(ScenarioInputError, match="invalid-scenario-input"):
+        read_scenario_input(Path("oversized.yaml"), trusted_root=tmp_path)
+
+
+@pytest.mark.parametrize("mutation", ["grow", "truncate"])
+def test_descriptor_reader_rejects_file_growth_or_truncation_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    scenario = tmp_path / "case.yaml"
+    original = _yaml()
+    scenario.write_bytes(original)
+    original_read = os.read
+    mutated = False
+
+    def mutating_read(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            if mutation == "grow":
+                with scenario.open("ab") as handle:
+                    handle.write(b"# growth\n")
+            else:
+                scenario.write_bytes(original[: max(1, len(original) // 2)])
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(os, "read", mutating_read)
+    with pytest.raises(ScenarioInputError, match="invalid-scenario-input"):
+        read_scenario_input(Path("case.yaml"), trusted_root=tmp_path)
+
+
+def test_default_inventory_rejects_mutation_during_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "scenarios"
+    directory.mkdir()
+    (directory / "case.yaml").write_bytes(_yaml())
+    original_snapshot = scenario_io._directory_snapshot
+    calls = 0
+
+    def changing_snapshot(descriptor: int) -> scenario_io._DirectorySnapshot:
+        nonlocal calls
+        snapshot = original_snapshot(descriptor)
+        calls += 1
+        if calls == 1:
+            (directory / "added.yaml").write_bytes(_yaml("added"))
+        return snapshot
+
+    monkeypatch.setattr(scenario_io, "_directory_snapshot", changing_snapshot)
+    with pytest.raises(ScenarioInputError, match="invalid-scenario-input"):
+        load_scenario_inputs(
+            (),
+            trusted_root=tmp_path,
+            default_directory=Path("scenarios"),
+        )
+
+
+def test_default_inventory_rejects_same_name_directory_replacement_mid_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "scenarios"
+    directory.mkdir()
+    for name in ("first", "second"):
+        (directory / f"{name}.yaml").write_bytes(_yaml(name))
+    moved = tmp_path / "original-scenarios"
+    original_reader = scenario_io._read_scenario_child
+    calls = 0
+
+    def replacing_reader(
+        parent_descriptor: int,
+        name: str,
+        normalized_name: str,
+        *,
+        max_bytes: int,
+        expected_identity: tuple[int, int, int, int, int, int] | None = None,
+    ) -> ScenarioInput:
+        nonlocal calls
+        result = original_reader(
+            parent_descriptor,
+            name,
+            normalized_name,
+            max_bytes=max_bytes,
+            expected_identity=expected_identity,
+        )
+        calls += 1
+        if calls == 1:
+            directory.rename(moved)
+            directory.mkdir()
+            for replacement_name in ("first", "second"):
+                replacement = _yaml(replacement_name).replace(
+                    b"synthetic-namaste",
+                    b"synthetic-replacement",
+                )
+                (directory / f"{replacement_name}.yaml").write_bytes(replacement)
+        return result
+
+    monkeypatch.setattr(scenario_io, "_read_scenario_child", replacing_reader)
+    with pytest.raises(ScenarioInputError, match="invalid-scenario-input"):
+        load_scenario_inputs(
+            (),
+            trusted_root=tmp_path,
+            default_directory=Path("scenarios"),
+        )
+
+
+@pytest.mark.parametrize(
+    "directory",
+    [Path("missing"), Path(os.fsdecode(b"invalid-\xff"))],
+)
+def test_default_inventory_normalizes_path_and_open_errors(
+    tmp_path: Path,
+    directory: Path,
+) -> None:
+    with pytest.raises(ScenarioInputError, match="invalid-scenario-input"):
+        load_scenario_inputs(
+            (),
+            trusted_root=tmp_path,
+            default_directory=directory,
+        )
+
+
+def test_scenario_count_cap_accepts_32_and_rejects_33(tmp_path: Path) -> None:
+    directory = tmp_path / "scenarios"
+    directory.mkdir()
+    paths: list[Path] = []
+    for index in range(32):
+        relative = Path("scenarios") / f"case-{index:02}.yaml"
+        (tmp_path / relative).write_bytes(_yaml(f"case-{index:02}"))
+        paths.append(relative)
+    assert (
+        len(
+            load_scenario_inputs(
+                paths,
+                trusted_root=tmp_path,
+                default_directory=Path("scenarios"),
+            )
+        )
+        == len(
+            load_scenario_inputs(
+                (),
+                trusted_root=tmp_path,
+                default_directory=Path("scenarios"),
+            )
+        )
+        == 32
+    )
+    extra = Path("scenarios/case-32.yaml")
+    (tmp_path / extra).write_bytes(_yaml("case-32"))
+    with pytest.raises(ScenarioInputError, match="invalid-scenario-input"):
+        load_scenario_inputs(
+            (*paths, extra),
+            trusted_root=tmp_path,
+            default_directory=Path("scenarios"),
+        )
+    with pytest.raises(ScenarioInputError, match="invalid-scenario-input"):
+        load_scenario_inputs(
+            (),
+            trusted_root=tmp_path,
+            default_directory=Path("scenarios"),
+        )
+
+
+def test_surrogateescaped_filename_is_invalid_input_not_an_assertion(tmp_path: Path) -> None:
+    invalid_name = os.fsdecode(b"invalid-\xff.yaml")
+    result = _run_at(
+        tmp_path,
+        "--scenario",
+        invalid_name,
+        "--turns",
+        "1",
+        "--json",
+    )
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert result.stderr == b"scenario-gate: invalid-input\n"
+
+
+def test_loader_rejects_casefold_logical_collision_on_every_platform(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = iter(
+        (
+            ScenarioInput("a/case.yaml", _yaml(), 1, 1),
+            ScenarioInput("A/CASE.yaml", _yaml(), 1, 2),
+        )
+    )
+
+    def scripted_reader(path: Path, *, trusted_root: Path) -> ScenarioInput:
+        assert path in {Path("first.yaml"), Path("second.yaml")}
+        assert trusted_root == tmp_path
+        return next(values)
+
+    monkeypatch.setattr(scenario_io, "read_scenario_input", scripted_reader)
+    with pytest.raises(ScenarioInputError, match="invalid-scenario-input"):
+        load_scenario_inputs(
+            (Path("first.yaml"), Path("second.yaml")),
+            trusted_root=tmp_path,
+            default_directory=Path("unused"),
+        )
+
+
+def test_loader_rejects_duplicate_logical_scenario_names(tmp_path: Path) -> None:
+    paths = (Path("a/case.yaml"), Path("b/case.yaml"))
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir()
+        target.write_bytes(_yaml())
+    with pytest.raises(ScenarioInputError, match="invalid-scenario-input"):
+        load_scenario_inputs(
+            paths,
+            trusted_root=tmp_path,
+            default_directory=Path("unused"),
+        )
+
+
+@pytest.mark.parametrize(
+    "hook",
+    [
+        "import socket; after=lambda: socket.socket()",
+        "import socket; after=lambda: socket.getaddrinfo('example.invalid', 443)",
+    ],
+)
+def test_network_and_dns_are_denied_after_guard(tmp_path: Path, hook: str) -> None:
+    scenario = tmp_path / "case.yaml"
+    scenario.write_bytes(_yaml())
+    code = (
+        f"{hook}; import sys; from pathlib import Path; "
+        "from scripts.run_scenarios import main; "
+        "raise SystemExit(main(sys.argv[2:], _repository_root=Path(sys.argv[1]), "
+        "_after_guard=after))"
+    )
+    result = _run_at(
+        tmp_path,
+        "--scenario",
+        "case.yaml",
+        "--turns",
+        "1",
+        "--json",
+        code=code,
+    )
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b"scenario-gate: failed\n"
+
+
+@pytest.mark.parametrize(
+    "observer",
+    [
+        "held=[]; observer=lambda _: held.append(os.open('/dev/null', os.O_RDONLY))",
+        "held=[]; observer=lambda _: held.append(asyncio.create_task(asyncio.Event().wait()))",
+    ],
+)
+def test_resource_gate_detects_fd_or_task_leaks(tmp_path: Path, observer: str) -> None:
+    (tmp_path / "case.yaml").write_bytes(_yaml())
+    code = (
+        f"import asyncio, os, sys; {observer}; from pathlib import Path; "
+        "from scripts.run_scenarios import main; "
+        "raise SystemExit(main(sys.argv[2:], _repository_root=Path(sys.argv[1]), "
+        "_turn_observer=observer))"
+    )
+    result = _run_at(
+        tmp_path,
+        "--scenario",
+        "case.yaml",
+        "--turns",
+        "1",
+        "--assert-resource-bounds",
+        "--json",
+        code=code,
+    )
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b"scenario-gate: failed\n"
+
+
+def test_invalid_private_content_is_never_echoed(tmp_path: Path) -> None:
+    sentinel = b"synthetic-private-sentinel-9381"
+    valid = _yaml("private-valid").replace(b"synthetic-namaste", sentinel)
+    (tmp_path / "private-valid.yaml").write_bytes(valid)
+    accepted = _run_at(
+        tmp_path,
+        "--scenario",
+        "private-valid.yaml",
+        "--turns",
+        "1",
+        "--json",
+    )
+    assert accepted.returncode == 0
+    assert sentinel not in accepted.stdout + accepted.stderr
+    (tmp_path / "private-invalid.yaml").write_bytes(b"invalid: " + sentinel + b"\n")
+    rejected = _run_at(
+        tmp_path,
+        "--scenario",
+        "private-invalid.yaml",
+        "--turns",
+        "1",
+        "--json",
+    )
+    assert rejected.returncode == 2
+    assert sentinel not in rejected.stdout + rejected.stderr
 ```
 
 ```python
 # tests/integration/test_deterministic_turn.py
-from pathlib import Path
-from tuntun_testing.scenario import ScenarioRunner
+from __future__ import annotations
 
-def test_scenario_is_byte_deterministic() -> None:
-    path = Path("tests/fixtures/scenarios/guest-hinglish.yaml")
-    first = ScenarioRunner().run(path).canonical_json()
-    second = ScenarioRunner().run(path).canonical_json()
-    assert first == second
-    assert b'"identity":"guest"' in first
-    assert b'"transcript":"synthetic-transcript-hi-en"' in first
+import json
+from pathlib import Path
+
+from tuntun_contracts.base import canonical_mapping_bytes
+from tuntun_testing.scenario import ScenarioRunner
+from tuntun_testing.scenario_io import read_scenario_input
+
+ROOT = Path(__file__).absolute().parents[2]
+SCENARIO = Path("tests/fixtures/scenarios/guest-hinglish.yaml")
+
+
+def test_real_port_chain_is_byte_deterministic_and_observable() -> None:
+    value = read_scenario_input(SCENARIO, trusted_root=ROOT)
+    first = ScenarioRunner().run(value)
+    second = ScenarioRunner().run(value)
+    expected_events = (
+        "wake.detected",
+        "audio.synthetic",
+        "route.authorize",
+        "stt.transcribe",
+        "route.consume",
+        "identity.resolve",
+        "route.authorize",
+        "llm.complete",
+        "route.consume",
+        "route.authorize",
+        "tts.synthesize",
+        "route.consume",
+        "reachy.send",
+        "audit.append",
+    )
+    assert first.canonical_json() == second.canonical_json()
+    assert first.events == expected_events
+    assert first.identity == "guest"
+    assert first.usage.input_audio_bytes == 16
+    assert first.usage.output_audio_bytes == 16
+    decoded = json.loads(first.canonical_json())
+    assert canonical_mapping_bytes(decoded) == first.canonical_json()
+
+
+def test_turn_index_changes_ids_but_remains_deterministic() -> None:
+    value = read_scenario_input(SCENARIO, trusted_root=ROOT)
+    zero = ScenarioRunner().run(value, turn_index=0)
+    one = ScenarioRunner().run(value, turn_index=1)
+    assert zero.turn_id != one.turn_id
+    assert zero.canonical_json() != one.canonical_json()
+    assert ScenarioRunner().run(value, turn_index=1) == one
 ```
 
-`tests/unit/testing/test_scenario_cli.py` must run the script in a subprocess and prove identical canonical JSON for repeated runs, exact exit codes for zero/10,001 turns, a symlink, duplicate normalized paths, malformed/oversized YAML, and any attempted socket or DNS use. It also proves that `--assert-resource-bounds` is accepted in the foundation synthetic runner without weakening the later B2 thresholds.
+```python
+# tests/security/test_scenario_guard.py
+from __future__ import annotations
 
-- [ ] **Step 2: Run the red fake/scenario tests**
+import ast
+import os
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
 
-Run: `uv run pytest tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py -q`
+ROOT = Path(__file__).absolute().parents[2]
+SCRIPT = ROOT / "scripts/run_scenarios.py"
+PYTHON_PATH = os.pathsep.join(
+    str(ROOT / path) for path in ("packages/testing/src", "packages/contracts/src", "apps/core/src")
+)
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_testing.fake_clock'`.
 
-- [ ] **Step 3: Implement deterministic time, fakes, and scenario serialization**
+def _python(code: str) -> subprocess.CompletedProcess[bytes]:
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = PYTHON_PATH
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+
+def test_guard_import_is_stdlib_only_and_allows_asyncio_local_wakeup() -> None:
+    code = """
+import asyncio
+import _socket
+import socket
+import sys
+original_dns = socket.getaddrinfo
+original_socket = socket.socket
+original_socket_type = socket.SocketType
+original_c_socket = _socket.socket
+assert "yaml" not in sys.modules
+assert "tuntun_contracts" not in sys.modules
+assert "tuntun_core" not in sys.modules
+from tuntun_testing.network_guard import NetworkDeniedError, install_network_guard
+assert "yaml" not in sys.modules
+assert "tuntun_contracts" not in sys.modules
+assert "tuntun_core" not in sys.modules
+install_network_guard()
+for call in (
+    lambda: socket.socket(),
+    lambda: socket.getaddrinfo("example.invalid", 443),
+    lambda: original_socket(),
+    lambda: original_socket_type(),
+    lambda: original_c_socket(),
+    lambda: original_dns("example.invalid", 443),
+):
+    try:
+        call()
+    except NetworkDeniedError:
+        pass
+    else:
+        raise AssertionError("network guard bypass")
+asyncio.run(asyncio.sleep(0))
+left, right = socket.socketpair()
+left.close()
+right.close()
+"""
+    result = _python(code)
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert result.stdout == result.stderr == b""
+
+
+def test_testing_is_an_optional_core_extra_and_imports_are_lazy() -> None:
+    core = tomllib.loads((ROOT / "apps/core/pyproject.toml").read_text(encoding="utf-8"))
+    testing = tomllib.loads((ROOT / "packages/testing/pyproject.toml").read_text(encoding="utf-8"))
+    assert "tuntun-testing" not in core["project"]["dependencies"]
+    assert core["project"]["optional-dependencies"]["simulation"] == ["tuntun-testing"]
+    assert core["tool"]["uv"]["sources"]["tuntun-testing"] == {"workspace": True}
+    assert testing["project"]["dependencies"] == ["PyYAML>=6.0,<7", "tuntun-contracts"]
+    for relative in (
+        "apps/core/src/tuntun_core/cli/main.py",
+        "apps/core/src/tuntun_core/cli/commands/simulate.py",
+    ):
+        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+        imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+        assert all("tuntun_testing" not in ast.unparse(node) for node in imports)
+
+
+def test_guard_is_active_before_a_failing_yaml_import_and_error_is_content_free(
+    tmp_path: Path,
+) -> None:
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    marker = tmp_path / "guard-state.txt"
+    (shadow / "yaml.py").write_text(
+        """
+import os
+import socket
+from pathlib import Path
+try:
+    socket.socket()
+except Exception:
+    Path(os.environ["TUNTUN_GUARD_MARKER"]).write_text("guarded", encoding="utf-8")
+else:
+    Path(os.environ["TUNTUN_GUARD_MARKER"]).write_text("unguarded", encoding="utf-8")
+raise RuntimeError("private-import-sentinel")
+""",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": os.pathsep.join((str(shadow), PYTHON_PATH)),
+            "TUNTUN_GUARD_MARKER": str(marker),
+        }
+    )
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    assert marker.read_text(encoding="utf-8") == "guarded"
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b"scenario-gate: failed\n"
+    assert b"traceback" not in result.stderr.lower()
+    assert b"private-import-sentinel" not in result.stdout + result.stderr
+
+
+def test_synthetic_fixture_policy_names_every_data_boundary() -> None:
+    policy = (ROOT / "tests/fixtures/synthetic/README.md").read_text(encoding="utf-8")
+    assert "canonical UUID encoded as 16 bytes" in policy
+    assert "never contain" in policy
+    scenario = (ROOT / "tests/fixtures/scenarios/guest-hinglish.yaml").read_text(encoding="utf-8")
+    assert "synthetic-" in scenario
+    assert "password" not in scenario.casefold()
+```
+
+- [ ] **Step 2: Prove the tests are genuinely red before adding implementation or metadata**
+
+Run from the accepted Task 8 checkout, before creating any Task 9 source or editing either
+`pyproject.toml`:
+
+```bash
+uv run pytest tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py -q
+```
+
+Expected: collection fails with `ModuleNotFoundError` for the first missing Task 9 module
+(`tuntun_testing.fake_clock`, `tuntun_testing.scenario`, or
+`tuntun_testing.network_guard`) and executes zero tests. An import failure for PyYAML,
+Pydantic, Typer, Task 5 contracts, or the Task 7 `types-PyYAML` stub is a predecessor/dependency
+failure, not the accepted RED.
+
+- [ ] **Step 3: Implement exact-signature scripted fakes, deterministic time, the guard, and safe input ownership**
+
+Use the following complete sources. `ExpectedCall`, `ObservedCall`, `ReturnValue`, and
+`RaiseError` are frozen; scripts and public observations are tuples. Argument mismatch does not
+consume an expectation. Every fake can return a valid object, raise an injected exception, or
+return an intentionally malformed object for caller-validation tests. `assert_exhausted()` also
+rejects a TTS iterator that was obtained but never drained. The compatibility aliases
+`FakeIdentity`, `FakeMemory`, and `FakePolicy` retain the original Task 9 public spelling.
 
 ```python
 # packages/testing/src/tuntun_testing/fake_clock.py
-from datetime import UTC, datetime, timedelta
+from __future__ import annotations
+
+import asyncio
+import heapq
+import math
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from itertools import count
+
+
+@dataclass(order=True, slots=True)
+class _ScheduledCall:
+    deadline: float
+    sequence: int
+    callback: Callable[[], None] = field(compare=False, repr=False)
+    cancelled: bool = field(default=False, compare=False)
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
 
 class FakeClock:
     def __init__(self, start: datetime) -> None:
-        if start.tzinfo is None: raise ValueError("start must be timezone-aware")
-        self._now = start.astimezone(UTC); self._monotonic = 0.0; self._calls = 0
+        if start.tzinfo is None or start.utcoffset() is None:
+            raise ValueError("start must be timezone-aware")
+        self._start = start
+        self._monotonic = 0.0
+        self._sequence = count()
+        self._scheduled: list[_ScheduledCall] = []
+        self._calls: list[str] = []
+
     @property
-    def calls(self) -> int: return self._calls
+    def calls(self) -> tuple[str, ...]:
+        return tuple(self._calls)
+
     def now(self) -> datetime:
-        self._calls += 1
-        return self._now
-    def monotonic(self) -> float: return self._monotonic
-    def advance(self, delta: timedelta) -> None:
-        seconds = delta.total_seconds()
-        if seconds < 0: raise ValueError("fake clock cannot move backwards")
-        self._now += delta; self._monotonic += seconds
+        self._calls.append("now")
+        return self._start + timedelta(seconds=self._monotonic)
+
+    def monotonic(self) -> float:
+        self._calls.append("monotonic")
+        return self._monotonic
+
+    def call_later(
+        self,
+        delay: float | timedelta,
+        callback: Callable[[], None],
+    ) -> _ScheduledCall:
+        delay_seconds = self._seconds(delay)
+        handle = _ScheduledCall(
+            self._monotonic + delay_seconds,
+            next(self._sequence),
+            callback,
+        )
+        heapq.heappush(self._scheduled, handle)
+        return handle
+
+    def advance(self, delay: float | timedelta) -> None:
+        seconds = self._seconds(delay)
+        target = self._monotonic + seconds
+        while self._scheduled and self._scheduled[0].deadline <= target:
+            handle = heapq.heappop(self._scheduled)
+            self._monotonic = handle.deadline
+            if not handle.cancelled:
+                handle.callback()
+        self._monotonic = target
+
+    async def sleep(self, seconds: float) -> None:
+        self.advance(seconds)
+        await asyncio.sleep(0)
+
+    @staticmethod
+    def _seconds(delay: float | timedelta) -> float:
+        seconds = delay.total_seconds() if isinstance(delay, timedelta) else delay
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("delay must be finite and non-negative")
+        return seconds
 ```
 
 ```python
 # packages/testing/src/tuntun_testing/fake_providers.py
+from __future__ import annotations
+
 from collections import deque
-from tuntun_contracts.provider import ProviderResponse, SanitizedProviderRequest
+from collections.abc import AsyncIterator, Callable, Iterable
+from dataclasses import dataclass
+from typing import cast
+from uuid import UUID
 
-class FakeLanguageModel:
-    def __init__(self, script: deque[ProviderResponse]) -> None: self.script = script; self.calls: list[SanitizedProviderRequest] = []
+from tuntun_contracts.actions import ActionBinding, ActionReceipt, ValidatedActionProposal
+from tuntun_contracts.audit import AuditDraft, AuditReceipt
+from tuntun_contracts.budget import (
+    BudgetReconciliationRequest,
+    BudgetReservation,
+    BudgetReservationRequest,
+    BudgetSettlement,
+    BudgetSettlementRequest,
+    TransportProof,
+)
+from tuntun_contracts.identity import IdentityDecision, IdentityRequest
+from tuntun_contracts.memory import (
+    ApprovedMemory,
+    DecideMemoryProposal,
+    MemoryProposal,
+    MemoryProposalDraft,
+    MemoryQuery,
+    MemoryRecord,
+    ProposalContext,
+)
+from tuntun_contracts.policy import (
+    AuthContext,
+    AuthenticationChallenge,
+    AuthenticationRequest,
+    AuthenticationResponse,
+    AuthGrant,
+    PolicyDecision,
+    PolicyRequest,
+)
+from tuntun_contracts.ports import AsyncTransactionBoundary
+from tuntun_contracts.provider import (
+    ProviderResponse,
+    RouteAuthorization,
+    RouteAuthorizationRequest,
+    RouteConsumption,
+    SanitizedProviderRequest,
+)
+from tuntun_contracts.speech import (
+    AuthorizedSynthesisRequest,
+    AuthorizedTranscriptionRequest,
+    SpeechChunk,
+    TranscriptResult,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ReturnValue:
+    value: object
+
+
+@dataclass(frozen=True, slots=True)
+class RaiseError:
+    error: BaseException
+
+
+Outcome = ReturnValue | RaiseError
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedCall:
+    operation: str
+    args: tuple[object, ...]
+    outcome: Outcome
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedCall:
+    operation: str
+    args: tuple[object, ...]
+
+
+class ScriptExhaustionError(AssertionError):
+    pass
+
+
+class UnexpectedCallError(AssertionError):
+    pass
+
+
+class _ScriptedFake:
+    def __init__(
+        self,
+        expectations: Iterable[ExpectedCall],
+        observer: Callable[[ObservedCall], None] | None = None,
+    ) -> None:
+        self._expectations = deque(expectations)
+        self._calls: list[ObservedCall] = []
+        self._observer = observer
+
+    @property
+    def calls(self) -> tuple[ObservedCall, ...]:
+        return tuple(self._calls)
+
+    def _take(self, operation: str, args: tuple[object, ...]) -> object:
+        if not self._expectations:
+            raise UnexpectedCallError("unexpected-call")
+        expected = self._expectations[0]
+        if expected.operation != operation or expected.args != args:
+            raise UnexpectedCallError("unexpected-call")
+        self._expectations.popleft()
+        observed = ObservedCall(operation=operation, args=args)
+        self._calls.append(observed)
+        if self._observer is not None:
+            self._observer(observed)
+        if isinstance(expected.outcome, RaiseError):
+            raise expected.outcome.error
+        return expected.outcome.value
+
+    def assert_exhausted(self) -> None:
+        if self._expectations:
+            raise ScriptExhaustionError("script-not-exhausted")
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(remaining={len(self._expectations)})"
+
+
+class FakeSpeechToText(_ScriptedFake):
+    async def transcribe(
+        self,
+        request: AuthorizedTranscriptionRequest,
+        audio: AsyncIterator[bytes],
+    ) -> TranscriptResult:
+        received = bytearray()
+        try:
+            async for chunk in audio:
+                if not isinstance(chunk, bytes):
+                    raise TypeError("invalid-audio-chunk")
+                if len(received) + len(chunk) > request.audio_bytes:
+                    raise ValueError("audio-bound-exceeded")
+                received.extend(chunk)
+            if len(received) != request.audio_bytes:
+                raise ValueError("audio-size-mismatch")
+            return cast(
+                TranscriptResult,
+                self._take("stt.transcribe", (request, bytes(received))),
+            )
+        finally:
+            received[:] = b"\x00" * len(received)
+            received.clear()
+
+
+class FakeTextToSpeech(_ScriptedFake):
+    def __init__(
+        self,
+        expectations: Iterable[ExpectedCall],
+        observer: Callable[[ObservedCall], None] | None = None,
+    ) -> None:
+        super().__init__(expectations, observer)
+        self._next_stream_id = 0
+        self._incomplete_streams: set[int] = set()
+
+    def synthesize(
+        self,
+        request: AuthorizedSynthesisRequest,
+    ) -> AsyncIterator[SpeechChunk]:
+        items = cast(tuple[SpeechChunk | RaiseError, ...], self._take("tts.synthesize", (request,)))
+        stream_id = self._next_stream_id
+        self._next_stream_id += 1
+        self._incomplete_streams.add(stream_id)
+        return self._stream(stream_id, items)
+
+    async def _stream(
+        self,
+        stream_id: int,
+        items: tuple[SpeechChunk | RaiseError, ...],
+    ) -> AsyncIterator[SpeechChunk]:
+        terminal = False
+        try:
+            for item in items:
+                if isinstance(item, RaiseError):
+                    terminal = True
+                    raise item.error
+                if not isinstance(item, SpeechChunk):
+                    terminal = True
+                    raise TypeError("invalid-speech-chunk")
+                yield item
+            terminal = True
+        finally:
+            if terminal:
+                self._incomplete_streams.discard(stream_id)
+
+    def assert_exhausted(self) -> None:
+        super().assert_exhausted()
+        if self._incomplete_streams:
+            raise ScriptExhaustionError("stream-not-exhausted")
+
+
+class FakeLanguageModel(_ScriptedFake):
     async def complete(self, request: SanitizedProviderRequest) -> ProviderResponse:
-        self.calls.append(request)
-        if not self.script: raise AssertionError("unexpected language-model call")
-        return self.script.popleft()
+        return cast(ProviderResponse, self._take("llm.complete", (request,)))
 
-class FakeSpeechToText:
-    def __init__(self, script) -> None: self.script=deque(script); self.calls=[]
-    async def transcribe(self, request, audio):
-        self.calls.append(request); chunks=[chunk async for chunk in audio]
-        if not chunks: raise AssertionError("synthetic audio iterator was empty")
-        if not self.script: raise AssertionError("unexpected STT call")
-        result=self.script.popleft()
-        if isinstance(result, BaseException): raise result
-        return result
 
-class FakeTextToSpeech:
-    def __init__(self, script) -> None: self.script=deque(script); self.calls=[]
-    async def _stream(self, request):
-        self.calls.append(request)
-        if not self.script: raise AssertionError("unexpected TTS call")
-        for item in self.script.popleft():
-            if isinstance(item, BaseException): raise item
-            yield item
-    def synthesize(self, request): return self._stream(request)
+class FakeIdentityFusion(_ScriptedFake):
+    async def resolve(self, request: IdentityRequest) -> IdentityDecision:
+        return cast(IdentityDecision, self._take("identity.resolve", (request,)))
 
-class ScriptedAsyncFake:
-    def __init__(self, script) -> None: self.script=deque(script); self.calls=[]
-    async def call(self, request):
-        self.calls.append(request)
-        if not self.script: raise AssertionError("unexpected fake call")
-        result=self.script.popleft()
-        if isinstance(result, BaseException): raise result
-        return result
 
-class FakeIdentity(ScriptedAsyncFake):
-    async def resolve(self, request): return await self.call(request)
-class FakeMemory(ScriptedAsyncFake):
-    async def create(self, memory, expected_absent=True): return await self.call(("create",memory,expected_absent))
-    async def replace(self, memory_id, expected_version, memory): return await self.call(("replace",memory_id,expected_version,memory))
-    async def delete(self, memory_id, expected_version, auth, approved_proposal_id): return await self.call(("delete",memory_id,expected_version,auth,approved_proposal_id))
-    async def query(self, request): return await self.call(("query",request))
-class FakeMemoryProposalService(ScriptedAsyncFake):
-    async def stage(self, draft, context): return await self.call(("stage",draft,context))
-    async def decide(self, command, auth): return await self.call(("decide",command,auth))
-class FakePolicy(ScriptedAsyncFake):
-    async def decide(self, request): return await self.call(request)
-class FakeAuthentication(ScriptedAsyncFake):
-    async def start(self, request): return await self.call(("start",request))
-    async def verify(self, response): return await self.call(("verify",response))
-    async def consume(self, grant_id, binding): return await self.call(("consume",grant_id,binding))
-class FakeActionProvider(ScriptedAsyncFake):
-    async def execute(self, proposal, auth): return await self.call(("execute",proposal,auth))
-class FakeAudit(ScriptedAsyncFake):
-    async def append(self, uow, draft): return await self.call((uow,draft))
-class FakeBudget(ScriptedAsyncFake):
-    async def reserve(self, request): return await self.call(("reserve",request))
-    async def mark_sent(self, reservation_id, attempt_id): return await self.call(("mark_sent",reservation_id,attempt_id))
-    async def settle(self, request): return await self.call(("settle",request))
-    async def release_unsent(self, reservation_id, attempt_id, proof): return await self.call(("release_unsent",reservation_id,attempt_id,proof))
-    async def reconcile_turn(self, request): return await self.call(("reconcile_turn",request))
-class FakeRouteAuthorizer(ScriptedAsyncFake):
-    async def authorize(self, request): return await self.call(("authorize",request))
-    async def consume(self, authorization_id, consumption): return await self.call(("consume",authorization_id,consumption))
+class FakeMemoryRepository(_ScriptedFake):
+    async def create(
+        self,
+        memory: ApprovedMemory,
+        expected_absent: bool = True,
+    ) -> MemoryRecord:
+        return cast(MemoryRecord, self._take("memory.create", (memory, expected_absent)))
+
+    async def replace(
+        self,
+        memory_id: UUID,
+        expected_version: int,
+        memory: ApprovedMemory,
+    ) -> MemoryRecord:
+        return cast(
+            MemoryRecord,
+            self._take("memory.replace", (memory_id, expected_version, memory)),
+        )
+
+    async def delete(
+        self,
+        memory_id: UUID,
+        expected_version: int,
+        auth: AuthContext,
+        approved_proposal_id: UUID,
+    ) -> None:
+        result = self._take(
+            "memory.delete",
+            (memory_id, expected_version, auth, approved_proposal_id),
+        )
+        if result is not None:
+            raise TypeError("invalid-void-outcome")
+
+    async def query(self, query: MemoryQuery) -> tuple[MemoryRecord, ...]:
+        return cast(tuple[MemoryRecord, ...], self._take("memory.query", (query,)))
+
+
+class FakeMemoryProposalService(_ScriptedFake):
+    async def stage(
+        self,
+        draft: MemoryProposalDraft,
+        context: ProposalContext,
+    ) -> MemoryProposal:
+        return cast(MemoryProposal, self._take("proposal.stage", (draft, context)))
+
+    async def decide(
+        self,
+        command: DecideMemoryProposal,
+        auth: AuthContext,
+    ) -> MemoryProposal:
+        return cast(MemoryProposal, self._take("proposal.decide", (command, auth)))
+
+
+class FakePolicyEngine(_ScriptedFake):
+    async def decide(self, request: PolicyRequest) -> PolicyDecision:
+        return cast(PolicyDecision, self._take("policy.decide", (request,)))
+
+
+class FakeAuthentication(_ScriptedFake):
+    async def start(self, request: AuthenticationRequest) -> AuthenticationChallenge:
+        return cast(AuthenticationChallenge, self._take("auth.start", (request,)))
+
+    async def verify(self, response: AuthenticationResponse) -> AuthGrant:
+        return cast(AuthGrant, self._take("auth.verify", (response,)))
+
+    async def consume(self, grant_id: UUID, binding: ActionBinding) -> AuthContext:
+        return cast(AuthContext, self._take("auth.consume", (grant_id, binding)))
+
+
+class FakeActionProvider(_ScriptedFake):
+    async def execute(
+        self,
+        proposal: ValidatedActionProposal,
+        auth: AuthContext,
+    ) -> ActionReceipt:
+        return cast(ActionReceipt, self._take("action.execute", (proposal, auth)))
+
+
+class FakeAudit(_ScriptedFake):
+    async def append(
+        self,
+        uow: AsyncTransactionBoundary,
+        draft: AuditDraft,
+    ) -> AuditReceipt:
+        return cast(AuditReceipt, self._take("audit.append", (uow, draft)))
+
+
+class FakeBudget(_ScriptedFake):
+    async def reserve(self, request: BudgetReservationRequest) -> BudgetReservation:
+        return cast(BudgetReservation, self._take("budget.reserve", (request,)))
+
+    async def mark_sent(self, reservation_id: UUID, attempt_id: UUID) -> None:
+        result = self._take("budget.mark_sent", (reservation_id, attempt_id))
+        if result is not None:
+            raise TypeError("invalid-void-outcome")
+
+    async def settle(self, request: BudgetSettlementRequest) -> BudgetSettlement:
+        return cast(BudgetSettlement, self._take("budget.settle", (request,)))
+
+    async def release_unsent(
+        self,
+        reservation_id: UUID,
+        attempt_id: UUID,
+        proof: TransportProof,
+    ) -> None:
+        result = self._take("budget.release_unsent", (reservation_id, attempt_id, proof))
+        if result is not None:
+            raise TypeError("invalid-void-outcome")
+
+    async def reconcile_turn(
+        self,
+        request: BudgetReconciliationRequest,
+    ) -> tuple[BudgetSettlement, ...]:
+        return cast(
+            tuple[BudgetSettlement, ...],
+            self._take("budget.reconcile_turn", (request,)),
+        )
+
+
+class FakeRouteAuthorizer(_ScriptedFake):
+    async def authorize(self, request: RouteAuthorizationRequest) -> RouteAuthorization:
+        return cast(RouteAuthorization, self._take("route.authorize", (request,)))
+
+    async def consume(
+        self,
+        authorization_id: UUID,
+        consumption: RouteConsumption,
+    ) -> None:
+        result = self._take("route.consume", (authorization_id, consumption))
+        if result is not None:
+            raise TypeError("invalid-void-outcome")
+
+
+FakeIdentity = FakeIdentityFusion
+FakeMemory = FakeMemoryRepository
+FakePolicy = FakePolicyEngine
 ```
 
 ```python
 # packages/testing/src/tuntun_testing/fake_reachy.py
-from tuntun_contracts.reachy import ReachyCommand, ReachyHealth, ReachyReceipt, ReachyState, SafetyReceipt
+from __future__ import annotations
 
-class FakeReachy:
-    def __init__(self) -> None: self.commands: list[ReachyCommand] = []
+from collections.abc import Callable, Iterable
+from typing import cast
+from uuid import UUID
+
+from tuntun_contracts.reachy import ReachyCommand, ReachyHealth, ReachyReceipt, SafetyReceipt
+
+from .fake_providers import ExpectedCall, ObservedCall, _ScriptedFake
+
+
+class FakeReachy(_ScriptedFake):
+    def __init__(
+        self,
+        expectations: Iterable[ExpectedCall],
+        observer: Callable[[ObservedCall], None] | None = None,
+    ) -> None:
+        super().__init__(expectations, observer)
+
     async def send(self, command: ReachyCommand) -> ReachyReceipt:
-        self.commands.append(command); return ReachyReceipt(command_id=command.command_id, accepted=True, reason_code="fake.accepted")
-    async def health(self) -> ReachyHealth: return ReachyHealth(state=ReachyState.IDLE, daemon_connected=True, queue_depth=0)
-    async def stop_all(self, turn_id): return SafetyReceipt(turn_id=turn_id, playback_stopped=True, motion_stopped=True, buffers_cleared=True)
+        return cast(ReachyReceipt, self._take("reachy.send", (command,)))
+
+    async def health(self) -> ReachyHealth:
+        return cast(ReachyHealth, self._take("reachy.health", ()))
+
+    async def stop_all(self, turn_id: UUID | None) -> SafetyReceipt:
+        return cast(SafetyReceipt, self._take("reachy.stop_all", (turn_id,)))
 ```
 
 ```python
-# packages/testing/src/tuntun_testing/scenario.py
-import json
+# packages/testing/src/tuntun_testing/network_guard.py
+from __future__ import annotations
+
+import socket
+import sys
+from collections.abc import Callable
+from typing import Any, Never
+
+
+class NetworkDeniedError(RuntimeError):
+    pass
+
+
+_ORIGINAL_SOCKET = socket.socket
+_INSTALLED = False
+_BLOCKED_AUDIT_EVENTS = frozenset(
+    {
+        "socket.bind",
+        "socket.connect",
+        "socket.getaddrinfo",
+        "socket.gethostbyaddr",
+        "socket.gethostbyname",
+        "socket.gethostbyname_ex",
+        "socket.getnameinfo",
+        "socket.sendto",
+    }
+)
+
+
+def _deny(*_args: object, **_kwargs: object) -> Never:
+    raise NetworkDeniedError("network access denied")
+
+
+class _GuardedSocket(_ORIGINAL_SOCKET):
+    def __new__(
+        cls,
+        family: int = socket.AF_INET,
+        type: int = socket.SOCK_STREAM,
+        proto: int = 0,
+        fileno: int | None = None,
+    ) -> _GuardedSocket:
+        if family != socket.AF_UNIX:
+            raise NetworkDeniedError("network access denied")
+        return _ORIGINAL_SOCKET.__new__(  # type: ignore[call-arg]
+            cls,
+            family,
+            type,
+            proto,
+            fileno,
+        )
+
+
+def _audit_hook(event: str, args: tuple[Any, ...]) -> None:
+    if event in _BLOCKED_AUDIT_EVENTS:
+        raise NetworkDeniedError("network access denied")
+    if event == "socket.__new__" and len(args) >= 2:
+        family = args[1]
+        if family != socket.AF_UNIX:
+            raise NetworkDeniedError("network access denied")
+
+
+def install_network_guard() -> None:
+    global _INSTALLED
+    if _INSTALLED:
+        return
+    socket.socket = _GuardedSocket  # type: ignore[misc]
+    blocked_functions: tuple[str, ...] = (
+        "create_connection",
+        "getaddrinfo",
+        "getfqdn",
+        "gethostbyaddr",
+        "gethostbyname",
+        "gethostbyname_ex",
+        "gethostname",
+        "getnameinfo",
+    )
+    for name in blocked_functions:
+        setattr(socket, name, _deny)
+    sys.addaudithook(_audit_hook)
+    _INSTALLED = True
+
+
+def guarded(function: Callable[[], int]) -> int:
+    install_network_guard()
+    return function()
+```
+
+```python
+# packages/testing/src/tuntun_testing/scenario_io.py
+from __future__ import annotations
+
+import errno
+import os
+import stat
+import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from itertools import islice
+from pathlib import Path, PurePosixPath
+
+MAX_SCENARIO_BYTES = 65_536
+MAX_SCENARIOS = 32
+
+
+class ScenarioInputError(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioInput:
+    normalized_name: str
+    raw: bytes
+    device: int
+    inode: int
+
+
+_StableIdentity = tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectorySnapshot:
+    identity: _StableIdentity
+    entries: tuple[tuple[str, _StableIdentity], ...]
+
+
+def _fail() -> ScenarioInputError:
+    return ScenarioInputError("invalid-scenario-input")
+
+
+def _validate_part(part: str) -> str:
+    if (
+        not part
+        or part in {".", ".."}
+        or part != unicodedata.normalize("NFC", part)
+        or len(part.encode("utf-8")) > 255
+        or any(ord(character) < 32 or ord(character) == 127 for character in part)
+    ):
+        raise _fail()
+    return part
+
+
+def _relative_parts(path: Path, trusted_root: Path) -> tuple[str, ...]:
+    if not trusted_root.is_absolute():
+        raise _fail()
+    if path.is_absolute():
+        try:
+            relative = path.relative_to(trusted_root)
+        except ValueError as error:
+            raise _fail() from error
+    else:
+        relative = path
+    parts = tuple(_validate_part(part) for part in relative.parts)
+    if not parts:
+        raise _fail()
+    return parts
+
+
+def _open_root(trusted_root: Path) -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open("/", flags)
+    try:
+        for part in trusted_root.parts[1:]:
+            validated = _validate_part(part)
+            next_descriptor = os.open(validated, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_parent(trusted_root: Path, parts: tuple[str, ...]) -> tuple[int, str]:
+    descriptor = _open_root(trusted_root)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        for part in parts[:-1]:
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor, parts[-1]
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _stable_identity(value: os.stat_result) -> _StableIdentity:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _read_exact(descriptor: int, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        try:
+            chunk = os.read(descriptor, min(remaining, 65_536))
+        except OSError as error:
+            if error.errno == errno.EINTR:
+                continue
+            raise
+        if not chunk:
+            raise _fail()
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise _fail()
+    return b"".join(chunks)
+
+
+def _read_scenario_child(
+    parent_descriptor: int,
+    name: str,
+    normalized_name: str,
+    *,
+    max_bytes: int,
+    expected_identity: _StableIdentity | None = None,
+) -> ScenarioInput:
+    descriptor = -1
+    try:
+        if (
+            max_bytes < 1
+            or max_bytes > MAX_SCENARIO_BYTES
+            or _validate_part(name) != name
+            or not name.endswith(".yaml")
+        ):
+            raise _fail()
+        before_path = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if expected_identity is not None and _stable_identity(before_path) != expected_identity:
+            raise _fail()
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_descriptor,
+        )
+        before_fd = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before_fd.st_mode)
+            or before_fd.st_nlink != 1
+            or before_fd.st_size < 1
+            or before_fd.st_size > max_bytes
+            or _stable_identity(before_path) != _stable_identity(before_fd)
+        ):
+            raise _fail()
+        raw = _read_exact(descriptor, before_fd.st_size)
+        after_fd = os.fstat(descriptor)
+        after_path = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if (
+            _stable_identity(before_fd) != _stable_identity(after_fd)
+            or _stable_identity(before_fd) != _stable_identity(after_path)
+            or after_fd.st_nlink != 1
+        ):
+            raise _fail()
+        return ScenarioInput(
+            normalized_name=normalized_name,
+            raw=raw,
+            device=after_fd.st_dev,
+            inode=after_fd.st_ino,
+        )
+    except (OSError, UnicodeError) as error:
+        raise _fail() from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def read_scenario_input(
+    path: Path,
+    *,
+    trusted_root: Path,
+    max_bytes: int = MAX_SCENARIO_BYTES,
+) -> ScenarioInput:
+    parent_descriptor = -1
+    try:
+        parts = _relative_parts(path, trusted_root)
+        parent_descriptor, name = _open_parent(trusted_root, parts)
+        return _read_scenario_child(
+            parent_descriptor,
+            name,
+            PurePosixPath(*parts).as_posix(),
+            max_bytes=max_bytes,
+        )
+    except (OSError, UnicodeError) as error:
+        raise _fail() from error
+    finally:
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+
+
+def _open_directory_descriptor(directory: Path, trusted_root: Path) -> int:
+    descriptor = -1
+    try:
+        parts = _relative_parts(directory, trusted_root)
+        descriptor = _open_root(trusted_root)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        for part in parts:
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except (OSError, UnicodeError) as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise _fail() from error
+
+
+def _directory_snapshot(descriptor: int) -> _DirectorySnapshot:
+    scan_descriptor = -1
+    try:
+        before = _stable_identity(os.fstat(descriptor))
+        scan_descriptor = os.open(
+            ".",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=descriptor,
+        )
+        collected: list[str] = []
+        with os.scandir(scan_descriptor) as entries:
+            for entry in entries:
+                if len(collected) == MAX_SCENARIOS:
+                    raise _fail()
+                collected.append(entry.name)
+        names = tuple(sorted(collected, key=lambda item: item.encode("utf-8")))
+        if not names or any(
+            _validate_part(name) != name or not name.endswith(".yaml") for name in names
+        ):
+            raise _fail()
+        frozen_entries = tuple(
+            (
+                name,
+                _stable_identity(os.stat(name, dir_fd=descriptor, follow_symlinks=False)),
+            )
+            for name in names
+        )
+        after = _stable_identity(os.fstat(descriptor))
+        if after != before:
+            raise _fail()
+        return _DirectorySnapshot(identity=after, entries=frozen_entries)
+    except (OSError, UnicodeError) as error:
+        raise _fail() from error
+    finally:
+        if scan_descriptor >= 0:
+            os.close(scan_descriptor)
+
+
+def _directory_inventory(directory: Path, trusted_root: Path) -> tuple[str, ...]:
+    descriptor = -1
+    try:
+        descriptor = _open_directory_descriptor(directory, trusted_root)
+        return tuple(name for name, _identity in _directory_snapshot(descriptor).entries)
+    except (OSError, UnicodeError) as error:
+        raise _fail() from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _load_default_inputs(
+    *,
+    trusted_root: Path,
+    default_directory: Path,
+) -> tuple[ScenarioInput, ...]:
+    descriptor = -1
+    rebound_descriptor = -1
+    try:
+        parts = _relative_parts(default_directory, trusted_root)
+        descriptor = _open_directory_descriptor(default_directory, trusted_root)
+        before = _directory_snapshot(descriptor)
+        loaded = tuple(
+            _read_scenario_child(
+                descriptor,
+                name,
+                PurePosixPath(*parts, name).as_posix(),
+                max_bytes=MAX_SCENARIO_BYTES,
+                expected_identity=identity,
+            )
+            for name, identity in before.entries
+        )
+        after = _directory_snapshot(descriptor)
+        rebound_descriptor = _open_directory_descriptor(default_directory, trusted_root)
+        rebound_identity = _stable_identity(os.fstat(rebound_descriptor))
+        if after != before or rebound_identity != before.identity:
+            raise _fail()
+        return loaded
+    except (OSError, UnicodeError) as error:
+        raise _fail() from error
+    finally:
+        if rebound_descriptor >= 0:
+            os.close(rebound_descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def load_scenario_inputs(
+    paths: Iterable[Path],
+    *,
+    trusted_root: Path,
+    default_directory: Path,
+) -> tuple[ScenarioInput, ...]:
+    requested = tuple(islice(paths, MAX_SCENARIOS + 1))
+    if len(requested) > MAX_SCENARIOS:
+        raise _fail()
+    if requested:
+        loaded = tuple(read_scenario_input(path, trusted_root=trusted_root) for path in requested)
+    else:
+        loaded = _load_default_inputs(
+            trusted_root=trusted_root,
+            default_directory=default_directory,
+        )
+    names = [item.normalized_name for item in loaded]
+    folded_names = [unicodedata.normalize("NFC", name).casefold() for name in names]
+    logical_names = [name.rsplit("/", 1)[-1].removesuffix(".yaml") for name in names]
+    folded_logical_names = [name.casefold() for name in logical_names]
+    identities = [(item.device, item.inode) for item in loaded]
+    if (
+        len(names) != len(set(names))
+        or len(folded_names) != len(set(folded_names))
+        or len(logical_names) != len(set(logical_names))
+        or len(folded_logical_names) != len(set(folded_logical_names))
+    ):
+        raise _fail()
+    if len(identities) != len(set(identities)):
+        raise _fail()
+    return tuple(sorted(loaded, key=lambda item: item.normalized_name.encode("utf-8")))
+```
+
+`network_guard.py` must remain independently importable while only Python's standard library is
+loaded. Keep `tuntun_testing/__init__.py` minimal in Step 5; eager re-exports would silently break
+this ordering. The guarded socket remains a class so a later standard-library `ssl` import can
+subclass it, blocks creation of IPv4/IPv6 sockets, blocks socket/DNS audit events including calls
+through references captured before installation, and still permits the `AF_UNIX` socketpair used
+by asyncio. `scenario_io.py` is the only scenario path reader: it walks an absolute trusted root
+from `/` with directory descriptors and `O_NOFOLLOW`; rejects lexical escape, non-NFC/control or
+overlong segments, symlinked parents/terminal, non-regular files, hardlinks, duplicate identity,
+casefold/NFC collision, mutation, empty or oversized input; uses `O_NONBLOCK` for FIFO safety; and
+rechecks descriptor/path identity plus the default-directory inventory before returning bytes.
+
+- [ ] **Step 4: Implement strict YAML, the actual fresh-container port chain, JCS documents, and both entry points**
+
+Use these complete sources and fixtures. The YAML language has exactly seven keys, rejects
+directives/tags/anchors/aliases/duplicate keys, is bounded before construction, accepts only
+canonical NFC printable synthetic text, and binds `name` to the descriptor-owned filename.
+`ScenarioRunner` constructs a new clock and all new scripted fakes on every call, authorizes and
+consumes all three provider routes, drains TTS, sends Reachy playback, commits audit, and derives
+ordered events, receipt IDs, and usage from those calls. It never copies a scenario mapping
+directly into a claimed result. The separate `guest_hinglish_scenario()` compatibility fixture is
+an intentionally higher-level workflow fake: its shared mutable event list and dual Task 07 versus
+Task 14/16 call shapes are executed in the focused suite, rather than being a nominal bundle of
+unusable low-level provider scripts.
+
+```python
+# packages/testing/src/tuntun_testing/scenario.py
+from __future__ import annotations
+
+import asyncio
+import re
+import unicodedata
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from typing import Any, Literal, cast
+from uuid import NAMESPACE_URL, UUID, uuid5
+
 import yaml
+from tuntun_contracts.audit import AuditDraft, AuditReceipt
+from tuntun_contracts.base import Commitment, Sensitivity, canonical_mapping_bytes
+from tuntun_contracts.identity import IdentityDecision, IdentityRequest, IdentityStatus
+from tuntun_contracts.ports import AsyncTransactionBoundary
+from tuntun_contracts.provider import (
+    ProviderName,
+    ProviderResponse,
+    RouteAuthorization,
+    RouteAuthorizationRequest,
+    RouteConsumption,
+    SanitizedProviderMessage,
+    SanitizedProviderRequest,
+)
+from tuntun_contracts.reachy import ReachyCommand, ReachyReceipt
+from tuntun_contracts.speech import (
+    AudioFormat,
+    AuthorizedSynthesisRequest,
+    AuthorizedTranscriptionRequest,
+    SpeechChunk,
+    TranscriptResult,
+)
+
+from .fake_clock import FakeClock
+from .fake_providers import (
+    ExpectedCall,
+    FakeAudit,
+    FakeIdentityFusion,
+    FakeLanguageModel,
+    FakeRouteAuthorizer,
+    FakeSpeechToText,
+    FakeTextToSpeech,
+    ObservedCall,
+    ReturnValue,
+    UnexpectedCallError,
+)
+from .fake_reachy import FakeReachy
+from .scenario_io import MAX_SCENARIO_BYTES, ScenarioInput
+
+MAX_YAML_TOKENS = 256
+MAX_YAML_NODES = 128
+MAX_YAML_DEPTH = 8
+_SCENARIO_KEYS = frozenset(
+    {"schema_version", "name", "identity", "transcript", "response", "language", "outcome"}
+)
+_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
+_FIXED_TIME = datetime(2026, 8, 27, tzinfo=UTC)
+_ZERO_COMMITMENT = Commitment(
+    algorithm="HMAC-SHA-256",
+    key_id="scenario-hmac-v1",
+    value_b64="A" * 43 + "=",
+)
+
+
+class ScenarioSchemaError(ValueError):
+    pass
+
+
+class _StrictLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_mapping(
+    loader: _StrictLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if type(key) is not str or key in result:
+            raise ScenarioSchemaError("invalid-scenario-schema")
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioSpec:
+    name: str
+    identity: Literal["guest"]
+    transcript: str
+    response: str
+    language: Literal["en", "hi", "hinglish"]
+    outcome: Literal["completed"]
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioUsage:
+    input_audio_bytes: int
+    transcript_characters: int
+    response_characters: int
+    output_audio_bytes: int
+
+    def to_mapping(self) -> dict[str, int]:
+        return {
+            "input_audio_bytes": self.input_audio_bytes,
+            "output_audio_bytes": self.output_audio_bytes,
+            "response_characters": self.response_characters,
+            "transcript_characters": self.transcript_characters,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class ScenarioResult:
-    events: tuple[str, ...]; identity: str; transcript: str; response: str; audit_outcome: str
+    scenario: str
+    turn_index: int
+    turn_id: UUID
+    identity: str
+    language: str
+    outcome: str
+    transcript: str
+    response: str
+    events: tuple[str, ...]
+    audit_receipt_ids: tuple[UUID, ...]
+    usage: ScenarioUsage
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "audit_receipt_ids": tuple(str(value) for value in self.audit_receipt_ids),
+            "events": self.events,
+            "identity": self.identity,
+            "language": self.language,
+            "outcome": self.outcome,
+            "response": self.response,
+            "scenario": self.scenario,
+            "schema_version": "scenario_result.v1",
+            "transcript": self.transcript,
+            "turn_id": str(self.turn_id),
+            "turn_index": self.turn_index,
+            "usage": self.usage.to_mapping(),
+        }
+
     def canonical_json(self) -> bytes:
-        return json.dumps({"audit_outcome":self.audit_outcome,"events":self.events,"identity":self.identity,"response":self.response,"transcript":self.transcript}, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        return canonical_mapping_bytes(self.to_mapping())
+
+
+@dataclass(frozen=True, slots=True)
+class FoundationResourceEvidence:
+    status: Literal["pass", "not_measured"]
+    fd_baseline: int | None
+    fd_after: int | None
+    fd_delta: int | None
+    pending_tasks_baseline: int | None
+    pending_tasks_after: int | None
+    pending_tasks_delta: int | None
+
+    @classmethod
+    def not_measured(cls) -> FoundationResourceEvidence:
+        return cls("not_measured", None, None, None, None, None, None)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "fd_after": self.fd_after,
+            "fd_baseline": self.fd_baseline,
+            "fd_delta": self.fd_delta,
+            "pending_tasks_after": self.pending_tasks_after,
+            "pending_tasks_baseline": self.pending_tasks_baseline,
+            "pending_tasks_delta": self.pending_tasks_delta,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class B2Evidence:
+    status: Literal["pass", "not_measured"] = "not_measured"
+    warmup_turns: int | None = None
+    terminal_rss_growth_bytes: int | None = None
+    peak_rss_growth_bytes: int | None = None
+    privacy_block_p95_ms: int | None = None
+    private_sentinel_count: int | None = None
+    duplicate_effect_count: int | None = None
+
+    def __post_init__(self) -> None:
+        values = (
+            self.warmup_turns,
+            self.terminal_rss_growth_bytes,
+            self.peak_rss_growth_bytes,
+            self.privacy_block_p95_ms,
+            self.private_sentinel_count,
+            self.duplicate_effect_count,
+        )
+        if self.status == "not_measured":
+            if any(value is not None for value in values):
+                raise ValueError("invalid-b2-evidence")
+            return
+        if (
+            self.status != "pass"
+            or self.warmup_turns != 50
+            or any(value is None or type(value) is not int or value < 0 for value in values)
+        ):
+            raise ValueError("invalid-b2-evidence")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "duplicate_effect_count": self.duplicate_effect_count,
+            "peak_rss_growth_bytes": self.peak_rss_growth_bytes,
+            "privacy_block_p95_ms": self.privacy_block_p95_ms,
+            "private_sentinel_count": self.private_sentinel_count,
+            "status": self.status,
+            "terminal_rss_growth_bytes": self.terminal_rss_growth_bytes,
+            "warmup_turns": self.warmup_turns,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioGateRecord:
+    name: str
+    turns: int
+    result_chain_sha256: str
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "result_chain_sha256": self.result_chain_sha256,
+            "turns": self.turns,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioGateDocument:
+    scenarios: tuple[ScenarioGateRecord, ...]
+    foundation_resources: FoundationResourceEvidence
+    b2: B2Evidence = B2Evidence()
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "b2": self.b2.to_mapping(),
+            "foundation_resources": self.foundation_resources.to_mapping(),
+            "scenarios": tuple(item.to_mapping() for item in self.scenarios),
+            "schema_version": "scenario_gate.v1",
+            "status": "pass",
+        }
+
+    def canonical_json(self) -> bytes:
+        return canonical_mapping_bytes(self.to_mapping())
+
+
+def _bounded_node_count(node: yaml.nodes.Node, depth: int = 1) -> int:
+    if depth > MAX_YAML_DEPTH:
+        raise ScenarioSchemaError("invalid-scenario-schema")
+    if isinstance(node, yaml.nodes.MappingNode):
+        children = [child for pair in node.value for child in pair]
+    elif isinstance(node, yaml.nodes.SequenceNode):
+        children = list(node.value)
+    else:
+        children = []
+    total = 1 + sum(_bounded_node_count(child, depth + 1) for child in children)
+    if total > MAX_YAML_NODES:
+        raise ScenarioSchemaError("invalid-scenario-schema")
+    return total
+
+
+def _strict_text(value: object, *, maximum: int, prefix: str | None = None) -> str:
+    if type(value) is not str:
+        raise ScenarioSchemaError("invalid-scenario-schema")
+    try:
+        normalized = unicodedata.normalize("NFC", value)
+        encoded_length = len(value.encode("utf-8"))
+    except UnicodeError as error:
+        raise ScenarioSchemaError("invalid-scenario-schema") from error
+    if (
+        not value
+        or len(value) > maximum
+        or encoded_length > maximum * 4
+        or value != normalized
+        or not value.isprintable()
+        or (prefix is not None and not value.startswith(prefix))
+    ):
+        raise ScenarioSchemaError("invalid-scenario-schema")
+    return value
+
+
+def parse_scenario(value: ScenarioInput) -> ScenarioSpec:
+    if not 1 <= len(value.raw) <= MAX_SCENARIO_BYTES:
+        raise ScenarioSchemaError("invalid-scenario-schema")
+    try:
+        text = value.raw.decode("utf-8", errors="strict")
+        tokens = list(yaml.scan(text, Loader=_StrictLoader))
+        forbidden = (
+            yaml.tokens.AliasToken,
+            yaml.tokens.AnchorToken,
+            yaml.tokens.DirectiveToken,
+            yaml.tokens.TagToken,
+        )
+        if len(tokens) > MAX_YAML_TOKENS or any(isinstance(token, forbidden) for token in tokens):
+            raise ScenarioSchemaError("invalid-scenario-schema")
+        node = yaml.compose(text, Loader=_StrictLoader)
+        if node is None:
+            raise ScenarioSchemaError("invalid-scenario-schema")
+        _bounded_node_count(node)
+        raw = yaml.load(text, Loader=_StrictLoader)
+    except (
+        UnicodeError,
+        yaml.YAMLError,
+        RecursionError,
+        ValueError,
+        OverflowError,
+    ) as error:
+        raise ScenarioSchemaError("invalid-scenario-schema") from error
+    if type(raw) is not dict or set(raw) != _SCENARIO_KEYS:
+        raise ScenarioSchemaError("invalid-scenario-schema")
+    schema_version = _strict_text(raw["schema_version"], maximum=3)
+    name = _strict_text(raw["name"], maximum=64)
+    identity = _strict_text(raw["identity"], maximum=8)
+    transcript = _strict_text(raw["transcript"], maximum=256, prefix="synthetic-")
+    response = _strict_text(raw["response"], maximum=256, prefix="synthetic-")
+    language = _strict_text(raw["language"], maximum=8)
+    outcome = _strict_text(raw["outcome"], maximum=16)
+    if (
+        schema_version != "1.0"
+        or _NAME_PATTERN.fullmatch(name) is None
+        or value.normalized_name.rsplit("/", 1)[-1] != f"{name}.yaml"
+        or identity != "guest"
+        or language not in {"en", "hi", "hinglish"}
+        or outcome != "completed"
+    ):
+        raise ScenarioSchemaError("invalid-scenario-schema")
+    return ScenarioSpec(
+        name=name,
+        identity="guest",
+        transcript=transcript,
+        response=response,
+        language=cast(Literal["en", "hi", "hinglish"], language),
+        outcome="completed",
+    )
+
+
+class _Boundary:
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioPorts:
+    stt: FakeSpeechToText
+    identity: FakeIdentityFusion
+    llm: FakeLanguageModel
+    tts: FakeTextToSpeech
+    route_authorizer: FakeRouteAuthorizer
+    reachy: FakeReachy
+    audit: FakeAudit
+
+    def assert_exhausted(self) -> None:
+        self.stt.assert_exhausted()
+        self.identity.assert_exhausted()
+        self.llm.assert_exhausted()
+        self.tts.assert_exhausted()
+        self.route_authorizer.assert_exhausted()
+        self.reachy.assert_exhausted()
+        self.audit.assert_exhausted()
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedTurn:
+    ports: ScenarioPorts
+    boundary: AsyncTransactionBoundary
+    wav_bytes: bytes
+    stt_route_request: RouteAuthorizationRequest
+    stt_request: AuthorizedTranscriptionRequest
+    stt_consumption: RouteConsumption
+    identity_request: IdentityRequest
+    reasoning_route_request: RouteAuthorizationRequest
+    provider_request: SanitizedProviderRequest
+    reasoning_consumption: RouteConsumption
+    tts_route_request: RouteAuthorizationRequest
+    synthesis_request: AuthorizedSynthesisRequest
+    tts_consumption: RouteConsumption
+    reachy_command: ReachyCommand
+    audit_draft: AuditDraft
+
+
+@dataclass(frozen=True, slots=True)
+class SyntheticTranscribedTurn:
+    text: str
+    stt_language: Literal["hinglish"] = "hinglish"
+    explicit_reply_language: None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SyntheticProviderTurnContext:
+    messages: tuple[dict[str, str], ...]
+    reply_mode: Literal["hinglish"] = "hinglish"
+    prompt_bundle_sha256: str = "0" * 64
+
+
+class GuestContextProvider:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def prepare(
+        self,
+        turn_id: UUID,
+        transcript: object,
+    ) -> SyntheticProviderTurnContext:
+        text = getattr(transcript, "text", None)
+        if (
+            not isinstance(turn_id, UUID)
+            or type(text) is not str
+            or not text.startswith("synthetic-")
+        ):
+            raise UnexpectedCallError("unexpected-call")
+        self._events.append("identity.guest")
+        return SyntheticProviderTurnContext(
+            messages=(
+                {"role": "system", "content": "synthetic-guest-context"},
+                {"role": "user", "content": text},
+            )
+        )
+
+
+class GuestWorkflowPorts:
+    def __init__(self, events: list[str], wav_bytes: bytes) -> None:
+        self._events = events
+        self._wav_bytes = wav_bytes
+        self._answer = "synthetic-namaste-welcome"
+        self._pcm = UUID("00000000-0000-0000-0000-000000000902").bytes
+
+    async def start(self, turn_id: UUID) -> None:
+        if not isinstance(turn_id, UUID):
+            raise UnexpectedCallError("unexpected-call")
+        self._events.append("session.start")
+
+    async def transcribe(self, wav_bytes: bytes) -> Any:
+        if wav_bytes != self._wav_bytes:
+            raise UnexpectedCallError("unexpected-call")
+        self._events.extend(("stt.reserve", "stt.authorize", "stt.call"))
+        return SyntheticTranscribedTurn(text="synthetic-namaste-hello")
+
+    async def guest_identity(self) -> str:
+        self._events.append("identity.guest")
+        return "guest"
+
+    async def generate(self, *arguments: object) -> str:
+        if len(arguments) not in {1, 2}:
+            raise UnexpectedCallError("unexpected-call")
+        if len(arguments) == 2 and (
+            getattr(arguments[0], "text", None) != "synthetic-namaste-hello"
+            or arguments[1] != "guest"
+        ):
+            raise UnexpectedCallError("unexpected-call")
+        if len(arguments) == 1 and not isinstance(arguments[0], SyntheticProviderTurnContext):
+            raise UnexpectedCallError("unexpected-call")
+        self._events.extend(
+            ("reasoning.sanitize", "reasoning.reserve", "reasoning.authorize", "reasoning.call")
+        )
+        return self._answer
+
+    async def synthesize(self, answer: str) -> bytes:
+        if answer != self._answer:
+            raise UnexpectedCallError("unexpected-call")
+        self._events.extend(("tts.dlp", "tts.reserve", "tts.authorize", "tts.call"))
+        return self._pcm
+
+    async def play(self, turn_id: UUID, pcm: bytes) -> None:
+        if not isinstance(turn_id, UUID) or pcm != self._pcm:
+            raise UnexpectedCallError("unexpected-call")
+        self._events.append("reachy.play")
+
+    async def finish(self, turn_id: UUID) -> None:
+        if not isinstance(turn_id, UUID):
+            raise UnexpectedCallError("unexpected-call")
+        self._events.append("turn.clear")
+
+
+@dataclass(frozen=True, slots=True)
+class GuestScenario:
+    ports: GuestWorkflowPorts
+    wav_bytes: bytes
+    events: list[str]
+    context_provider: GuestContextProvider
+
+
+def _identifier(name: str, turn_index: int, label: str) -> UUID:
+    return uuid5(NAMESPACE_URL, f"tuntun:{name}:{turn_index}:{label}")
+
+
+def _route(
+    spec: ScenarioSpec,
+    turn_index: int,
+    purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"],
+    request_id: UUID,
+    turn_id: UUID,
+    household_id: UUID,
+    session_id: UUID,
+) -> tuple[RouteAuthorizationRequest, RouteAuthorization, RouteConsumption]:
+    attempt_id = _identifier(spec.name, turn_index, f"{purpose}:attempt")
+    authorization_id = _identifier(spec.name, turn_index, f"{purpose}:authorization")
+    model = {
+        "cloud_stt": "synthetic-stt",
+        "cloud_reasoning": "synthetic-llm",
+        "cloud_tts": "synthetic-tts",
+    }[purpose]
+    maximum_bytes = 16 if purpose == "cloud_stt" else 4_096
+    common: dict[str, Any] = {
+        "request_id": request_id,
+        "attempt_id": attempt_id,
+        "purpose": purpose,
+        "household_id": household_id,
+        "subject_id": None,
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "provider": "openai",
+        "model": model,
+        "request_commitment": _ZERO_COMMITMENT,
+        "max_input_bytes": maximum_bytes,
+        "max_input_units": 4_096,
+        "privacy_receipt_id": _identifier(spec.name, turn_index, f"{purpose}:privacy"),
+        "consent_receipt_ids": (_identifier(spec.name, turn_index, f"{purpose}:consent"),),
+        "budget_reservation_id": _identifier(spec.name, turn_index, f"{purpose}:budget"),
+        "maximum_sensitivity": Sensitivity.PUBLIC,
+    }
+    request = RouteAuthorizationRequest(**common)
+    authorization = RouteAuthorization(
+        authorization_id=authorization_id,
+        expires_at=_FIXED_TIME + timedelta(minutes=5),
+        **common,
+    )
+    consumption = RouteConsumption(
+        request_id=request_id,
+        attempt_id=attempt_id,
+        purpose=purpose,
+        household_id=household_id,
+        subject_id=None,
+        session_id=session_id,
+        turn_id=turn_id,
+        provider="openai",
+        model=model,
+        request_commitment=_ZERO_COMMITMENT,
+        input_bytes=maximum_bytes,
+        input_units=1,
+        consumed_at=_FIXED_TIME,
+    )
+    return request, authorization, consumption
+
+
+def _prepare_turn(
+    spec: ScenarioSpec,
+    turn_index: int,
+    observer: Callable[[ObservedCall], None],
+) -> _PreparedTurn:
+    turn_id = _identifier(spec.name, turn_index, "turn")
+    household_id = _identifier(spec.name, turn_index, "household")
+    session_id = _identifier(spec.name, turn_index, "session")
+    wav_bytes = _identifier(spec.name, turn_index, "audio").bytes
+    stt_request_id = _identifier(spec.name, turn_index, "stt:request")
+    reasoning_request_id = _identifier(spec.name, turn_index, "reasoning:request")
+    tts_request_id = _identifier(spec.name, turn_index, "tts:request")
+    stt_route_request, stt_route, stt_consumption = _route(
+        spec, turn_index, "cloud_stt", stt_request_id, turn_id, household_id, session_id
+    )
+    reasoning_route_request, reasoning_route, reasoning_consumption = _route(
+        spec,
+        turn_index,
+        "cloud_reasoning",
+        reasoning_request_id,
+        turn_id,
+        household_id,
+        session_id,
+    )
+    tts_route_request, tts_route, tts_consumption = _route(
+        spec, turn_index, "cloud_tts", tts_request_id, turn_id, household_id, session_id
+    )
+    stt_request = AuthorizedTranscriptionRequest(
+        request_id=stt_request_id,
+        turn_id=turn_id,
+        audio_format=AudioFormat(
+            sample_format="s16le",
+            sample_rate_hz=16_000,
+            channels=1,
+            interleaved=True,
+            channel_layout="mono",
+        ),
+        audio_commitment=_ZERO_COMMITMENT,
+        audio_bytes=len(wav_bytes),
+        duration_ms=1,
+        language_hints=("hi", "en"),
+        route=stt_route,
+    )
+    transcript = TranscriptResult(
+        request_id=stt_request_id,
+        text=spec.transcript,
+        language=spec.language,
+        duration_ms=1,
+    )
+    identity_request = IdentityRequest(
+        household_id=household_id,
+        session_id=session_id,
+        evidence=(),
+    )
+    identity = IdentityDecision(
+        status=IdentityStatus.UNKNOWN,
+        subject_id=None,
+        reason_code="synthetic.guest",
+        expires_at=_FIXED_TIME + timedelta(minutes=5),
+    )
+    provider_request = SanitizedProviderRequest(
+        request_id=reasoning_request_id,
+        provider=ProviderName.OPENAI,
+        model="synthetic-llm",
+        messages=(SanitizedProviderMessage(role="user", content=spec.transcript),),
+        allowed_tools=(),
+        max_output_tokens=128,
+        redaction_receipt_id=_identifier(spec.name, turn_index, "reasoning:redaction"),
+        route=reasoning_route,
+        timeout_ms=1_000,
+    )
+    response = ProviderResponse(
+        request_id=reasoning_request_id,
+        text=spec.response,
+        language=spec.language,
+        provider_usage_receipt_id=_identifier(spec.name, turn_index, "reasoning:usage"),
+    )
+    synthesis_request = AuthorizedSynthesisRequest(
+        request_id=tts_request_id,
+        turn_id=turn_id,
+        text=spec.response,
+        text_commitment=_ZERO_COMMITMENT,
+        segment_index=0,
+        segment_count=1,
+        language=spec.language,
+        dlp_receipt_id=_identifier(spec.name, turn_index, "tts:dlp"),
+        route=tts_route,
+    )
+    speech_chunk = SpeechChunk(
+        request_id=tts_request_id,
+        sequence=0,
+        pcm=_identifier(spec.name, turn_index, "speech").bytes,
+        final=True,
+    )
+    reachy_command = ReachyCommand(
+        command_id=_identifier(spec.name, turn_index, "reachy:command"),
+        turn_id=turn_id,
+        kind="playback",
+        state=None,
+        media_stream_id=_identifier(spec.name, turn_index, "reachy:stream"),
+        gesture_id=None,
+        expires_at=_FIXED_TIME + timedelta(seconds=5),
+    )
+    reachy_receipt = ReachyReceipt(
+        command_id=reachy_command.command_id,
+        accepted=True,
+        reason_code="synthetic.accepted",
+    )
+    audit_draft = AuditDraft(
+        event_id=_identifier(spec.name, turn_index, "audit:event"),
+        occurred_at=_FIXED_TIME,
+        actor_pseudonym="guest",
+        action_code="conversation.completed",
+        outcome=spec.outcome,
+        reason_code="synthetic.completed",
+        correlation_id=turn_id,
+        payload_commitment=_ZERO_COMMITMENT,
+    )
+    audit_receipt = AuditReceipt(
+        receipt_id=_identifier(spec.name, turn_index, "audit:receipt"),
+        ordinal=1,
+        public_hash_hex="0" * 64,
+        hmac_key_id="scenario-hmac-v1",
+        hmac_b64="A" * 43 + "=",
+        occurred_at=_FIXED_TIME,
+    )
+    boundary = _Boundary()
+    route_expectations = (
+        ExpectedCall("route.authorize", (stt_route_request,), ReturnValue(stt_route)),
+        ExpectedCall(
+            "route.consume",
+            (stt_route.authorization_id, stt_consumption),
+            ReturnValue(None),
+        ),
+        ExpectedCall("route.authorize", (reasoning_route_request,), ReturnValue(reasoning_route)),
+        ExpectedCall(
+            "route.consume",
+            (reasoning_route.authorization_id, reasoning_consumption),
+            ReturnValue(None),
+        ),
+        ExpectedCall("route.authorize", (tts_route_request,), ReturnValue(tts_route)),
+        ExpectedCall(
+            "route.consume",
+            (tts_route.authorization_id, tts_consumption),
+            ReturnValue(None),
+        ),
+    )
+    ports = ScenarioPorts(
+        stt=FakeSpeechToText(
+            (ExpectedCall("stt.transcribe", (stt_request, wav_bytes), ReturnValue(transcript)),),
+            observer,
+        ),
+        identity=FakeIdentityFusion(
+            (ExpectedCall("identity.resolve", (identity_request,), ReturnValue(identity)),),
+            observer,
+        ),
+        llm=FakeLanguageModel(
+            (ExpectedCall("llm.complete", (provider_request,), ReturnValue(response)),),
+            observer,
+        ),
+        tts=FakeTextToSpeech(
+            (ExpectedCall("tts.synthesize", (synthesis_request,), ReturnValue((speech_chunk,))),),
+            observer,
+        ),
+        route_authorizer=FakeRouteAuthorizer(route_expectations, observer),
+        reachy=FakeReachy(
+            (ExpectedCall("reachy.send", (reachy_command,), ReturnValue(reachy_receipt)),),
+            observer,
+        ),
+        audit=FakeAudit(
+            (ExpectedCall("audit.append", (boundary, audit_draft), ReturnValue(audit_receipt)),),
+            observer,
+        ),
+    )
+    return _PreparedTurn(
+        ports=ports,
+        boundary=boundary,
+        wav_bytes=wav_bytes,
+        stt_route_request=stt_route_request,
+        stt_request=stt_request,
+        stt_consumption=stt_consumption,
+        identity_request=identity_request,
+        reasoning_route_request=reasoning_route_request,
+        provider_request=provider_request,
+        reasoning_consumption=reasoning_consumption,
+        tts_route_request=tts_route_request,
+        synthesis_request=synthesis_request,
+        tts_consumption=tts_consumption,
+        reachy_command=reachy_command,
+        audit_draft=audit_draft,
+    )
+
+
+async def _audio(value: bytes) -> AsyncIterator[bytes]:
+    yield value
+
 
 class ScenarioRunner:
-    def run(self, path: Path) -> ScenarioResult:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        expected = {"schema_version","audio_token","transcript","identity","response","audit_outcome"}
-        if set(raw) != expected: raise ValueError("scenario keys do not match version 1")
-        return ScenarioResult(("wake","audio","transcript","identity","model","playback","audit"), raw["identity"], raw["transcript"], raw["response"], raw["audit_outcome"])
+    def run(self, value: ScenarioInput, *, turn_index: int = 0) -> ScenarioResult:
+        return asyncio.run(self.run_async(value, turn_index=turn_index))
+
+    async def run_async(self, value: ScenarioInput, *, turn_index: int = 0) -> ScenarioResult:
+        if turn_index < 0 or turn_index > 9_999:
+            raise ValueError("invalid-turn-index")
+        spec = parse_scenario(value)
+        observed: list[ObservedCall] = []
+        prepared = _prepare_turn(spec, turn_index, observed.append)
+        clock = FakeClock(_FIXED_TIME)
+        if clock.now() != _FIXED_TIME:
+            raise AssertionError("clock-mismatch")
+        ports = prepared.ports
+        stt_route = await ports.route_authorizer.authorize(prepared.stt_route_request)
+        if stt_route != prepared.stt_request.route:
+            raise AssertionError("route-mismatch")
+        transcript = await ports.stt.transcribe(prepared.stt_request, _audio(prepared.wav_bytes))
+        await ports.route_authorizer.consume(stt_route.authorization_id, prepared.stt_consumption)
+        identity = await ports.identity.resolve(prepared.identity_request)
+        reasoning_route = await ports.route_authorizer.authorize(prepared.reasoning_route_request)
+        if reasoning_route != prepared.provider_request.route:
+            raise AssertionError("route-mismatch")
+        response = await ports.llm.complete(prepared.provider_request)
+        await ports.route_authorizer.consume(
+            reasoning_route.authorization_id,
+            prepared.reasoning_consumption,
+        )
+        tts_route = await ports.route_authorizer.authorize(prepared.tts_route_request)
+        if tts_route != prepared.synthesis_request.route:
+            raise AssertionError("route-mismatch")
+        chunks = [chunk async for chunk in ports.tts.synthesize(prepared.synthesis_request)]
+        if not chunks or not chunks[-1].final:
+            raise AssertionError("incomplete-speech-stream")
+        await ports.route_authorizer.consume(tts_route.authorization_id, prepared.tts_consumption)
+        reachy_receipt = await ports.reachy.send(prepared.reachy_command)
+        if not reachy_receipt.accepted:
+            raise AssertionError("reachy-rejected")
+        audit_receipt = await ports.audit.append(prepared.boundary, prepared.audit_draft)
+        await prepared.boundary.commit()
+        ports.assert_exhausted()
+        events = ("wake.detected", "audio.synthetic", *(call.operation for call in observed))
+        return ScenarioResult(
+            scenario=spec.name,
+            turn_index=turn_index,
+            turn_id=prepared.stt_request.turn_id,
+            identity=spec.identity if identity.status is IdentityStatus.UNKNOWN else "invalid",
+            language=response.language,
+            outcome=spec.outcome,
+            transcript=transcript.text,
+            response=response.text,
+            events=events,
+            audit_receipt_ids=(audit_receipt.receipt_id,),
+            usage=ScenarioUsage(
+                input_audio_bytes=len(prepared.wav_bytes),
+                transcript_characters=len(transcript.text),
+                response_characters=len(response.text),
+                output_audio_bytes=sum(len(chunk.pcm) for chunk in chunks),
+            ),
+        )
+
+
+def guest_hinglish_scenario(*, turn_index: int = 0) -> GuestScenario:
+    if turn_index < 0 or turn_index > 9_999:
+        raise ValueError("invalid-turn-index")
+    events: list[str] = []
+    wav_bytes = _identifier("guest-hinglish", turn_index, "audio").bytes
+    return GuestScenario(
+        ports=GuestWorkflowPorts(events, wav_bytes),
+        wav_bytes=wav_bytes,
+        events=events,
+        context_provider=GuestContextProvider(events),
+    )
+
+
+def result_chain(results: tuple[ScenarioResult, ...]) -> str:
+    digest = sha256()
+    for result in results:
+        canonical = result.canonical_json()
+        digest.update(len(canonical).to_bytes(8, byteorder="big"))
+        digest.update(canonical)
+    return digest.hexdigest()
+```
+
+```python
+# scripts/run_scenarios.py
+from __future__ import annotations
+
+import argparse
+import asyncio
+import gc
+import inspect
+import os
+import sys
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any, Never
+
+MIN_TURNS = 1
+MAX_TURNS = 10_000
+MAX_TOTAL_TURNS = 10_000
+
+
+class _InputFailure(ValueError):
+    pass
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> Never:
+        raise _InputFailure("invalid-input")
+
+
+def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = _Parser(prog="run_scenarios.py", add_help=True)
+    parser.add_argument("--scenario", action="append", default=[])
+    parser.add_argument("--turns", type=int, required=True)
+    parser.add_argument("--assert-resource-bounds", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    values = parser.parse_args(argv)
+    if not MIN_TURNS <= values.turns <= MAX_TURNS:
+        raise _InputFailure("invalid-input")
+    return values
+
+
+def _fd_count() -> int:
+    directory = next((path for path in ("/proc/self/fd", "/dev/fd") if os.path.isdir(path)), None)
+    if directory is None:
+        raise RuntimeError("fd-measurement-unavailable")
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        entries = tuple(name for name in os.listdir(descriptor) if name.isdecimal())
+        return len(entries) - (1 if str(descriptor) in entries else 0)
+    finally:
+        os.close(descriptor)
+
+
+def _pending_task_count() -> int:
+    current = asyncio.current_task()
+    return sum(1 for task in asyncio.all_tasks() if task is not current and not task.done())
+
+
+async def _execute(
+    inputs: tuple[Any, ...],
+    turns: int,
+    assert_resource_bounds: bool,
+    turn_observer: Callable[[int], object] | None,
+) -> tuple[tuple[Any, ...], Any]:
+    from tuntun_testing.scenario import (
+        FoundationResourceEvidence,
+        ScenarioGateRecord,
+        ScenarioRunner,
+        result_chain,
+    )
+
+    for value in inputs:
+        await ScenarioRunner().run_async(value, turn_index=0)
+    await asyncio.sleep(0)
+    gc.collect()
+    fd_baseline = _fd_count() if assert_resource_bounds else None
+    task_baseline = _pending_task_count() if assert_resource_bounds else None
+    records: list[Any] = []
+    global_turn = 0
+    for value in inputs:
+        results = []
+        for turn_index in range(turns):
+            results.append(await ScenarioRunner().run_async(value, turn_index=turn_index))
+            if turn_observer is not None:
+                observed = turn_observer(global_turn)
+                if inspect.isawaitable(observed):
+                    await observed
+            global_turn += 1
+        records.append(
+            ScenarioGateRecord(
+                name=results[0].scenario,
+                turns=turns,
+                result_chain_sha256=result_chain(tuple(results)),
+            )
+        )
+    await asyncio.sleep(0)
+    gc.collect()
+    if assert_resource_bounds:
+        fd_after = _fd_count()
+        task_after = _pending_task_count()
+        if fd_baseline is None or task_baseline is None:
+            raise AssertionError("resource-measurement-missing")
+        evidence = FoundationResourceEvidence(
+            status="pass",
+            fd_baseline=fd_baseline,
+            fd_after=fd_after,
+            fd_delta=fd_after - fd_baseline,
+            pending_tasks_baseline=task_baseline,
+            pending_tasks_after=task_after,
+            pending_tasks_delta=task_after - task_baseline,
+        )
+        if evidence.fd_delta != 0 or evidence.pending_tasks_delta != 0:
+            raise AssertionError("resource-bound-failed")
+    else:
+        evidence = FoundationResourceEvidence.not_measured()
+    return tuple(records), evidence
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    _after_guard: Callable[[], object] | None = None,
+    _turn_observer: Callable[[int], object] | None = None,
+    _repository_root: Path | None = None,
+) -> int:
+    try:
+        values = _arguments(argv)
+    except _InputFailure:
+        print("scenario-gate: invalid-input", file=sys.stderr)
+        return 2
+    try:
+        from tuntun_testing.network_guard import install_network_guard
+
+        install_network_guard()
+    except Exception:
+        print("scenario-gate: failed", file=sys.stderr)
+        return 1
+    try:
+        if _after_guard is not None:
+            guarded_result = _after_guard()
+            if inspect.isawaitable(guarded_result):
+                raise AssertionError("invalid-guard-hook")
+    except Exception:
+        print("scenario-gate: failed", file=sys.stderr)
+        return 1
+    try:
+        from tuntun_testing.scenario import ScenarioGateDocument, ScenarioSchemaError
+        from tuntun_testing.scenario_io import (
+            ScenarioInputError,
+            load_scenario_inputs,
+        )
+    except Exception:
+        print("scenario-gate: failed", file=sys.stderr)
+        return 1
+    try:
+        repository_root = (
+            Path(__file__).absolute().parent.parent
+            if _repository_root is None
+            else _repository_root
+        )
+        default_directory = Path("tests/fixtures/scenarios")
+        inputs = load_scenario_inputs(
+            (Path(item) for item in values.scenario),
+            trusted_root=repository_root,
+            default_directory=default_directory,
+        )
+        if len(inputs) * values.turns > MAX_TOTAL_TURNS:
+            raise _InputFailure("invalid-input")
+        records, evidence = asyncio.run(
+            _execute(
+                inputs,
+                values.turns,
+                values.assert_resource_bounds,
+                _turn_observer,
+            )
+        )
+        document = ScenarioGateDocument(scenarios=records, foundation_resources=evidence)
+        if values.json:
+            sys.stdout.buffer.write(document.canonical_json() + b"\n")
+        else:
+            print("scenario-gate: PASS")
+        return 0
+    except (_InputFailure, ScenarioInputError, ScenarioSchemaError):
+        print("scenario-gate: invalid-input", file=sys.stderr)
+        return 2
+    except Exception:
+        print("scenario-gate: failed", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 ```
 
 ```python
 # apps/core/src/tuntun_core/cli/commands/simulate.py
-import json
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Annotated
+
 import typer
-from tuntun_testing.scenario import ScenarioRunner
 
-def simulate(scenario: Annotated[Path, typer.Option(exists=True, dir_okay=False)], json_output: bool = typer.Option(False, "--json")) -> None:
-    result=ScenarioRunner().run(scenario)
-    if json_output: typer.echo(result.canonical_json().decode("utf-8"))
-    else: typer.echo(f"scenario: {result.audit_outcome}")
+
+def simulate(
+    scenario: Annotated[Path, typer.Option("--scenario")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Run one synthetic repository scenario with the optional simulation extra."""
+    try:
+        from tuntun_testing.network_guard import install_network_guard
+
+        install_network_guard()
+        from tuntun_testing.scenario import ScenarioRunner
+        from tuntun_testing.scenario_io import read_scenario_input
+    except ImportError:
+        typer.echo("simulation-extra-required", err=True)
+        raise typer.Exit(2) from None
+    try:
+        repository_root = Path(__file__).absolute().parents[6]
+        value = read_scenario_input(scenario, trusted_root=repository_root)
+        result = ScenarioRunner().run(value)
+    except Exception:
+        typer.echo("simulation-invalid-input", err=True)
+        raise typer.Exit(2) from None
+    if json_output:
+        typer.echo(result.canonical_json().decode("utf-8"))
+    else:
+        typer.echo("simulation: PASS")
 ```
-
-Import `simulate` in `cli/main.py` and register it with `app.command("simulate")(simulate)`.
 
 ```yaml
 # tests/fixtures/scenarios/guest-hinglish.yaml
 schema_version: "1.0"
-audio_token: "00000000-0000-0000-0000-000000000401"
-transcript: synthetic-transcript-hi-en
+name: guest-hinglish
 identity: guest
-response: synthetic-response-hi-en
-audit_outcome: completed
+transcript: synthetic-namaste-hello
+response: synthetic-namaste-welcome
+language: hinglish
+outcome: completed
 ```
 
-Add `PyYAML>=6.0,<7` to `packages/testing/pyproject.toml` and export every public fake/scenario class shown above from `tuntun_testing/__init__.py`.
+```markdown
+# tests/fixtures/synthetic/README.md
+# Synthetic fixtures
 
-Implement `scripts/run_scenarios.py` as a thin, import-safe dispatcher over `ScenarioRunner`: bounded reads occur before YAML parsing, the network-deny guard is active before scenario/application imports, every requested turn receives a fresh scripted-fake container, and the process fails closed if a fake has an unconsumed expectation or an unexpected call. The foundation resource assertion is limited to universally available invariants (zero leaked asyncio tasks and zero leaked file descriptors after a warm-up plus collection); C23 owns the production B2 RSS, privacy-latency, sentinel, and duplicate-effect assertions.
+Fixtures in this directory use generated UUIDs and synthetic roles only. They never contain
+recorded media, real names, credentials, addresses, host identifiers, or provider response bodies.
 
-- [ ] **Step 4: Run the green deterministic gate**
+Scenario audio is exactly a canonical UUID encoded as 16 bytes. Scenario text starts with
+`synthetic-`; no fixture is recorded speech or a cloud/provider transcript.
+```
 
-Run: `uv lock && uv run pytest tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py -q && uv run tuntunctl simulate --scenario tests/fixtures/scenarios/guest-hinglish.yaml --json > /tmp/tuntun-scenario-a.json && uv run tuntunctl simulate --scenario tests/fixtures/scenarios/guest-hinglish.yaml --json > /tmp/tuntun-scenario-b.json && cmp /tmp/tuntun-scenario-a.json /tmp/tuntun-scenario-b.json && uv run python scripts/run_scenarios.py --scenario tests/fixtures/scenarios/guest-hinglish.yaml --turns 2 --assert-resource-bounds --json && uv run python scripts/verify_private_data.py tests/fixtures/scenarios`
+The script's imports above the guard are standard-library-only. It installs the guard before
+YAML, contracts, scenario, or application imports. `--turns N` means N fully executed measured
+turns per byte-sorted scenario after one unmeasured warm-up per scenario, and every turn gets a
+fresh runner/fake container. The two underscore-prefixed callback/root seams exist only so
+subprocess tests can prove guard and leak failures; argparse exposes none of them. JSON mode emits
+one newline-terminated `scenario_gate.v1` JCS object and no other stdout. The result-chain digest
+keeps output bounded at 10,000 aggregate measured turns. Input ownership limits every file to
+65,536 bytes, every explicit/default selection to 32 files, and rejects duplicate normalized,
+case-folded, logical scenario names or descriptor identities before execution. Foundation
+evidence measures the open descriptor directory by descriptor, subtracts that known measurement
+FD if listed, excludes only the current/done asyncio task, and requires both deltas to be exactly
+zero. C23 must fill the already-owned B2 fields—including exactly 50 warm-up turns, both RSS
+measurements, privacy-block P95, private-sentinel count, and duplicate-effect count—rather than
+introducing a schema or CLI fork.
 
-Expected: PASS with all deterministic/CLI tests, a `scenario_gate.v1` success document, and `private-data scan: PASS`.
+- [ ] **Step 5: Wire the optional package, lazy CLI, synthetic policy, and repository/dual-host gates**
 
-- [ ] **Step 5: Commit exact Task 9 paths**
+Do not add `tuntun-testing` to normal Core dependencies. Add these exact tables to the accepted
+Task 8 `apps/core/pyproject.toml`, preserving its complete existing runtime dependency list:
+
+```toml
+# apps/core/pyproject.toml -- additive Task 9 tables
+[project.optional-dependencies]
+simulation = ["tuntun-testing"]
+
+[tool.uv.sources]
+tuntun-testing = { workspace = true }
+```
+
+Replace the testing package metadata with the complete file below. PyYAML is a direct dependency
+of the package that imports it; the root `types-PyYAML` installed by Task 7 remains the strict-mypy
+stub. Then run `uv lock` and review `uv.lock`; never edit the lock by hand.
+
+```toml
+# packages/testing/pyproject.toml
+[project]
+name = "tuntun-testing"
+version = "0.1.0.dev0"
+requires-python = "==3.12.*"
+dependencies = ["PyYAML>=6.0,<7", "tuntun-contracts"]
+
+[tool.uv.sources]
+tuntun-contracts = { workspace = true }
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+```
+
+Keep package initialization import-safe and register the Core command exactly as follows. The
+complete `main.py` is still the accepted bootstrap CLI plus only the lazy Task 9 command import
+and registration; `simulate.py` itself has no top-level testing import, so a normal production
+wheel can import the full CLI without the extra.
+
+```python
+# packages/testing/src/tuntun_testing/__init__.py
+__version__: str = "0.1.0.dev0"
+
+__all__ = ("__version__",)
+```
+
+```python
+# apps/core/src/tuntun_core/cli/main.py
+import typer
+from tuntun_core.cli.commands.simulate import simulate
+
+app = typer.Typer(no_args_is_help=True)
+
+
+@app.callback()
+def main() -> None:
+    """Manage local Tuntun development commands."""
+
+
+@app.command()
+def version() -> None:
+    """Print the application version without reading configuration or secrets."""
+    typer.echo("0.1.0.dev0")
+
+
+app.command("simulate")(simulate)
+```
+
+The complete Makefile after Task 9 is below. `scenario-typecheck` includes the owned testing
+source tree so its installed-package resolution stays typed, and keeps the runner plus all four
+Task 9 test files in strict mypy even though the existing source-only `typecheck` target does not
+own those script/test paths. `scenario-check` executes a real two-turn, resource-checked default
+scenario.
+`core-wheel-smoke` uses an unpredictable private directory, validates its cleanup prefix before
+recursive removal, builds exactly one Core wheel, installs it without the `simulation` extra in an
+isolated venv, proves `tuntun_testing` absent, imports the lazy command module, runs `version`, and
+proves invoking `simulate` fails with exit 2. All three are dependencies of `check`, so the
+existing Task 7 matrix executes them natively on `ubuntu-24.04` and `macos-15-intel`.
+
+```make
+# Makefile
+.PHONY: bootstrap format lint typecheck test test-security test-contract web-test web-build web-e2e scenario-typecheck scenario-check core-wheel-smoke check verify-private-data
+bootstrap:
+	uv sync --all-packages
+	pnpm install --frozen-lockfile
+format:
+	uv run ruff format .
+lint:
+	uv run ruff check .
+	pnpm --filter @tuntun/admin lint
+typecheck:
+	uv run mypy apps/core/src apps/edge/src packages/contracts/src packages/testing/src
+	pnpm --filter @tuntun/admin typecheck
+test:
+	uv run pytest -m "not live_cloud and not reachy_hardware" --cov --cov-branch
+test-security:
+	@files="$$(find tests/security -type f -name 'test_*.py' -print 2>/dev/null | sort)"; count="$$(printf '%s\n' "$$files" | sed '/^$$/d' | wc -l | tr -d ' ')"; echo "test-security: $$count discovered files"; if [ "$$count" -gt 0 ]; then uv run pytest $$files -m "not live_cloud and not reachy_hardware"; fi
+test-contract:
+	@files="$$(find tests/contract -type f -name 'test_*.py' -print 2>/dev/null | sort)"; count="$$(printf '%s\n' "$$files" | sed '/^$$/d' | wc -l | tr -d ' ')"; echo "test-contract: $$count discovered files"; if [ "$$count" -gt 0 ]; then uv run pytest $$files; fi
+web-test:
+	pnpm --filter @tuntun/admin --fail-if-no-match test
+web-build:
+	pnpm --filter @tuntun/admin build
+	uv run python scripts/verify_private_data.py apps/admin/dist
+web-e2e:
+	pnpm --filter @tuntun/admin e2e
+verify-private-data:
+	uv run python scripts/verify_private_data.py .
+scenario-typecheck:
+	uv run mypy --python-version 3.12 packages/testing/src scripts/run_scenarios.py tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py
+scenario-check:
+	uv run python scripts/run_scenarios.py --turns 2 --assert-resource-bounds --json
+core-wheel-smoke:
+	@set -eu; base="$${TMPDIR:-/tmp}"; case "$$base" in /*) ;; *) exit 97 ;; esac; while [ "$$base" != / ] && [ "$${base%/}" != "$$base" ]; do base="$${base%/}"; done; prefix="$${base%/}/tuntun-core-wheel."; smoke="$$(mktemp -d "$${prefix}XXXXXX")"; cleanup() { case "$$smoke" in "$$prefix"*) rm -rf -- "$$smoke" ;; *) exit 97 ;; esac; }; trap cleanup 0; UV_CACHE_DIR="$${UV_CACHE_DIR:-$$smoke/uv-cache}" uv build --package tuntun-core --wheel --out-dir "$$smoke/dist"; set -- "$$smoke"/dist/tuntun_core-*.whl; [ "$$#" -eq 1 ] && [ -f "$$1" ]; uv venv --python 3.12 "$$smoke/venv"; uv pip install --python "$$smoke/venv/bin/python" "$$1"; env -u PYTHONPATH "$$smoke/venv/bin/python" -c 'import importlib.util as u; assert u.find_spec("tuntun_testing") is None; from typer.testing import CliRunner; from tuntun_core.cli.main import app; import tuntun_core.cli.commands.simulate; result = CliRunner().invoke(app, ["version"]); assert result.exit_code == 0 and result.stdout == "0.1.0.dev0\n"; missing = CliRunner().invoke(app, ["simulate", "--scenario", "missing.yaml"]); assert missing.exit_code == 2 and missing.stdout == "" and missing.stderr == "simulation-extra-required\n"'
+check: lint typecheck test test-security test-contract web-test web-build verify-private-data scenario-typecheck scenario-check core-wheel-smoke
+```
+
+- [ ] **Step 6: Run focused, packaging, privacy, full-regression, and exact-diff green gates**
+
+Regenerate and synchronize only after all dependency declarations are present:
+
+```bash
+uv lock
+uv sync --all-packages --locked
+```
+
+Run the exact Task 9 static and focused gates (tests are included in strict mypy deliberately):
+
+```bash
+uv run ruff format --check packages/testing/src/tuntun_testing/__init__.py packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/network_guard.py packages/testing/src/tuntun_testing/scenario_io.py packages/testing/src/tuntun_testing/scenario.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py
+uv run ruff check packages/testing/src/tuntun_testing/__init__.py packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/network_guard.py packages/testing/src/tuntun_testing/scenario_io.py packages/testing/src/tuntun_testing/scenario.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py
+uv run mypy --python-version 3.12 packages/testing/src/tuntun_testing/__init__.py packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/network_guard.py packages/testing/src/tuntun_testing/scenario_io.py packages/testing/src/tuntun_testing/scenario.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py
+uv run pytest tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py -q
+```
+
+Expected: Ruff format/check report zero findings, strict Python-3.12 mypy reports zero issues,
+and the focused suite reports exactly `47 passed`. It includes real 10,000-turn and
+two-scenario aggregate-boundary subprocesses, not parser-only upper-bound tests.
+
+Run the owned executable twice from fresh processes and compare bytes inside an unpredictable
+private directory; do not use a fixed `/tmp` filename:
+
+```bash
+(
+set -eu
+scenario_base="${TMPDIR:-/tmp}"
+case "$scenario_base" in /*) ;; *) exit 97 ;; esac
+while [ "$scenario_base" != / ] && [ "${scenario_base%/}" != "$scenario_base" ]; do scenario_base="${scenario_base%/}"; done
+scenario_prefix="${scenario_base%/}/tuntun-scenario."
+scenario_tmp="$(mktemp -d "${scenario_prefix}XXXXXX")"
+case "$scenario_tmp" in "$scenario_prefix"*) ;; *) exit 97 ;; esac
+trap 'rm -rf -- "$scenario_tmp"' 0
+PYTHONHASHSEED=1 TZ=UTC uv run python scripts/run_scenarios.py --scenario tests/fixtures/scenarios/guest-hinglish.yaml --turns 2 --assert-resource-bounds --json >"$scenario_tmp/a.json"
+PYTHONHASHSEED=98765 TZ=Asia/Singapore uv run python scripts/run_scenarios.py --scenario tests/fixtures/scenarios/guest-hinglish.yaml --turns 2 --assert-resource-bounds --json >"$scenario_tmp/b.json"
+cmp "$scenario_tmp/a.json" "$scenario_tmp/b.json"
+SCENARIO_RESULT="$scenario_tmp/a.json" uv run python -c 'import json, os, pathlib; from tuntun_contracts.base import canonical_mapping_bytes; raw=pathlib.Path(os.environ["SCENARIO_RESULT"]).read_bytes(); value=json.loads(raw); assert canonical_mapping_bytes(value)+b"\n" == raw; assert set(value)=={"b2","foundation_resources","scenarios","schema_version","status"}; assert value["schema_version"]=="scenario_gate.v1" and value["status"]=="pass"; assert value["scenarios"]==[{"name":"guest-hinglish","result_chain_sha256":"59477a0065a6700cbc68456ad3dcb7b33a7172403a16ea35b261940d8d7c9e40","turns":2}]; assert value["b2"]=={"duplicate_effect_count":None,"peak_rss_growth_bytes":None,"privacy_block_p95_ms":None,"private_sentinel_count":None,"status":"not_measured","terminal_rss_growth_bytes":None,"warmup_turns":None}; resources=value["foundation_resources"]; assert set(resources)=={"fd_after","fd_baseline","fd_delta","pending_tasks_after","pending_tasks_baseline","pending_tasks_delta","status"}; assert resources["status"]=="pass" and resources["fd_delta"]==resources["pending_tasks_delta"]==0'
+)
+```
+
+Then run all three Makefile gates, the fixture scan, every predecessor regression, and diff
+checks. The full test run gets a second unpredictable private temporary root:
+
+```bash
+(
+set -eu
+make scenario-typecheck
+make scenario-check
+make core-wheel-smoke
+uv run python scripts/verify_private_data.py tests/fixtures/scenarios tests/fixtures/synthetic
+check_base="${TMPDIR:-/tmp}"
+case "$check_base" in /*) ;; *) exit 97 ;; esac
+while [ "$check_base" != / ] && [ "${check_base%/}" != "$check_base" ]; do check_base="${check_base%/}"; done
+check_prefix="${check_base%/}/tuntun-check."
+check_tmp="$(mktemp -d "${check_prefix}XXXXXX")"
+case "$check_tmp" in "$check_prefix"*) ;; *) exit 97 ;; esac
+trap 'rm -rf -- "$check_tmp"' 0
+PYTEST_ADDOPTS="--basetemp=$check_tmp/pytest" make check
+git diff --check
+git status --short
+)
+```
+
+Expected: all three Make targets pass; the production wheel contains/imports Core but not the
+optional testing package; the scanner prints `private-data scan: PASS`; and `make check` retains
+every accepted Task 1–8 node plus the 47 focused Task 9 nodes. The checked
+`scenario_gate.v1` output has the exact closed root/resource/B2/scenario key sets above, exactly
+one scenario record with result-chain digest
+`59477a0065a6700cbc68456ad3dcb7b33a7172403a16ea35b261940d8d7c9e40`, `status="pass"`, zero
+FD/task deltas, and all six C23/B2 metric values null with `status="not_measured"`.
+
+- [ ] **Step 7: Stage and commit exactly the complete Task 9 closure**
 
 ```bash
 git status --short
-git add packages/testing/pyproject.toml packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/scenario.py packages/testing/src/tuntun_testing/__init__.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/fixtures/scenarios/guest-hinglish.yaml tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py uv.lock
+git add Makefile apps/core/pyproject.toml packages/testing/pyproject.toml uv.lock packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/network_guard.py packages/testing/src/tuntun_testing/scenario_io.py packages/testing/src/tuntun_testing/scenario.py packages/testing/src/tuntun_testing/__init__.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/fixtures/scenarios/guest-hinglish.yaml tests/fixtures/synthetic/README.md tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py
 git diff --cached --name-only
+git diff --cached --check
 git diff --cached
 git commit -m "test: add deterministic foundation scenario"
 ```
+
+`git diff --cached --name-only` must equal the 20-entry **Files** list exactly, including generated
+`uv.lock`. No Task 7 configuration fixture, Task 8 Keychain/logging file, generated scenario gate,
+wheel, venv, private temp directory, cache, real audio/transcript, or Task 10 path may be staged.
+
+- [ ] **Step 8: Require same-SHA dual-host acceptance**
+
+Push the exact Task 9 commit through the unchanged Task 7 GitHub Actions matrix. Require both
+`check (ubuntu-24.04)` and `check (macos-15-intel)` for that same SHA. Each job must complete
+`uv sync --all-packages --locked` and `make check`; therefore each independently executes the
+actual scenario chain, strict runner/test mypy target, FD/task measurement, network/DNS subprocess
+tests, 32-scenario and 10,000 aggregate-turn boundaries, private-data scan, and
+production-wheel-without-extra smoke. On each host, repeated same-host executions must be
+byte-identical canonical JCS and must report the exact stable result-chain digest
+`59477a0065a6700cbc68456ad3dcb7b33a7172403a16ea35b261940d8d7c9e40`. The absolute FD/task
+baselines are host/process observations and are not compared byte-for-byte across hosts; their
+status and deltas are. A skipped `scenario-typecheck`, `scenario-check`, or `core-wheel-smoke`, a
+nonzero resource delta, a platform-only pass, or a different stable result-chain digest blocks
+Task 10.
 
 ### Task 10: Implement the governed model registry and CLI
 
