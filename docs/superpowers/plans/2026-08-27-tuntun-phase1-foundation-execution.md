@@ -6785,7 +6785,7 @@ git commit -m "feat(contracts): freeze canonical event primitives"
 **Interfaces:**
 - Consumes: `ContractModel`, `Commitment`, `Sensitivity`, event DTOs, and the sole schema/OpenAPI generators and owned artifact paths from Task 4.
 - Produces the exact public DTOs, enums, discriminated aliases, and runtime-checkable protocols in the complete module listings below. Later plans import those names rather than redefining them.
-- `AsyncTransactionBoundary` is the smallest contracts-owned structural boundary: it exposes only async `commit()` and `rollback()`. `AuditPort` is generic over one private contravariant type variable bound to that boundary, so an implementation may bind the exact richer transaction capability it consumes without narrowing a non-generic port method. Task 14 remains the sole owner of the application `UnitOfWorkProtocol`, `AsyncUnitOfWorkProtocol`, and concrete `AsyncUnitOfWork`; its async protocol and implementation structurally satisfy the boundary. Task 15 binds `AsyncAuditLedger` as `AuditPort[AsyncUnitOfWorkProtocol]` when it delegates through `run_sync`, so no contracts-to-application import, duplicate concrete UoW, or Liskov-incompatible parameter narrowing is introduced. The Task 5 type gate models those exact downstream signatures, and Task 15 must repeat the assignment proof with the actual classes.
+- `AsyncTransactionBoundary` is the smallest contracts-owned structural boundary: it exposes only async `commit()` and `rollback()`. `AuditPort` is generic over one private contravariant type variable bound to that boundary, so an implementation may bind the exact richer transaction capability it consumes without narrowing a non-generic port method. Task 14 remains the sole owner of the application `UnitOfWorkProtocol`, `AsyncUnitOfWorkProtocol`, and concrete `AsyncUnitOfWork`; its async protocol and implementation structurally satisfy the boundary. Task 15 binds `AsyncAuditLedger` as `AuditPort[AsyncUnitOfWorkProtocol]` when it delegates through `run_sync`, so no contracts-to-application import, duplicate concrete UoW, or Liskov-incompatible parameter narrowing is introduced. The Task 5 type gate independently models every Task 14 sync/async unit-of-work method relevant to that boundary and executes the planned `run_sync` delegation body without an inheritance shortcut. This Task 5 repair also augments the frozen Task 15 ledger listing with `_bind_audit_port`, whose real-class return assignment is checked by Task 15's existing application-source `make typecheck` gate.
 - The complete post-Task-5 root registry is the same immutable package-owned sorted singleton established by Task 4, expanded explicitly to exactly 93 `ContractModel` subclasses. Root `__all__` is an explicit 136-name tuple: the 93 registered models, `ContractModel`, 10 enums, 5 type aliases, 18 protocols, and the 9 already-public Task 4 version/constants/errors/functions. Task 5 budget limits and `usage_total` remain module implementation details and are not root exports.
 
 - [ ] **Step 1: Write the red DTO and protocol test**
@@ -6827,7 +6827,7 @@ def valid_action_fields() -> Callable[[str], dict[str, object]]:
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Literal, Protocol, TypeVar, get_origin
@@ -6921,24 +6921,64 @@ from tuntun_contracts.speech import (
 _T = TypeVar("_T")
 
 
-class _PlannedUnitOfWorkProtocol(Protocol):
+class _PlannedExecutable(Protocol):
     pass
 
 
-class _PlannedAsyncUnitOfWorkProtocol(AsyncTransactionBoundary, Protocol):
+class _PlannedCursorResult(Protocol):
+    pass
+
+
+class _PlannedUnitOfWorkProtocol(Protocol):
+    def execute(
+        self,
+        statement: _PlannedExecutable,
+        parameters: Mapping[str, object] | None = None,
+    ) -> _PlannedCursorResult: ...
+
+    def exec_driver_sql(
+        self,
+        statement: str,
+        parameters: tuple[object, ...] | Mapping[str, object] = (),
+    ) -> _PlannedCursorResult: ...
+
+    def commit(self) -> None: ...
+
+    def rollback(self) -> None: ...
+
+
+class _PlannedAsyncUnitOfWorkProtocol(Protocol):
     async def run_sync(
         self,
-        operation: Callable[[_PlannedUnitOfWorkProtocol, _T], _T],
+        operation: Callable[[_PlannedUnitOfWorkProtocol], _T],
     ) -> _T: ...
+
+    def signal_after_commit(self, name: str) -> None: ...
+
+    async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...
+
+
+class _PlannedAuditLedger:
+    def append(
+        self,
+        uow: _PlannedUnitOfWorkProtocol,
+        draft: AuditDraft,
+    ) -> AuditReceipt:
+        raise NotImplementedError
 
 
 class _PlannedAsyncAuditLedger:
+    def __init__(self, ledger: _PlannedAuditLedger) -> None:
+        self._ledger = ledger
+
     async def append(
         self,
         uow: _PlannedAsyncUnitOfWorkProtocol,
         draft: AuditDraft,
     ) -> AuditReceipt:
-        raise NotImplementedError
+        return await uow.run_sync(lambda transaction: self._ledger.append(transaction, draft))
 
 
 def _bind_planned_audit_ledger(
@@ -8079,7 +8119,7 @@ def test_external_ports_are_async() -> None:
 
 
 def test_planned_task_14_15_audit_signatures_bind_to_the_generic_port() -> None:
-    port = _bind_planned_audit_ledger(_PlannedAsyncAuditLedger())
+    port = _bind_planned_audit_ledger(_PlannedAsyncAuditLedger(_PlannedAuditLedger()))
     assert isinstance(port, AuditPort)
 ```
 
@@ -14746,7 +14786,7 @@ git commit -m "feat(storage): add explicit encrypted unit of work"
 
 **Interfaces:**
 - Consumes: `AuditDraft`, `AuditReceipt`, `canonical_bytes`, HMAC key ID/key, the Task 5 project-owned `ClockPort`, the Task 9 `FakeClock`, and the Task 14 project-owned `UnitOfWorkProtocol` or `AsyncUnitOfWorkProtocol`. Audit service modules never import `tuntun_core.adapters`; composition supplies the structurally conforming SQLCipher adapters and an application-owned clock.
-- Produces: `AuditLedger(key_id: str, key: bytes, clock: ClockPort)`; `AuditLedger.append(uow, draft) -> AuditReceipt`; `AsyncAuditLedger.append(uow, draft) -> Awaitable[AuditReceipt]`; `AuditLedger.seal(uow, first_ordinal: int, last_ordinal: int) -> AuditSegment`; `AuditVerifier.verify(connection) -> AuditVerification(valid: bool, count: int, terminal_public_hash_hex: str | None, reason: str)`. `seal` calls the injected clock exactly once, rejects a naive result, normalizes an aware result to UTC, persists the exact six-fractional-digit `YYYY-MM-DDTHH:MM:SS.ffffffZ` value, and returns the same instant as `AuditSegment.sealed_at`; it never reads ambient wall-clock time. `AsyncAuditLedger` delegates through `uow.run_sync` and never opens or commits a transaction. A rotated ledger may append with a new `hmac_key_id`; verification requires every key ID still referenced by a retained receipt/segment.
+- Produces: `AuditLedger(key_id: str, key: bytes, clock: ClockPort)`; `AuditLedger.append(uow, draft) -> AuditReceipt`; `AsyncAuditLedger.append(uow, draft) -> Awaitable[AuditReceipt]`; `AuditLedger.seal(uow, first_ordinal: int, last_ordinal: int) -> AuditSegment`; `AuditVerifier.verify(connection) -> AuditVerification(valid: bool, count: int, terminal_public_hash_hex: str | None, reason: str)`. `seal` calls the injected clock exactly once, rejects a naive result, normalizes an aware result to UTC, persists the exact six-fractional-digit `YYYY-MM-DDTHH:MM:SS.ffffffZ` value, and returns the same instant as `AuditSegment.sealed_at`; it never reads ambient wall-clock time. `AsyncAuditLedger` delegates through `uow.run_sync` and never opens or commits a transaction. Its private `_bind_audit_port(ledger) -> AuditPort[AsyncUnitOfWorkProtocol]` helper returns the ledger unchanged and exists solely so the ordinary application-source mypy gate proves the concrete Task 15 method is a valid implementation of the generic Task 5 port. A rotated ledger may append with a new `hmac_key_id`; verification requires every key ID still referenced by a retained receipt/segment.
 - Chain formula: `public_hash = SHA256(previous_public_hash_bytes || canonical_body_bytes)`; `hmac = HMAC-SHA-256(key, b"tuntun:audit:v1\x00" || public_hash_bytes || canonical_body_bytes)`.
 
 - [ ] **Step 1: Write red chain, tamper, rollback, and concurrency tests**
@@ -14968,7 +15008,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from tuntun_contracts.audit import AuditDraft, AuditReceipt
 from tuntun_contracts.base import canonical_bytes
-from tuntun_contracts.ports import ClockPort
+from tuntun_contracts.ports import AuditPort, ClockPort
 from tuntun_core.services.transactions.protocols import (
     AsyncUnitOfWorkProtocol,UnitOfWorkProtocol,
 )
@@ -15011,6 +15051,11 @@ class AsyncAuditLedger:
         return await uow.run_sync(lambda transaction: self._ledger.append(transaction,draft))
     async def seal(self, uow:AsyncUnitOfWorkProtocol, first_ordinal: int, last_ordinal: int) -> AuditSegment:
         return await uow.run_sync(lambda transaction: self._ledger.seal(transaction,first_ordinal,last_ordinal))
+
+def _bind_audit_port(
+    ledger: AsyncAuditLedger,
+) -> AuditPort[AsyncUnitOfWorkProtocol]:
+    return ledger
 ```
 
 ```python
@@ -15060,7 +15105,7 @@ Write `docs/operations/foundation-storage.md` with startup order: resolve Keycha
 
 Run: `uv run pytest tests/integration/storage tests/unit/audit tests/security/test_audit_tamper.py tests/integration/audit -q && uv run pytest tests/unit/audit tests/security/test_audit_tamper.py tests/integration/audit --cov=tuntun_core.services.audit --cov-branch --cov-fail-under=95 && make lint && make typecheck && make verify-private-data`
 
-Expected: PASS for migration, rollback, chain, trigger, concurrency, initialization, and raw-byte tests; audit branch coverage is at least 95%; all static/private-data gates exit 0.
+Expected: PASS for migration, rollback, chain, trigger, concurrency, initialization, and raw-byte tests; audit branch coverage is at least 95%; `make typecheck` proves the actual `AsyncAuditLedger` return assignment to `AuditPort[AsyncUnitOfWorkProtocol]`; all static/private-data gates exit 0.
 
 - [ ] **Step 5: Commit exact Task 15 paths**
 
