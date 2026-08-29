@@ -6785,7 +6785,7 @@ git commit -m "feat(contracts): freeze canonical event primitives"
 **Interfaces:**
 - Consumes: `ContractModel`, `Commitment`, `Sensitivity`, event DTOs, and the sole schema/OpenAPI generators and owned artifact paths from Task 4.
 - Produces the exact public DTOs, enums, discriminated aliases, and runtime-checkable protocols in the complete module listings below. Later plans import those names rather than redefining them.
-- `AsyncTransactionBoundary` is the smallest contracts-owned structural boundary needed by `AuditPort`: it exposes only async `commit()` and `rollback()`. It is not the concrete unit of work and does not expose adapters, SQLAlchemy, repositories, or `run_sync`. Task 14 remains the sole owner of the application `UnitOfWorkProtocol`, `AsyncUnitOfWorkProtocol`, and concrete `AsyncUnitOfWork`; its async protocol and implementation structurally satisfy this boundary. Task 15 continues to consume the richer Task 14 protocol when it delegates ledger work through `run_sync`, so no contracts-to-application import or duplicate concrete UoW is introduced.
+- `AsyncTransactionBoundary` is the smallest contracts-owned structural boundary: it exposes only async `commit()` and `rollback()`. `AuditPort` is generic over one private contravariant type variable bound to that boundary, so an implementation may bind the exact richer transaction capability it consumes without narrowing a non-generic port method. Task 14 remains the sole owner of the application `UnitOfWorkProtocol`, `AsyncUnitOfWorkProtocol`, and concrete `AsyncUnitOfWork`; its async protocol and implementation structurally satisfy the boundary. Task 15 binds `AsyncAuditLedger` as `AuditPort[AsyncUnitOfWorkProtocol]` when it delegates through `run_sync`, so no contracts-to-application import, duplicate concrete UoW, or Liskov-incompatible parameter narrowing is introduced. The Task 5 type gate models those exact downstream signatures, and Task 15 must repeat the assignment proof with the actual classes.
 - The complete post-Task-5 root registry is the same immutable package-owned sorted singleton established by Task 4, expanded explicitly to exactly 93 `ContractModel` subclasses. Root `__all__` is an explicit 136-name tuple: the 93 registered models, `ContractModel`, 10 enums, 5 type aliases, 18 protocols, and the 9 already-public Task 4 version/constants/errors/functions. Task 5 budget limits and `usage_total` remain module implementation details and are not root exports.
 
 - [ ] **Step 1: Write the red DTO and protocol test**
@@ -6830,7 +6830,7 @@ import inspect
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Literal, get_origin
+from typing import Literal, Protocol, TypeVar, get_origin
 from uuid import UUID
 
 import pytest
@@ -6846,6 +6846,7 @@ from tuntun_contracts.actions import (
     TimerCreateActionDraft,
     TimerTargetActionDraft,
 )
+from tuntun_contracts.audit import AuditDraft, AuditReceipt
 from tuntun_contracts.base import (
     Commitment,
     ContractModel,
@@ -6916,6 +6917,34 @@ from tuntun_contracts.speech import (
     AuthorizedSynthesisRequest,
     AuthorizedTranscriptionRequest,
 )
+
+_T = TypeVar("_T")
+
+
+class _PlannedUnitOfWorkProtocol(Protocol):
+    pass
+
+
+class _PlannedAsyncUnitOfWorkProtocol(AsyncTransactionBoundary, Protocol):
+    async def run_sync(
+        self,
+        operation: Callable[[_PlannedUnitOfWorkProtocol, _T], _T],
+    ) -> _T: ...
+
+
+class _PlannedAsyncAuditLedger:
+    async def append(
+        self,
+        uow: _PlannedAsyncUnitOfWorkProtocol,
+        draft: AuditDraft,
+    ) -> AuditReceipt:
+        raise NotImplementedError
+
+
+def _bind_planned_audit_ledger(
+    ledger: _PlannedAsyncAuditLedger,
+) -> AuditPort[_PlannedAsyncUnitOfWorkProtocol]:
+    return ledger
 
 
 def test_every_registered_contract_model_is_strict_closed_and_frozen() -> None:
@@ -7114,6 +7143,19 @@ def test_memory_proposal_operation_target_shape_is_total_and_unambiguous() -> No
 
     delete = replace | {"operation": "delete", "content": None, "audience": None}
     assert MemoryProposalDraft.model_validate(delete).operation == "delete"
+    for target_memory_id, expected_version in (
+        (None, None),
+        (UUID(int=508), None),
+        (None, 1),
+    ):
+        with pytest.raises(ValidationError):
+            MemoryProposalDraft.model_validate(
+                delete
+                | {
+                    "target_memory_id": target_memory_id,
+                    "expected_version": expected_version,
+                }
+            )
 
 
 def test_budget_request_carries_closed_usage_not_a_caller_cost() -> None:
@@ -8034,6 +8076,11 @@ def test_external_ports_are_async() -> None:
     assert inspect.iscoroutinefunction(AuditPort.append)
     assert inspect.iscoroutinefunction(AsyncTransactionBoundary.commit)
     assert inspect.iscoroutinefunction(AsyncTransactionBoundary.rollback)
+
+
+def test_planned_task_14_15_audit_signatures_bind_to_the_generic_port() -> None:
+    port = _bind_planned_audit_ledger(_PlannedAsyncAuditLedger())
+    assert isinstance(port, AuditPort)
 ```
 
 ```python
@@ -9651,7 +9698,7 @@ class CameraWindowGrant(ContractModel):
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, TypeVar, runtime_checkable
 from uuid import UUID
 
 from pydantic import AwareDatetime
@@ -9843,11 +9890,18 @@ class AsyncTransactionBoundary(Protocol):
     async def rollback(self) -> None: ...
 
 
+_AuditBoundaryT_contra = TypeVar(
+    "_AuditBoundaryT_contra",
+    bound=AsyncTransactionBoundary,
+    contravariant=True,
+)
+
+
 @runtime_checkable
-class AuditPort(Protocol):
+class AuditPort(Protocol[_AuditBoundaryT_contra]):
     async def append(
         self,
-        uow: AsyncTransactionBoundary,
+        uow: _AuditBoundaryT_contra,
         draft: AuditDraft,
     ) -> AuditReceipt: ...
 
@@ -10330,7 +10384,7 @@ MYPYPATH=packages/contracts/src:. uv run mypy --explicit-package-bases --python-
 git diff --check
 ```
 
-Expected: PASS with `84 passed` from the focused pytest command; required enum values match exactly, every asserted port operation is async, `registered_contract_models()` is the immutable sorted 93-model singleton, and root exports contain exactly 136 unique names spanning 10 enums, 5 aliases, and 18 runtime-checkable protocols without exposing Task 5 constants/helpers. Both generated artifacts contain exactly that complete post-DTO public model registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output. Ruff format/check and strict mypy under Python 3.11 semantics report no errors on all 14 Task 5 Python paths.
+Expected: PASS with `91 passed` from the focused pytest command against the reviewed Task 4 generator suite; required enum values match exactly, every asserted port operation is async, the modeled Task 14/15 ledger signature is statically assignable to `AuditPort[_PlannedAsyncUnitOfWorkProtocol]`, `registered_contract_models()` is the immutable sorted 93-model singleton, and root exports contain exactly 136 unique names spanning 10 enums, 5 aliases, and 18 runtime-checkable protocols without exposing Task 5 constants/helpers. Both generated artifacts contain exactly that complete post-DTO public model registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output. Ruff format/check and strict mypy under Python 3.11 semantics report no errors on all 14 Task 5 Python paths.
 
 - [ ] **Step 5: Commit exact Task 5 paths**
 
