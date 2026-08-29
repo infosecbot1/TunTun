@@ -3,6 +3,11 @@ import typer
 app = typer.Typer(no_args_is_help=True)
 
 
+@app.callback()
+def main() -> None:
+    """Manage local Tuntun development commands."""
+
+
 @app.command()
 def version() -> None:
     """Print the application version without reading configuration or secrets."""
