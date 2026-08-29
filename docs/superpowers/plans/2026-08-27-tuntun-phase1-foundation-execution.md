@@ -13806,6 +13806,8 @@ Expected on either supported host: exactly `86 passed, 1 skipped`. The platform-
 # tests/contract/test_v1_fixtures.py
 from __future__ import annotations
 
+# The import split below deliberately bootstraps the uninstalled root namespace.
+# ruff: noqa: E402
 import json
 import os
 import subprocess
@@ -13814,6 +13816,12 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import cast
+
+# The root project is not an installed package; preserve package-import coverage
+# without changing workspace metadata or adding a suite-wide import side effect.
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import pytest
 from tuntun_contracts import (
@@ -13849,7 +13857,6 @@ from scripts.contract_fixture_builders import (
 )
 from scripts.contract_generator_common import open_generated_directory_snapshot
 
-ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = ROOT / "packages/contracts/fixtures/v1"
 EXPECTED_GROUP_MODULES: Mapping[str, tuple[ModuleType, ...]] = {
     "actions": (actions,),
@@ -14501,6 +14508,8 @@ def test_fixture_generator_direct_and_package_check_modes_match() -> None:
 Run: `uv run pytest tests/contract/test_v1_fixtures.py -q -x`
 
 Expected: collection ERROR at `from scripts import contract_fixture_builders, generate_contract_fixtures` with `ImportError: cannot import name 'contract_fixture_builders' from 'scripts'`. Task 5 is complete, so all `tuntun_contracts` imports above it succeed. This is the truthful first RED.
+
+Execution ruling (2026-08-29): the repository's configured `pytest` entrypoint does not place the uninstalled workspace root on `sys.path`. The fixture test therefore owns the same narrow root bootstrap already used by `test_contract_generators.py`; without it the RED stops one boundary too early with `ModuleNotFoundError: No module named 'scripts'` and never proves that the Task 6 owner itself is missing.
 
 - [ ] **Step 7: Implement the exhaustive typed builders and dual-mode generator**
 
@@ -15963,7 +15972,9 @@ Create the two exact privacy documents:
 
 Run: `uv run pytest tests/contract/test_v1_fixtures.py -q -x`
 
-Expected: the registry, exact 51/42 partition, repaired-Task-5 correlation gate, fail-before-write misclassification, exact 93-schema surface, supported-shape matrix, and nine unclaimed-shape rejection nodes pass (15 nodes); the next node fails with `FileNotFoundError` for `packages/contracts/fixtures/v1/actions.json`. That proves the test is not self-generating its oracle.
+Expected: the registry, exact 51/42 partition, repaired-Task-5 correlation gate, fail-before-write misclassification, exact 93-schema surface, supported-shape matrix, and nine unclaimed-shape rejection nodes pass (15 nodes); the next node fails with `AssuranceInputError` carrying `missing-input` while the retained no-follow walker opens the absent `packages/contracts/fixtures/v1` tree. That proves the test is not self-generating its oracle.
+
+Execution ruling (2026-08-29): preserve the shared typed safe-path failure instead of translating this missing-parent RED into a raw `FileNotFoundError`. The typed failure is the established fail-closed boundary and the absent fixture tree is the intended cause.
 
 Run: `uv run python scripts/generate_contract_fixtures.py --write && uv run pytest tests/contract/test_v1_fixtures.py -q`
 
