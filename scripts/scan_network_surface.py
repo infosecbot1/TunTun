@@ -485,6 +485,15 @@ def _is_lan(address: str) -> bool:
     return not value.is_loopback and (value.is_private or value.is_link_local)
 
 
+def _is_public_address(address: str) -> bool:
+    if _is_wildcard(address):
+        return True
+    try:
+        return not ipaddress.ip_address(address).is_loopback
+    except ValueError as error:
+        raise AssuranceInputError(Path("<network>"), "listener-address-invalid", address) from error
+
+
 def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
     try:
         arguments = _parser().parse_args(argv)
@@ -501,6 +510,9 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         ):
             raise ValueError("network selectors must be unique")
         listeners = _listeners(capture_inventory())
+        public_addresses = {
+            listener.address: _is_public_address(listener.address) for listener in listeners
+        }
     except AssuranceInputError as error:
         return incomplete(TOOL, error)
     except (ValueError, TypeError) as error:
@@ -549,7 +561,7 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         if (
             arguments.forbid_camera_public
             and "camera" in owner
-            and not ipaddress.ip_address(listener.address).is_loopback
+            and public_addresses[listener.address]
         ):
             findings.append(AssuranceFinding(root, "camera-public-listener", identity))
     return AssuranceResult(TOOL, True, tuple(findings))

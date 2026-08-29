@@ -931,6 +931,68 @@ def test_network_capture_assigns_stable_native_owner_and_applies_wildcard_policy
     assert scan_network_surface.main(["--root", str(tmp_path), "--forbid-wildcard"]) == 1
 
 
+def test_camera_public_policy_treats_complete_wildcard_listener_as_public(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = scan_network_surface.InventorySnapshot(
+        sockets=(scan_network_surface.SocketRecord("tcp", "*", 8554, 4101, 7001),),
+        processes=(
+            scan_network_surface.ProcessRecord(
+                4101,
+                "python",
+                "camera_source",
+                7001,
+                "Sat Aug 29 16:00:00 2026",
+                "python -m tuntun_camera_source.entrypoint start",
+            ),
+        ),
+        generation=7001,
+        complete=True,
+    )
+    monkeypatch.setattr(scan_network_surface, "capture_inventory", lambda: snapshot)
+    argv = ["--root", str(tmp_path), "--forbid-camera-public"]
+
+    receipt = scan_network_surface.evaluate(argv)
+
+    assert receipt.complete is True
+    assert [(finding.code, finding.detail) for finding in receipt.findings] == [
+        ("camera-public-listener", "*:8554=camera_source")
+    ]
+    assert scan_network_surface.main(argv) == 1
+
+
+def test_camera_public_policy_rejects_non_ip_non_wildcard_address_as_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = scan_network_surface.InventorySnapshot(
+        sockets=(scan_network_surface.SocketRecord("tcp", "synthetic-host", 8554, 4101, 7001),),
+        processes=(
+            scan_network_surface.ProcessRecord(
+                4101,
+                "python",
+                "camera_source",
+                7001,
+                "Sat Aug 29 16:00:00 2026",
+                "python -m tuntun_camera_source.entrypoint start",
+            ),
+        ),
+        generation=7001,
+        complete=True,
+    )
+    monkeypatch.setattr(scan_network_surface, "capture_inventory", lambda: snapshot)
+    argv = ["--root", str(tmp_path), "--forbid-camera-public"]
+
+    receipt = scan_network_surface.evaluate(argv)
+
+    assert receipt.complete is False
+    assert [(finding.code, finding.detail) for finding in receipt.findings] == [
+        ("listener-address-invalid", "synthetic-host")
+    ]
+    assert scan_network_surface.main(argv) == 2
+
+
 def test_network_capture_normalizes_spawn_failure_to_incomplete_exit_two(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
