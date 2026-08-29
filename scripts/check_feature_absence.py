@@ -72,6 +72,16 @@ else:
 
 TOOL = "feature-absence"
 FEATURE_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}")
+REQUIRED_SURFACES = (
+    "src/feature_registry.py",
+    "config/features.json",
+    "api/routes.json",
+    "openapi/openapi.json",
+    "package.json",
+    "apps/admin/dist/assets/app.js",
+    "ipc/services.json",
+    "launchd/services.json",
+)
 
 
 def _parser() -> ClosedArgumentParser:
@@ -163,7 +173,7 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         surfaces = manifest.get("surfaces")
         if not isinstance(features, Mapping) or not isinstance(surfaces, list):
             raise AssuranceInputError(manifest_path, "feature-manifest-invalid")
-        if not all(isinstance(path, str) for path in surfaces):
+        if tuple(surfaces) != REQUIRED_SURFACES:
             raise AssuranceInputError(manifest_path, "surface-inventory-invalid")
         if selected is None:
             selected = tuple(
@@ -216,29 +226,28 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         for feature in selected:
             if feature.encode("utf-8").lower() in lowered:
                 findings.append(AssuranceFinding(path, "feature-registered", feature))
-    if arguments.direct_and_replay:
-        direct_path = root / ".assurance" / "direct_replay.json"
-        raw = files.get(direct_path)
-        if raw is None:
-            try:
-                raw = read_regular_file(direct_path, max_bytes=MAX_REGULAR_FILE_BYTES)
-            except AssuranceInputError as error:
-                return incomplete(TOOL, error)
+    direct_path = root / ".assurance" / "direct_replay.json"
+    raw = files.get(direct_path)
+    if raw is None:
         try:
-            probes = _json(direct_path, raw)
+            raw = read_regular_file(direct_path, max_bytes=MAX_REGULAR_FILE_BYTES)
         except AssuranceInputError as error:
             return incomplete(TOOL, error)
-        expected = {"direct_request": "schema-unsupported", "replay": "no-route"}
-        for name, result in expected.items():
-            record = probes.get(name)
-            if not isinstance(record, Mapping):
-                return AssuranceResult(
-                    TOOL,
-                    False,
-                    (AssuranceFinding(direct_path, "probe-inventory-invalid", name),),
-                )
-            if record.get("result") != result or record.get("side_effects") is not False:
-                findings.append(AssuranceFinding(direct_path, "feature-reachable", name))
+    try:
+        probes = _json(direct_path, raw)
+    except AssuranceInputError as error:
+        return incomplete(TOOL, error)
+    expected = {"direct_request": "schema-unsupported", "replay": "no-route"}
+    for name, result in expected.items():
+        record = probes.get(name)
+        if not isinstance(record, Mapping):
+            return AssuranceResult(
+                TOOL,
+                False,
+                (AssuranceFinding(direct_path, "probe-inventory-invalid", name),),
+            )
+        if record.get("result") != result or record.get("side_effects") is not False:
+            findings.append(AssuranceFinding(direct_path, "feature-reachable", name))
     return AssuranceResult(TOOL, True, tuple(findings))
 
 

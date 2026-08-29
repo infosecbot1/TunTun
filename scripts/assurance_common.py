@@ -8,7 +8,9 @@ import stat
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TypeVar, overload
+
+_Namespace = TypeVar("_Namespace")
 
 MAX_REGULAR_FILE_BYTES = 4 * 1024 * 1024
 MAX_WALK_FILES = 4096
@@ -80,6 +82,33 @@ class ClosedArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         raise ValueError(message)
 
+    @overload
+    def parse_args(
+        self,
+        args: Sequence[str] | None = ...,
+        namespace: None = ...,
+    ) -> argparse.Namespace: ...
+
+    @overload
+    def parse_args(
+        self,
+        args: Sequence[str] | None,
+        namespace: _Namespace,
+    ) -> _Namespace: ...
+
+    @overload
+    def parse_args(self, *, namespace: _Namespace) -> _Namespace: ...
+
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: Any = None,
+    ) -> Any:
+        try:
+            return super().parse_args(args, namespace)
+        except (argparse.ArgumentError, argparse.ArgumentTypeError) as error:
+            raise ValueError(str(error)) from error
+
 
 def finish(result: AssuranceResult) -> int:
     for finding in sorted(result.findings):
@@ -139,18 +168,52 @@ def _open_directory(path: Path) -> tuple[int, os.stat_result]:
         raise
 
 
-def validate_root(path: Path) -> Path:
-    root = lexical_path(path)
-    try:
+@dataclass(slots=True)
+class BoundDirectory:
+    path: Path
+    descriptor: int
+    identity: tuple[int, int, int, int, int, int]
+
+    @classmethod
+    def open(cls, path: Path) -> BoundDirectory:
+        root = lexical_path(path)
         descriptor, opened = _open_directory(root)
         try:
             named = os.stat(root, follow_symlinks=False)
             if not stat.S_ISDIR(named.st_mode) or _identity(named) != _identity(opened):
                 _raise(root, "input-changed-during-scan")
-        finally:
+            return cls(root, descriptor, _identity(opened))
+        except BaseException:
             os.close(descriptor)
+            raise
+
+    def revalidate(self) -> None:
+        try:
+            opened = os.fstat(self.descriptor)
+            named = os.stat(self.path, follow_symlinks=False)
+        except OSError as error:
+            _raise(self.path, "input-changed-during-scan", error.strerror)
+        if not stat.S_ISDIR(named.st_mode) or (
+            _identity(opened) != self.identity or _identity(named) != self.identity
+        ):
+            _raise(self.path, "input-changed-during-scan")
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+
+def validate_root(path: Path) -> Path:
+    root = lexical_path(path)
+    binding: BoundDirectory | None = None
+    try:
+        binding = BoundDirectory.open(root)
     except FileNotFoundError:
         _raise(root, "missing-input")
+    finally:
+        if binding is not None:
+            binding.close()
     return root
 
 
@@ -305,6 +368,61 @@ def _git_source_regular_files(
             binding.close()
 
 
+def _preflight_json(text: str, *, max_depth: int, max_containers: int, max_tokens: int) -> None:
+    containers = 0
+    tokens = 0
+    stack: list[str] = []
+
+    def token() -> None:
+        nonlocal tokens
+        tokens += 1
+        if tokens > max_tokens:
+            raise ValueError("json-token-limit")
+
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character.isspace() or character in {",", ":"}:
+            index += 1
+            continue
+        if character == '"':
+            token()
+            index += 1
+            while index < len(text):
+                if text[index] == "\\":
+                    index += 2
+                    continue
+                if text[index] == '"':
+                    index += 1
+                    break
+                index += 1
+            else:
+                raise ValueError("invalid-json")
+            continue
+        if character in {"{", "["}:
+            token()
+            containers += 1
+            if containers > max_containers:
+                raise ValueError("json-container-limit")
+            stack.append(character)
+            if len(stack) > max_depth:
+                raise ValueError("json-depth-limit")
+            index += 1
+            continue
+        if character in {"}", "]"}:
+            expected = "{" if character == "}" else "["
+            if not stack or stack.pop() != expected:
+                raise ValueError("invalid-json")
+            index += 1
+            continue
+        token()
+        index += 1
+        while index < len(text) and not (text[index].isspace() or text[index] in '{}[],:"'):
+            index += 1
+    if stack:
+        raise ValueError("invalid-json")
+
+
 def parse_json_object(
     raw: bytes, *, max_depth: int, max_containers: int, max_tokens: int
 ) -> Mapping[str, object]:
@@ -312,6 +430,12 @@ def parse_json_object(
         text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ValueError("invalid-utf8") from error
+    _preflight_json(
+        text,
+        max_depth=max_depth,
+        max_containers=max_containers,
+        max_tokens=max_tokens,
+    )
 
     def pairs(values: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}

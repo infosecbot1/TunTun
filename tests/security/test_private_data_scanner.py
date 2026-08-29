@@ -3,7 +3,7 @@ import os
 import socket
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -68,6 +68,46 @@ def test_source_root_omits_git_ignored_tool_cache_and_pnpm_outputs(
     (pnpm / ".pnpm" / "synthetic").mkdir(parents=True)
     (pnpm / "synthetic").symlink_to(".pnpm/synthetic", target_is_directory=True)
     assert scan(root) == ()
+
+
+def test_ignored_membership_operations_are_proportional_to_paths_and_depth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    (root / ".gitignore").write_text("ignored-*.txt\n", encoding="utf-8")
+    _git(root, "add", ".gitignore")
+    ignored_count = 256
+    for index in range(ignored_count):
+        (root / f"ignored-{index:04d}.txt").write_text("synthetic\n", encoding="utf-8")
+    binding = private_data_scanner.RootBinding.open(root)
+    classification = private_data_scanner._classify_root(binding)
+    repository = classification.repository
+    assert repository is not None
+    assert classification.scope is not None
+    try:
+        snapshot = private_data_scanner._capture_source_snapshot(
+            repository,
+            classification.scope,
+        )
+    finally:
+        repository.close()
+        binding.close()
+
+    comparisons = 0
+    original_equality = PurePosixPath.__eq__
+
+    def counted_equality(self, other):
+        nonlocal comparisons
+        comparisons += 1
+        return original_equality(self, other)
+
+    monkeypatch.setattr(PurePosixPath, "__eq__", counted_equality)
+    probes = tuple(PurePosixPath(f"src/level/branch/probe-{index:04d}.txt") for index in range(128))
+
+    assert not any(private_data_scanner._ignored_by_snapshot(probe, snapshot) for probe in probes)
+    maximum_path_depth = max(len(probe.parts) for probe in probes)
+    assert comparisons <= len(probes) * (maximum_path_depth + 1)
 
 
 def test_nonignored_source_subtree_uses_git_inventory(tmp_path: Path) -> None:
@@ -602,6 +642,58 @@ def test_history_mode_scans_compressed_archive_objects_with_the_shared_engine(
     assert any(finding.code == "credential-pattern" for finding in receipt.findings)
 
 
+@pytest.mark.parametrize("damage", ("missing", "corrupt"))
+def test_history_mode_rejects_damaged_reachable_object_and_still_scans_orphans(
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    root = _source_repository(tmp_path)
+    historical = root / "historical.txt"
+    historical.write_text("synthetic historical payload\n", encoding="utf-8")
+    _git(root, "add", "historical.txt")
+    _git(
+        root,
+        "-c",
+        "user.name=synthetic",
+        "-c",
+        "user.email=synthetic@example.invalid",
+        "commit",
+        "-qm",
+        "synthetic historical state",
+    )
+    historical_oid = _git(root, "rev-parse", "HEAD:historical.txt").strip().decode("ascii")
+    historical.write_text("synthetic current payload\n", encoding="utf-8")
+    _git(root, "add", "historical.txt")
+    _git(
+        root,
+        "-c",
+        "user.name=synthetic",
+        "-c",
+        "user.email=synthetic@example.invalid",
+        "commit",
+        "-qm",
+        "synthetic current state",
+    )
+    _git(root, "hash-object", "-w", "--stdin", input_bytes=_credential(b"O"))
+    historical_object = root / ".git" / "objects" / historical_oid[:2] / historical_oid[2:]
+    assert historical_object.is_file()
+    if damage == "missing":
+        historical_object.unlink()
+    else:
+        historical_object.chmod(0o600)
+        historical_object.write_bytes(b"synthetic-corrupt-object")
+    argv = ["--paths", str(root), "--include-git-history"]
+
+    receipt = private_data_cli.evaluate(argv)
+
+    assert receipt.complete is False
+    assert receipt.exit_code() == 2
+    if damage == "missing":
+        assert any(finding.code == "credential-pattern" for finding in receipt.findings)
+        assert any(finding.code == "git-history-object-missing" for finding in receipt.findings)
+    assert private_data_cli.main(argv) == 2
+
+
 def test_git_batch_trailing_stdout_is_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -757,6 +849,14 @@ def test_duplicate_or_alias_roots_block_before_scanning(
     assert scan((first, second)) == (
         private_data_scanner.Finding(second.absolute(), "duplicate-root"),
     )
+
+
+def test_private_data_cli_maps_unsupported_root_scope_to_incomplete_exit_two() -> None:
+    receipt = private_data_cli.evaluate(["--paths", "/"])
+
+    assert receipt.complete is False
+    assert [finding.code for finding in receipt.findings] == ["root-scope-unsupported"]
+    assert private_data_cli.main(["--paths", "/"]) == 2
 
 
 def test_one_budget_spans_mixed_source_and_artifact_roots(

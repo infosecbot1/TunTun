@@ -129,30 +129,67 @@ def _resolve_relative(module: str, is_package: bool, level: int, target: str | N
 
 
 def _imports(
-    module: ast.Module, current: str, is_package: bool
+    module: ast.Module, current: str, is_package: bool, modules: set[str]
 ) -> Iterable[tuple[str | None, str]]:
+    importlib_aliases = {"importlib"}
+    import_module_aliases: set[str] = set()
+    builtins_aliases: set[str] = set()
+    builtin_import_aliases = {"__import__"}
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            importlib_aliases.update(
+                alias.asname or alias.name for alias in node.names if alias.name == "importlib"
+            )
+            builtins_aliases.update(
+                alias.asname or alias.name for alias in node.names if alias.name == "builtins"
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "importlib":
+            import_module_aliases.update(
+                alias.asname or alias.name for alias in node.names if alias.name == "import_module"
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "builtins":
+            builtin_import_aliases.update(
+                alias.asname or alias.name for alias in node.names if alias.name == "__import__"
+            )
     for node in ast.walk(module):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield alias.name, "import"
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                yield _resolve_relative(current, is_package, node.level, node.module), "relative"
+                base = _resolve_relative(current, is_package, node.level, node.module)
+                kind = "relative"
             elif node.module is not None:
-                yield node.module, "from"
+                base = node.module
+                kind = "from"
+            else:
+                base = None
+                kind = "relative"
+            if base is None:
+                yield None, kind
+                continue
+            for alias in node.names:
+                candidate = f"{base}.{alias.name}" if alias.name != "*" else base
+                yield candidate if _local_resolution(candidate, modules) else base, kind
         elif isinstance(node, ast.Call):
-            dynamic = False
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "__import__"
+            dynamic = (
+                (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id in (builtin_import_aliases | import_module_aliases)
+                )
                 or (
                     isinstance(node.func, ast.Attribute)
                     and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "importlib"
+                    and node.func.value.id in importlib_aliases
                     and node.func.attr == "import_module"
                 )
-            ):
-                dynamic = True
+                or (
+                    isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in builtins_aliases
+                    and node.func.attr == "__import__"
+                )
+            )
             if dynamic:
                 if (
                     not node.args
@@ -242,7 +279,7 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         if sum(1 for _ in ast.walk(syntax)) > MAX_AST_NODES:
             return AssuranceResult(TOOL, False, (AssuranceFinding(path, "ast-node-limit"),))
         is_package = path.name == "__init__.py"
-        for target, kind in _imports(syntax, module_name, is_package):
+        for target, kind in _imports(syntax, module_name, is_package, modules):
             if target is None:
                 findings.append(AssuranceFinding(path, kind, module_name))
                 continue

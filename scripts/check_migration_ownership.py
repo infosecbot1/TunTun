@@ -197,7 +197,14 @@ def graph_findings(
     if forbid_forks:
         for parent, count in child_counts.items():
             if count > 1:
-                findings.append(AssuranceFinding(unique[parent].path, "migration-fork", parent))
+                parent_node = unique.get(parent)
+                findings.append(
+                    AssuranceFinding(
+                        parent_node.path if parent_node is not None else inventory.root,
+                        "migration-fork",
+                        parent,
+                    )
+                )
     return tuple(findings)
 
 
@@ -261,6 +268,17 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
             )
         else:
             requested_nodes.append(matches[0])
+    if len(requested_nodes) == len(revisions) and any(
+        node.down_revisions != (previous.revision,)
+        for previous, node in zip(requested_nodes, requested_nodes[1:], strict=False)
+    ):
+        findings.append(
+            AssuranceFinding(
+                inventory.root,
+                "requested-revision-order-mismatch",
+                ",".join(revisions),
+            )
+        )
     if arguments.exact_head is not None:
         children = Counter(parent for node in inventory.nodes for parent in node.down_revisions)
         heads = [node.revision for node in inventory.nodes if children[node.revision] == 0]

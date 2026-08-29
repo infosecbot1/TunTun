@@ -8,7 +8,8 @@ import selectors
 import subprocess
 import time
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -52,6 +53,29 @@ PROBE_TIMEOUT_SECONDS = 10.0
 MAX_PROBE_STREAM_BYTES = 4 * 1024 * 1024
 SAFE_ENVIRONMENT = {"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
 OWNER = re.compile(r"[a-z][a-z0-9_]{0,63}")
+PROCESS_ROW = re.compile(
+    r"^\s*(?P<pid>[0-9]+)\s+"
+    r"(?P<started>\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+"
+    r"(?P<command>\S.*)$"
+)
+PROCESS_COMMAND = ("ps", "-ww", "-axo", "pid=,lstart=,args=")
+SERVICE_OWNERS = ("camera_source", "core", "media_proxy", "owner_ingress", "recorder")
+GENERIC_EXECUTABLES = {
+    "bash",
+    "bun",
+    "dash",
+    "deno",
+    "env",
+    "java",
+    "node",
+    "nodejs",
+    "perl",
+    "php",
+    "ruby",
+    "sh",
+    "uv",
+    "zsh",
+}
 
 
 @dataclass(frozen=True)
@@ -69,6 +93,8 @@ class ProcessRecord:
     executable: str
     service_owner: str
     generation: int
+    identity: str = ""
+    command: str = ""
 
 
 @dataclass(frozen=True)
@@ -95,21 +121,22 @@ class ProbeError(RuntimeError):
 
 
 def _bounded_command(argv: tuple[str, ...]) -> bytes:
-    process = subprocess.Popen(
-        argv,
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=SAFE_ENVIRONMENT,
-    )
-    assert process.stdout is not None and process.stderr is not None
+    process: subprocess.Popen[bytes] | None = None
     selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
     streams: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     deadline = time.monotonic() + PROBE_TIMEOUT_SECONDS
     try:
+        process = subprocess.Popen(
+            argv,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=SAFE_ENVIRONMENT,
+        )
+        assert process.stdout is not None and process.stderr is not None
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -131,9 +158,11 @@ def _bounded_command(argv: tuple[str, ...]) -> bytes:
         raise ProbeError("probe-unavailable") from error
     finally:
         selector.close()
-        if process.poll() is None:
-            process.kill()
-        process.wait()
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            with suppress(subprocess.SubprocessError):
+                process.wait(timeout=1.0)
 
 
 def _split_endpoint(value: str) -> tuple[str, int]:
@@ -154,83 +183,142 @@ def _split_endpoint(value: str) -> tuple[str, int]:
     return address, port
 
 
-def _capture_linux(generation: int) -> InventorySnapshot:
-    socket_raw = _bounded_command(("ss", "-H", "-lntup"))
-    process_raw = _bounded_command(("ps", "-axo", "pid=,comm="))
+def _service_owner(executable: str, command: str) -> str:
+    candidates: set[str] = set()
+    for raw in (executable, *re.findall(r"[A-Za-z0-9_./-]+", command)):
+        token = Path(raw).name.lower().removesuffix(".py").replace("-", "_")
+        for owner in SERVICE_OWNERS:
+            if token in {owner, f"tuntun_{owner}"} or token.startswith(f"tuntun_{owner}."):
+                candidates.add(owner)
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if candidates:
+        return ""
+    native = re.sub(r"[^a-z0-9_]+", "_", executable.lower().replace("-", "_")).strip("_")
+    generic = native in GENERIC_EXECUTABLES or re.fullmatch(r"python[0-9_]*", native) is not None
+    if generic or not native or len(native) > 55:
+        return ""
+    return f"external_{native}"
+
+
+def _process_records(raw: bytes, generation: int) -> tuple[ProcessRecord, ...]:
     try:
-        socket_text = socket_raw.decode("utf-8")
-        process_text = process_raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return InventorySnapshot((), (), generation, False, ("probe-invalid-utf8",))
+        process_text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ProbeError("probe-invalid-utf8") from error
     processes: list[ProcessRecord] = []
     for line in process_text.splitlines():
-        fields = line.strip().split(None, 1)
-        if len(fields) != 2 or not fields[0].isdecimal():
-            return InventorySnapshot((), (), generation, False, ("process-row-invalid",))
-        executable = Path(fields[1]).name
-        processes.append(ProcessRecord(int(fields[0]), executable, executable, generation))
+        match = PROCESS_ROW.fullmatch(line)
+        if match is None:
+            raise ProbeError("process-row-invalid")
+        pid = int(match.group("pid"))
+        command = match.group("command")
+        executable = Path(command.split(maxsplit=1)[0]).name
+        processes.append(
+            ProcessRecord(
+                pid,
+                executable,
+                _service_owner(executable, command),
+                generation,
+                match.group("started"),
+                command,
+            )
+        )
+    if len({row.pid for row in processes}) != len(processes):
+        raise ProbeError("process-row-duplicate")
+    return tuple(processes)
+
+
+def _linux_socket_records(raw: bytes, generation: int) -> tuple[SocketRecord, ...]:
+    try:
+        socket_text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ProbeError("probe-invalid-utf8") from error
     sockets: list[SocketRecord] = []
     for line in socket_text.splitlines():
         fields = line.split()
         if len(fields) < 5:
-            return InventorySnapshot(
-                (), tuple(processes), generation, False, ("socket-row-invalid",)
-            )
+            raise ProbeError("socket-row-invalid")
         protocol = fields[0].lower().removesuffix("6")
-        local_index = 4 if protocol == "tcp" else 4
-        try:
-            address, port = _split_endpoint(fields[local_index])
-        except ProbeError as error:
-            return InventorySnapshot((), tuple(processes), generation, False, (str(error),))
+        if protocol not in {"tcp", "udp"}:
+            raise ProbeError("socket-row-invalid")
+        address, port = _split_endpoint(fields[4])
         pid_match = re.search(r"pid=(\d+)", line)
         if pid_match is None:
-            return InventorySnapshot(
-                (), tuple(processes), generation, False, ("socket-pid-missing",)
-            )
+            raise ProbeError("socket-pid-missing")
         sockets.append(SocketRecord(protocol, address, port, int(pid_match.group(1)), generation))
-    return InventorySnapshot(tuple(sockets), tuple(processes), generation, True)
+    return tuple(sockets)
 
 
-def _capture_darwin(generation: int) -> InventorySnapshot:
-    raw = _bounded_command(("/usr/sbin/lsof", "-nP", "-iTCP", "-iUDP", "-FpcnPT"))
+def _darwin_socket_records(raw: bytes, generation: int) -> tuple[SocketRecord, ...]:
     try:
         lines = raw.decode("utf-8").splitlines()
-    except UnicodeDecodeError:
-        return InventorySnapshot((), (), generation, False, ("probe-invalid-utf8",))
+    except UnicodeDecodeError as error:
+        raise ProbeError("probe-invalid-utf8") from error
     sockets: list[SocketRecord] = []
-    processes: dict[int, ProcessRecord] = {}
     pid: int | None = None
-    executable: str | None = None
     protocol: str | None = None
+    listening = False
     for line in lines:
         if not line:
             continue
         field, value = line[0], line[1:]
         if field == "p":
             if not value.isdecimal():
-                return InventorySnapshot((), (), generation, False, ("process-row-invalid",))
+                raise ProbeError("process-row-invalid")
             pid = int(value)
-            executable = None
             protocol = None
-        elif field == "c" and pid is not None:
-            executable = value
-            processes[pid] = ProcessRecord(pid, value, value, generation)
+            listening = False
         elif field == "P":
             protocol = value.lower()
+            listening = protocol == "udp"
+        elif field == "T" and value == "ST=LISTEN":
+            listening = True
         elif field == "n":
             endpoint = value.split("->", 1)[0]
-            if pid is None or executable is None or protocol not in {"tcp", "udp"}:
-                return InventorySnapshot(
-                    (), tuple(processes.values()), generation, False, ("socket-owner-missing",)
-                )
-            try:
-                address, port = _split_endpoint(endpoint)
-            except ProbeError as error:
-                return InventorySnapshot(
-                    (), tuple(processes.values()), generation, False, (str(error),)
-                )
+            if pid is None or protocol not in {"tcp", "udp"} or not listening:
+                raise ProbeError("socket-owner-missing")
+            address, port = _split_endpoint(endpoint)
             sockets.append(SocketRecord(protocol, address, port, pid, generation))
-    return InventorySnapshot(tuple(sockets), tuple(processes.values()), generation, True)
+    return tuple(sockets)
+
+
+def _captured_snapshot(
+    generation: int,
+    socket_command: tuple[str, ...],
+    parser: Callable[[bytes, int], tuple[SocketRecord, ...]],
+) -> InventorySnapshot:
+    try:
+        before = _process_records(_bounded_command(PROCESS_COMMAND), generation)
+        sockets = parser(_bounded_command(socket_command), generation)
+        after = _process_records(_bounded_command(PROCESS_COMMAND), generation)
+    except ProbeError as error:
+        return InventorySnapshot((), (), generation, False, (str(error),))
+    before_by_pid = {row.pid: row for row in before}
+    after_by_pid = {row.pid: row for row in after}
+    processes: list[ProcessRecord] = []
+    for pid in sorted({row.pid for row in sockets}):
+        if before_by_pid.get(pid) != after_by_pid.get(pid):
+            return InventorySnapshot((), (), generation, False, ("process-inventory-drift",))
+        process = after_by_pid.get(pid)
+        if process is None:
+            return InventorySnapshot((), (), generation, False, ("socket-owner-missing",))
+        if not process.service_owner:
+            return InventorySnapshot((), (), generation, False, ("service-owner-unresolved",))
+        processes.append(process)
+    return InventorySnapshot(sockets, tuple(processes), generation, True)
+
+
+def _capture_linux(generation: int) -> InventorySnapshot:
+    return _captured_snapshot(generation, ("ss", "-H", "-lntup"), _linux_socket_records)
+
+
+def _capture_darwin(generation: int) -> InventorySnapshot:
+    return _captured_snapshot(
+        generation,
+        ("/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-iUDP", "-FpnPT"),
+        _darwin_socket_records,
+    )
 
 
 def capture_inventory() -> InventorySnapshot:
@@ -406,13 +494,13 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
             findings.append(AssuranceFinding(root, "wildcard-listener", identity))
         if arguments.forbid_ipv6 and ":" in listener.address:
             findings.append(AssuranceFinding(root, "ipv6-listener", identity))
-        owner = (listener.service_owner + " " + listener.executable).lower()
-        if arguments.forbid_core_tcp and listener.protocol == "tcp" and "core" in owner:
+        owner = listener.service_owner.lower()
+        if arguments.forbid_core_tcp and listener.protocol == "tcp" and owner == "core":
             findings.append(AssuranceFinding(root, "core-tcp-listener", identity))
         if (
             arguments.forbid_media_proxy_tcp
             and listener.protocol == "tcp"
-            and ("media_proxy" in owner or "media-proxy" in owner)
+            and owner == "media_proxy"
         ):
             findings.append(AssuranceFinding(root, "media-proxy-tcp-listener", identity))
         if arguments.forbid_camera_ports and listener.port in {554, 8554, 3702}:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import platform
-import stat
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,6 +12,7 @@ if TYPE_CHECKING:
         AssuranceFinding,
         AssuranceInputError,
         AssuranceResult,
+        BoundDirectory,
         ClosedArgumentParser,
         finish,
         incomplete,
@@ -24,6 +24,7 @@ elif __package__:
         AssuranceFinding,
         AssuranceInputError,
         AssuranceResult,
+        BoundDirectory,
         ClosedArgumentParser,
         finish,
         incomplete,
@@ -35,6 +36,7 @@ else:
         AssuranceFinding,
         AssuranceInputError,
         AssuranceResult,
+        BoundDirectory,
         ClosedArgumentParser,
         finish,
         incomplete,
@@ -52,10 +54,7 @@ def _parser() -> ClosedArgumentParser:
     return parser
 
 
-def _entries(root: Path) -> tuple[str, ...]:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(root, flags)
-    opened = os.fstat(descriptor)
+def _entries(root: Path, descriptor: int) -> tuple[str, ...]:
     try:
         names = []
         with os.scandir(descriptor) as entries:
@@ -63,27 +62,17 @@ def _entries(root: Path) -> tuple[str, ...]:
                 names.append(entry.name)
                 if len(names) > 1:
                     break
-        renamed = os.stat(root, follow_symlinks=False)
-        if not stat.S_ISDIR(renamed.st_mode) or (
-            opened.st_dev,
-            opened.st_ino,
-            opened.st_mtime_ns,
-            opened.st_ctime_ns,
-        ) != (renamed.st_dev, renamed.st_ino, renamed.st_mtime_ns, renamed.st_ctime_ns):
-            raise AssuranceInputError(root, "input-changed-during-scan")
         return tuple(names)
     except OSError as error:
         raise AssuranceInputError(root, "unreadable-input", error.strerror) from error
-    finally:
-        os.close(descriptor)
 
 
-def _process_handles(root: Path) -> tuple[str, ...]:
+def _process_handles(root: Path, scanner_handle: tuple[int, int]) -> tuple[str, ...]:
     system = platform.system()
     if system == "Darwin":
         try:
             result = subprocess.run(
-                ("/usr/sbin/lsof", "-Fn", "+D", str(root)),
+                ("/usr/sbin/lsof", "-Fpfn", "+D", str(root)),
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -97,9 +86,22 @@ def _process_handles(root: Path) -> tuple[str, ...]:
             raise AssuranceInputError(root, "handle-inventory-truncated")
         if result.returncode not in {0, 1}:
             raise AssuranceInputError(root, "handle-inventory-unavailable")
-        return tuple(
-            line[1:] for line in result.stdout.decode("utf-8").splitlines() if line.startswith("n")
-        )
+        try:
+            lines = result.stdout.decode("utf-8").splitlines()
+        except UnicodeDecodeError as error:
+            raise AssuranceInputError(root, "handle-inventory-unavailable") from error
+        handles = []
+        pid: int | None = None
+        handle_fd: int | None = None
+        for line in lines:
+            if line.startswith("p") and line[1:].isdecimal():
+                pid = int(line[1:])
+                handle_fd = None
+            elif line.startswith("f"):
+                handle_fd = int(line[1:]) if line[1:].isdecimal() else None
+            elif line.startswith("n") and (pid, handle_fd) != scanner_handle:
+                handles.append(f"{pid}:{handle_fd}:{line[1:]}")
+        return tuple(handles)
     if system == "Linux":
         proc = Path("/proc")
         if not proc.is_dir():
@@ -111,16 +113,18 @@ def _process_handles(root: Path) -> tuple[str, ...]:
                 continue
             descriptors = process / "fd"
             try:
-                for descriptor in descriptors.iterdir():
+                for descriptor_path in descriptors.iterdir():
                     count += 1
                     if count > 1_000_000:
                         raise AssuranceInputError(root, "handle-inventory-limit")
                     try:
-                        target = Path(os.readlink(descriptor))
+                        target = Path(os.readlink(descriptor_path))
                     except (OSError, UnicodeError):
                         continue
+                    if (int(process.name), int(descriptor_path.name)) == scanner_handle:
+                        continue
                     if target == root or root in target.parents:
-                        handles.append(f"{process.name}:{descriptor.name}")
+                        handles.append(f"{process.name}:{descriptor_path.name}")
             except PermissionError:
                 raise AssuranceInputError(root, "handle-inventory-incomplete") from None
             except FileNotFoundError:
@@ -130,20 +134,28 @@ def _process_handles(root: Path) -> tuple[str, ...]:
 
 
 def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
+    binding: BoundDirectory | None = None
     try:
         arguments = _parser().parse_args(argv)
         if not arguments.require_empty:
             raise ValueError("--require-empty is required")
         root = validate_root(lexical_path(arguments.root))
-        entries = _entries(root)
+        binding = BoundDirectory.open(root)
+        entries = _entries(root, binding.descriptor)
+        binding.revalidate()
         mounted = os.path.ismount(root)
-        handles = _process_handles(root)
+        binding.revalidate()
+        handles = _process_handles(root, (os.getpid(), binding.descriptor))
+        binding.revalidate()
     except AssuranceInputError as error:
         return incomplete(TOOL, error)
     except (ValueError, TypeError) as error:
         return AssuranceResult(
             TOOL, False, (AssuranceFinding(Path("."), "invalid-arguments", str(error)),)
         )
+    finally:
+        if binding is not None:
+            binding.close()
     findings = [AssuranceFinding(root / name, "sandbox-entry") for name in entries]
     if mounted:
         findings.append(AssuranceFinding(root, "sandbox-mount"))

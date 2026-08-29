@@ -60,6 +60,7 @@ else:
 TOOL = "backup-artifacts"
 PORTABLE_SECRET_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".token", ".secret"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+AUTHENTICATED_CIPHERS = {"xchacha20-poly1305": (b"TUNTUN-AEAD\0\x01\x01", 24, 16)}
 
 
 def _parser() -> ClosedArgumentParser:
@@ -68,6 +69,12 @@ def _parser() -> ClosedArgumentParser:
     parser.add_argument("--require-encrypted", action="store_true")
     parser.add_argument("--forbid", required=True, type=CsvSet.parse)
     return parser
+
+
+def _authenticated_envelope(raw: bytes, cipher: str) -> bool:
+    header, nonce_bytes, tag_bytes = AUTHENTICATED_CIPHERS[cipher]
+    minimum_size = len(header) + nonce_bytes + 1 + tag_bytes
+    return len(raw) >= minimum_size and raw.startswith(header)
 
 
 def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
@@ -85,10 +92,12 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         )
         manifest_path = root / "manifest.json"
         manifest = read_json_object(manifest_path, max_bytes=MAX_REGULAR_FILE_BYTES)
+        cipher = manifest.get("cipher")
         if (
             manifest.get("format") != "tuntun-authenticated-backup-v1"
             or manifest.get("authenticated") is not True
-            or not isinstance(manifest.get("cipher"), str)
+            or not isinstance(cipher, str)
+            or cipher not in AUTHENTICATED_CIPHERS
         ):
             raise AssuranceInputError(manifest_path, "encryption-proof-invalid")
         declared = manifest.get("files")
@@ -117,7 +126,7 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
             return AssuranceResult(
                 TOOL, False, (AssuranceFinding(root / path, "backup-payload-missing"),)
             )
-        if path.suffix != ".enc" or not item.raw.startswith(b"TUNTUN-AEAD\0"):
+        if path.suffix != ".enc" or not _authenticated_envelope(item.raw, cipher):
             findings.append(AssuranceFinding(item.path, "encryption-proof-missing"))
     expected = {"manifest.json", *declared}
     for relative, item in by_relative.items():

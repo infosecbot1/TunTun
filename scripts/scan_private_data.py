@@ -35,6 +35,7 @@ else:
 TOOL = "private-data"
 INCOMPLETE_REASONS = {
     "no-scan-roots",
+    "root-scope-unsupported",
     "missing-root",
     "filesystem-symlink",
     "filesystem-symlink-ancestor",
@@ -72,6 +73,7 @@ INCOMPLETE_REASONS = {
     "git-inventory-timeout",
     "git-inventory-output-limit",
     "git-inventory-malformed",
+    "git-history-object-missing",
     "git-object-format-unsupported",
     "git-process-reap-timeout",
     "git-index-conflict",

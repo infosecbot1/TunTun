@@ -66,12 +66,35 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         return AssuranceResult(
             TOOL, False, (AssuranceFinding(Path("."), "invalid-arguments", str(error)),)
         )
-    selected = [
-        node
-        for node in inventory.nodes
-        if (arguments.db_kind == "vision" and node.schema_owner == "vision")
-        or (arguments.db_kind == "canonical" and node.schema_owner == "core")
-    ]
+    registered_owners = {"vision", "core"}
+    nodes_with_owners = []
+    for node in inventory.nodes:
+        path_owner = node.path.relative_to(inventory.root).parts[1]
+        if path_owner not in registered_owners:
+            return AssuranceResult(
+                TOOL,
+                False,
+                (AssuranceFinding(node.path, "schema-owner-unknown", path_owner),),
+            )
+        if node.schema_owner is None or not node.ddl:
+            return AssuranceResult(
+                TOOL, False, (AssuranceFinding(node.path, "unowned-or-unknown-ddl"),)
+            )
+        if node.schema_owner != path_owner:
+            return AssuranceResult(
+                TOOL,
+                False,
+                (
+                    AssuranceFinding(
+                        node.path,
+                        "schema-owner-mismatch",
+                        f"{node.schema_owner}!={path_owner}",
+                    ),
+                ),
+            )
+        nodes_with_owners.append((node, path_owner))
+    selected_owner = "vision" if arguments.db_kind == "vision" else "core"
+    selected = [node for node, path_owner in nodes_with_owners if path_owner == selected_owner]
     if not selected:
         return AssuranceResult(
             TOOL,
@@ -80,10 +103,7 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         )
     findings: list[AssuranceFinding] = []
     for node in selected:
-        if node.ddl is None or node.schema_owner is None:
-            return AssuranceResult(
-                TOOL, False, (AssuranceFinding(node.path, "unowned-or-unknown-ddl"),)
-            )
+        assert node.ddl is not None
         tokens = {token.lower() for token in SQL_TOKEN.findall(node.ddl)}
         for forbidden in arguments.forbid:
             if forbidden in tokens:

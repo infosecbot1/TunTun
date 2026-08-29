@@ -941,6 +941,8 @@ class SourceSnapshot:
     index: tuple[IndexEntry, ...]
     untracked: tuple[PurePosixPath, ...]
     ignored: tuple[IgnoredEntry, ...]
+    ignored_files: frozenset[PurePosixPath]
+    ignored_directories: frozenset[PurePosixPath]
     working: tuple[tuple[str, Identity | None], ...]
     ignore_sources: tuple[tuple[str, Identity], ...]
 
@@ -1369,15 +1371,17 @@ def _capture_source_snapshot(
         captured_ignores.append((relative.as_posix(), identity))
     repository.revalidate()
     return SourceSnapshot(
-        index_raw,
-        untracked_raw,
-        ignored_raw,
-        ignore_sources_raw,
-        index,
-        untracked,
-        ignored,
-        tuple(working),
-        tuple(captured_ignores),
+        index_raw=index_raw,
+        untracked_raw=untracked_raw,
+        ignored_raw=ignored_raw,
+        ignore_sources_raw=ignore_sources_raw,
+        index=index,
+        untracked=untracked,
+        ignored=ignored,
+        ignored_files=frozenset(entry.path for entry in ignored if not entry.directory),
+        ignored_directories=frozenset(entry.path for entry in ignored if entry.directory),
+        working=tuple(working),
+        ignore_sources=tuple(captured_ignores),
     )
 
 
@@ -1533,10 +1537,9 @@ def _joined_git_path(parent: PurePosixPath, name: str) -> PurePosixPath:
 
 
 def _ignored_by_snapshot(path: PurePosixPath, snapshot: SourceSnapshot) -> bool:
-    for entry in snapshot.ignored:
-        if path == entry.path or (entry.directory and entry.path in path.parents):
-            return True
-    return False
+    if path in snapshot.ignored_files:
+        return True
+    return any(parent in snapshot.ignored_directories for parent in (path, *path.parents))
 
 
 def _physical_source_directory(
@@ -2047,6 +2050,26 @@ def _start_git_history(repository: RepositoryBinding) -> GitHistoryStream:
     return GitHistoryStream(repository, process)
 
 
+def _history_connectivity_finding(repository: RepositoryBinding) -> Finding | None:
+    output = _git_output(
+        repository,
+        ("rev-list", "--objects", "--all", "--missing=print", "--no-object-names"),
+        max_bytes=MAX_GIT_INVENTORY_BYTES,
+    )
+    if repository.object_format not in {"sha1", "sha256"}:
+        raise GitInventoryError(repository.path, "git-object-format-unsupported")
+    oid_width = 40 if repository.object_format == "sha1" else 64
+    for line in output.splitlines():
+        missing = line.startswith(b"?")
+        raw_oid = line[1:] if missing else line
+        if len(raw_oid) != oid_width or re.fullmatch(rb"[0-9a-f]+", raw_oid) is None:
+            raise GitInventoryError(repository.path, "git-inventory-malformed")
+        if missing:
+            oid = raw_oid.decode("ascii")
+            return Finding(Path("<git-history>") / oid, "git-history-object-missing")
+    return None
+
+
 def _scan_index_blob(
     batch: GitBatch,
     entry: IndexEntry,
@@ -2103,6 +2126,13 @@ def _scan_git_history(
             if intent is not None:
                 source.seek(0)
                 findings.extend(_scan_archive(source, intent, display, budget, 0))
+    try:
+        connectivity = _history_connectivity_finding(repository)
+    except GitInventoryError as error:
+        findings.append(Finding(error.path, error.reason))
+    else:
+        if connectivity is not None:
+            findings.append(connectivity)
     return findings
 
 
