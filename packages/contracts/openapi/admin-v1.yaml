@@ -130,6 +130,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -263,6 +264,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -349,6 +351,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -452,6 +455,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -538,6 +542,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -661,6 +666,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -773,6 +779,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -858,6 +865,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -958,6 +966,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -1082,6 +1091,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -1296,7 +1306,8 @@ components:
               title: Target Memory Id
             expected_version:
               anyOf:
-              - type: integer
+              - minimum: 1
+                type: integer
               - type: 'null'
               title: Expected Version
             sensitivity:
@@ -1539,6 +1550,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -1693,6 +1705,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -1819,6 +1832,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -1966,6 +1980,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -2106,6 +2121,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -2197,6 +2213,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -2283,6 +2300,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -2479,6 +2497,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -2596,6 +2615,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -2685,6 +2705,7 @@ components:
           title: Schema Version
           type: string
         resource_type:
+          pattern: ^[a-z][a-z0-9_]{0,63}$
           title: Resource Type
           type: string
         resource_id:
@@ -2805,6 +2826,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -2865,6 +2887,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -2967,6 +2990,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -3027,6 +3051,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -3124,6 +3149,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -3210,6 +3236,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -3299,6 +3326,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -3373,6 +3401,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -3471,6 +3500,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -3560,6 +3590,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -3756,7 +3787,8 @@ components:
               title: Target Memory Id
             expected_version:
               anyOf:
-              - type: integer
+              - minimum: 1
+                type: integer
               - type: 'null'
               title: Expected Version
             sensitivity:
@@ -3913,6 +3945,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -4006,6 +4039,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -4127,6 +4161,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -4274,6 +4309,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -4339,6 +4375,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -4399,6 +4436,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -4569,6 +4607,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -4695,6 +4734,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -4758,6 +4798,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -7068,7 +7109,8 @@ components:
               title: Target Memory Id
             expected_version:
               anyOf:
-              - type: integer
+              - minimum: 1
+                type: integer
               - type: 'null'
               title: Expected Version
             sensitivity:
@@ -7635,7 +7677,8 @@ components:
           title: Target Memory Id
         expected_version:
           anyOf:
-          - type: integer
+          - minimum: 1
+            type: integer
           - type: 'null'
           title: Expected Version
         sensitivity:
@@ -8914,6 +8957,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -8974,6 +9018,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -9076,6 +9121,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -9136,6 +9182,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -9233,6 +9280,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -9319,6 +9367,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -9408,6 +9457,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -9482,6 +9532,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -9580,6 +9631,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -9669,6 +9721,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -9865,7 +9918,8 @@ components:
               title: Target Memory Id
             expected_version:
               anyOf:
-              - type: integer
+              - minimum: 1
+                type: integer
               - type: 'null'
               title: Expected Version
             sensitivity:
@@ -10022,6 +10076,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -10115,6 +10170,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -10236,6 +10292,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -10383,6 +10440,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -10456,6 +10514,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -10516,6 +10575,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -10686,6 +10746,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -10812,6 +10873,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:
@@ -10875,6 +10937,7 @@ components:
               title: Schema Version
               type: string
             resource_type:
+              pattern: ^[a-z][a-z0-9_]{0,63}$
               title: Resource Type
               type: string
             resource_id:

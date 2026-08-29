@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, field_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from .base import Commitment, ContractModel, Sensitivity
 
@@ -123,6 +123,17 @@ class SanitizedProviderRequest(ContractModel):
     redaction_receipt_id: UUID
     route: RouteAuthorization
     timeout_ms: Annotated[int, Field(ge=1_000, le=120_000)]
+
+    @model_validator(mode="after")
+    def exact_reasoning_route(self) -> Self:
+        if (
+            self.route.request_id != self.request_id
+            or self.route.purpose != "cloud_reasoning"
+            or self.route.provider != self.provider.value
+            or self.route.model != self.model
+        ):
+            raise ValueError("provider request route mismatch")
+        return self
 
 
 class ProviderResponse(ContractModel):

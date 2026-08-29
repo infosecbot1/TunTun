@@ -1,6 +1,8 @@
 # packages/contracts/src/tuntun_contracts/actions.py
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Annotated, Literal, Self, TypeAlias
 from uuid import UUID
 
@@ -10,16 +12,79 @@ from .base import Commitment, ContractModel
 from .identity import PersonaTraits
 from .memory import MemoryContent, MemoryProposalDraft
 
+ACTION_RESOURCE_TYPE_BY_NAME: Mapping[str, str] = MappingProxyType(
+    {
+        "timer.create": "timer",
+        "timer.cancel": "timer",
+        "timer.status": "timer",
+        "privacy.on": "privacy",
+        "mute": "mute",
+        "stop": "stop",
+        "privacy.off": "privacy",
+        "mute.off": "mute",
+        "system.status": "system",
+        "reachy.status": "reachy",
+        "reachy.gesture_test": "reachy",
+        "offline.prompt_test": "offline",
+        "memory.propose": "memory",
+        "memory.approve": "memory",
+        "memory.edit_approve": "memory",
+        "memory.reject": "memory",
+        "memory.expire": "memory",
+        "memory.delete": "memory",
+        "memory.export": "memory",
+        "profile.create": "profile",
+        "profile.edit": "profile",
+        "profile.revoke": "profile",
+        "profile.delete": "profile",
+        "profile.export": "profile",
+        "consent.grant": "consent",
+        "consent.revoke": "consent",
+        "identity.enroll": "identity",
+        "identity.enrollment.cancel": "identity",
+        "provider.review": "provider",
+        "provider.configure": "provider",
+        "budget.change": "budget",
+        "access.change": "access",
+        "credential.passkey.add": "credential",
+        "credential.passkey.revoke": "credential",
+        "credential.pin.change": "credential",
+        "credential.recovery.rotate": "credential",
+        "audit.export": "audit",
+        "audit.verify": "audit",
+        "backup.recovery_key.create": "backup",
+        "backup.create": "backup",
+        "backup.verify": "backup",
+        "backup.restore": "backup",
+        "search.profile_mode.change": "search",
+        "search.experimental.activate": "search",
+        "security.finding.suppress": "security_finding",
+        "release.latency.accept": "soak_run",
+        "release.family_stage.review": "family_stage",
+        "release.p1r0": "release_candidate",
+    }
+)
+
 
 class ActionDraftBase(ContractModel):
     proposal_id: UUID
     schema_version: Literal["1.0"]
-    resource_type: str
+    resource_type: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
     resource_id: UUID | None
     parameters_commitment: Commitment
     uncertainty_micros: Annotated[int, Field(ge=0, le=1_000_000)]
     expires_at: AwareDatetime
     idempotency_key: UUID
+
+    @model_validator(mode="after")
+    def exact_resource_type(self) -> Self:
+        action_name = getattr(self, "action_name", None)
+        if (
+            action_name is not None
+            and (expected := ACTION_RESOURCE_TYPE_BY_NAME.get(action_name)) != self.resource_type
+        ):
+            raise ValueError(f"{action_name} resource type mismatch; expected {expected}")
+        return self
 
 
 class TimerCreateActionDraft(ActionDraftBase):
@@ -176,6 +241,21 @@ class MemoryActionDraft(ActionDraftBase):
             raise ValueError(
                 "memory.export requires one exact resource, version, and closed export format"
             )
+        if self.action_name == "memory.propose":
+            target_resource_id = (
+                None if self.memory_proposal is None else self.memory_proposal.proposal_id
+            )
+        elif self.action_name in {
+            "memory.approve",
+            "memory.edit_approve",
+            "memory.reject",
+            "memory.expire",
+        }:
+            target_resource_id = self.proposal_id_ref
+        else:
+            target_resource_id = self.memory_id
+        if target_resource_id is None or self.resource_id != target_resource_id:
+            raise ValueError("memory action resource must equal the typed target")
         return self
 
 
@@ -262,6 +342,8 @@ class ProfileActionDraft(ActionDraftBase):
                 or self.clear_persona_traits
             ):
                 raise ValueError("profile lifecycle draft requires only expected version")
+        if self.resource_id != self.subject_id:
+            raise ValueError("profile action resource must equal subject")
         return self
 
 
@@ -287,6 +369,8 @@ class ConsentActionDraft(ActionDraftBase):
     def expected_state_shape(self) -> ConsentActionDraft:
         if self.action_name == "consent.revoke" and self.expected_latest_receipt_id is None:
             raise ValueError("consent.revoke requires expected latest receipt")
+        if self.resource_id != self.subject_id:
+            raise ValueError("consent action resource must equal subject")
         return self
 
 
@@ -398,6 +482,15 @@ class CredentialActionDraft(ActionDraftBase):
         }[self.action_name]
         if {name for name, value in present.items() if value} != expected:
             raise ValueError("credential operation shape mismatch")
+        if (
+            self.action_name
+            in {
+                "credential.passkey.add",
+                "credential.passkey.revoke",
+            }
+            and self.resource_id != self.credential_id
+        ):
+            raise ValueError("passkey action resource must equal credential")
         return self
 
 
@@ -435,6 +528,8 @@ class BackupActionDraft(ActionDraftBase):
         }[self.action_name]
         if {name for name, value in present.items() if value} != expected:
             raise ValueError("backup operation shape mismatch")
+        if self.backup_id is not None and self.resource_id != self.backup_id:
+            raise ValueError("backup action resource must equal backup")
         return self
 
 
@@ -465,6 +560,8 @@ class SearchActionDraft(ActionDraftBase):
             self.pricing_version,
             self.privacy_generation,
             self.feature_generation,
+            self.activation_issued_at,
+            self.activation_expires_at,
             self.max_passes,
             self.max_sources,
             self.max_duration_seconds,
@@ -496,6 +593,8 @@ class SearchActionDraft(ActionDraftBase):
             raise ValueError(
                 "experimental search activation must be positive and at most 30 minutes"
             )
+        if self.resource_id != self.subject_id:
+            raise ValueError("search action resource must equal subject")
         return self
 
 
@@ -526,6 +625,12 @@ class LatencyDeviationActionDraft(ActionDraftBase):
     observed_ms: Annotated[int, Field(ge=0, le=120_000)]
     limit_ms: Annotated[int, Field(ge=1, le=120_000)]
     release_notes_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @model_validator(mode="after")
+    def exact_run_resource(self) -> Self:
+        if self.resource_id != self.run_id:
+            raise ValueError("latency action resource must equal soak run")
+        return self
 
 
 class FamilyStageReviewActionDraft(ActionDraftBase):
@@ -586,6 +691,19 @@ class ValidatedActionProposal(ContractModel):
         "passkey_verified",
         "recovery_verified",
     ]
+
+    @model_validator(mode="after")
+    def draft_matches_binding(self) -> Self:
+        if (
+            self.binding.proposal_id != self.draft.proposal_id
+            or self.binding.idempotency_key != self.draft.idempotency_key
+            or self.binding.action_name != self.draft.action_name
+            or self.binding.resource_type != self.draft.resource_type
+            or self.binding.resource_id != self.draft.resource_id
+            or self.binding.parameter_commitment != self.draft.parameters_commitment
+        ):
+            raise ValueError("draft binding mismatch")
+        return self
 
 
 class ActionReceipt(ContractModel):

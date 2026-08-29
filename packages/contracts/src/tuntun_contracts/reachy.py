@@ -105,6 +105,12 @@ class CameraWindowGrant(ContractModel):
 
     @model_validator(mode="after")
     def bounded_window(self) -> Self:
+        expected_purpose = {
+            "identity.enroll": "explicit_enrollment",
+            "identity.observe": "active_conversation_identity",
+        }[self.action_name]
+        if self.purpose != expected_purpose:
+            raise ValueError("camera action purpose mismatch")
         if (
             self.expires_at <= self.issued_at
             or (self.expires_at - self.issued_at).total_seconds() > 10

@@ -3,6 +3,22 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  contracts-python311:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with: {version: "0.8.13", enable-cache: true}
+      - run: uv python install 3.11
+      - run: uv build --package tuntun-contracts --wheel --out-dir dist-py311
+      - run: uv venv --python 3.11 .venv-contracts-py311
+      - run: >-
+          uv pip install --python .venv-contracts-py311/bin/python
+          dist-py311/*.whl "pytest>=8.4,<9"
+      - run: >-
+          .venv-contracts-py311/bin/python -m pytest
+          tests/contract/test_v1_types_and_ports.py
+          tests/contract/test_dependency_direction.py -q
   check:
     strategy:
       fail-fast: false

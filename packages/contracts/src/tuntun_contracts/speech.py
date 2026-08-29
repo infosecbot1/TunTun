@@ -1,10 +1,10 @@
 # packages/contracts/src/tuntun_contracts/speech.py
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from .base import Commitment, ContractModel
 from .provider import RouteAuthorization
@@ -41,6 +41,17 @@ class AuthorizedTranscriptionRequest(ContractModel):
             raise ValueError("duplicate language hint")
         return value
 
+    @model_validator(mode="after")
+    def exact_transcription_route(self) -> Self:
+        if (
+            self.request_id != self.route.request_id
+            or self.turn_id != self.route.turn_id
+            or self.route.purpose != "cloud_stt"
+            or self.audio_commitment != self.route.request_commitment
+        ):
+            raise ValueError("transcription request route mismatch")
+        return self
+
 
 class TranscriptResult(ContractModel):
     request_id: UUID
@@ -59,6 +70,18 @@ class AuthorizedSynthesisRequest(ContractModel):
     language: Literal["en", "hi", "hinglish"]
     dlp_receipt_id: UUID
     route: RouteAuthorization
+
+    @model_validator(mode="after")
+    def exact_synthesis_route(self) -> Self:
+        if (
+            self.request_id != self.route.request_id
+            or self.turn_id != self.route.turn_id
+            or self.route.purpose != "cloud_tts"
+            or self.text_commitment != self.route.request_commitment
+            or self.segment_index >= self.segment_count
+        ):
+            raise ValueError("synthesis request route mismatch")
+        return self
 
 
 class SpeechChunk(ContractModel):

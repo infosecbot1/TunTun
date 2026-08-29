@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, field_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from .base import ContractModel
 
@@ -26,6 +26,12 @@ class IdentityEvidence(ContractModel):
     model_version: str
     observed_at: AwareDatetime
     expires_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def expiry_does_not_precede_observation(self) -> Self:
+        if self.expires_at < self.observed_at:
+            raise ValueError("identity evidence expires before observation")
+        return self
 
 
 class IdentityRequest(ContractModel):
@@ -49,6 +55,12 @@ class IdentityDecision(ContractModel):
     subject_id: UUID | None
     reason_code: str
     expires_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def verified_subject_shape(self) -> Self:
+        if (self.status is IdentityStatus.VERIFIED) != (self.subject_id is not None):
+            raise ValueError("identity decision subject mismatch")
+        return self
 
 
 class PersonaTraits(ContractModel):

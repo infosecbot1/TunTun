@@ -143,6 +143,8 @@ class ProviderUsageReceiptV1(ContractModel):
     def exact_usage_category(self) -> Self:
         if self.category != self.billable_usage.category:
             raise ValueError("provider_usage_category_mismatch")
+        if usage_total(self.billable_usage) <= 0:
+            raise ValueError("provider_usage_must_be_positive")
         if (
             isinstance(self.billable_usage, WebSearchUsageUnits)
             and self.billable_usage.web_search_calls != 1

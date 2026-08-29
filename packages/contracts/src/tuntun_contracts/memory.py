@@ -116,13 +116,20 @@ class MemoryProposalDraft(ContractModel):
     content: MemoryContent | None
     audience: MemoryAudience | None
     target_memory_id: UUID | None
-    expected_version: int | None
+    expected_version: Annotated[int, Field(ge=1)] | None
     sensitivity: Sensitivity
     confidence_micros: Annotated[int, Field(ge=0, le=1_000_000)]
     reason: Annotated[str, Field(min_length=1, max_length=256)]
     claim_commitment: Commitment
     source_receipt_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=8)]
     expires_at: AwareDatetime
+
+    @field_validator("source_receipt_ids")
+    @classmethod
+    def unique_draft_source_receipts(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate source receipt")
+        return value
 
     @model_validator(mode="after")
     def operation_shape(self) -> Self:
@@ -215,3 +222,9 @@ class DecideMemoryProposal(ContractModel):
     decision: Literal["approve", "reject"]
     edited_content: MemoryContent | None
     expected_version: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def rejected_content_is_absent(self) -> Self:
+        if self.decision == "reject" and self.edited_content is not None:
+            raise ValueError("rejected proposal cannot carry edited content")
+        return self

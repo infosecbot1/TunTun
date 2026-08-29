@@ -3,23 +3,30 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Literal, Protocol, TypeVar, get_origin
 from uuid import UUID
 
 import pytest
 import tuntun_contracts
+import tuntun_contracts.actions as action_contracts
 from pydantic import TypeAdapter, ValidationError
 from tuntun_contracts.actions import (
     ActionBinding,
     ActionProposalDraft,
     ActionReceipt,
+    BackupActionDraft,
     ConsentActionDraft,
+    CredentialActionDraft,
     IdentityActionDraft,
+    LatencyDeviationActionDraft,
+    MemoryActionDraft,
     ProfileActionDraft,
+    SearchActionDraft,
     TimerCreateActionDraft,
     TimerTargetActionDraft,
+    ValidatedActionProposal,
 )
 from tuntun_contracts.audit import AuditDraft, AuditReceipt
 from tuntun_contracts.base import (
@@ -44,13 +51,16 @@ from tuntun_contracts.budget import (
 )
 from tuntun_contracts.events import StopRequestedPayload
 from tuntun_contracts.identity import (
+    IdentityDecision,
     IdentityEvidence,
     IdentityRequest,
+    IdentityStatus,
     PersonaProjection,
     PersonaTraits,
 )
 from tuntun_contracts.memory import (
     ApprovedMemory,
+    DecideMemoryProposal,
     EpisodicContent,
     MemoryAudience,
     MemoryKind,
@@ -63,8 +73,14 @@ from tuntun_contracts.memory import (
 from tuntun_contracts.policy import (
     AdminSessionPrincipal,
     AssuranceLevel,
+    AuthContext,
+    AuthenticationChallenge,
+    AuthenticationRequest,
     AuthGrant,
     CurrentOwnerAuthority,
+    PolicyDecision,
+    PolicyEffect,
+    TimerIntent,
 )
 from tuntun_contracts.ports import (
     ActionProviderPort,
@@ -86,7 +102,7 @@ from tuntun_contracts.provider import (
     SanitizedProviderRequest,
     SanitizedToolReference,
 )
-from tuntun_contracts.reachy import StopSignal
+from tuntun_contracts.reachy import CameraWindowGrant, StopSignal
 from tuntun_contracts.speech import (
     AudioFormat,
     AuthorizedSynthesisRequest,
@@ -94,6 +110,64 @@ from tuntun_contracts.speech import (
 )
 
 _T = TypeVar("_T")
+
+
+def _test_commitment(key_id: str = "contract-test-v1") -> Commitment:
+    return Commitment(
+        algorithm="HMAC-SHA-256",
+        key_id=key_id,
+        value_b64="A" * 43 + "=",
+    )
+
+
+def _test_route(
+    *,
+    purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"] = "cloud_reasoning",
+    request_id: UUID | None = None,
+    turn_id: UUID | None = None,
+    provider: Literal["openai", "qwen"] = "openai",
+    model: str = "gpt-5.6-sol",
+) -> RouteAuthorization:
+    if request_id is None:
+        request_id = UUID(int=1_001)
+    if turn_id is None:
+        turn_id = UUID(int=1_002)
+    return RouteAuthorization(
+        authorization_id=UUID(int=1_003),
+        request_id=request_id,
+        attempt_id=UUID(int=1_004),
+        purpose=purpose,
+        household_id=UUID(int=1_005),
+        subject_id=UUID(int=1_006),
+        session_id=UUID(int=1_007),
+        turn_id=turn_id,
+        provider=provider,
+        model=model,
+        request_commitment=_test_commitment("route-v1"),
+        max_input_bytes=8_388_608,
+        max_input_units=8_000,
+        privacy_receipt_id=UUID(int=1_008),
+        consent_receipt_ids=(UUID(int=1_009),),
+        budget_reservation_id=UUID(int=1_010),
+        maximum_sensitivity=Sensitivity.HOUSEHOLD,
+        expires_at=datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+    )
+
+
+def _test_binding(subject_id: UUID | None) -> ActionBinding:
+    return ActionBinding(
+        household_id=UUID(int=1_102),
+        proposal_id=UUID(int=1_103),
+        turn_id=UUID(int=1_104),
+        idempotency_key=UUID(int=1_105),
+        action_name="timer.create",
+        resource_type="timer",
+        resource_id=UUID(int=1_106),
+        parameter_commitment=_test_commitment("action-v1"),
+        policy_version="policy-v1",
+        session_id=UUID(int=1_107),
+        subject_id=subject_id,
+    )
 
 
 class _PlannedExecutable(Protocol):
@@ -377,6 +451,38 @@ def test_memory_proposal_operation_target_shape_is_total_and_unambiguous() -> No
                 }
             )
 
+    for invalid_version in (0, -1):
+        with pytest.raises(ValidationError):
+            MemoryProposalDraft.model_validate(replace | {"expected_version": invalid_version})
+    with pytest.raises(ValidationError, match="duplicate source receipt"):
+        MemoryProposalDraft.model_validate(
+            create | {"source_receipt_ids": (UUID(int=507), UUID(int=507))}
+        )
+
+
+def test_rejected_memory_decision_cannot_carry_edited_private_content() -> None:
+    edited = PreferenceContent(
+        category="food",
+        key="spice",
+        value="mild",
+        strength_micros=400_000,
+    )
+    rejected = DecideMemoryProposal(
+        proposal_id=UUID(int=509),
+        decision="reject",
+        edited_content=None,
+        expected_version=1,
+    )
+    assert rejected.edited_content is None
+    DecideMemoryProposal(
+        proposal_id=UUID(int=510),
+        decision="approve",
+        edited_content=edited,
+        expected_version=1,
+    )
+    with pytest.raises(ValidationError, match="rejected proposal cannot carry edited content"):
+        DecideMemoryProposal.model_validate(rejected.model_dump() | {"edited_content": edited})
+
 
 def test_budget_request_carries_closed_usage_not_a_caller_cost() -> None:
     common = {
@@ -539,6 +645,19 @@ def test_provider_usage_receipt_is_closed_and_bound_to_the_exact_call() -> None:
                 },
             }
         )
+    for category, zero_usage in (
+        ("llm", LlmUsageUnits(category="llm", input_tokens=0, output_tokens=0)),
+        ("stt", SttUsageUnits(category="stt", audio_millis=0)),
+        ("tts", TtsUsageUnits(category="tts", characters=0)),
+    ):
+        with pytest.raises(ValidationError, match="provider_usage_must_be_positive"):
+            ProviderUsageReceiptV1.model_validate(
+                receipt.model_dump()
+                | {
+                    "category": category,
+                    "billable_usage": zero_usage,
+                }
+            )
 
 
 def test_provider_response_exposes_only_the_persisted_usage_receipt_identity() -> None:
@@ -630,10 +749,288 @@ def test_assurance_values_are_exact_and_auth_grants_have_no_biometric_source() -
     assert "biometric" not in str(AuthGrant.model_json_schema()).lower()
 
 
+def test_authentication_contracts_cannot_cross_subject_boundaries() -> None:
+    subject_id = UUID(int=1_201)
+    other_subject_id = UUID(int=1_202)
+    binding = _test_binding(subject_id)
+    AuthenticationRequest(
+        subject_id=subject_id,
+        binding=binding,
+        requested_assurance=AssuranceLevel.PASSKEY_VERIFIED,
+    )
+    AuthenticationChallenge(
+        challenge_id=UUID(int=1_203),
+        subject_id=subject_id,
+        binding=binding,
+        factor="passkey",
+        expires_at=datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+    )
+    grant = AuthGrant(
+        grant_id=UUID(int=1_204),
+        subject_id=subject_id,
+        binding=binding,
+        assurance=AssuranceLevel.PASSKEY_VERIFIED,
+        assurance_source="passkey",
+        issued_at=datetime(2026, 8, 27, tzinfo=UTC),
+        expires_at=datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+    )
+    for model, payload in (
+        (
+            AuthenticationRequest,
+            {
+                "subject_id": other_subject_id,
+                "binding": binding,
+                "requested_assurance": AssuranceLevel.PASSKEY_VERIFIED,
+            },
+        ),
+        (
+            AuthenticationChallenge,
+            {
+                "challenge_id": UUID(int=1_205),
+                "subject_id": other_subject_id,
+                "binding": binding,
+                "factor": "passkey",
+                "expires_at": datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+            },
+        ),
+        (AuthGrant, grant.model_dump() | {"subject_id": other_subject_id}),
+    ):
+        with pytest.raises(ValidationError, match="authentication subject binding mismatch"):
+            model.model_validate(payload)
+
+
+def test_auth_context_subject_and_grant_shape_is_exact_for_each_source() -> None:
+    subject_id = UUID(int=1_211)
+    identified_binding = _test_binding(subject_id)
+    guest_binding = _test_binding(None)
+    consumed_at = datetime(2026, 8, 27, tzinfo=UTC)
+    AuthContext(
+        grant_id=None,
+        subject_id=None,
+        binding=guest_binding,
+        assurance=AssuranceLevel.GUEST,
+        assurance_source="guest",
+        consumed_at=consumed_at,
+    )
+    AuthContext(
+        grant_id=None,
+        subject_id=subject_id,
+        binding=identified_binding,
+        assurance=AssuranceLevel.IDENTIFIED,
+        assurance_source="identity",
+        consumed_at=consumed_at,
+    )
+    AuthContext(
+        grant_id=UUID(int=1_212),
+        subject_id=subject_id,
+        binding=identified_binding,
+        assurance=AssuranceLevel.PASSKEY_VERIFIED,
+        assurance_source="passkey",
+        consumed_at=consumed_at,
+    )
+    invalid = (
+        {
+            "grant_id": None,
+            "subject_id": subject_id,
+            "binding": identified_binding,
+            "assurance": AssuranceLevel.GUEST,
+            "assurance_source": "guest",
+            "consumed_at": consumed_at,
+        },
+        {
+            "grant_id": None,
+            "subject_id": None,
+            "binding": guest_binding,
+            "assurance": AssuranceLevel.IDENTIFIED,
+            "assurance_source": "identity",
+            "consumed_at": consumed_at,
+        },
+        {
+            "grant_id": UUID(int=1_213),
+            "subject_id": subject_id,
+            "binding": _test_binding(UUID(int=1_214)),
+            "assurance": AssuranceLevel.PASSKEY_VERIFIED,
+            "assurance_source": "passkey",
+            "consumed_at": consumed_at,
+        },
+    )
+    for payload in invalid:
+        with pytest.raises(ValidationError):
+            AuthContext.model_validate(payload)
+
+
+def test_policy_decision_step_up_assurance_shape_is_unambiguous() -> None:
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    PolicyDecision(
+        effect=PolicyEffect.ALLOW,
+        reason_code="allowed",
+        policy_version="policy-v1",
+        required_assurance=None,
+        expires_at=now + timedelta(seconds=10),
+    )
+    PolicyDecision(
+        effect=PolicyEffect.STEP_UP,
+        reason_code="step_up",
+        policy_version="policy-v1",
+        required_assurance=AssuranceLevel.PASSKEY_VERIFIED,
+        expires_at=now + timedelta(seconds=10),
+    )
+    for effect, required in (
+        (PolicyEffect.ALLOW, AssuranceLevel.PASSKEY_VERIFIED),
+        (PolicyEffect.DENY, AssuranceLevel.CONFIRMED),
+        (PolicyEffect.STEP_UP, None),
+        (PolicyEffect.STEP_UP, AssuranceLevel.GUEST),
+        (PolicyEffect.STEP_UP, AssuranceLevel.IDENTIFIED),
+    ):
+        with pytest.raises(ValidationError):
+            PolicyDecision(
+                effect=effect,
+                reason_code="invalid",
+                policy_version="policy-v1",
+                required_assurance=required,
+                expires_at=now + timedelta(seconds=10),
+            )
+
+
+def test_identity_and_authority_temporal_and_subject_shapes_are_ordered() -> None:
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    evidence = IdentityEvidence(
+        modality="face",
+        subject_id=None,
+        confidence_micros=0,
+        quality_micros=0,
+        liveness_accepted=False,
+        model_version="synthetic",
+        observed_at=now,
+        expires_at=now,
+    )
+    assert evidence.expires_at == evidence.observed_at
+    with pytest.raises(ValidationError):
+        IdentityEvidence.model_validate(
+            evidence.model_dump() | {"expires_at": now - timedelta(microseconds=1)}
+        )
+    IdentityDecision(
+        status=IdentityStatus.VERIFIED,
+        subject_id=UUID(int=1_221),
+        reason_code="verified",
+        expires_at=now + timedelta(seconds=10),
+    )
+    for status, subject_id in (
+        (IdentityStatus.VERIFIED, None),
+        (IdentityStatus.UNKNOWN, UUID(int=1_222)),
+        (IdentityStatus.AMBIGUOUS, UUID(int=1_223)),
+        (IdentityStatus.CONFLICT, UUID(int=1_224)),
+    ):
+        with pytest.raises(ValidationError):
+            IdentityDecision(
+                status=status,
+                subject_id=subject_id,
+                reason_code="invalid",
+                expires_at=now + timedelta(seconds=10),
+            )
+
+    binding = _test_binding(UUID(int=1_225))
+    grant = AuthGrant(
+        grant_id=UUID(int=1_226),
+        subject_id=UUID(int=1_225),
+        binding=binding,
+        assurance=AssuranceLevel.CONFIRMED,
+        assurance_source="explicit_confirmation",
+        issued_at=now,
+        expires_at=now + timedelta(seconds=1),
+    )
+    for expires_at in (now, now - timedelta(microseconds=1)):
+        with pytest.raises(ValidationError):
+            AuthGrant.model_validate(grant.model_dump() | {"expires_at": expires_at})
+
+    session = AdminSessionPrincipal(
+        admin_session_id=UUID(int=1_227),
+        household_id=UUID(int=1_228),
+        subject_id=UUID(int=1_229),
+        owner_generation=1,
+        profile_version=1,
+        session_version=1,
+        access_mode="loopback",
+        authenticated_at=now,
+        idle_expires_at=now + timedelta(minutes=15),
+        absolute_expires_at=now + timedelta(hours=8),
+    )
+    for mutation in (
+        {"idle_expires_at": now},
+        {"absolute_expires_at": now},
+        {
+            "idle_expires_at": now + timedelta(hours=9),
+            "absolute_expires_at": now + timedelta(hours=8),
+        },
+    ):
+        with pytest.raises(ValidationError):
+            AdminSessionPrincipal.model_validate(session.model_dump() | mutation)
+
+
+def test_timer_intent_has_operation_specific_payload() -> None:
+    commitment = _test_commitment("timer-label-v1")
+    TimerIntent(
+        timer_id=UUID(int=1_231),
+        operation="create",
+        duration_seconds=30,
+        label_commitment=commitment,
+        idempotency_key=UUID(int=1_232),
+    )
+    invalid_cases: tuple[
+        tuple[
+            Literal["create", "cancel", "status"],
+            int | None,
+            Commitment | None,
+        ],
+        ...,
+    ] = (
+        ("create", None, commitment),
+        ("create", 30, None),
+        ("cancel", 30, commitment),
+        ("status", 30, None),
+    )
+    for operation, duration, label in invalid_cases:
+        with pytest.raises(ValidationError):
+            TimerIntent(
+                timer_id=UUID(int=1_233),
+                operation=operation,
+                duration_seconds=duration,
+                label_commitment=label,
+                idempotency_key=UUID(int=1_234),
+            )
+
+
 def test_stop_event_and_stop_signal_share_the_exact_closed_sources() -> None:
     expected = {"edge_keyword", "physical_input", "owner_console", "watchdog"}
     assert set(StopRequestedPayload.model_json_schema()["properties"]["source"]["enum"]) == expected
     assert set(StopSignal.model_json_schema()["properties"]["source"]["enum"]) == expected
+
+
+def test_camera_window_action_and_purpose_are_an_exact_pair() -> None:
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    grant = CameraWindowGrant(
+        grant_id=UUID(int=1_241),
+        household_id=UUID(int=1_242),
+        device_id=UUID(int=1_243),
+        session_id=UUID(int=1_244),
+        turn_id=UUID(int=1_245),
+        subject_id=UUID(int=1_246),
+        action_name="identity.enroll",
+        purpose="explicit_enrollment",
+        max_frames=2,
+        max_frame_bytes=1_024,
+        max_total_bytes=2_048,
+        max_frames_per_second=1,
+        issued_at=now,
+        expires_at=now + timedelta(seconds=2),
+        grant_commitment=_test_commitment("camera-grant-v1"),
+    )
+    with pytest.raises(ValidationError):
+        CameraWindowGrant.model_validate(grant.model_dump() | {"action_name": "identity.observe"})
+    with pytest.raises(ValidationError):
+        CameraWindowGrant.model_validate(
+            grant.model_dump() | {"purpose": "active_conversation_identity"}
+        )
 
 
 def test_route_authorization_is_attempt_and_purpose_specific() -> None:
@@ -690,6 +1087,83 @@ def test_route_authorization_is_attempt_and_purpose_specific() -> None:
     )
 
 
+def test_provider_request_is_exactly_correlated_with_reasoning_route() -> None:
+    route = _test_route()
+    request = SanitizedProviderRequest(
+        request_id=route.request_id,
+        provider=ProviderName.OPENAI,
+        model=route.model,
+        messages=(SanitizedProviderMessage(role="user", content="synthetic"),),
+        allowed_tools=(),
+        max_output_tokens=128,
+        redaction_receipt_id=UUID(int=1_011),
+        route=route,
+        timeout_ms=1_000,
+    )
+    mutations: tuple[dict[str, object], ...] = (
+        {"request_id": UUID(int=1_012)},
+        {"provider": ProviderName.QWEN},
+        {"model": "other-model"},
+        {"route": route.model_copy(update={"purpose": "cloud_stt"})},
+    )
+    for mutation in mutations:
+        with pytest.raises(ValidationError):
+            SanitizedProviderRequest.model_validate(request.model_dump() | mutation)
+
+
+def test_speech_requests_are_exactly_correlated_with_their_routes() -> None:
+    audio_format = AudioFormat(
+        sample_format="s16le",
+        sample_rate_hz=16_000,
+        channels=1,
+        interleaved=True,
+        channel_layout="mono",
+    )
+    stt_route = _test_route(purpose="cloud_stt", model="gpt-transcribe")
+    stt = AuthorizedTranscriptionRequest(
+        request_id=stt_route.request_id,
+        turn_id=stt_route.turn_id,
+        audio_format=audio_format,
+        audio_commitment=stt_route.request_commitment,
+        audio_bytes=320,
+        duration_ms=10,
+        language_hints=("en", "hi"),
+        route=stt_route,
+    )
+    stt_mutations: tuple[dict[str, object], ...] = (
+        {"request_id": UUID(int=1_013)},
+        {"turn_id": UUID(int=1_014)},
+        {"audio_commitment": _test_commitment("different-audio-v1")},
+        {"route": stt_route.model_copy(update={"purpose": "cloud_reasoning"})},
+    )
+    for mutation in stt_mutations:
+        with pytest.raises(ValidationError):
+            AuthorizedTranscriptionRequest.model_validate(stt.model_dump() | mutation)
+
+    tts_route = _test_route(purpose="cloud_tts", model="tts-1")
+    tts = AuthorizedSynthesisRequest(
+        request_id=tts_route.request_id,
+        turn_id=tts_route.turn_id,
+        text="Namaste",
+        text_commitment=tts_route.request_commitment,
+        segment_index=0,
+        segment_count=1,
+        language="hinglish",
+        dlp_receipt_id=UUID(int=1_015),
+        route=tts_route,
+    )
+    tts_mutations: tuple[dict[str, object], ...] = (
+        {"request_id": UUID(int=1_016)},
+        {"turn_id": UUID(int=1_017)},
+        {"text_commitment": _test_commitment("different-text-v1")},
+        {"segment_index": 1},
+        {"route": tts_route.model_copy(update={"purpose": "cloud_reasoning"})},
+    )
+    for mutation in tts_mutations:
+        with pytest.raises(ValidationError):
+            AuthorizedSynthesisRequest.model_validate(tts.model_dump() | mutation)
+
+
 def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
     commitment = Commitment(
         algorithm="HMAC-SHA-256",
@@ -743,9 +1217,10 @@ def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
         with pytest.raises(ValidationError):
             SanitizedProviderRequest.model_validate(request | mutation)
 
+    audio_route = route.model_copy(update={"purpose": "cloud_stt", "model": "gpt-transcribe"})
     audio = dict(
-        request_id=UUID(int=811),
-        turn_id=route.turn_id,
+        request_id=audio_route.request_id,
+        turn_id=audio_route.turn_id,
         audio_format=AudioFormat(
             sample_format="s16le",
             sample_rate_hz=16_000,
@@ -757,7 +1232,7 @@ def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
         audio_bytes=2,
         duration_ms=1,
         language_hints=("en",),
-        route=route,
+        route=audio_route,
     )
     AuthorizedTranscriptionRequest.model_validate(audio)
     for hints in ((), ("en", "en"), ("en", "hi", "en")):
@@ -882,6 +1357,236 @@ def test_action_drafts_are_a_closed_discriminated_union() -> None:
         TypeAdapter(ActionProposalDraft).validate_python(
             {"action_name": "smart_home.unlock", "parameters": {}}
         )
+
+
+def test_action_resource_type_map_is_explicit_and_complete_for_every_discriminator() -> None:
+    expected = {
+        "timer.create": "timer",
+        "timer.cancel": "timer",
+        "timer.status": "timer",
+        "privacy.on": "privacy",
+        "mute": "mute",
+        "stop": "stop",
+        "privacy.off": "privacy",
+        "mute.off": "mute",
+        "system.status": "system",
+        "reachy.status": "reachy",
+        "reachy.gesture_test": "reachy",
+        "offline.prompt_test": "offline",
+        "memory.propose": "memory",
+        "memory.approve": "memory",
+        "memory.edit_approve": "memory",
+        "memory.reject": "memory",
+        "memory.expire": "memory",
+        "memory.delete": "memory",
+        "memory.export": "memory",
+        "profile.create": "profile",
+        "profile.edit": "profile",
+        "profile.revoke": "profile",
+        "profile.delete": "profile",
+        "profile.export": "profile",
+        "consent.grant": "consent",
+        "consent.revoke": "consent",
+        "identity.enroll": "identity",
+        "identity.enrollment.cancel": "identity",
+        "provider.review": "provider",
+        "provider.configure": "provider",
+        "budget.change": "budget",
+        "access.change": "access",
+        "credential.passkey.add": "credential",
+        "credential.passkey.revoke": "credential",
+        "credential.pin.change": "credential",
+        "credential.recovery.rotate": "credential",
+        "audit.export": "audit",
+        "audit.verify": "audit",
+        "backup.recovery_key.create": "backup",
+        "backup.create": "backup",
+        "backup.verify": "backup",
+        "backup.restore": "backup",
+        "search.profile_mode.change": "search",
+        "search.experimental.activate": "search",
+        "security.finding.suppress": "security_finding",
+        "release.latency.accept": "soak_run",
+        "release.family_stage.review": "family_stage",
+        "release.p1r0": "release_candidate",
+    }
+    schema = TypeAdapter(ActionProposalDraft).json_schema()
+    assert expected == action_contracts.ACTION_RESOURCE_TYPE_BY_NAME
+    assert set(action_contracts.ACTION_RESOURCE_TYPE_BY_NAME) == set(
+        schema["discriminator"]["mapping"]
+    )
+
+
+def test_typed_action_targets_cannot_be_substituted_across_resources() -> None:
+    common = {
+        "proposal_id": UUID(int=1_301),
+        "schema_version": "1.0",
+        "parameters_commitment": _test_commitment("action-target-v1"),
+        "uncertainty_micros": 0,
+        "expires_at": datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+        "idempotency_key": UUID(int=1_302),
+    }
+    subject_id = UUID(int=1_303)
+    memory_id = UUID(int=1_304)
+    memory = MemoryActionDraft.model_validate(
+        common
+        | {
+            "action_name": "memory.delete",
+            "resource_type": "memory",
+            "resource_id": memory_id,
+            "subject_id": subject_id,
+            "memory_id": memory_id,
+            "expected_version": 1,
+        }
+    )
+    profile = ProfileActionDraft.model_validate(
+        common
+        | {
+            "action_name": "profile.revoke",
+            "resource_type": "profile",
+            "resource_id": subject_id,
+            "subject_id": subject_id,
+            "expected_version": 1,
+        }
+    )
+    consent = ConsentActionDraft.model_validate(
+        common
+        | {
+            "action_name": "consent.grant",
+            "resource_type": "consent",
+            "resource_id": subject_id,
+            "subject_id": subject_id,
+            "purpose": "personalization",
+            "expected_latest_receipt_id": None,
+            "policy_version": "policy-v1",
+            "disclosure_version": "disclosure-v1",
+        }
+    )
+    search = SearchActionDraft.model_validate(
+        common
+        | {
+            "action_name": "search.profile_mode.change",
+            "resource_type": "search",
+            "resource_id": subject_id,
+            "subject_id": subject_id,
+            "expected_profile_version": 1,
+            "mode": "no_web",
+        }
+    )
+    credential_id = UUID(int=1_306)
+    credential = CredentialActionDraft.model_validate(
+        common
+        | {
+            "action_name": "credential.passkey.revoke",
+            "resource_type": "credential",
+            "resource_id": credential_id,
+            "credential_id": credential_id,
+            "expected_version": 1,
+        }
+    )
+    backup_id = UUID(int=1_307)
+    backup = BackupActionDraft.model_validate(
+        common
+        | {
+            "action_name": "backup.restore",
+            "resource_type": "backup",
+            "resource_id": backup_id,
+            "backup_id": backup_id,
+            "manifest_sha256": "a" * 64,
+        }
+    )
+    run_id = UUID(int=1_308)
+    latency = LatencyDeviationActionDraft.model_validate(
+        common
+        | {
+            "action_name": "release.latency.accept",
+            "resource_type": "soak_run",
+            "resource_id": run_id,
+            "candidate_version": "p1r0",
+            "candidate_commit": "a" * 40,
+            "run_id": run_id,
+            "metric": "first_audio_p95_ms",
+            "observed_ms": 900,
+            "limit_ms": 1_000,
+            "release_notes_sha256": "b" * 64,
+        }
+    )
+    adapter: TypeAdapter[ActionProposalDraft] = TypeAdapter(ActionProposalDraft)
+    for draft in (memory, profile, consent, search, credential, backup, latency):
+        with pytest.raises(ValidationError):
+            adapter.validate_python(draft.model_dump() | {"resource_id": UUID(int=1_305)})
+        with pytest.raises(ValidationError):
+            adapter.validate_python(draft.model_dump() | {"resource_type": "cross_scope"})
+
+
+def test_validated_action_proposal_correlates_draft_and_binding() -> None:
+    timer_id = UUID(int=1_311)
+    draft = TimerCreateActionDraft(
+        proposal_id=UUID(int=1_312),
+        schema_version="1.0",
+        action_name="timer.create",
+        resource_type="timer",
+        resource_id=timer_id,
+        parameters_commitment=_test_commitment("validated-action-v1"),
+        uncertainty_micros=0,
+        expires_at=datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+        idempotency_key=UUID(int=1_313),
+        duration_seconds=30,
+        label="tea",
+    )
+    binding = ActionBinding(
+        household_id=UUID(int=1_314),
+        proposal_id=draft.proposal_id,
+        turn_id=UUID(int=1_315),
+        idempotency_key=draft.idempotency_key,
+        action_name=draft.action_name,
+        resource_type=draft.resource_type,
+        resource_id=draft.resource_id,
+        parameter_commitment=draft.parameters_commitment,
+        policy_version="policy-v1",
+        session_id=UUID(int=1_316),
+        subject_id=UUID(int=1_317),
+    )
+    proposal = ValidatedActionProposal(
+        draft=draft,
+        binding=binding,
+        resource_scope=f"timer:{timer_id}",
+        required_assurance="confirmed",
+    )
+    mutations = (
+        {"proposal_id": UUID(int=1_318)},
+        {"idempotency_key": UUID(int=1_319)},
+        {"action_name": "timer.cancel"},
+        {"resource_type": "backup"},
+        {"resource_id": UUID(int=1_320)},
+        {"parameter_commitment": _test_commitment("different-action-v1")},
+    )
+    for mutation in mutations:
+        with pytest.raises(ValidationError, match="draft binding mismatch"):
+            ValidatedActionProposal.model_validate(
+                proposal.model_dump() | {"binding": binding.model_copy(update=mutation)}
+            )
+
+
+def test_search_profile_mode_rejects_experimental_activation_timestamps() -> None:
+    base = {
+        "proposal_id": UUID(int=1_321),
+        "schema_version": "1.0",
+        "action_name": "search.profile_mode.change",
+        "resource_type": "search",
+        "resource_id": UUID(int=1_322),
+        "subject_id": UUID(int=1_322),
+        "expected_profile_version": 1,
+        "mode": "no_web",
+        "parameters_commitment": _test_commitment("search-profile-v1"),
+        "uncertainty_micros": 0,
+        "expires_at": datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+        "idempotency_key": UUID(int=1_323),
+    }
+    SearchActionDraft.model_validate(base)
+    for field in ("activation_issued_at", "activation_expires_at"):
+        with pytest.raises(ValidationError):
+            SearchActionDraft.model_validate(base | {field: datetime(2026, 8, 27, tzinfo=UTC)})
 
 
 def test_timer_drafts_bind_the_exact_server_resource(
@@ -1188,11 +1893,20 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
             "expected_provider_version": 1,
         },
         "credential.passkey.revoke": base("credential.passkey.revoke", 43)
-        | {"credential_id": UUID(int=243), "expected_version": 1},
+        | {
+            "resource_id": UUID(int=243),
+            "credential_id": UUID(int=243),
+            "expected_version": 1,
+        },
         "backup.restore": base("backup.restore", 44)
-        | {"backup_id": UUID(int=244), "manifest_sha256": "a" * 64},
+        | {
+            "resource_id": UUID(int=244),
+            "backup_id": UUID(int=244),
+            "manifest_sha256": "a" * 64,
+        },
         "memory.edit_approve": base("memory.edit_approve", 45)
         | {
+            "resource_id": UUID(int=246),
             "subject_id": UUID(int=245),
             "proposal_id_ref": UUID(int=246),
             "expected_version": 1,
@@ -1209,6 +1923,7 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
         },
         "identity.enroll": base("identity.enroll", 46)
         | {
+            "resource_id": UUID(int=247),
             "subject_id": UUID(int=247),
             "modality": "face",
             "expected_profile_version": 1,
@@ -1217,6 +1932,7 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
         },
         "search.profile_mode.change": base("search.profile_mode.change", 47)
         | {
+            "resource_id": UUID(int=249),
             "subject_id": UUID(int=249),
             "expected_profile_version": 1,
             "mode": "controlled",
@@ -1224,6 +1940,7 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
         },
         "search.experimental.activate": base("search.experimental.activate", 48)
         | {
+            "resource_id": UUID(int=251),
             "subject_id": UUID(int=251),
             "expected_profile_version": 1,
             "expected_web_consent_receipt_id": UUID(int=252),
@@ -1242,6 +1959,16 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
             "no_tools": True,
         },
     }
+
+
+def test_grouped_action_fixtures_are_valid_and_reject_cross_scope_substitution(
+    valid_action_payloads: dict[str, dict[str, object]],
+) -> None:
+    adapter: TypeAdapter[ActionProposalDraft] = TypeAdapter(ActionProposalDraft)
+    for payload in valid_action_payloads.values():
+        adapter.validate_python(payload)
+        with pytest.raises(ValidationError):
+            adapter.validate_python(payload | {"resource_type": "cross_scope"})
 
 
 @pytest.mark.parametrize(

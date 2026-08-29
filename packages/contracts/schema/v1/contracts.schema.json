@@ -166,6 +166,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -341,6 +342,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -458,6 +460,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -604,6 +607,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -717,6 +721,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -882,6 +887,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -1044,6 +1050,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -1155,6 +1162,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -1284,6 +1292,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -1470,6 +1479,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -1767,6 +1777,7 @@
             "expected_version": {
               "anyOf": [
                 {
+                  "minimum": 1,
                   "type": "integer"
                 },
                 {
@@ -2091,6 +2102,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -2331,6 +2343,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -2495,6 +2508,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -2713,6 +2727,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -2928,6 +2943,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -3046,6 +3062,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -3158,6 +3175,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -3472,6 +3490,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -3621,6 +3640,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -3736,6 +3756,7 @@
           "type": "string"
         },
         "resource_type": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
           "title": "Resource Type",
           "type": "string"
         },
@@ -3899,6 +3920,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -3983,6 +4005,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -4127,6 +4150,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -4207,6 +4231,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -4339,6 +4364,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -4468,6 +4494,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -4584,6 +4611,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -4680,6 +4708,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -4833,6 +4862,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -4946,6 +4976,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -5266,6 +5297,7 @@
             "expected_version": {
               "anyOf": [
                 {
+                  "minimum": 1,
                   "type": "integer"
                 },
                 {
@@ -5472,6 +5504,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -5598,6 +5631,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -5783,6 +5817,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -6011,6 +6046,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -6096,6 +6132,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -6175,6 +6212,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -6456,6 +6494,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -6616,6 +6655,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -6698,6 +6738,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -9817,6 +9858,7 @@
             "expected_version": {
               "anyOf": [
                 {
+                  "minimum": 1,
                   "type": "integer"
                 },
                 {
@@ -10594,6 +10636,7 @@
         "expected_version": {
           "anyOf": [
             {
+              "minimum": 1,
               "type": "integer"
             },
             {
@@ -12314,6 +12357,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -12398,6 +12442,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -12542,6 +12587,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -12622,6 +12668,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -12754,6 +12801,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -12883,6 +12931,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -12999,6 +13048,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -13095,6 +13145,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -13248,6 +13299,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -13361,6 +13413,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -13681,6 +13734,7 @@
             "expected_version": {
               "anyOf": [
                 {
+                  "minimum": 1,
                   "type": "integer"
                 },
                 {
@@ -13887,6 +13941,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -14013,6 +14068,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -14198,6 +14254,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -14426,6 +14483,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -14521,6 +14579,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -14600,6 +14659,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -14881,6 +14941,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -15041,6 +15102,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },
@@ -15123,6 +15185,7 @@
               "type": "string"
             },
             "resource_type": {
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
               "title": "Resource Type",
               "type": "string"
             },

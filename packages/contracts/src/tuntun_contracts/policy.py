@@ -48,11 +48,31 @@ class PolicyDecision(ContractModel):
     required_assurance: AssuranceLevel | None
     expires_at: AwareDatetime
 
+    @model_validator(mode="after")
+    def exact_step_up_shape(self) -> Self:
+        if self.effect is PolicyEffect.STEP_UP:
+            if self.required_assurance not in {
+                AssuranceLevel.CONFIRMED,
+                AssuranceLevel.PIN_VERIFIED,
+                AssuranceLevel.PASSKEY_VERIFIED,
+                AssuranceLevel.RECOVERY_VERIFIED,
+            }:
+                raise ValueError("step-up requires elevated assurance")
+        elif self.required_assurance is not None:
+            raise ValueError("non-step-up decision cannot require assurance")
+        return self
+
 
 class AuthenticationRequest(ContractModel):
     subject_id: UUID
     binding: ActionBinding
     requested_assurance: AssuranceLevel
+
+    @model_validator(mode="after")
+    def subject_matches_binding(self) -> Self:
+        if self.subject_id != self.binding.subject_id:
+            raise ValueError("authentication subject binding mismatch")
+        return self
 
 
 class AuthenticationChallenge(ContractModel):
@@ -61,6 +81,12 @@ class AuthenticationChallenge(ContractModel):
     binding: ActionBinding
     factor: Literal["confirmation", "pin", "passkey"]
     expires_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def subject_matches_binding(self) -> Self:
+        if self.subject_id != self.binding.subject_id:
+            raise ValueError("authentication subject binding mismatch")
+        return self
 
 
 class AuthenticationResponse(ContractModel):
@@ -88,6 +114,10 @@ class AuthGrant(ContractModel):
         }
         if self.assurance is not expected[self.assurance_source]:
             raise ValueError("assurance source mismatch")
+        if self.subject_id != self.binding.subject_id:
+            raise ValueError("authentication subject binding mismatch")
+        if self.expires_at <= self.issued_at:
+            raise ValueError("authentication grant expiry ordering")
         return self
 
 
@@ -118,8 +148,16 @@ class AuthContext(ContractModel):
         }
         if self.assurance is not expected[self.assurance_source]:
             raise ValueError("assurance source mismatch")
-        if (self.assurance_source in {"guest", "identity"}) != (self.grant_id is None):
-            raise ValueError("grant presence mismatch")
+        if self.subject_id != self.binding.subject_id:
+            raise ValueError("authentication context subject binding mismatch")
+        if self.assurance_source == "guest":
+            if self.subject_id is not None or self.grant_id is not None:
+                raise ValueError("guest authentication context shape")
+        elif self.assurance_source == "identity":
+            if self.subject_id is None or self.grant_id is not None:
+                raise ValueError("identity authentication context shape")
+        elif self.subject_id is None or self.grant_id is None:
+            raise ValueError("grant-backed authentication context shape")
         return self
 
 
@@ -143,6 +181,12 @@ class AdminSessionPrincipal(ContractModel):
     idle_expires_at: AwareDatetime
     absolute_expires_at: AwareDatetime
 
+    @model_validator(mode="after")
+    def expiry_ordering(self) -> Self:
+        if not self.authenticated_at < self.idle_expires_at <= self.absolute_expires_at:
+            raise ValueError("admin session expiry ordering")
+        return self
+
 
 class TimerIntent(ContractModel):
     timer_id: UUID
@@ -150,3 +194,14 @@ class TimerIntent(ContractModel):
     duration_seconds: Annotated[int, Field(ge=1, le=86_400)] | None
     label_commitment: Commitment | None
     idempotency_key: UUID
+
+    @model_validator(mode="after")
+    def exact_operation_payload(self) -> Self:
+        create_payload = self.duration_seconds is not None and self.label_commitment is not None
+        if (self.operation == "create") != create_payload:
+            raise ValueError("timer intent operation payload mismatch")
+        if self.operation != "create" and (
+            self.duration_seconds is not None or self.label_commitment is not None
+        ):
+            raise ValueError("timer intent operation payload mismatch")
+        return self
