@@ -11,7 +11,7 @@
 ## Global Constraints
 
 1. The normative specification is `docs/superpowers/specs/2026-08-27-tuntun-phase1-anchor-design.md`; changing a locked decision requires a specification update and ADR before implementation.
-2. The repository runner and Mac core are exactly Python 3.12. The pure-Python `tuntun-edge` and `tuntun-contracts` distributions declare `>=3.11,<3.13`, avoid 3.12-only syntax, and are installed only for the exact delivered Reachy interpreter/version/ABI/platform combination accepted by the later hardware gate; every other combination blocks packaging. `sqlcipher3==0.6.2` is a Mac-only compatibility candidate and is accepted only after the target Intel Mac probe passes.
+2. The repository runner and Mac core are exactly Python 3.12. The pure-Python `tuntun-edge` and `tuntun-contracts` distributions declare `>=3.11,<3.13`, avoid 3.12-only syntax, and are installed only for the exact delivered Reachy interpreter/version/ABI/platform combination accepted by the later hardware gate; every other combination blocks packaging. `sqlcipher3==0.6.2` is the Mac-core storage compatibility candidate: its path/WAL behavior must pass the exact Ubuntu and hosted Intel-macOS CI jobs, and it is accepted only after the real target Intel Mac encrypted probe passes.
 3. No real family name, audio, transcript, image, embedding, credential, memory, provider response, database, backup, key, certificate, local username, hostname, IP, MAC address, or serial number may enter source control, test reports, CI artifacts, or public issues.
 4. All Pydantic trust-boundary models are frozen, reject unknown fields, use aware UTC timestamps, bounded text/bytes, random UUIDs, integer confidence/money, and explicit schema version `1.0`.
 5. RFC 8785/JCS canonical bytes normalize Unicode to NFC and serialize UTC timestamps with exactly six fractional digits. Private or low-entropy values use purpose-separated HMAC-SHA-256 commitments, never bare hashes.
@@ -4611,7 +4611,7 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 
 **Interfaces:**
 - Consumes: YAML file and explicit `TUNTUN_` environment overrides.
-- Produces: `Settings` and `load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Settings`; descriptor-walked `OwnedPath(path, device, inode).revalidate()` and `ensure_private_directory(path: Path) -> OwnedPath`; `ApplicationPaths.create(base: Path | None = None) -> ApplicationPaths` with `root`, `data`, `logs`, `models`, and `backups` directories at exact mode `0700`. Every path component is opened no-follow relative to its already verified parent; root-owned ancestors must not be group/world writable, user-owned ancestors must be private, and every returned leaf is a user-owned directory whose device/inode/type/mode still match immediately before return.
+- Produces: `Settings` and `load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Settings`; descriptor-walked `OwnedPath(path, device, inode).revalidate()`; `open_owned_directory(path: Path) -> OwnedDirectory`, whose context-managed live directory FD remains open until `close()`/context exit; `ensure_private_directory(path: Path) -> OwnedPath`; and `ApplicationPaths.create(base: Path | None = None) -> ApplicationPaths` with `root`, `data`, `logs`, `models`, and `backups` directories at exact mode `0700`. Every initial and revalidation walk opens every lexical path component no-follow relative to its already verified parent; root-owned ancestors must not be group/world writable, user-owned ancestors must be private, and every returned leaf is a user-owned directory whose device/inode/type/mode match its named entry and retained FD. No untrusted application path is accepted by calling `resolve()`/`realpath()` through a symlink. On macOS, tests canonicalize pytest's trusted temporary root once from `/var/...` to `/private/var/...`; production path logic does not canonicalize an untrusted alias.
 
 - [ ] **Step 1: Write red settings/path tests**
 
@@ -4681,21 +4681,33 @@ from pathlib import Path
 import pytest
 from tuntun_core.config import secure_paths
 from tuntun_core.config.paths import ApplicationPaths
+from tuntun_core.config.secure_paths import ensure_private_directory,open_owned_directory
+
+def _fixture_root(tmp_path:Path) -> Path:
+    # pytest owns this root. Darwin may report it through the trusted /var alias;
+    # production code must never use realpath to bless an untrusted symlink.
+    return Path(os.path.realpath(tmp_path))
 
 def test_paths_are_created_owner_only(tmp_path: Path) -> None:
-    paths = ApplicationPaths.create(tmp_path / "Tuntun")
+    paths = ApplicationPaths.create(_fixture_root(tmp_path) / "Tuntun")
     for path in (paths.root, paths.data, paths.logs, paths.models, paths.backups):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700
 
 
 @pytest.mark.parametrize("mutation",(
-    "root_symlink","data_symlink","data_fifo","wrong_mode","wrong_owner",
+    "ancestor_symlink","root_symlink","data_symlink","data_fifo",
+    "wrong_mode","wrong_owner",
 ))
 def test_application_paths_reject_unsafe_existing_components(
     tmp_path:Path,monkeypatch:pytest.MonkeyPatch,mutation:str,
 ) -> None:
-    base=tmp_path/"Tuntun"; target=tmp_path/"target"; target.mkdir(mode=0o700)
-    if mutation=="root_symlink": base.symlink_to(target,directory=True)
+    root=_fixture_root(tmp_path); base=root/"Tuntun"; target=root/"target"
+    target.mkdir(mode=0o700)
+    if mutation=="ancestor_symlink":
+        real=root/"real-parent"; real.mkdir(mode=0o700)
+        alias=root/"alias-parent"; alias.symlink_to(real,directory=True)
+        base=alias/"Tuntun"
+    elif mutation=="root_symlink": base.symlink_to(target,directory=True)
     else:
         base.mkdir(mode=0o700)
         if mutation=="data_symlink": (base/"data").symlink_to(target,directory=True)
@@ -4708,21 +4720,27 @@ def test_application_paths_reject_unsafe_existing_components(
         ApplicationPaths.create(base)
 
 
-def test_application_path_replacement_after_open_fails_identity_check(
-    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
+def test_live_directory_guard_rejects_parent_replacement_and_closes_fd(
+    tmp_path:Path,
 ) -> None:
-    base=tmp_path/"Tuntun"; base.mkdir(mode=0o700)
-    watched=(base.stat().st_dev,base.stat().st_ino)
-    original_fstat=secure_paths.os.fstat; replaced=False
-    def replacing_fstat(fd:int):
-        nonlocal replaced
-        value=original_fstat(fd)
-        if not replaced and (value.st_dev,value.st_ino)==watched:
-            replaced=True; base.rename(tmp_path/"opened-original"); base.mkdir(mode=0o700)
-        return value
-    monkeypatch.setattr(secure_paths.os,"fstat",replacing_fstat)
+    root=_fixture_root(tmp_path); base=root/"Tuntun"; base.mkdir(mode=0o700)
+    directory=open_owned_directory(base); held_fd=directory.fd
+    base.rename(root/"opened-original"); base.mkdir(mode=0o700)
     with pytest.raises(PermissionError,match="unsafe application path"):
-        ApplicationPaths.create(base)
+        directory.revalidate()
+    directory.close()
+    with pytest.raises(OSError): os.fstat(held_fd)
+
+
+def test_owned_path_fresh_walk_rejects_one_way_ancestor_replacement(
+    tmp_path:Path,
+) -> None:
+    root=_fixture_root(tmp_path); parent=root/"parent"; leaf=parent/"leaf"
+    parent.mkdir(mode=0o700); identity=ensure_private_directory(leaf)
+    parent.rename(root/"old-parent")
+    parent.mkdir(mode=0o700); (parent/"leaf").mkdir(mode=0o700)
+    with pytest.raises(PermissionError,match="unsafe application path"):
+        identity.revalidate()
 ```
 
 Define `strict_settings_case` in the config subtree where it is consumed. It begins as an owner-only regular valid settings file; every mutation changes exactly one loader invariant:
@@ -4955,22 +4973,25 @@ def load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Setting
 from dataclasses import dataclass
 import os,stat
 from pathlib import Path
+from types import TracebackType
 
-OPEN_FLAGS=os.O_RDONLY|os.O_CLOEXEC|os.O_DIRECTORY|getattr(os,"O_NOFOLLOW",0)
+OPEN_FLAGS=os.O_RDONLY|os.O_CLOEXEC|os.O_DIRECTORY|os.O_NOFOLLOW
 
-@dataclass(frozen=True,slots=True)
-class OwnedPath:
-    path:Path; device:int; inode:int
-    def revalidate(self) -> None:
-        value=os.lstat(self.path)
-        if (
-            not stat.S_ISDIR(value.st_mode) or value.st_uid!=os.geteuid()
-            or stat.S_IMODE(value.st_mode)!=0o700
-            or (value.st_dev,value.st_ino)!=(self.device,self.inode)
-        ): raise PermissionError("unsafe application path")
+def _absolute_lexical(path:Path) -> Path:
+    raw=os.fspath(path)
+    if (
+        type(raw) is not str or not raw or "\x00" in raw
+        or any(component in {".",".."} for component in raw.split(os.sep))
+    ): raise PermissionError("unsafe application path")
+    absolute=Path(os.path.abspath(raw))
+    if absolute==Path("/") or absolute.name in {".",".."}:
+        raise PermissionError("unsafe application path")
+    return absolute
 
-def _qualified_directory(fd:int,path:Path,*,leaf:bool) -> os.stat_result:
-    opened=os.fstat(fd); named=os.lstat(path); owner=os.geteuid()
+def _require_directory(
+    opened:os.stat_result,named:os.stat_result,*,leaf:bool,
+) -> None:
+    owner=os.geteuid()
     if (
         not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(named.st_mode)
         or (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino)
@@ -4979,29 +5000,72 @@ def _qualified_directory(fd:int,path:Path,*,leaf:bool) -> os.stat_result:
         or (opened.st_uid==owner and opened.st_mode&0o077)
         or (leaf and (opened.st_uid!=owner or stat.S_IMODE(opened.st_mode)!=0o700))
     ): raise PermissionError("unsafe application path")
-    return opened
 
-def ensure_private_directory(path:Path) -> OwnedPath:
-    absolute=Path(os.path.abspath(os.fspath(path)))
-    if not absolute.is_absolute() or absolute==Path("/"):
-        raise PermissionError("unsafe application path")
-    current=Path("/"); parent_fd=os.open("/",OPEN_FLAGS)
+@dataclass(slots=True)
+class OwnedDirectory:
+    path:Path; fd:int; device:int; inode:int; _closed:bool=False
+    def revalidate(self) -> None:
+        if self._closed: raise PermissionError("unsafe application path")
+        held=os.fstat(self.fd)
+        with _walk_owned_directory(self.path,create=False) as fresh:
+            if (
+                (held.st_dev,held.st_ino)!=(self.device,self.inode)
+                or (fresh.device,fresh.inode)!=(self.device,self.inode)
+            ): raise PermissionError("unsafe application path")
+    def close(self) -> None:
+        if not self._closed:
+            os.close(self.fd); self._closed=True
+    def __enter__(self) -> "OwnedDirectory": return self
+    def __exit__(
+        self,exc_type:type[BaseException]|None,exc:BaseException|None,
+        traceback:TracebackType|None,
+    ) -> None: self.close()
+
+@dataclass(frozen=True,slots=True)
+class OwnedPath:
+    path:Path; device:int; inode:int
+    def revalidate(self) -> None:
+        with open_owned_directory(self.path) as fresh:
+            if (fresh.device,fresh.inode)!=(self.device,self.inode):
+                raise PermissionError("unsafe application path")
+
+def _walk_owned_directory(path:Path,*,create:bool) -> OwnedDirectory:
+    absolute=_absolute_lexical(path); parts=absolute.parts[1:]
+    parent_fd=os.open("/",OPEN_FLAGS)
     try:
-        for index,part in enumerate(absolute.parts[1:]):
-            current=current/part; leaf=index==len(absolute.parts)-2
-            try: child_fd=os.open(part,OPEN_FLAGS,dir_fd=parent_fd)
+        root=os.fstat(parent_fd); _require_directory(root,os.lstat("/"),leaf=False)
+        for index,part in enumerate(parts):
+            leaf=index==len(parts)-1
+            try:
+                child_fd=os.open(part,OPEN_FLAGS,dir_fd=parent_fd)
             except FileNotFoundError:
+                if not create: raise
                 os.mkdir(part,0o700,dir_fd=parent_fd)
                 child_fd=os.open(part,OPEN_FLAGS,dir_fd=parent_fd)
-            try: opened=_qualified_directory(child_fd,current,leaf=leaf)
+            try:
+                opened=os.fstat(child_fd)
+                named=os.stat(part,dir_fd=parent_fd,follow_symlinks=False)
+                _require_directory(opened,named,leaf=leaf)
             except BaseException: os.close(child_fd); raise
             os.close(parent_fd); parent_fd=child_fd
-        result=OwnedPath(absolute,opened.st_dev,opened.st_ino)
-        result.revalidate(); return result
+        leaf_value=os.fstat(parent_fd)
+        result=OwnedDirectory(absolute,parent_fd,leaf_value.st_dev,leaf_value.st_ino)
+        parent_fd=-1
+        return result
     except OSError as error:
         if isinstance(error,PermissionError): raise
         raise PermissionError("unsafe application path") from error
-    finally: os.close(parent_fd)
+    finally:
+        if parent_fd>=0: os.close(parent_fd)
+
+def open_owned_directory(path:Path) -> OwnedDirectory:
+    return _walk_owned_directory(path,create=False)
+
+def ensure_private_directory(path:Path) -> OwnedPath:
+    with _walk_owned_directory(path,create=True) as opened:
+        result=OwnedPath(opened.path,opened.device,opened.inode)
+    result.revalidate()
+    return result
 ```
 
 ```python
@@ -5030,7 +5094,7 @@ Add `pydantic-settings>=2.10,<3`, `PyYAML>=6.0,<7`, and `platformdirs>=4.4,<5` t
 
 Run: `uv lock && uv run pytest tests/unit/config/test_settings.py tests/unit/config/test_paths.py -q && uv run ruff check apps/core/src/tuntun_core/config tests/unit/config && uv run mypy apps/core/src/tuntun_core/config`
 
-Expected: PASS with all settings/path tests passing, including symlink/special-file/wrong-owner/wrong-mode/device-inode replacement failures; every returned application directory remains the exact descriptor-qualified `0700` inode; Ruff/mypy exit 0.
+Expected: PASS with all settings/path tests passing, including ancestor/leaf symlink, special-file, wrong-owner, wrong-mode, parent-replacement, and device/inode replacement failures. The one trusted Darwin pytest-root alias is canonicalized by the fixture only. Every creation/revalidation uses a fresh full no-follow component walk; each live `OwnedDirectory` retains its exact descriptor-qualified `0700` inode until explicit close/context exit, and all FDs close on success and failure. Ruff/mypy exit 0.
 
 - [ ] **Step 5: Commit exact Task 7 paths**
 
@@ -5279,6 +5343,8 @@ git commit -m "feat(core): add Keychain boundary and log redaction"
 **Estimated effort:** 2 person-days.
 
 **Files:**
+- Modify: `packages/testing/pyproject.toml`
+- Modify: `uv.lock`
 - Create: `packages/testing/src/tuntun_testing/fake_clock.py`
 - Create: `packages/testing/src/tuntun_testing/fake_providers.py`
 - Create: `packages/testing/src/tuntun_testing/fake_reachy.py`
@@ -6518,8 +6584,9 @@ git commit -m "feat(models): add governed registry and explicit installer"
 - Create: `docs/operations/sqlcipher-compatibility.md`
 
 **Interfaces:**
-- Consumes: a 32-byte database key; Task 7 `ensure_private_directory`/`OwnedPath`; and an owner-only database path whose parent chain and file entry can be descriptor-qualified.
-- Produces: `qualified_database_identity(path: Path) -> tuple[int, int]`; `open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection`; `probe_storage(path: Path, key: bytes) -> StorageProbe`; CLI `tuntunctl storage probe --path PATH --json`. The database parent is held by its verified no-follow directory descriptor during open; the database file is created/opened `O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK` at `0600`, must be one regular single-link user-owned inode on the parent's device, and is rechecked by `dir_fd` device/inode/type/owner/mode immediately after SQLCipher opens it. No chmod/touch follows a caller pathname.
+- Consumes: a 32-byte database key and Task 7 `ensure_private_directory`, `open_owned_directory`, and their fresh no-follow component walk. Task 11's `_OPEN_LOCK` serializes qualification/connect windows inside this process only; it is not represented as cross-process protection.
+- Produces: `qualified_database_identity(path: Path) -> tuple[int, int]`; `open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection`; concrete subclass `QualifiedSQLCipherConnection.revalidate_storage_path()` and `.guarded_file_descriptors()`; `probe_storage(path: Path, key: bytes) -> StorageProbe`; CLI `tuntunctl storage probe --path PATH --json`. The adapter descriptor-qualifies or descriptor-relative `O_EXCL`-creates the main file beneath a retained verified parent, asks SQLCipher to reopen the normal symlink-free absolute pathname with exact `READWRITE|FULLMUTEX|PRIVATECACHE|SQLITE_OPEN_NOFOLLOW` flags (no `CREATE`, URI, or custom VFS), and brackets connect/key/WAL setup with fresh parent and database inode revalidation. It qualifies pre-existing and newly materialized sibling WAL/SHM entries, then retains the parent, main-file, and sidecar FDs in the connection guard until `close()` or finalization. Every main/sidecar entry is a regular, single-link, exact-`0600`, effective-user-owned inode on the parent's device. No chmod/touch follows a caller pathname; only a newly created held FD may receive `fchmod(0600)`.
+- This is deliberately not an exact descriptor handoff: `sqlcipher3==0.6.2` exposes neither a main-file FD nor Python VFS registration. A hostile same-EUID/root process can perform an ABA swap that restores the checked names between bracket checks, and a process able to read this process's memory can obtain the key. The contract is strong against other users, symlinks, stale/unsafe entries, and one-way/non-ABA replacement; exact binding against a malicious same-EUID process requires a funded native VFS or different driver and blocks this adapter rather than permitting a stronger claim.
 
 - [ ] **Step 1: Pin dependencies and write the red encryption tests**
 
@@ -6527,60 +6594,255 @@ Add `sqlcipher3==0.6.2` and `cryptography>=45,<46` to core dependencies and run 
 
 ```python
 # tests/security/test_sqlcipher.py
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
 import os
+import socket
 import sqlite3
+import stat
 import pytest
 from sqlcipher3 import dbapi2 as sqlcipher3
 from tuntun_core.adapters.sqlcipher import connection as connection_module
-from tuntun_core.adapters.sqlcipher.connection import open_sqlcipher
+from tuntun_core.adapters.sqlcipher.connection import (
+    SQLCIPHER_OPEN_FLAGS,SQLITE_OPEN_NOFOLLOW,QualifiedSQLCipherConnection,
+    open_sqlcipher,
+)
+from tuntun_core.adapters.sqlcipher.probe import probe_storage
 
 KEY = bytes(range(32)); WRONG = bytes(reversed(range(32)))
+
+def _database_path(tmp_path:Path,name:str="foundation.db") -> Path:
+    # pytest owns this root; canonicalize only its trusted Darwin /var alias.
+    root=Path(os.path.realpath(tmp_path)); private=root/"private"
+    private.mkdir(mode=0o700,exist_ok=True)
+    return private/name
+
+def _regular(path:Path,data:bytes=b"") -> None:
+    path.write_bytes(data); path.chmod(0o600)
+
+@pytest.mark.parametrize("path",(Path("."),Path("private")/".."/"database.db",Path("bad\x00name.db")))
+def test_database_path_rejects_dot_dotdot_and_nul(path:Path) -> None:
+    with pytest.raises(PermissionError,match="unsafe database path"):
+        open_sqlcipher(path,KEY)
+
 def test_key_first_database_is_encrypted_and_wrong_key_fails(tmp_path: Path) -> None:
-    path=tmp_path/"foundation.db"; sentinel=b"foundation-private-sentinel"
+    path=_database_path(tmp_path); sentinel=b"foundation-private-sentinel"
     db=open_sqlcipher(path, KEY); db.execute("CREATE TABLE marker(value BLOB NOT NULL)"); db.execute("INSERT INTO marker VALUES (?)", (sentinel,)); db.commit(); db.close()
     assert sentinel not in path.read_bytes(); assert not path.read_bytes().startswith(b"SQLite format 3\x00")
     with pytest.raises(sqlcipher3.DatabaseError): open_sqlcipher(path, WRONG)
     with pytest.raises(sqlite3.DatabaseError): sqlite3.connect(path).execute("SELECT name FROM sqlite_master").fetchall()
 
 def test_connection_enables_integrity_foreign_keys_and_secure_delete(tmp_path: Path) -> None:
-    db=open_sqlcipher(tmp_path/"settings.db", KEY)
+    db=open_sqlcipher(_database_path(tmp_path,"settings.db"), KEY)
     assert db.execute("PRAGMA cipher_version").fetchone()[0]
     assert db.execute("PRAGMA cipher_integrity_check").fetchone()[0] == "ok"
     assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert db.execute("PRAGMA secure_delete").fetchone()[0] == 1
+    db.close()
 
+def test_connect_uses_normal_path_exact_flags_and_key_is_first_sql(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
+) -> None:
+    path=_database_path(tmp_path); calls=[]; statements=[]
+    original_connect=connection_module.sqlcipher3.connect
+    original_execute=QualifiedSQLCipherConnection.execute
+    def recording_connect(database,*args,**kwargs):
+        calls.append((database,dict(kwargs)))
+        return original_connect(database,*args,**kwargs)
+    def recording_execute(self,statement,*args,**kwargs):
+        statements.append(str(statement)); return original_execute(self,statement,*args,**kwargs)
+    monkeypatch.setattr(connection_module.sqlcipher3,"connect",recording_connect)
+    monkeypatch.setattr(QualifiedSQLCipherConnection,"execute",recording_execute)
+    db=open_sqlcipher(path,KEY); db.close()
+    database,kwargs=calls[0]
+    assert database==os.fspath(path) and not database.startswith("/dev/fd/")
+    assert kwargs["flags"]==SQLCIPHER_OPEN_FLAGS
+    assert kwargs["factory"] is QualifiedSQLCipherConnection
+    assert "uri" not in kwargs and "vfs" not in kwargs
+    assert SQLCIPHER_OPEN_FLAGS&sqlcipher3.SQLITE_OPEN_CREATE==0
+    assert SQLCIPHER_OPEN_FLAGS&SQLITE_OPEN_NOFOLLOW
+    assert statements[0]==f'PRAGMA key = "x\'{KEY.hex()}\'"'
+
+@pytest.mark.parametrize("component",("ancestor","leaf"))
+def test_pinned_driver_enforces_nofollow_on_each_target_platform(
+    tmp_path:Path,component:str,
+) -> None:
+    real=_database_path(tmp_path,"real.db"); db=open_sqlcipher(real,KEY); db.close()
+    if component=="leaf":
+        candidate=real.with_name("alias.db"); candidate.symlink_to(real)
+    else:
+        alias=real.parent.with_name("alias-parent"); alias.symlink_to(real.parent,directory=True)
+        candidate=alias/real.name
+    with pytest.raises(sqlcipher3.OperationalError):
+        sqlcipher3.connect(os.fspath(candidate),flags=SQLCIPHER_OPEN_FLAGS)
 
 @pytest.mark.parametrize("mutation",(
-    "parent_symlink","database_symlink","database_fifo","wrong_mode",
-    "wrong_owner","replace_during_connect",
+    "symlink","fifo","socket","directory","mode_0640","mode_0400","wrong_owner",
+    "hard_link","device_mismatch",
 ))
-def test_database_path_is_nofollow_owner_only_and_identity_stable(
+def test_database_entry_is_regular_owned_private_single_link_and_same_device(
     tmp_path:Path,monkeypatch:pytest.MonkeyPatch,mutation:str,
 ) -> None:
-    private=tmp_path/"private"; private.mkdir(mode=0o700); path=private/"database.db"
-    if mutation=="parent_symlink":
-        target=tmp_path/"target"; target.mkdir(mode=0o700)
-        private.rmdir(); private.symlink_to(target,directory=True)
-    elif mutation=="database_symlink":
-        target=tmp_path/"target.db"; target.write_bytes(b""); target.chmod(0o600)
-        path.symlink_to(target)
-    elif mutation=="database_fifo": os.mkfifo(path,0o600)
+    path=_database_path(tmp_path); cleanup=None
+    if mutation=="symlink":
+        target=path.with_name("target.db"); _regular(target); path.symlink_to(target)
+    elif mutation=="fifo": os.mkfifo(path,0o600)
+    elif mutation=="socket":
+        cleanup=socket.socket(socket.AF_UNIX); cleanup.bind(os.fspath(path))
+    elif mutation=="directory": path.mkdir(mode=0o700)
     else:
-        path.write_bytes(b""); path.chmod(0o640 if mutation=="wrong_mode" else 0o600)
-        if mutation=="wrong_owner":
-            owner=os.geteuid()
-            monkeypatch.setattr(connection_module,"_database_owner",lambda:owner+1)
-        elif mutation=="replace_during_connect":
-            original_connect=connection_module.sqlcipher3.connect
-            def replacing_connect(*args,**kwargs):
-                path.rename(private/"qualified-original.db")
-                path.write_bytes(b""); path.chmod(0o600)
-                return original_connect(*args,**kwargs)
-            monkeypatch.setattr(connection_module.sqlcipher3,"connect",replacing_connect)
+        _regular(path)
+        if mutation.startswith("mode_"): path.chmod(int(mutation.removeprefix("mode_"),8))
+        elif mutation=="hard_link": os.link(path,path.with_name("second-link.db"))
+        elif mutation=="wrong_owner":
+            original=connection_module._reported_owner
+            monkeypatch.setattr(connection_module,"_reported_owner",lambda name,value: value.st_uid+1 if name==path.name else original(name,value))
+        elif mutation=="device_mismatch":
+            original=connection_module._reported_device
+            monkeypatch.setattr(connection_module,"_reported_device",lambda name,value: value.st_dev+1 if name==path.name else original(name,value))
+    try:
+        with pytest.raises(PermissionError,match="unsafe database path"):
+            open_sqlcipher(path,KEY)
+    finally:
+        if cleanup is not None: cleanup.close()
+
+def test_every_ancestor_and_final_symlink_is_rejected(tmp_path:Path) -> None:
+    root=Path(os.path.realpath(tmp_path)); target=root/"target"; target.mkdir(mode=0o700)
+    alias=root/"alias"; alias.symlink_to(target,directory=True)
+    with pytest.raises(PermissionError,match="unsafe database path"):
+        open_sqlcipher(alias/"database.db",KEY)
+    private=root/"private"; private.mkdir(mode=0o700)
+    real=private/"real.db"; _regular(real); (private/"database.db").symlink_to(real)
+    with pytest.raises(PermissionError,match="unsafe database path"):
+        open_sqlcipher(private/"database.db",KEY)
+
+@pytest.mark.parametrize("replacement",("database","parent"))
+def test_one_way_replacement_during_connect_fails_and_closes(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,replacement:str,
+) -> None:
+    path=_database_path(tmp_path); parent=path.parent; captured=[]
+    original_connect=connection_module.sqlcipher3.connect
+    original_open=connection_module._open_qualified_database
+    def recording_open(value):
+        guard=original_open(value); captured.extend(guard.file_descriptors()); return guard
+    def replacing_connect(*args,**kwargs):
+        if replacement=="database":
+            path.rename(parent/"qualified-original.db"); _regular(path)
+        else:
+            parent.rename(parent.with_name("qualified-original-parent"))
+            parent.mkdir(mode=0o700); _regular(path)
+        return original_connect(*args,**kwargs)
+    monkeypatch.setattr(connection_module,"_open_qualified_database",recording_open)
+    monkeypatch.setattr(connection_module.sqlcipher3,"connect",replacing_connect)
     with pytest.raises(PermissionError,match="unsafe database path"):
         open_sqlcipher(path,KEY)
+    assert captured
+    for fd in captured:
+        with pytest.raises(OSError): os.fstat(fd)
+
+@pytest.mark.parametrize("suffix",("-wal","-shm"))
+@pytest.mark.parametrize("mutation",(
+    "symlink","fifo","socket","directory","mode_0640","mode_0400","wrong_owner",
+    "hard_link","device_mismatch",
+))
+def test_preexisting_sidecars_are_qualified_before_sqlite_touches_them(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,suffix:str,mutation:str,
+) -> None:
+    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY); db.close()
+    sidecar=Path(os.fspath(path)+suffix); cleanup=None
+    if mutation=="symlink":
+        target=sidecar.with_name(sidecar.name+"-target"); _regular(target); sidecar.symlink_to(target)
+    elif mutation=="fifo": os.mkfifo(sidecar,0o600)
+    elif mutation=="socket":
+        cleanup=socket.socket(socket.AF_UNIX); cleanup.bind(os.fspath(sidecar))
+    elif mutation=="directory": sidecar.mkdir(mode=0o700)
+    else:
+        _regular(sidecar)
+        if mutation.startswith("mode_"): sidecar.chmod(int(mutation.removeprefix("mode_"),8))
+        elif mutation=="hard_link": os.link(sidecar,sidecar.with_name(sidecar.name+"-link"))
+        elif mutation=="wrong_owner":
+            original=connection_module._reported_owner
+            monkeypatch.setattr(connection_module,"_reported_owner",lambda name,value: value.st_uid+1 if name==sidecar.name else original(name,value))
+        elif mutation=="device_mismatch":
+            original=connection_module._reported_device
+            monkeypatch.setattr(connection_module,"_reported_device",lambda name,value: value.st_dev+1 if name==sidecar.name else original(name,value))
+    try:
+        with pytest.raises(PermissionError,match="unsafe database path"):
+            open_sqlcipher(path,KEY)
+    finally:
+        if cleanup is not None: cleanup.close()
+
+def test_materialized_sidecars_and_guard_descriptors_live_until_close(tmp_path:Path) -> None:
+    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY)
+    descriptors=db.guarded_file_descriptors()
+    assert len(descriptors)==4
+    assert all(os.fstat(fd).st_uid==os.geteuid() for fd in descriptors)
+    for suffix in ("-wal","-shm"):
+        value=os.lstat(os.fspath(path)+suffix)
+        assert stat.S_ISREG(value.st_mode) and stat.S_IMODE(value.st_mode)==0o600
+        assert value.st_uid==os.geteuid() and value.st_nlink==1
+        assert value.st_dev==os.lstat(path.parent).st_dev
+    db.close()
+    for fd in descriptors:
+        with pytest.raises(OSError): os.fstat(fd)
+
+def test_initialization_failure_closes_every_guard_descriptor(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
+) -> None:
+    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY); db.close(); captured=[]
+    original=connection_module._open_qualified_database
+    def recording_guard(value):
+        guard=original(value); captured.extend(guard.file_descriptors()); return guard
+    monkeypatch.setattr(connection_module,"_open_qualified_database",recording_guard)
+    with pytest.raises(sqlcipher3.DatabaseError): open_sqlcipher(path,WRONG)
+    assert captured
+    for fd in captured:
+        with pytest.raises(OSError): os.fstat(fd)
+
+@pytest.mark.parametrize("replacement",("database","parent"))
+def test_live_connection_revalidation_rejects_named_entry_drift(
+    tmp_path:Path,replacement:str,
+) -> None:
+    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY); parent=path.parent
+    if replacement=="database":
+        original=parent/"open-original.db"; path.rename(original)
+        _regular(path,original.read_bytes())
+    else:
+        original_parent=parent.with_name("open-original-parent"); parent.rename(original_parent)
+        parent.mkdir(mode=0o700); _regular(path,(original_parent/path.name).read_bytes())
+    with pytest.raises(PermissionError,match="unsafe database path"):
+        db.revalidate_storage_path()
+    db.close()
+
+def test_two_connections_share_canonical_wal_and_complete_concurrent_writes(tmp_path:Path) -> None:
+    path=_database_path(tmp_path); first=open_sqlcipher(path,KEY); second=open_sqlcipher(path,KEY)
+    first.execute("CREATE TABLE concurrent_writes(value INTEGER NOT NULL)")
+    def write(connection,value):
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("INSERT INTO concurrent_writes VALUES (?)",(value,))
+        connection.execute("COMMIT")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda item:write(*item),((first,1),(second,2))))
+    expected=os.fspath(path)
+    assert first.execute("PRAGMA database_list").fetchone()[2]==expected
+    assert second.execute("PRAGMA database_list").fetchone()[2]==expected
+    assert Path(expected+"-wal").is_file() and Path(expected+"-shm").is_file()
+    assert first.execute("SELECT count(*) FROM concurrent_writes").fetchone()[0]==2
+    first.close(); second.close()
+
+def test_probe_is_sanitized_and_records_driver_runtime(tmp_path:Path) -> None:
+    value=probe_storage(_database_path(tmp_path),KEY).as_dict(); encoded=json.dumps(value)
+    assert set(value)=={
+        "operating_system","architecture","python","driver","sqlite","cipher",
+        "open_flags","integrity_ok","mode",
+    }
+    assert value["driver"]=="sqlcipher3==0.6.2"
+    assert value["sqlite"]==sqlcipher3.sqlite_version and value["cipher"]
+    assert value["open_flags"]==SQLCIPHER_OPEN_FLAGS and value["integrity_ok"] is True
+    assert value["mode"]=="0o600"
+    assert "path" not in value and "key" not in value
+    assert os.fspath(tmp_path) not in encoded and KEY.hex() not in encoded
 ```
 
 - [ ] **Step 2: Run the red SQLCipher test**
@@ -6593,92 +6855,256 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 
 ```python
 # apps/core/src/tuntun_core/adapters/sqlcipher/connection.py
+from dataclasses import dataclass,field
 import os,stat
 from pathlib import Path
+from threading import Lock
 from sqlcipher3 import dbapi2 as sqlcipher3
-from tuntun_core.config.secure_paths import ensure_private_directory
+from tuntun_core.config.secure_paths import (
+    OwnedDirectory,ensure_private_directory,open_owned_directory,
+)
 
-FILE_FLAGS=os.O_RDWR|os.O_CLOEXEC|os.O_NONBLOCK|getattr(os,"O_NOFOLLOW",0)
+NOFOLLOW=os.O_NOFOLLOW
+FILE_FLAGS=os.O_RDWR|os.O_CLOEXEC|os.O_NONBLOCK|NOFOLLOW
+CREATE_FLAGS=FILE_FLAGS|os.O_CREAT|os.O_EXCL
+# Official SQLite value; sqlcipher3 0.6.2 does not export it.
+# https://sqlite.org/c3ref/c_open_autoproxy.html
+SQLITE_OPEN_NOFOLLOW=0x01000000
+SQLCIPHER_OPEN_FLAGS=(
+    sqlcipher3.SQLITE_OPEN_READWRITE
+    |sqlcipher3.SQLITE_OPEN_FULLMUTEX
+    |sqlcipher3.SQLITE_OPEN_PRIVATECACHE
+    |SQLITE_OPEN_NOFOLLOW
+)
+_OPEN_LOCK=Lock()
 
-def _database_owner() -> int: return os.geteuid()
+def _reported_owner(name:str,value:os.stat_result) -> int: return value.st_uid
+def _reported_device(name:str,value:os.stat_result) -> int: return value.st_dev
 
-def _require_database_file(parent_fd:int,name:str,parent_device:int,fd:int):
-    opened=os.fstat(fd); named=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+def _absolute_database_path(path:Path) -> Path:
+    raw=os.fspath(path)
+    if type(raw) is not str or "\x00" in raw or any(
+        component in {".",".."} for component in raw.split(os.sep)
+    ):
+        raise PermissionError("unsafe database path")
+    absolute=Path(os.path.abspath(raw))
+    if absolute==Path("/") or absolute.name in {"",".",".."}:
+        raise PermissionError("unsafe database path")
+    return absolute
+
+def _require_file(parent:OwnedDirectory,name:str,fd:int) -> os.stat_result:
+    opened=os.fstat(fd)
+    named=os.stat(name,dir_fd=parent.fd,follow_symlinks=False)
     if (
         not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(named.st_mode)
-        or opened.st_uid!=_database_owner() or opened.st_nlink!=1
-        or stat.S_IMODE(opened.st_mode)!=0o600 or opened.st_dev!=parent_device
+        or _reported_owner(name,opened)!=os.geteuid() or opened.st_nlink!=1
+        or stat.S_IMODE(opened.st_mode)!=0o600
+        or _reported_device(name,opened)!=parent.device
         or (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino)
     ): raise PermissionError("unsafe database path")
     return opened
 
-def _open_qualified_database(path:Path):
-    parent=ensure_private_directory(path.parent)
-    parent_fd=os.open(
-        parent.path,os.O_RDONLY|os.O_CLOEXEC|os.O_DIRECTORY|getattr(os,"O_NOFOLLOW",0),
-    )
+@dataclass(slots=True)
+class DatabasePathGuard:
+    path:Path
+    parent:OwnedDirectory
+    database_fd:int
+    database_identity:tuple[int,int]
+    sidecars:dict[str,tuple[int,tuple[int,int]]]=field(default_factory=dict)
+    _closed:bool=False
+
+    def file_descriptors(self) -> tuple[int,...]:
+        if self._closed: return ()
+        return (self.parent.fd,self.database_fd,*(value[0] for value in self.sidecars.values()))
+
+    def _retain_sidecar(self,suffix:str,*,required:bool) -> None:
+        name=self.path.name+suffix
+        if suffix in self.sidecars:
+            fd,identity=self.sidecars[suffix]
+            value=_require_file(self.parent,name,fd)
+            if (value.st_dev,value.st_ino)!=identity:
+                raise PermissionError("unsafe database path")
+            return
+        try: os.stat(name,dir_fd=self.parent.fd,follow_symlinks=False)
+        except FileNotFoundError:
+            if required: raise PermissionError("unsafe database path")
+            return
+        try: fd=os.open(name,FILE_FLAGS,dir_fd=self.parent.fd)
+        except OSError as error: raise PermissionError("unsafe database path") from error
+        try:
+            value=_require_file(self.parent,name,fd)
+            self.sidecars[suffix]=(fd,(value.st_dev,value.st_ino))
+        except BaseException:
+            os.close(fd); raise
+
+    def qualify_preexisting_sidecars(self) -> None:
+        for suffix in ("-wal","-shm"): self._retain_sidecar(suffix,required=False)
+
+    def qualify_materialized_sidecars(self) -> None:
+        for suffix in ("-wal","-shm"): self._retain_sidecar(suffix,required=True)
+
+    def revalidate(self) -> None:
+        if self._closed: raise PermissionError("unsafe database path")
+        try:
+            self.parent.revalidate()
+            value=_require_file(self.parent,self.path.name,self.database_fd)
+            if (value.st_dev,value.st_ino)!=self.database_identity:
+                raise PermissionError("unsafe database path")
+            for suffix in tuple(self.sidecars): self._retain_sidecar(suffix,required=True)
+        except OSError as error:
+            if isinstance(error,PermissionError): raise
+            raise PermissionError("unsafe database path") from error
+
+    def close(self) -> None:
+        if self._closed: return
+        self._closed=True; failure:OSError|None=None
+        descriptors=[value[0] for value in self.sidecars.values()]+[self.database_fd]
+        self.sidecars.clear()
+        for fd in descriptors:
+            try: os.close(fd)
+            except OSError as error:
+                if failure is None: failure=error
+        try: self.parent.close()
+        except OSError as error:
+            if failure is None: failure=error
+        if failure is not None: raise failure
+
+def _open_qualified_database(path:Path) -> DatabasePathGuard:
+    absolute=_absolute_database_path(path)
+    identity=ensure_private_directory(absolute.parent)
+    parent:OwnedDirectory|None=open_owned_directory(identity.path)
+    guard:DatabasePathGuard|None=None
+    transferred=False
     try:
-        parent_stat=os.fstat(parent_fd)
-        if (parent_stat.st_dev,parent_stat.st_ino)!=(parent.device,parent.inode):
-            raise PermissionError("unsafe database path")
-        fd=os.open(path.name,FILE_FLAGS|os.O_CREAT,0o600,dir_fd=parent_fd)
-        try: opened=_require_database_file(parent_fd,path.name,parent.device,fd)
+        assert parent is not None
+        parent.revalidate()
+        try: fd=os.open(absolute.name,FILE_FLAGS,dir_fd=parent.fd)
+        except FileNotFoundError:
+            fd=os.open(absolute.name,CREATE_FLAGS,0o600,dir_fd=parent.fd)
+            try: os.fchmod(fd,0o600)
+            except BaseException: os.close(fd); raise
+        try: opened=_require_file(parent,absolute.name,fd)
         except BaseException: os.close(fd); raise
-        return parent_fd,fd,opened
+        guard=DatabasePathGuard(
+            absolute,parent,fd,(opened.st_dev,opened.st_ino),
+        )
+        parent=None
+        guard.qualify_preexisting_sidecars(); guard.revalidate()
+        transferred=True
+        return guard
+    except OSError as error:
+        if isinstance(error,PermissionError): raise
+        raise PermissionError("unsafe database path") from error
     except BaseException:
-        os.close(parent_fd); raise
+        raise
+    finally:
+        if not transferred:
+            if guard is not None: guard.close()
+            elif parent is not None: parent.close()
 
 def qualified_database_identity(path:Path) -> tuple[int,int]:
-    parent_fd,fd,opened=_open_qualified_database(path)
-    try: return opened.st_dev,opened.st_ino
-    finally: os.close(fd); os.close(parent_fd)
+    with _OPEN_LOCK:
+        guard=_open_qualified_database(path)
+        try: return guard.database_identity
+        finally: guard.close()
+
+class QualifiedSQLCipherConnection(sqlcipher3.Connection):
+    _path_guard:DatabasePathGuard|None=None
+    def _bind_path_guard(self,guard:DatabasePathGuard) -> None:
+        if self._path_guard is not None: raise RuntimeError("path guard already bound")
+        self._path_guard=guard
+    def revalidate_storage_path(self) -> None:
+        if self._path_guard is None: raise PermissionError("unsafe database path")
+        self._path_guard.revalidate()
+    def guarded_file_descriptors(self) -> tuple[int,...]:
+        if self._path_guard is None: return ()
+        return self._path_guard.file_descriptors()
+    def close(self) -> None:
+        guard=self._path_guard; self._path_guard=None
+        try: super().close()
+        finally:
+            if guard is not None: guard.close()
+    def __del__(self) -> None:
+        # Finalizer is leak protection only; callers still close explicitly.
+        try: self.close()
+        except BaseException: pass
 
 def open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection:
     if len(key) != 32: raise ValueError("SQLCipher key must be exactly 32 bytes")
-    parent_fd,qualified_fd,before=_open_qualified_database(path)
-    connection=None
-    try:
-        # /dev/fd keeps resolution relative to the already qualified parent on
-        # the target macOS/Linux platforms; unsupported descriptor paths fail.
-        descriptor_path=f"/dev/fd/{parent_fd}/{path.name}"
-        connection=sqlcipher3.connect(
-            descriptor_path,isolation_level=None,check_same_thread=False,
-        )
-        after=_require_database_file(parent_fd,path.name,before.st_dev,qualified_fd)
-        if (after.st_dev,after.st_ino)!=(before.st_dev,before.st_ino):
-            raise PermissionError("unsafe database path")
-        connection.execute(f'PRAGMA key = "x\'{key.hex()}\'"')
-        version=connection.execute("PRAGMA cipher_version").fetchone()
-        if version is None or not version[0]: raise RuntimeError("SQLCipher support is unavailable")
-        connection.execute("PRAGMA foreign_keys=ON"); connection.execute("PRAGMA secure_delete=ON")
-        connection.execute("PRAGMA journal_mode=WAL"); connection.execute("PRAGMA busy_timeout=5000")
-        integrity=connection.execute("PRAGMA cipher_integrity_check").fetchone()
-        if integrity is not None and integrity[0] != "ok": raise RuntimeError("SQLCipher integrity check failed")
-        return connection
-    except BaseException:
-        if connection is not None: connection.close()
-        raise
-    finally:
-        os.close(qualified_fd); os.close(parent_fd)
+    if sqlcipher3.sqlite_version_info<(3,31,0):
+        raise RuntimeError("bundled SQLite lacks SQLITE_OPEN_NOFOLLOW")
+    with _OPEN_LOCK:
+        guard=_open_qualified_database(path); connection=None
+        try:
+            guard.revalidate()  # immediately before the pathname reopen
+            connection=sqlcipher3.connect(
+                os.fspath(guard.path),
+                isolation_level=None,
+                check_same_thread=False,
+                flags=SQLCIPHER_OPEN_FLAGS,
+                factory=QualifiedSQLCipherConnection,
+            )
+            if not isinstance(connection,QualifiedSQLCipherConnection):
+                raise RuntimeError("SQLCipher connection guard unavailable")
+            connection._bind_path_guard(guard); guard=None
+            connection.revalidate_storage_path()  # after connect, before key
+            # This must remain the first SQL statement issued on the connection.
+            connection.execute(f'PRAGMA key = "x\'{key.hex()}\'"')
+            connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            version=connection.execute("PRAGMA cipher_version").fetchone()
+            if version is None or not version[0]:
+                raise RuntimeError("SQLCipher support is unavailable")
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA secure_delete=ON")
+            connection.execute("PRAGMA busy_timeout=5000")
+            if connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower()!="wal":
+                raise RuntimeError("SQLCipher WAL mode is unavailable")
+            connection.execute("BEGIN IMMEDIATE"); connection.execute("ROLLBACK")
+            assert connection._path_guard is not None
+            connection._path_guard.qualify_materialized_sidecars()
+            connection.revalidate_storage_path()  # after keyed read/WAL setup
+            listed=connection.execute("PRAGMA database_list").fetchall()
+            assert connection._path_guard is not None
+            expected=os.fspath(connection._path_guard.path)
+            if [row[2] for row in listed if row[1]=="main"]!=[expected]:
+                raise PermissionError("unsafe database path")
+            integrity=connection.execute("PRAGMA cipher_integrity_check").fetchone()
+            if integrity is None or integrity[0]!="ok":
+                raise RuntimeError("SQLCipher integrity check failed")
+            return connection
+        except BaseException:
+            if connection is not None: connection.close()
+            if guard is not None: guard.close()
+            raise
 ```
 
 ```python
 # apps/core/src/tuntun_core/adapters/sqlcipher/probe.py
 from dataclasses import asdict, dataclass
 from pathlib import Path
-import platform, sys
-from .connection import open_sqlcipher,qualified_database_identity
+import platform
+from typing import cast
+from sqlcipher3 import dbapi2 as sqlcipher3
+from .connection import (
+    SQLCIPHER_OPEN_FLAGS,QualifiedSQLCipherConnection,open_sqlcipher,
+    qualified_database_identity,
+)
 
 @dataclass(frozen=True, slots=True)
 class StorageProbe:
-    architecture: str; python: str; driver: str; cipher: str; integrity_ok: bool; mode: str
+    operating_system:str; architecture:str; python:str; driver:str; sqlite:str
+    cipher:str; open_flags:int; integrity_ok:bool; mode:str
     def as_dict(self) -> dict[str, object]: return asdict(self)
 def probe_storage(path: Path, key: bytes) -> StorageProbe:
-    db=open_sqlcipher(path, key)
+    db=cast(QualifiedSQLCipherConnection,open_sqlcipher(path,key))
     try:
-        qualified_database_identity(path)
+        db.revalidate_storage_path(); qualified_database_identity(path)
         cipher=str(db.execute("PRAGMA cipher_version").fetchone()[0]); integrity=db.execute("PRAGMA cipher_integrity_check").fetchone()[0] == "ok"
-        return StorageProbe(platform.machine(), platform.python_version(), "sqlcipher3==0.6.2", cipher, integrity, "0o600")
+        return StorageProbe(
+            platform.platform(),platform.machine(),platform.python_version(),
+            "sqlcipher3==0.6.2",sqlcipher3.sqlite_version,cipher,
+            SQLCIPHER_OPEN_FLAGS,integrity,"0o600",
+        )
     finally: db.close()
 ```
 
@@ -6688,9 +7114,11 @@ Implement the Typer command so `--json` prints `json.dumps(probe.as_dict(), sort
 
 Run: `uv run pytest tests/security/test_sqlcipher.py -q && uv run tuntunctl storage probe --path var/probe/foundation.db --json`
 
-Expected: PASS with the two SQLCipher behavior tests plus all six database-path mutations. Parent/file symlinks, FIFO, wrong mode/owner, or device/inode replacement fail before a connection is returned. Probe JSON has `"driver":"sqlcipher3==0.6.2"`, non-empty `cipher`, `"integrity_ok":true`, and `"mode":"0o600"`; it contains no username, absolute path, or key material.
+Expected: PASS in both exact Task 2 CI jobs, `ubuntu-24.04` and `macos-15-intel`, against the pinned wheel and its bundled SQLite, with no platform skip. The behavior gate proves the ordinary absolute database name and exact `READWRITE|FULLMUTEX|PRIVATECACHE|NOFOLLOW` flags, omission of `CREATE`/URI/custom VFS, and key as the first SQL statement; a direct pinned-driver test also proves those flags reject both ancestor and final symlinks on each runner. Every ancestor/final symlink; main or pre-existing WAL/SHM special file, wrong owner/mode, hard link, or device mismatch; and one-way database/parent replacement fails closed. Newly materialized WAL/SHM are exact qualified siblings, two connections complete concurrent WAL writes against the same canonical names, live guard FDs close only with the connection (and on initialization failure), and explicit revalidation detects post-open named-entry drift. The minimum bundled-SQLite check is necessary but does not replace these behavior tests. Probe JSON has `"driver":"sqlcipher3==0.6.2"`, the exact bundled `sqlite`, non-empty `cipher`, exact numeric `open_flags`, `"integrity_ok":true`, and `"mode":"0o600"`; it contains no username, absolute path, or key material.
 
-Record the exact probe JSON, macOS version, Intel architecture, `uv.lock` hash, date, and PASS decision in `docs/operations/sqlcipher-compatibility.md`. Also document that WAL/SHM remain SQLCipher-managed sidecars, maintenance checkpoints WAL before backup, and startup refuses missing/wrong keys or failed cipher integrity.
+Run the shown encrypted CLI probe again on the actual household Intel Mac before accepting the stop/go checkpoint. Record its exact sanitized JSON, macOS/Intel architecture, Python, `sqlcipher3==0.6.2`, bundled SQLite and cipher versions, numeric flags, `uv.lock` SHA-256, date, and PASS decision in `docs/operations/sqlcipher-compatibility.md`; record the Ubuntu CI result beside it. Also document that WAL/SHM are SQLCipher-managed same-directory sidecars, maintenance checkpoints WAL before backup, startup refuses missing/wrong keys or failed cipher integrity, and the local open lock prevents only cooperative races inside one process. Production startup must acquire the application's later lifecycle-owned singleton-instance lock before storage open, but that later lock is not invented or claimed by this Foundation task.
+
+The compatibility document must state the residual exactly: the DB-API receives a pathname, not the qualified FD. Retained descriptors and bracket checks detect stale entries and one-way/non-ABA substitutions, while SQLite `NOFOLLOW` rejects symlink components, but a hostile same-EUID/root process can perform an undetectable swap-and-restore between checks or access process memory/key material. Do not claim descriptor-relative SQLite open or perfect inode binding. If protection from that attacker becomes mandatory, stop and require a native registered VFS/driver with an actual file-handle API.
 
 - [ ] **Step 5: Commit exact Task 11 paths after the target-Mac gate passes**
 
@@ -7167,7 +7595,9 @@ def encrypted_backup(source: Path, destination: Path, key: bytes) -> None:
     try:
         source_db.execute("PRAGMA wal_checkpoint(TRUNCATE)"); source_db.backup(destination_db)
         if destination_db.execute("PRAGMA cipher_integrity_check").fetchone()[0] != "ok": raise RuntimeError("encrypted backup integrity failed")
-        destination_db.commit(); destination.chmod(0o600)
+        # Task 11 already descriptor-created and verified exact 0600; never chmod
+        # a caller pathname after the guarded open.
+        destination_db.commit()
     except BaseException:
         destination_db.close(); destination.unlink(missing_ok=True); raise
     finally:
