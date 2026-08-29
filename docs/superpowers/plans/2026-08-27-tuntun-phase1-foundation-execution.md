@@ -312,6 +312,7 @@ git commit -m "build: bootstrap Tuntun Python workspace"
 **Files:**
 - Modify: `pyproject.toml`
 - Modify: `uv.lock`
+- Modify: `apps/core/src/tuntun_core/cli/main.py`
 - Create: `package.json`
 - Create: `pnpm-workspace.yaml`
 - Create: `pnpm-lock.yaml`
@@ -338,7 +339,7 @@ git commit -m "build: bootstrap Tuntun Python workspace"
 
 **Interfaces:**
 - Consumes: Task 1 workspace commands.
-- Produces: root development dependencies `PyYAML>=6.0,<7` and `pytest-cov>=6.2,<7` locked in `uv.lock` before any Task 2 Python or coverage gate; working `make bootstrap|format|lint|typecheck|test|test-security|test-contract|web-test|web-build|web-e2e`; explicit fail-closed `make verify-private-data` and therefore fail-closed `make check` until Task 3 installs the required scanner; a non-networked admin page rendering `Tuntun setup in progress`; CI with exact root read-only contents permission, absent-or-exact-read-only job permissions, no secret forwarding/expression, and no hardware/provider jobs.
+- Produces: root development dependencies `PyYAML>=6.0,<7` and `pytest-cov>=6.2,<7` locked in `uv.lock` before any Task 2 Python or coverage gate; a group-preserving, no-I/O Typer callback so `tuntunctl version` remains an explicit subcommand; working `make bootstrap|format|lint|typecheck|test|test-security|test-contract|web-test|web-build|web-e2e`; explicit fail-closed `make verify-private-data` and therefore fail-closed `make check` until Task 3 installs the required scanner; a non-networked admin page rendering `Tuntun setup in progress`; CI with exact root read-only contents permission, absent-or-exact-read-only job permissions, no secret forwarding/expression, and no hardware/provider jobs.
 
 - [ ] **Step 1: Write the failing admin smoke test**
 
@@ -370,6 +371,8 @@ import yaml
 
 FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 FIXED_RUNNERS = {"ubuntu-24.04", "macos-15-intel"}
+MATRIX_RUNNER = "${{ matrix.os }}"
+APPROVED_MATRIX = {"os": ["ubuntu-24.04", "macos-15-intel"]}
 WORKFLOW_ROOT = Path(".github/workflows")
 
 
@@ -408,6 +411,17 @@ def _assert_permissions(owner: Mapping[str, object], *, required: bool) -> None:
     assert owner["permissions"] == {"contents": "read"}
 
 
+def _assert_strategy_matches_runner(job: Mapping[str, object]) -> None:
+    runner = job.get("runs-on")
+    strategy = job.get("strategy")
+    if runner != MATRIX_RUNNER:
+        assert strategy is None
+        return
+    assert isinstance(strategy, Mapping)
+    assert set(strategy) <= {"fail-fast", "matrix"}
+    assert strategy["matrix"] == APPROVED_MATRIX
+
+
 def _assert_workflow_policy(path: Path) -> None:
     assert path.is_file() and not path.is_symlink()
     raw = path.read_text()
@@ -425,17 +439,16 @@ def _assert_workflow_policy(path: Path) -> None:
     for job in workflow["jobs"].values():
         assert isinstance(job, dict)
         _assert_permissions(job, required=False)
+        _assert_strategy_matches_runner(job)
         if "uses" in job:
             assert set(job) <= {
-                "name", "needs", "if", "strategy", "uses", "with", "permissions",
+                "name", "needs", "if", "uses", "with", "permissions",
             }
             _assert_uses_is_immutable(job["uses"])
             continue
         runner = job["runs-on"]
         if isinstance(runner, str) and runner.startswith("${{"):
-            assert runner == "${{ matrix.os }}"
-            matrix = job["strategy"]["matrix"]
-            assert matrix == {"os": ["ubuntu-24.04", "macos-15-intel"]}
+            assert runner == MATRIX_RUNNER
         else:
             assert runner in FIXED_RUNNERS
         for step in job.get("steps", []):
@@ -501,6 +514,22 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
                 "exclude": [{"os": "ubuntu-24.04"}],
             }},
         }),
+        ("security.yml", {"strategy": {"matrix": {"python": ["3.12"]}}}),
+        ("release.yaml", {"strategy": {"matrix": {
+            "os": ["ubuntu-24.04", "macos-15-intel"],
+            "include": [{"os": "ubuntu-24.04"}],
+        }}}),
+        ("security.yml", {"strategy": {"matrix": {
+            "os": ["ubuntu-24.04", "macos-15-intel"],
+            "exclude": [{"os": "macos-15-intel"}],
+        }}}),
+        ("release.yaml", {
+            "runs-on": "${{ matrix.os }}",
+            "strategy": {"matrix": {
+                "os": ["ubuntu-24.04", "macos-15-intel"],
+                "python": ["3.12"],
+            }},
+        }),
     ):
         changed = {**valid, "jobs": {"check": {**valid["jobs"]["check"], **mutation}}}
         path = root / name
@@ -521,8 +550,14 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
          "secrets": {"token": "${{ secrets['TOKEN'] }}"}},
         {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
          "permissions": {"actions": "write"}},
+        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+         "strategy": {"matrix": {"python": ["3.12"]}}},
     ):
-        path.write_text(yaml.safe_dump({"permissions": {"contents": "read"}, "jobs": {"reuse": reusable}}))
+        workflow_with_reusable_job = {
+            "permissions": {"contents": "read"},
+            "jobs": {"reuse": reusable},
+        }
+        path.write_text(yaml.safe_dump(workflow_with_reusable_job))
         with pytest.raises(AssertionError):
             _assert_workflow_policy(path)
 ```
@@ -542,11 +577,41 @@ def test_version_command_exercises_the_bootstrap_cli() -> None:
     assert result.stdout == "0.1.0.dev0\n"
 ```
 
+The explicit `version` subcommand needs a Typer group even though its callback
+does no work. Add the smallest no-I/O callback before this coverage gate:
+
+```python
+# apps/core/src/tuntun_core/cli/main.py
+import typer
+
+app = typer.Typer(no_args_is_help=True)
+
+
+@app.callback()
+def main() -> None:
+    """Manage local Tuntun development commands."""
+
+
+@app.command()
+def version() -> None:
+    """Print the application version without reading configuration or secrets."""
+    typer.echo("0.1.0.dev0")
+```
+
 - [ ] **Step 2: Run the red web test**
 
-Run: `corepack enable && pnpm --filter @tuntun/admin test`
+The original absent-workspace observation printed a missing-project diagnostic
+but exited zero, so it is not a valid RED. Preserve that chronology honestly:
+reconstruct the immutable pre-Task-2 base only to prove the replacement
+sentinel, rather than relabeling the old diagnostic. In a disposable worktree
+at `aa24b9c033732a30e521a472d3ce11f7be5ac7fc`, run:
 
-Expected: FAIL with `No projects matched the filters` because the pnpm workspace is absent.
+Run: `pnpm --filter @tuntun/admin --fail-if-no-match test`
+
+Expected: exit `1` with `No projects found in "/private/tmp/tuntun-task2-red-base"`
+because the admin workspace is absent. This is the maintained executable
+missing-workspace contract; the same command exits zero after the workspace is
+created.
 
 - [ ] **Step 3: Add the minimal web application and command surface**
 
@@ -581,7 +646,7 @@ packages:
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4173",
-    "lint": "eslint . ../../tests/unit/admin ../../tests/e2e ../../tests/ui --max-warnings 0",
+    "lint": "cd ../.. && ./apps/admin/node_modules/.bin/eslint --config apps/admin/eslint.config.js apps/admin/src apps/admin/vite.config.ts tests/unit/admin tests/e2e tests/ui --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "pnpm run typecheck && vite build",
@@ -636,14 +701,16 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  {ignores: ["dist", "playwright-report", "test-results"]},
-  js.configs.recommended,
-  ...tseslint.configs.recommended,
+  {basePath: "../..", ignores: ["apps/admin/dist", "apps/admin/playwright-report", "apps/admin/test-results"]},
+  {...js.configs.recommended, basePath: "../.."},
+  ...tseslint.configs.recommended.map((config) => ({...config, basePath: "../.."})),
   {
+    basePath: "../..",
     files: [
-      "**/*.{ts,tsx}",
-      "../../tests/e2e/**/*.{ts,tsx}",
-      "../../tests/ui/**/*.{ts,tsx}",
+      "apps/admin/**/*.{ts,tsx}",
+      "tests/unit/admin/**/*.{ts,tsx}",
+      "tests/e2e/**/*.{ts,tsx}",
+      "tests/ui/**/*.{ts,tsx}",
     ],
     languageOptions: {ecmaVersion: 2022, globals: {...globals.browser, ...globals.node}},
     plugins: {"react-hooks": reactHooks, "react-refresh": reactRefresh},
@@ -777,6 +844,19 @@ def test_workspace_admits_all_later_apps_and_typescript_packages() -> None:
     assert workspace == {"packages": ["apps/*", "packages/*"]}
 
 
+def test_web_test_fails_closed_without_an_admin_workspace(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        ["make", "-f", str(ROOT / "Makefile"), "web-test"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode != 0, completed.stdout + completed.stderr
+    assert "No projects found" in completed.stdout + completed.stderr
+
+
 def test_playwright_config_owns_root_discovery_server_and_project() -> None:
     config = (ROOT / "apps/admin/playwright.config.ts").read_text()
     required_fragments = (
@@ -794,7 +874,7 @@ def test_playwright_config_owns_root_discovery_server_and_project() -> None:
 
 def test_playwright_discovers_root_e2e_and_ui_suites() -> None:
     completed = subprocess.run(
-        ["pnpm", "--filter", "@tuntun/admin", "e2e", "--", "--list"],
+        ["pnpm", "--filter", "@tuntun/admin", "e2e", "--list"],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -817,10 +897,46 @@ def test_typecheck_and_lint_scope_every_root_e2e_and_ui_typescript_file() -> Non
     } <= set(tsconfig["include"])
     eslint = (ROOT / "apps/admin/eslint.config.js").read_text()
     for required in (
-        '"../../tests/e2e/**/*.{ts,tsx}"',
-        '"../../tests/ui/**/*.{ts,tsx}"',
+        'basePath: "../.."',
+        '"apps/admin/**/*.{ts,tsx}"',
+        '"tests/unit/admin/**/*.{ts,tsx}"',
+        '"tests/e2e/**/*.{ts,tsx}"',
+        '"tests/ui/**/*.{ts,tsx}"',
     ):
         assert required in eslint
+
+    for path in (
+        "apps/admin/src/app.tsx",
+        "tests/unit/admin/root-discovery.test.ts",
+        "tests/e2e/admin-smoke.spec.ts",
+        "tests/ui/admin-accessibility.spec.ts",
+    ):
+        completed = subprocess.run(
+            [
+                str(ROOT / "apps/admin/node_modules/.bin/eslint"),
+                "--config",
+                "apps/admin/eslint.config.js",
+                "--print-config",
+                path,
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert completed.stdout.lstrip().startswith("{"), completed.stdout
+
+    lint = subprocess.run(
+        ["pnpm", "--filter", "@tuntun/admin", "lint"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert lint.returncode == 0, lint.stdout + lint.stderr
 ```
 
 ```make
@@ -844,7 +960,7 @@ test-security:
 test-contract:
 	@files="$$(find tests/contract -type f -name 'test_*.py' -print 2>/dev/null | sort)"; count="$$(printf '%s\n' "$$files" | sed '/^$$/d' | wc -l | tr -d ' ')"; echo "test-contract: $$count discovered files"; if [ "$$count" -gt 0 ]; then uv run pytest $$files; fi
 web-test:
-	pnpm --filter @tuntun/admin test
+	pnpm --filter @tuntun/admin --fail-if-no-match test
 web-build:
 	pnpm --filter @tuntun/admin build
 web-e2e:
@@ -928,19 +1044,19 @@ jobs:
       - run: make lint typecheck test test-security test-contract web-test web-build
 ```
 
-The four action revisions are full reviewed commit SHAs and the comments are informational only. The policy test enumerates the union of `.github/workflows/*.yml` and `.github/workflows/*.yaml` on every run, so later security/release workflows cannot escape review by using the other suffix. It checks job-level reusable workflows and every step-level third-party `uses`, while allowing only repository-local `./` actions, and validates every literal runner against the fixed set. A matrix runner is permitted only when the complete matrix object is exactly the ordered `os` list shown above; `include`, `exclude`, another axis, or another runner label is rejected. Dependabot may propose an update, but CI rejects a tag, branch, abbreviated SHA, `*-latest` runner, unreviewed runner label, secret reference, or hardware/provider job. Linux remains the portable gate; `macos-15-intel` proves hosted Intel compatibility only. It is not evidence for the household Mac, Reachy, network, reboot, thermal, firewall, or lifecycle qualification gates.
+The four action revisions are full reviewed commit SHAs and the comments are informational only. The policy test enumerates the union of `.github/workflows/*.yml` and `.github/workflows/*.yaml` on every run, so later security/release workflows cannot escape review by using the other suffix. It checks strategy before any job-kind branch: fixed-runner and reusable jobs carry no strategy; only `${{ matrix.os }}` may carry strategy, whose keys are limited to `fail-fast` and `matrix`, and whose literal matrix is exactly the ordered `os` pair shown above. Therefore `include`, `exclude`, another axis, or another runner label is rejected everywhere. It checks job-level reusable workflows and every step-level third-party `uses`, while allowing only repository-local `./` actions, and validates every literal runner against the fixed set. Dependabot may propose an update, but CI rejects a tag, branch, abbreviated SHA, `*-latest` runner, unreviewed runner label, secret reference, or hardware/provider job. Linux remains the portable gate; `macos-15-intel` proves hosted Intel compatibility only. It is not evidence for the household Mac, Reachy, network, reboot, thermal, firewall, or lifecycle qualification gates.
 
 - [ ] **Step 4: Run the green web/build gate**
 
-Run: `uv lock && uv sync --all-packages --locked && pnpm install && pnpm --filter @tuntun/admin test && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/admin e2e -- --list && uv run python -c "import coverage, pytest_cov, yaml" && uv run pytest tests/unit/test_package_smoke.py tests/unit/test_cli.py tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py -q && make test && make test-security test-contract && make lint && make typecheck && sh -c 'make verify-private-data; code=$?; test "$code" -eq 2' && sh -c 'make check; code=$?; test "$code" -eq 2'`
+Run: `uv lock && uv sync --all-packages --locked && pnpm install && pnpm --filter @tuntun/admin --fail-if-no-match test && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/admin e2e --list && uv run python -c "import coverage, pytest_cov, yaml" && uv run pytest tests/unit/test_package_smoke.py tests/unit/test_cli.py tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py -q && make test && make test-security test-contract && make lint && make typecheck && sh -c 'make verify-private-data; code=$?; test "$code" -eq 2' && sh -c 'make check; code=$?; test "$code" -eq 2'`
 
-Expected: PASS on Linux and Intel macOS; `uv.lock` contains resolved `PyYAML` and `pytest-cov`, `uv sync --locked` accepts it as current, the direct import probe exits 0, the CLI test prints exactly `0.1.0.dev0` and `make test` meets the 85% branch-coverage gate, and both Python policy modules reject root/job write permissions, reusable-job secret forwarding, dot/index secret expressions, and matrix `include`/`exclude` or extra-axis runner expansion. `test-security` and `test-contract` print an explicit zero-file count now and automatically execute every matching future file once its owning directory exists. `verify-private-data` and `check` exit exactly 2 until Task 3 installs the scanner, so Task 2 CI runs only the complete current gates. The app-local/root-unit Vitest sentinels pass, Playwright's `--list` output contains the `testDir`-relative paths `e2e/admin-smoke.spec.ts` and `ui/admin-accessibility.spec.ts` with a nonzero discovery total, all `.ts`/`.tsx` e2e/UI files are in ESLint and TypeScript scopes, the Vite build succeeds, and static checks report zero errors. `git diff -- .gitignore` retains `.worktrees/` and `.superpowers/sdd/` and adds every listed runtime/build/Python-cache ignore.
+Expected: PASS on Linux and Intel macOS; `uv.lock` contains resolved `PyYAML` and `pytest-cov`, `uv sync --locked` accepts it as current, the direct import probe exits 0, the CLI test prints exactly `0.1.0.dev0` and `make test` meets the 85% branch-coverage gate, and both Python policy modules reject root/job write permissions, reusable-job secret forwarding, dot/index secret expressions, fixed/reusable strategy bypasses, and matrix `include`/`exclude` or extra-axis runner expansion. `test-security` and `test-contract` print an explicit zero-file count now and automatically execute every matching future file once its owning directory exists. `verify-private-data` and `check` exit exactly 2 until Task 3 installs the scanner, so Task 2 CI runs only the complete current gates. The app-local/root-unit Vitest sentinels pass, Playwright's `--list` output contains the `testDir`-relative paths `e2e/admin-smoke.spec.ts` and `ui/admin-accessibility.spec.ts` with a nonzero discovery total, the executable empty-workspace contract proves `web-test` fails nonzero with `No projects found`, all `.ts`/`.tsx` app, root-unit, e2e, and UI trees are in ESLint and TypeScript scopes with repository-root `basePath: "../.."`, the Vite build succeeds, and static checks report zero errors. `git diff -- .gitignore` retains `.worktrees/` and `.superpowers/sdd/` and adds every listed runtime/build/Python-cache ignore.
 
 - [ ] **Step 5: Commit exact Task 2 paths**
 
 ```bash
 git status --short
-git add pyproject.toml uv.lock package.json pnpm-workspace.yaml pnpm-lock.yaml apps/admin/package.json apps/admin/index.html apps/admin/vite.config.ts apps/admin/tsconfig.json apps/admin/eslint.config.js apps/admin/playwright.config.ts apps/admin/src/main.tsx apps/admin/src/app.tsx apps/admin/src/app.test.tsx apps/admin/src/test-setup.ts tests/unit/test_cli.py tests/unit/admin/root-discovery.test.ts tests/e2e/admin-smoke.spec.ts tests/ui/admin-accessibility.spec.ts Makefile .gitignore .pre-commit-config.yaml .github/workflows/ci.yml tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py
+git add pyproject.toml uv.lock package.json pnpm-workspace.yaml pnpm-lock.yaml apps/core/src/tuntun_core/cli/main.py apps/admin/package.json apps/admin/index.html apps/admin/vite.config.ts apps/admin/tsconfig.json apps/admin/eslint.config.js apps/admin/playwright.config.ts apps/admin/src/main.tsx apps/admin/src/app.tsx apps/admin/src/app.test.tsx apps/admin/src/test-setup.ts tests/unit/test_cli.py tests/unit/admin/root-discovery.test.ts tests/e2e/admin-smoke.spec.ts tests/ui/admin-accessibility.spec.ts Makefile .gitignore .pre-commit-config.yaml .github/workflows/ci.yml tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "build: add web workspace and baseline CI"
