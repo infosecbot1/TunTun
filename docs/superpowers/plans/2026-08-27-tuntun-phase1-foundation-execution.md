@@ -6778,191 +6778,417 @@ git commit -m "feat(contracts): freeze canonical event primitives"
 - Modify: `packages/contracts/src/tuntun_contracts/__init__.py`
 - Modify: `packages/contracts/schema/v1/contracts.schema.json`
 - Modify: `packages/contracts/openapi/admin-v1.yaml`
+- Create: `tests/contract/conftest.py`
 - Test: `tests/contract/test_v1_types_and_ports.py`
 - Test: `tests/contract/test_dependency_direction.py`
 
 **Interfaces:**
 - Consumes: `ContractModel`, `Commitment`, `Sensitivity`, event DTOs, and the sole schema/OpenAPI generators and owned artifact paths from Task 4.
-- Produces the following exact public types and methods; later plans must import these names rather than redefining them:
-
-```python
-class ClockPort(Protocol):
-    def now(self) -> AwareDatetime: raise NotImplementedError
-    def monotonic(self) -> float: raise NotImplementedError
-
-class ReachyPort(Protocol):
-    async def send(self, command: ReachyCommand) -> ReachyReceipt: raise NotImplementedError
-    async def health(self) -> ReachyHealth: raise NotImplementedError
-    async def stop_all(self, turn_id: UUID | None) -> SafetyReceipt: raise NotImplementedError
-
-class StopInputPort(Protocol):
-    async def receive(self) -> StopSignal: raise NotImplementedError
-
-class AudioConverterPort(Protocol):
-    def convert(self, audio: AsyncIterator[bytes], source: AudioFormat, target: AudioFormat) -> AsyncIterator[bytes]: raise NotImplementedError
-
-class SpeechToTextPort(Protocol):
-    async def transcribe(self, request: AuthorizedTranscriptionRequest, audio: AsyncIterator[bytes]) -> TranscriptResult: raise NotImplementedError
-
-class TextToSpeechPort(Protocol):
-    def synthesize(self, request: AuthorizedSynthesisRequest) -> AsyncIterator[SpeechChunk]: raise NotImplementedError
-
-class LanguageModelPort(Protocol):
-    async def complete(self, request: SanitizedProviderRequest) -> ProviderResponse: raise NotImplementedError
-
-class IdentityFusionPort(Protocol):
-    async def resolve(self, request: IdentityRequest) -> IdentityDecision: raise NotImplementedError
-
-class MemoryRepositoryPort(Protocol):
-    async def create(self, memory: ApprovedMemory, expected_absent: bool = True) -> MemoryRecord: raise NotImplementedError
-    async def replace(self, memory_id: UUID, expected_version: int, memory: ApprovedMemory) -> MemoryRecord: raise NotImplementedError
-    async def delete(self, memory_id: UUID, expected_version: int, auth: AuthContext, approved_proposal_id: UUID) -> None: raise NotImplementedError
-    async def query(self, query: MemoryQuery) -> tuple[MemoryRecord, ...]: raise NotImplementedError
-
-class MemoryProposalServicePort(Protocol):
-    async def stage(self, draft: MemoryProposalDraft, context: ProposalContext) -> MemoryProposal: raise NotImplementedError
-    async def decide(self, command: DecideMemoryProposal, auth: AuthContext) -> MemoryProposal: raise NotImplementedError
-
-class PolicyEnginePort(Protocol):
-    async def decide(self, request: PolicyRequest) -> PolicyDecision: raise NotImplementedError
-
-class AuthenticationPort(Protocol):
-    async def start(self, request: AuthenticationRequest) -> AuthenticationChallenge: raise NotImplementedError
-    async def verify(self, response: AuthenticationResponse) -> AuthGrant: raise NotImplementedError
-    async def consume(self, grant_id: UUID, binding: ActionBinding) -> AuthContext: raise NotImplementedError
-
-class ActionProviderPort(Protocol):
-    async def execute(self, proposal: ValidatedActionProposal, auth: AuthContext) -> ActionReceipt: raise NotImplementedError
-
-class AuditPort(Protocol):
-    async def append(self, uow: AsyncUnitOfWork, draft: AuditDraft) -> AuditReceipt: raise NotImplementedError
-
-class BudgetPort(Protocol):
-    async def reserve(self, request: BudgetReservationRequest) -> BudgetReservation: raise NotImplementedError
-    async def mark_sent(self, reservation_id: UUID, attempt_id: UUID) -> None: raise NotImplementedError
-    async def settle(self, request: BudgetSettlementRequest) -> BudgetSettlement: raise NotImplementedError
-    async def release_unsent(self, reservation_id: UUID, attempt_id: UUID, proof: TransportProof) -> None: raise NotImplementedError
-    async def reconcile_turn(self, request: BudgetReconciliationRequest) -> tuple[BudgetSettlement, ...]: raise NotImplementedError
-
-class RouteAuthorizerPort(Protocol):
-    async def authorize(self, request: RouteAuthorizationRequest) -> RouteAuthorization: raise NotImplementedError
-    async def consume(self, authorization_id: UUID, consumption: RouteConsumption) -> None: raise NotImplementedError
-
-class ConversationWorkflow(Protocol):
-    async def run(self, turn: TurnInput) -> TurnOutput: raise NotImplementedError
-```
+- Produces the exact public DTOs, enums, discriminated aliases, and runtime-checkable protocols in the complete module listings below. Later plans import those names rather than redefining them.
+- `AsyncTransactionBoundary` is the smallest contracts-owned structural boundary needed by `AuditPort`: it exposes only async `commit()` and `rollback()`. It is not the concrete unit of work and does not expose adapters, SQLAlchemy, repositories, or `run_sync`. Task 14 remains the sole owner of the application `UnitOfWorkProtocol`, `AsyncUnitOfWorkProtocol`, and concrete `AsyncUnitOfWork`; its async protocol and implementation structurally satisfy this boundary. Task 15 continues to consume the richer Task 14 protocol when it delegates ledger work through `run_sync`, so no contracts-to-application import or duplicate concrete UoW is introduced.
+- The complete post-Task-5 root registry is the same immutable package-owned sorted singleton established by Task 4, expanded explicitly to exactly 93 `ContractModel` subclasses. Root `__all__` is an explicit 136-name tuple: the 93 registered models, `ContractModel`, 10 enums, 5 type aliases, 18 protocols, and the 9 already-public Task 4 version/constants/errors/functions. Task 5 budget limits and `usage_total` remain module implementation details and are not root exports.
 
 - [ ] **Step 1: Write the red DTO and protocol test**
 
 ```python
-# tests/contract/test_v1_types_and_ports.py
-import inspect
+# tests/contract/conftest.py
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from tuntun_contracts.base import Commitment
 
-from tuntun_contracts.actions import ActionBinding, ActionProposalDraft, ActionReceipt, ConsentActionDraft, IdentityActionDraft, ProfileActionDraft, TimerCreateActionDraft, TimerTargetActionDraft
-from tuntun_contracts import actions, audit, budget, events, identity, memory, policy, ports, provider, reachy, speech
-from tuntun_contracts.base import Commitment, canonical_bytes, registered_contract_models
-from tuntun_contracts.budget import BudgetReconciliationRequest, BudgetReservation, BudgetReservationRequest, BudgetSettlement, BudgetSettlementRequest, LlmUsageUnits, ProviderUsageReceiptV1, SttUsageUnits, TransportProof, TtsUsageUnits, WebSearchUsageUnits
+
+@pytest.fixture
+def valid_action_fields() -> Callable[[str], dict[str, object]]:
+    def build(action_name: str) -> dict[str, object]:
+        return {
+            "proposal_id": UUID(int=901),
+            "schema_version": "1.0",
+            "action_name": action_name,
+            "resource_type": action_name.split(".", 1)[0],
+            "resource_id": UUID(int=902),
+            "parameters_commitment": Commitment(
+                algorithm="HMAC-SHA-256",
+                key_id="action-hmac-v1",
+                value_b64="A" * 43 + "=",
+            ),
+            "uncertainty_micros": 0,
+            "expires_at": datetime(2026, 8, 27, tzinfo=UTC),
+            "idempotency_key": UUID(int=903),
+        }
+
+    return build
+```
+
+```python
+# tests/contract/test_v1_types_and_ports.py
+from __future__ import annotations
+
+import inspect
+from collections.abc import Callable
+from datetime import UTC, datetime
+from enum import Enum
+from typing import Literal, get_origin
+from uuid import UUID
+
+import pytest
+import tuntun_contracts
+from pydantic import TypeAdapter, ValidationError
+from tuntun_contracts.actions import (
+    ActionBinding,
+    ActionProposalDraft,
+    ActionReceipt,
+    ConsentActionDraft,
+    IdentityActionDraft,
+    ProfileActionDraft,
+    TimerCreateActionDraft,
+    TimerTargetActionDraft,
+)
+from tuntun_contracts.base import (
+    Commitment,
+    ContractModel,
+    Sensitivity,
+    canonical_bytes,
+    registered_contract_models,
+)
+from tuntun_contracts.budget import (
+    BudgetReconciliationRequest,
+    BudgetReservation,
+    BudgetReservationRequest,
+    BudgetSettlement,
+    BudgetSettlementRequest,
+    LlmUsageUnits,
+    ProviderUsageReceiptV1,
+    SttUsageUnits,
+    TransportProof,
+    TtsUsageUnits,
+    WebSearchUsageUnits,
+)
 from tuntun_contracts.events import StopRequestedPayload
-from tuntun_contracts.identity import IdentityEvidence, IdentityRequest, PersonaProjection, PersonaTraits
-from tuntun_contracts.memory import ApprovedMemory, EpisodicContent, MemoryAudience, MemoryKind, MemoryQuery, PreferenceContent, ProceduralContent, WorkingContent
-from tuntun_contracts.policy import AdminSessionPrincipal, AssuranceLevel, AuthGrant, CurrentOwnerAuthority
-from tuntun_contracts.ports import ActionProviderPort, AuthenticationPort, BudgetPort, LanguageModelPort, MemoryRepositoryPort, RouteAuthorizerPort, ReachyPort
-from tuntun_contracts.provider import ProviderName, ProviderResponse, RedactionReceipt, RouteAuthorization, SanitizedProviderMessage, SanitizedProviderRequest, SanitizedToolReference
+from tuntun_contracts.identity import (
+    IdentityEvidence,
+    IdentityRequest,
+    PersonaProjection,
+    PersonaTraits,
+)
+from tuntun_contracts.memory import (
+    ApprovedMemory,
+    EpisodicContent,
+    MemoryAudience,
+    MemoryKind,
+    MemoryProposalDraft,
+    MemoryQuery,
+    PreferenceContent,
+    ProceduralContent,
+    WorkingContent,
+)
+from tuntun_contracts.policy import (
+    AdminSessionPrincipal,
+    AssuranceLevel,
+    AuthGrant,
+    CurrentOwnerAuthority,
+)
+from tuntun_contracts.ports import (
+    ActionProviderPort,
+    AsyncTransactionBoundary,
+    AuditPort,
+    AuthenticationPort,
+    BudgetPort,
+    LanguageModelPort,
+    MemoryRepositoryPort,
+    ReachyPort,
+    RouteAuthorizerPort,
+)
+from tuntun_contracts.provider import (
+    ProviderName,
+    ProviderResponse,
+    RedactionReceipt,
+    RouteAuthorization,
+    SanitizedProviderMessage,
+    SanitizedProviderRequest,
+    SanitizedToolReference,
+)
 from tuntun_contracts.reachy import StopSignal
-from tuntun_contracts.speech import AudioFormat, AuthorizedSynthesisRequest, AuthorizedTranscriptionRequest
+from tuntun_contracts.speech import (
+    AudioFormat,
+    AuthorizedSynthesisRequest,
+    AuthorizedTranscriptionRequest,
+)
 
 
 def test_every_registered_contract_model_is_strict_closed_and_frozen() -> None:
-    # Importing every owning module above completes the registry before this
-    # reflection gate; fixture discovery is not the authority for this test.
-    registered=registered_contract_models()
+    # The explicit root imports complete the registry; fixture discovery is not
+    # the authority for this test.
+    registered = registered_contract_models()
     assert registered
-    violations={
-        f"{model.__module__}.{model.__qualname__}":dict(model.model_config)
+    violations = {
+        f"{model.__module__}.{model.__qualname__}": dict(model.model_config)
         for model in registered
         if model.model_config.get("strict") is not True
         or model.model_config.get("extra") != "forbid"
         or model.model_config.get("frozen") is not True
     }
-    assert violations=={}
+    assert violations == {}
+
+
+def test_root_exports_registry_and_public_type_families_are_exact() -> None:
+    exports = tuntun_contracts.__all__
+    assert type(exports) is tuple
+    assert len(exports) == len(set(exports)) == 136
+    assert len(registered_contract_models()) == 93
+
+    enum_names = {
+        name
+        for name in exports
+        if isinstance(exported := getattr(tuntun_contracts, name), type)
+        and issubclass(exported, Enum)
+    }
+    assert enum_names == {
+        "AssuranceLevel",
+        "EventType",
+        "IdentityStatus",
+        "MemoryAudience",
+        "MemoryKind",
+        "PolicyEffect",
+        "ProviderName",
+        "ReachyState",
+        "RiskTier",
+        "Sensitivity",
+    }
+    protocol_names = {
+        name for name in exports if getattr(getattr(tuntun_contracts, name), "_is_protocol", False)
+    }
+    assert protocol_names == {
+        "ActionProviderPort",
+        "AsyncTransactionBoundary",
+        "AudioConverterPort",
+        "AuthenticationPort",
+        "AuditPort",
+        "BudgetPort",
+        "ClockPort",
+        "ConversationWorkflow",
+        "IdentityFusionPort",
+        "LanguageModelPort",
+        "MemoryProposalServicePort",
+        "MemoryRepositoryPort",
+        "PolicyEnginePort",
+        "ReachyPort",
+        "RouteAuthorizerPort",
+        "SpeechToTextPort",
+        "StopInputPort",
+        "TextToSpeechPort",
+    }
+    alias_names = {
+        name for name in exports if get_origin(getattr(tuntun_contracts, name)) is not None
+    }
+    assert alias_names == {
+        "ActionProposalDraft",
+        "EventPayload",
+        "JSONValue",
+        "MemoryContent",
+        "UsageUnits",
+    }
+    assert {
+        "MAX_AUDIO_MILLIS",
+        "MAX_CHARGE_MICROS_SGD",
+        "MAX_USAGE_UNITS",
+        "MAX_WEB_SEARCH_CALLS",
+        "usage_total",
+    }.isdisjoint(exports)
 
 
 def test_public_contract_collection_schemas_are_never_variadic() -> None:
-    expected={
-        (SanitizedProviderRequest,"messages"):(1,32),(SanitizedProviderRequest,"allowed_tools"):(0,8),
-        (AuthorizedTranscriptionRequest,"language_hints"):(1,2),
-        (IdentityRequest,"evidence"):(0,2),(BudgetReconciliationRequest,"proofs"):(0,8),
-        (RedactionReceipt,"removed_categories"):(0,16),
-        (WorkingContent,"unresolved_intents"):(0,8),(EpisodicContent,"participant_ids"):(0,16),
-        (ProceduralContent,"steps"):(1,32),(MemoryQuery,"kinds"):(1,7),
-        (ApprovedMemory,"source_receipt_ids"):(1,8),
+    expected: dict[tuple[type[ContractModel], str], tuple[int, int]] = {
+        (SanitizedProviderRequest, "messages"): (1, 32),
+        (SanitizedProviderRequest, "allowed_tools"): (0, 8),
+        (AuthorizedTranscriptionRequest, "language_hints"): (1, 2),
+        (IdentityRequest, "evidence"): (0, 2),
+        (BudgetReconciliationRequest, "proofs"): (0, 8),
+        (RedactionReceipt, "removed_categories"): (0, 16),
+        (WorkingContent, "unresolved_intents"): (0, 8),
+        (EpisodicContent, "participant_ids"): (0, 16),
+        (ProceduralContent, "steps"): (1, 32),
+        (MemoryQuery, "kinds"): (1, 7),
+        (ApprovedMemory, "source_receipt_ids"): (1, 8),
     }
-    for (model,field),(minimum,maximum) in expected.items():
-        schema=model.model_json_schema()["properties"][field]
-        assert schema.get("minItems",0)==minimum
-        assert schema["maxItems"]==maximum
+    for (model, field), (minimum, maximum) in expected.items():
+        schema = model.model_json_schema()["properties"][field]
+        assert schema.get("minItems", 0) == minimum
+        assert schema["maxItems"] == maximum
 
 
 def test_required_memory_kinds_are_exact() -> None:
     assert {kind.value for kind in MemoryKind} == {
-        "working", "episodic", "semantic", "preference", "procedural", "relational", "policy"
+        "working",
+        "episodic",
+        "semantic",
+        "preference",
+        "procedural",
+        "relational",
+        "policy",
     }
     with pytest.raises(ValidationError):
-        PreferenceContent(category="food", key="spice", value="high", strength_micros=1.5)
+        PreferenceContent.model_validate(
+            {"category": "food", "key": "spice", "value": "high", "strength_micros": 1.5}
+        )
+
 
 def test_memory_audiences_are_closed() -> None:
     assert {audience.value for audience in MemoryAudience} == {
-        "subject_private", "guardian_child", "household_adults", "household_all"
+        "subject_private",
+        "guardian_child",
+        "household_adults",
+        "household_all",
     }
+
+
+def test_memory_proposal_operation_target_shape_is_total_and_unambiguous() -> None:
+    content = PreferenceContent(
+        category="food",
+        key="spice",
+        value="medium",
+        strength_micros=500_000,
+    )
+    common: dict[str, object] = {
+        "proposal_id": UUID(int=501),
+        "schema_version": "1.0",
+        "household_id": UUID(int=502),
+        "subject_id": UUID(int=503),
+        "session_id": UUID(int=504),
+        "turn_id": UUID(int=505),
+        "idempotency_key": UUID(int=506),
+        "sensitivity": Sensitivity.PERSONAL,
+        "confidence_micros": 900_000,
+        "reason": "synthetic proposal",
+        "claim_commitment": Commitment(
+            algorithm="HMAC-SHA-256",
+            key_id="memory-claim-v1",
+            value_b64="A" * 43 + "=",
+        ),
+        "source_receipt_ids": (UUID(int=507),),
+        "expires_at": datetime(2026, 8, 27, tzinfo=UTC),
+    }
+    create = common | {
+        "operation": "create",
+        "content": content,
+        "audience": MemoryAudience.SUBJECT_PRIVATE,
+        "target_memory_id": None,
+        "expected_version": None,
+    }
+    assert MemoryProposalDraft.model_validate(create).operation == "create"
+    for target_memory_id, expected_version in (
+        (UUID(int=508), None),
+        (None, 1),
+        (UUID(int=508), 1),
+    ):
+        with pytest.raises(ValidationError):
+            MemoryProposalDraft.model_validate(
+                create
+                | {
+                    "target_memory_id": target_memory_id,
+                    "expected_version": expected_version,
+                }
+            )
+
+    replace = create | {
+        "operation": "replace",
+        "target_memory_id": UUID(int=508),
+        "expected_version": 1,
+    }
+    assert MemoryProposalDraft.model_validate(replace).operation == "replace"
+    for target_memory_id, expected_version in (
+        (None, None),
+        (UUID(int=508), None),
+        (None, 1),
+    ):
+        with pytest.raises(ValidationError):
+            MemoryProposalDraft.model_validate(
+                replace
+                | {
+                    "target_memory_id": target_memory_id,
+                    "expected_version": expected_version,
+                }
+            )
+
+    delete = replace | {"operation": "delete", "content": None, "audience": None}
+    assert MemoryProposalDraft.model_validate(delete).operation == "delete"
 
 
 def test_budget_request_carries_closed_usage_not_a_caller_cost() -> None:
     common = {
-        "household_id": UUID(int=61), "turn_id": UUID(int=62), "request_id": UUID(int=63),
-        "attempt_id": UUID(int=64), "provider": "openai", "model": "gpt-5.6-sol",
-        "category": "llm", "month_key": "2026-08",
+        "household_id": UUID(int=61),
+        "turn_id": UUID(int=62),
+        "request_id": UUID(int=63),
+        "attempt_id": UUID(int=64),
+        "provider": "openai",
+        "model": "gpt-5.6-sol",
+        "category": "llm",
+        "month_key": "2026-08",
         "usage_ceiling": LlmUsageUnits(category="llm", input_tokens=8_000, output_tokens=2_000),
     }
     request = BudgetReservationRequest.model_validate(common)
     assert tuple(BudgetReservationRequest.model_fields) == (
-        "household_id", "turn_id", "request_id", "attempt_id", "provider", "model",
-        "category", "usage_ceiling", "month_key",
+        "household_id",
+        "turn_id",
+        "request_id",
+        "attempt_id",
+        "provider",
+        "model",
+        "category",
+        "usage_ceiling",
+        "month_key",
     )
     assert request.usage_ceiling.category == "llm"
     for caller_amount in (-1, 0, 1, 1_000_000_000_001):
         with pytest.raises(ValidationError):
-            BudgetReservationRequest.model_validate(common | {"worst_case_micros_sgd": caller_amount})
+            BudgetReservationRequest.model_validate(
+                common | {"worst_case_micros_sgd": caller_amount}
+            )
     with pytest.raises(ValidationError):
-        BudgetReservationRequest.model_validate(common | {
-            "category": "stt",
-        })
+        BudgetReservationRequest.model_validate(
+            common
+            | {
+                "category": "stt",
+            }
+        )
     with pytest.raises(ValidationError):
-        BudgetReservationRequest.model_validate(common | {
-            "usage_ceiling": LlmUsageUnits(category="llm", input_tokens=0, output_tokens=0),
-        })
+        BudgetReservationRequest.model_validate(
+            common
+            | {
+                "usage_ceiling": LlmUsageUnits(category="llm", input_tokens=0, output_tokens=0),
+            }
+        )
     with pytest.raises(ValidationError):
         LlmUsageUnits(category="llm", input_tokens=10_000_001, output_tokens=0)
     with pytest.raises(ValidationError):
         SttUsageUnits(category="stt", audio_millis=3_600_001)
     with pytest.raises(ValidationError):
         TtsUsageUnits(category="tts", characters=4_097)
-    assert WebSearchUsageUnits(
-        category="web_search",input_tokens=1,output_tokens=1,web_search_calls=1,
-    ).web_search_calls==1
-    for calls in (0,2,-1,17):
+    assert (
+        WebSearchUsageUnits(
+            category="web_search",
+            input_tokens=1,
+            output_tokens=1,
+            web_search_calls=1,
+        ).web_search_calls
+        == 1
+    )
+    for calls in (0, 2, -1, 17):
         with pytest.raises(ValidationError):
-            BudgetReservationRequest.model_validate(common | {
-                "category":"web_search",
-                "usage_ceiling":{
-                    "category":"web_search","input_tokens":1,"output_tokens":1,
-                    "web_search_calls":calls,
-                },
-            })
+            BudgetReservationRequest.model_validate(
+                common
+                | {
+                    "category": "web_search",
+                    "usage_ceiling": {
+                        "category": "web_search",
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "web_search_calls": calls,
+                    },
+                }
+            )
 
 
 def test_budget_settlement_has_no_caller_actual_and_reports_overrun_freeze_truth() -> None:
@@ -6972,87 +7198,166 @@ def test_budget_settlement_has_no_caller_actual_and_reports_overrun_freeze_truth
         with pytest.raises(ValidationError):
             BudgetSettlementRequest.model_validate(request.model_dump() | injected)
     settlement = BudgetSettlement(
-        reservation_id=request.reservation_id, charged_micros_sgd=501,
-        conservative_estimate_used=False, estimate_overrun=True, cloud_egress_frozen=True,
+        reservation_id=request.reservation_id,
+        charged_micros_sgd=501,
+        conservative_estimate_used=False,
+        estimate_overrun=True,
+        cloud_egress_frozen=True,
     )
     assert settlement.estimate_overrun and settlement.cloud_egress_frozen
     with pytest.raises(ValidationError):
-        BudgetSettlement.model_validate(settlement.model_dump() | {"charged_micros_sgd": 1_000_000_000_001})
+        BudgetSettlement.model_validate(
+            settlement.model_dump() | {"charged_micros_sgd": 1_000_000_000_001}
+        )
 
 
 def test_provider_usage_receipt_is_closed_and_bound_to_the_exact_call() -> None:
-    commitment = Commitment(algorithm="HMAC-SHA-256", key_id="provider-usage-v1", value_b64="A" * 43 + "=")
+    commitment = Commitment(
+        algorithm="HMAC-SHA-256", key_id="provider-usage-v1", value_b64="A" * 43 + "="
+    )
     receipt = ProviderUsageReceiptV1(
         schema_version="tuntun.provider-usage-receipt.v1",
-        receipt_id=UUID(int=67), provider_call_id=UUID(int=68), reservation_id=UUID(int=69),
-        request_id=UUID(int=70), attempt_id=UUID(int=71), authorization_id=UUID(int=72),
-        provider="openai", model="gpt-5.6-sol", category="llm",
+        receipt_id=UUID(int=67),
+        provider_call_id=UUID(int=68),
+        reservation_id=UUID(int=69),
+        request_id=UUID(int=70),
+        attempt_id=UUID(int=71),
+        authorization_id=UUID(int=72),
+        provider="openai",
+        model="gpt-5.6-sol",
+        category="llm",
         accounting_basis="provider_reported_exact",
         billable_usage=LlmUsageUnits(category="llm", input_tokens=100, output_tokens=25),
-        provider_response_commitment=commitment, observed_at=datetime(2026, 8, 27, tzinfo=UTC),
+        provider_response_commitment=commitment,
+        observed_at=datetime(2026, 8, 27, tzinfo=UTC),
         receipt_commitment=commitment,
     )
     assert tuple(ProviderUsageReceiptV1.model_fields) == (
-        "schema_version", "receipt_id", "provider_call_id", "reservation_id", "request_id", "attempt_id",
-        "authorization_id", "provider", "model", "category", "accounting_basis",
+        "schema_version",
+        "receipt_id",
+        "provider_call_id",
+        "reservation_id",
+        "request_id",
+        "attempt_id",
+        "authorization_id",
+        "provider",
+        "model",
+        "category",
+        "accounting_basis",
         "billable_usage",
-        "provider_response_commitment", "observed_at", "receipt_commitment",
+        "provider_response_commitment",
+        "observed_at",
+        "receipt_commitment",
     )
     with pytest.raises(ValidationError):
-        ProviderUsageReceiptV1.model_validate(receipt.model_dump() | {
-            "category": "stt", "billable_usage": {"category": "llm", "input_tokens": 100, "output_tokens": 25},
-        })
-    with pytest.raises(ValidationError,match="web_search_receipt_requires_exactly_one_call"):
-        ProviderUsageReceiptV1.model_validate(receipt.model_dump() | {
-            "category":"web_search",
-            "billable_usage":{
-                "category":"web_search","input_tokens":100,"output_tokens":25,
-                "web_search_calls":2,
-            },
-        })
+        ProviderUsageReceiptV1.model_validate(
+            receipt.model_dump()
+            | {
+                "category": "stt",
+                "billable_usage": {"category": "llm", "input_tokens": 100, "output_tokens": 25},
+            }
+        )
+    with pytest.raises(ValidationError, match="web_search_receipt_requires_exactly_one_call"):
+        ProviderUsageReceiptV1.model_validate(
+            receipt.model_dump()
+            | {
+                "category": "web_search",
+                "billable_usage": {
+                    "category": "web_search",
+                    "input_tokens": 100,
+                    "output_tokens": 25,
+                    "web_search_calls": 2,
+                },
+            }
+        )
 
 
 def test_provider_response_exposes_only_the_persisted_usage_receipt_identity() -> None:
     response = ProviderResponse(
-        request_id=UUID(int=76), text="synthetic", language="en",
+        request_id=UUID(int=76),
+        text="synthetic",
+        language="en",
         provider_usage_receipt_id=UUID(int=77),
     )
     assert tuple(ProviderResponse.model_fields) == (
-        "request_id", "text", "language", "provider_usage_receipt_id",
+        "request_id",
+        "text",
+        "language",
+        "provider_usage_receipt_id",
     )
-    assert ProviderResponse(
-        request_id=UUID(int=78), text="synthetic-without-usage", language="en",
-        provider_usage_receipt_id=None,
-    ).provider_usage_receipt_id is None
+    assert (
+        ProviderResponse(
+            request_id=UUID(int=78),
+            text="synthetic-without-usage",
+            language="en",
+            provider_usage_receipt_id=None,
+        ).provider_usage_receipt_id
+        is None
+    )
     with pytest.raises(ValidationError):
-        ProviderResponse.model_validate(response.model_dump() | {
-            "usage": {"input_units": 1, "output_units": 1, "audio_millis": 0,
-                      "provider_usage_present": True},
-        })
+        ProviderResponse.model_validate(
+            response.model_dump()
+            | {
+                "usage": {
+                    "input_units": 1,
+                    "output_units": 1,
+                    "audio_millis": 0,
+                    "provider_usage_present": True,
+                },
+            }
+        )
 
 
-@pytest.mark.parametrize(("outcome", "amount", "commitment_present"), [
-    ("allow", 1, True), ("allow_soft_warning", 1_000_000_000_000, True),
-    ("deny_hard_limit", 0, True), ("deny_unknown_price", 0, False),
-    ("deny_cloud_egress_frozen", 0, False),
-])
-def test_budget_reservation_outcome_amount_and_quote_commitment_are_exact(outcome, amount, commitment_present) -> None:
+@pytest.mark.parametrize(
+    ("outcome", "amount", "commitment_present"),
+    [
+        ("allow", 1, True),
+        ("allow_soft_warning", 1_000_000_000_000, True),
+        ("deny_hard_limit", 0, True),
+        ("deny_unknown_price", 0, False),
+        ("deny_cloud_egress_frozen", 0, False),
+    ],
+)
+def test_budget_reservation_outcome_amount_and_quote_commitment_are_exact(
+    outcome: Literal[
+        "allow",
+        "allow_soft_warning",
+        "deny_hard_limit",
+        "deny_unknown_price",
+        "deny_cloud_egress_frozen",
+    ],
+    amount: int,
+    commitment_present: bool,
+) -> None:
     commitment = Commitment(algorithm="HMAC-SHA-256", key_id="pricing-v1", value_b64="A" * 43 + "=")
     reservation = BudgetReservation(
-        reservation_id=UUID(int=73), request_id=UUID(int=74), attempt_id=UUID(int=75),
-        outcome=outcome, amount_micros_sgd=amount,
+        reservation_id=UUID(int=73),
+        request_id=UUID(int=74),
+        attempt_id=UUID(int=75),
+        outcome=outcome,
+        amount_micros_sgd=amount,
         pricing_commitment=commitment if commitment_present else None,
         expires_at=datetime(2026, 8, 27, tzinfo=UTC),
     )
     assert reservation.amount_micros_sgd == amount
     with pytest.raises(ValidationError):
-        BudgetReservation.model_validate(reservation.model_dump() | {
-            "pricing_commitment": None if commitment_present else commitment,
-        })
+        BudgetReservation.model_validate(
+            reservation.model_dump()
+            | {
+                "pricing_commitment": None if commitment_present else commitment,
+            }
+        )
 
 
 def test_assurance_values_are_exact_and_auth_grants_have_no_biometric_source() -> None:
-    assert {value.value for value in AssuranceLevel} == {"guest","identified","confirmed","pin_verified","passkey_verified","recovery_verified"}
+    assert {value.value for value in AssuranceLevel} == {
+        "guest",
+        "identified",
+        "confirmed",
+        "pin_verified",
+        "passkey_verified",
+        "recovery_verified",
+    }
     assert "biometric" not in str(AuthGrant.model_json_schema()).lower()
 
 
@@ -7064,101 +7369,214 @@ def test_stop_event_and_stop_signal_share_the_exact_closed_sources() -> None:
 
 def test_route_authorization_is_attempt_and_purpose_specific() -> None:
     route = RouteAuthorization(
-        authorization_id=UUID(int=1), request_id=UUID(int=9), attempt_id=UUID(int=2), purpose="cloud_reasoning",
-        household_id=UUID(int=3), subject_id=None, session_id=UUID(int=4), turn_id=UUID(int=5),
-        provider="openai", model="gpt-5.6-sol",
-        request_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="route-v1", value_b64="A" * 43 + "="),
-        max_input_bytes=8_388_608, max_input_units=8_000,
-        privacy_receipt_id=UUID(int=6), consent_receipt_ids=(UUID(int=7),),
-        budget_reservation_id=UUID(int=8), maximum_sensitivity="household",
+        authorization_id=UUID(int=1),
+        request_id=UUID(int=9),
+        attempt_id=UUID(int=2),
+        purpose="cloud_reasoning",
+        household_id=UUID(int=3),
+        subject_id=None,
+        session_id=UUID(int=4),
+        turn_id=UUID(int=5),
+        provider="openai",
+        model="gpt-5.6-sol",
+        request_commitment=Commitment(
+            algorithm="HMAC-SHA-256", key_id="route-v1", value_b64="A" * 43 + "="
+        ),
+        max_input_bytes=8_388_608,
+        max_input_units=8_000,
+        privacy_receipt_id=UUID(int=6),
+        consent_receipt_ids=(UUID(int=7),),
+        budget_reservation_id=UUID(int=8),
+        maximum_sensitivity=Sensitivity.HOUSEHOLD,
         expires_at=datetime(2026, 8, 27, tzinfo=UTC),
     )
     assert route.purpose == "cloud_reasoning" and route.subject_id is None
     assert tuple(RouteAuthorization.model_fields) == (
-        "authorization_id", "request_id", "attempt_id", "purpose", "household_id", "subject_id", "session_id", "turn_id",
-        "provider", "model", "request_commitment", "max_input_bytes", "max_input_units", "privacy_receipt_id",
-        "consent_receipt_ids", "budget_reservation_id", "maximum_sensitivity", "expires_at",
+        "authorization_id",
+        "request_id",
+        "attempt_id",
+        "purpose",
+        "household_id",
+        "subject_id",
+        "session_id",
+        "turn_id",
+        "provider",
+        "model",
+        "request_commitment",
+        "max_input_bytes",
+        "max_input_units",
+        "privacy_receipt_id",
+        "consent_receipt_ids",
+        "budget_reservation_id",
+        "maximum_sensitivity",
+        "expires_at",
     )
     with pytest.raises(ValidationError):
         RouteAuthorization.model_validate(route.model_dump() | {"consent_receipt_ids": []})
-    assert {"audio_commitment","audio_bytes","duration_ms"} <= set(AuthorizedTranscriptionRequest.model_fields)
-    assert {"text_commitment","segment_index","segment_count"} <= set(AuthorizedSynthesisRequest.model_fields)
+    assert {"audio_commitment", "audio_bytes", "duration_ms"} <= set(
+        AuthorizedTranscriptionRequest.model_fields
+    )
+    assert {"text_commitment", "segment_index", "segment_count"} <= set(
+        AuthorizedSynthesisRequest.model_fields
+    )
 
 
 def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
-    commitment=Commitment(
-        algorithm="HMAC-SHA-256",key_id="bounds-v1",value_b64="A"*43+"=",
+    commitment = Commitment(
+        algorithm="HMAC-SHA-256",
+        key_id="bounds-v1",
+        value_b64="A" * 43 + "=",
     )
-    route=RouteAuthorization(
-        authorization_id=UUID(int=801),request_id=UUID(int=802),attempt_id=UUID(int=803),
-        purpose="cloud_reasoning",household_id=UUID(int=804),subject_id=None,
-        session_id=UUID(int=805),turn_id=UUID(int=806),provider="openai",model="gpt-5.6-sol",
-        request_commitment=commitment,max_input_bytes=1024,max_input_units=1024,
-        privacy_receipt_id=UUID(int=807),consent_receipt_ids=(UUID(int=808),),
-        budget_reservation_id=UUID(int=809),maximum_sensitivity="household",
-        expires_at=datetime(2026,8,27,tzinfo=UTC),
+    route = RouteAuthorization(
+        authorization_id=UUID(int=801),
+        request_id=UUID(int=802),
+        attempt_id=UUID(int=803),
+        purpose="cloud_reasoning",
+        household_id=UUID(int=804),
+        subject_id=None,
+        session_id=UUID(int=805),
+        turn_id=UUID(int=806),
+        provider="openai",
+        model="gpt-5.6-sol",
+        request_commitment=commitment,
+        max_input_bytes=1024,
+        max_input_units=1024,
+        privacy_receipt_id=UUID(int=807),
+        consent_receipt_ids=(UUID(int=808),),
+        budget_reservation_id=UUID(int=809),
+        maximum_sensitivity=Sensitivity.HOUSEHOLD,
+        expires_at=datetime(2026, 8, 27, tzinfo=UTC),
     )
-    message=SanitizedProviderMessage(role="user",content="synthetic")
-    tool=SanitizedToolReference(
-        registered_name="safe.tool",schema_version="1.0",schema_commitment=commitment,
+    message = SanitizedProviderMessage(role="user", content="synthetic")
+    tool = SanitizedToolReference(
+        registered_name="safe.tool",
+        schema_version="1.0",
+        schema_commitment=commitment,
     )
-    request=dict(
-        request_id=route.request_id,provider=ProviderName.OPENAI,model=route.model,
-        messages=(message,),allowed_tools=(),max_output_tokens=10,store=False,
-        redaction_receipt_id=UUID(int=810),route=route,timeout_ms=1_000,
+    request = dict(
+        request_id=route.request_id,
+        provider=ProviderName.OPENAI,
+        model=route.model,
+        messages=(message,),
+        allowed_tools=(),
+        max_output_tokens=10,
+        store=False,
+        redaction_receipt_id=UUID(int=810),
+        route=route,
+        timeout_ms=1_000,
     )
-    SanitizedProviderRequest(**request)
-    for mutation in ({"messages":()},{"messages":(message,)*33},{"allowed_tools":(tool,)*9}):
-        with pytest.raises(ValidationError): SanitizedProviderRequest(**(request|mutation))
+    SanitizedProviderRequest.model_validate(request)
+    for mutation in (
+        {"messages": ()},
+        {"messages": (message,) * 33},
+        {"allowed_tools": (tool,) * 9},
+    ):
+        with pytest.raises(ValidationError):
+            SanitizedProviderRequest.model_validate(request | mutation)
 
-    audio=dict(
-        request_id=UUID(int=811),turn_id=route.turn_id,
-        audio_format=AudioFormat(sample_format="s16le",sample_rate_hz=16_000,channels=1,interleaved=True,channel_layout="mono"),
-        audio_commitment=commitment,audio_bytes=2,duration_ms=1,language_hints=("en",),route=route,
+    audio = dict(
+        request_id=UUID(int=811),
+        turn_id=route.turn_id,
+        audio_format=AudioFormat(
+            sample_format="s16le",
+            sample_rate_hz=16_000,
+            channels=1,
+            interleaved=True,
+            channel_layout="mono",
+        ),
+        audio_commitment=commitment,
+        audio_bytes=2,
+        duration_ms=1,
+        language_hints=("en",),
+        route=route,
     )
-    AuthorizedTranscriptionRequest(**audio)
-    for hints in ((),("en","en"),("en","hi","en")):
-        with pytest.raises(ValidationError): AuthorizedTranscriptionRequest(**(audio|{"language_hints":hints}))
+    AuthorizedTranscriptionRequest.model_validate(audio)
+    for hints in ((), ("en", "en"), ("en", "hi", "en")):
+        with pytest.raises(ValidationError):
+            AuthorizedTranscriptionRequest.model_validate(audio | {"language_hints": hints})
 
-    observed=datetime(2026,8,27,tzinfo=UTC)
-    evidence=IdentityEvidence(
-        modality="face",subject_id=None,confidence_micros=1,quality_micros=1,
-        liveness_accepted=False,model_version="synthetic",observed_at=observed,expires_at=observed,
+    observed = datetime(2026, 8, 27, tzinfo=UTC)
+    evidence = IdentityEvidence(
+        modality="face",
+        subject_id=None,
+        confidence_micros=1,
+        quality_micros=1,
+        liveness_accepted=False,
+        model_version="synthetic",
+        observed_at=observed,
+        expires_at=observed,
     )
     with pytest.raises(ValidationError):
-        IdentityRequest(household_id=route.household_id,session_id=route.session_id,evidence=(evidence,evidence))
+        IdentityRequest(
+            household_id=route.household_id,
+            session_id=route.session_id,
+            evidence=(evidence, evidence),
+        )
     with pytest.raises(ValidationError):
-        IdentityRequest(household_id=route.household_id,session_id=route.session_id,evidence=(evidence,)*3)
+        IdentityRequest(
+            household_id=route.household_id, session_id=route.session_id, evidence=(evidence,) * 3
+        )
 
-    proof=TransportProof(
-        reservation_id=route.budget_reservation_id,attempt_id=route.attempt_id,
-        disposition="never_sent",evidence_code="synthetic",observed_at=observed,
+    proof = TransportProof(
+        reservation_id=route.budget_reservation_id,
+        attempt_id=route.attempt_id,
+        disposition="never_sent",
+        evidence_code="synthetic",
+        observed_at=observed,
     )
-    with pytest.raises(ValidationError): BudgetReconciliationRequest(turn_id=route.turn_id,proofs=(proof,proof))
-    with pytest.raises(ValidationError): BudgetReconciliationRequest(turn_id=route.turn_id,proofs=(proof,)*9)
+    with pytest.raises(ValidationError):
+        BudgetReconciliationRequest(turn_id=route.turn_id, proofs=(proof, proof))
+    with pytest.raises(ValidationError):
+        BudgetReconciliationRequest(turn_id=route.turn_id, proofs=(proof,) * 9)
 
-    provider_schema=SanitizedProviderRequest.model_json_schema()["properties"]
-    speech_schema=AuthorizedTranscriptionRequest.model_json_schema()["properties"]
-    assert (provider_schema["messages"]["minItems"],provider_schema["messages"]["maxItems"])==(1,32)
-    assert provider_schema["allowed_tools"]["maxItems"]==8
-    assert (speech_schema["language_hints"]["minItems"],speech_schema["language_hints"]["maxItems"])==(1,2)
+    provider_schema = SanitizedProviderRequest.model_json_schema()["properties"]
+    speech_schema = AuthorizedTranscriptionRequest.model_json_schema()["properties"]
+    assert (provider_schema["messages"]["minItems"], provider_schema["messages"]["maxItems"]) == (
+        1,
+        32,
+    )
+    assert provider_schema["allowed_tools"]["maxItems"] == 8
+    assert (
+        speech_schema["language_hints"]["minItems"],
+        speech_schema["language_hints"]["maxItems"],
+    ) == (1, 2)
 
 
 def test_action_receipt_is_frozen_for_downstream_consumers() -> None:
     fields = ActionReceipt.model_fields
     assert tuple(fields) == (
-        "receipt_id", "proposal_id", "household_id", "action_name", "resource_scope",
-        "resource_id", "idempotency_key", "outcome", "reason_code", "occurred_at",
+        "receipt_id",
+        "proposal_id",
+        "household_id",
+        "action_name",
+        "resource_scope",
+        "resource_id",
+        "idempotency_key",
+        "outcome",
+        "reason_code",
+        "occurred_at",
     )
 
 
 def test_owner_authority_and_admin_session_bind_all_current_epochs() -> None:
     assert tuple(CurrentOwnerAuthority.model_fields) == (
-        "household_id", "subject_id", "owner_generation", "profile_version", "observed_at",
+        "household_id",
+        "subject_id",
+        "owner_generation",
+        "profile_version",
+        "observed_at",
     )
     assert tuple(AdminSessionPrincipal.model_fields) == (
-        "admin_session_id", "household_id", "subject_id", "owner_generation", "profile_version",
-        "session_version", "access_mode", "authenticated_at", "idle_expires_at", "absolute_expires_at",
+        "admin_session_id",
+        "household_id",
+        "subject_id",
+        "owner_generation",
+        "profile_version",
+        "session_version",
+        "access_mode",
+        "authenticated_at",
+        "idle_expires_at",
+        "absolute_expires_at",
     )
 
 
@@ -7166,44 +7584,82 @@ def test_action_drafts_are_a_closed_discriminated_union() -> None:
     schema = TypeAdapter(ActionProposalDraft).json_schema()
     assert schema["discriminator"]["propertyName"] == "action_name"
     encoded = str(schema)
-    assert all(name in encoded for name in (
-        "timer.create", "backup.restore", "backup.recovery_key.create", "profile.delete",
-        "identity.enroll", "identity.enrollment.cancel", "security.finding.suppress",
-        "search.profile_mode.change", "search.experimental.activate",
-        "release.latency.accept", "release.family_stage.review", "release.p1r0",
-    ))
+    assert all(
+        name in encoded
+        for name in (
+            "timer.create",
+            "backup.restore",
+            "backup.recovery_key.create",
+            "profile.delete",
+            "identity.enroll",
+            "identity.enrollment.cancel",
+            "security.finding.suppress",
+            "search.profile_mode.change",
+            "search.experimental.activate",
+            "release.latency.accept",
+            "release.family_stage.review",
+            "release.p1r0",
+        )
+    )
     assert "identity.discovery" not in encoded
     assert "identity.candidate" not in encoded
     assert "additionalProperties': True" not in encoded
     with pytest.raises(ValidationError):
-        TypeAdapter(ActionProposalDraft).validate_python({"action_name": "smart_home.unlock", "parameters": {}})
+        TypeAdapter(ActionProposalDraft).validate_python(
+            {"action_name": "smart_home.unlock", "parameters": {}}
+        )
 
 
-def test_timer_drafts_bind_the_exact_server_resource(valid_action_fields) -> None:
+def test_timer_drafts_bind_the_exact_server_resource(
+    valid_action_fields: Callable[[str], dict[str, object]],
+) -> None:
     with pytest.raises(ValidationError):
-        TimerCreateActionDraft.model_validate(valid_action_fields("timer.create") | {
-            "resource_type": "timer", "resource_id": None, "duration_seconds": 30, "label": "tea",
-        })
+        TimerCreateActionDraft.model_validate(
+            valid_action_fields("timer.create")
+            | {
+                "resource_type": "timer",
+                "resource_id": None,
+                "duration_seconds": 30,
+                "label": "tea",
+            }
+        )
     timer_id = UUID(int=81)
     with pytest.raises(ValidationError):
-        TimerTargetActionDraft.model_validate(valid_action_fields("timer.cancel") | {
-            "resource_type": "timer", "resource_id": UUID(int=82), "timer_id": timer_id,
-        })
+        TimerTargetActionDraft.model_validate(
+            valid_action_fields("timer.cancel")
+            | {
+                "resource_type": "timer",
+                "resource_id": UUID(int=82),
+                "timer_id": timer_id,
+            }
+        )
 
 
-def test_ordinary_profile_create_cannot_create_an_owner(valid_action_fields) -> None:
+def test_ordinary_profile_create_cannot_create_an_owner(
+    valid_action_fields: Callable[[str], dict[str, object]],
+) -> None:
     subject_id = UUID(int=83)
     with pytest.raises(ValidationError):
-        ProfileActionDraft.model_validate(valid_action_fields("profile.create") | {
-            "resource_type": "profile", "resource_id": subject_id, "subject_id": subject_id,
-            "profile_class": "owner", "display_label": "second owner",
-        })
+        ProfileActionDraft.model_validate(
+            valid_action_fields("profile.create")
+            | {
+                "resource_type": "profile",
+                "resource_id": subject_id,
+                "subject_id": subject_id,
+                "profile_class": "owner",
+                "display_label": "second owner",
+            }
+        )
 
 
-def test_enrollment_cancel_requires_exact_non_null_enrollment_resource(valid_action_fields) -> None:
+def test_enrollment_cancel_requires_exact_non_null_enrollment_resource(
+    valid_action_fields: Callable[[str], dict[str, object]],
+) -> None:
     subject_id, enrollment_id = UUID(int=84), UUID(int=85)
     common = valid_action_fields("identity.enrollment.cancel") | {
-        "resource_type": "identity", "subject_id": subject_id, "enrollment_id": enrollment_id,
+        "resource_type": "identity",
+        "subject_id": subject_id,
+        "enrollment_id": enrollment_id,
     }
     for resource_id in (None, UUID(int=86)):
         with pytest.raises(ValidationError):
@@ -7213,77 +7669,195 @@ def test_enrollment_cancel_requires_exact_non_null_enrollment_resource(valid_act
 def test_prepared_consent_action_schema_has_exact_durable_purposes() -> None:
     purpose_schema = ConsentActionDraft.model_json_schema()["properties"]["purpose"]
     assert set(purpose_schema["enum"]) == {
-        "face", "voice", "personalization", "cloud_stt", "cloud_reasoning", "cloud_tts",
-        "web_search", "child_durable_memory_v1",
+        "face",
+        "voice",
+        "personalization",
+        "cloud_stt",
+        "cloud_reasoning",
+        "cloud_tts",
+        "web_search",
+        "child_durable_memory_v1",
     }
 
 
 def test_persona_contract_is_minimized_typed_and_identifier_free() -> None:
-    assert tuple(PersonaProjection.model_fields) == ("role", "context", "tone", "depth", "learning_level")
+    assert tuple(PersonaProjection.model_fields) == (
+        "role",
+        "context",
+        "tone",
+        "depth",
+        "learning_level",
+    )
     assert set(PersonaTraits.model_json_schema()["properties"]["context"]["enum"]) == {
-        "general", "technical_security", "household_practical", "early_learning"
+        "general",
+        "technical_security",
+        "household_practical",
+        "early_learning",
     }
     encoded = str(PersonaProjection.model_json_schema()).lower()
-    assert all(forbidden not in encoded for forbidden in ("subject_id", "name", "birth", "school", "secret", "free_form"))
+    assert all(
+        forbidden not in encoded
+        for forbidden in ("subject_id", "name", "birth", "school", "secret", "free_form")
+    )
     with pytest.raises(ValidationError):
-        PersonaTraits(context="my private biography", tone="warm", depth="standard", learning_level="none")
-    assert {"persona_traits", "clear_persona_traits", "target_profile_class", "expected_version", "guardian_generation"} <= set(ProfileActionDraft.model_fields)
-    assert "profile_persona" in str(ActionProposalDraft.model_json_schema())
+        PersonaTraits.model_validate(
+            {
+                "context": "my private biography",
+                "tone": "warm",
+                "depth": "standard",
+                "learning_level": "none",
+            }
+        )
+    assert {
+        "persona_traits",
+        "clear_persona_traits",
+        "target_profile_class",
+        "expected_version",
+        "guardian_generation",
+    } <= set(ProfileActionDraft.model_fields)
+    assert "profile_persona" in str(TypeAdapter(ActionProposalDraft).json_schema())
 
 
-@pytest.mark.parametrize("change", [
-    {},
-    {"persona_traits": PersonaTraits(context="general", tone="neutral", depth="standard", learning_level="none")},
-    {"profile_class": "adult", "persona_traits": PersonaTraits(context="general", tone="neutral", depth="standard", learning_level="none"), "expected_version": 1},
-    {"persona_traits": PersonaTraits(context="general", tone="neutral", depth="standard", learning_level="none"), "expected_version": 1, "guardian_generation": 2},
-    {"persona_traits": PersonaTraits(context="general", tone="neutral", depth="standard", learning_level="none"), "clear_persona_traits": True, "expected_version": 1},
-])
-def test_profile_edit_is_exactly_versioned_replace_or_clear_without_role_change(change) -> None:
+@pytest.mark.parametrize(
+    "change",
+    [
+        {},
+        {
+            "persona_traits": PersonaTraits(
+                context="general", tone="neutral", depth="standard", learning_level="none"
+            )
+        },
+        {
+            "profile_class": "adult",
+            "persona_traits": PersonaTraits(
+                context="general", tone="neutral", depth="standard", learning_level="none"
+            ),
+            "expected_version": 1,
+        },
+        {
+            "persona_traits": PersonaTraits(
+                context="general", tone="neutral", depth="standard", learning_level="none"
+            ),
+            "expected_version": 1,
+            "guardian_generation": 2,
+        },
+        {
+            "persona_traits": PersonaTraits(
+                context="general", tone="neutral", depth="standard", learning_level="none"
+            ),
+            "clear_persona_traits": True,
+            "expected_version": 1,
+        },
+    ],
+)
+def test_profile_edit_is_exactly_versioned_replace_or_clear_without_role_change(
+    change: dict[str, object],
+) -> None:
     common = {
-        "proposal_id": UUID(int=21), "schema_version": "1.0", "action_name": "profile.edit",
-        "resource_type": "profile", "resource_id": UUID(int=22), "subject_id": UUID(int=22),
+        "proposal_id": UUID(int=21),
+        "schema_version": "1.0",
+        "action_name": "profile.edit",
+        "resource_type": "profile",
+        "resource_id": UUID(int=22),
+        "subject_id": UUID(int=22),
         "target_profile_class": "adult",
-        "parameters_commitment": Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="),
-        "uncertainty_micros": 0, "expires_at": datetime(2026, 8, 27, tzinfo=UTC), "idempotency_key": UUID(int=23),
+        "parameters_commitment": Commitment(
+            algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="
+        ),
+        "uncertainty_micros": 0,
+        "expires_at": datetime(2026, 8, 27, tzinfo=UTC),
+        "idempotency_key": UUID(int=23),
     }
     with pytest.raises(ValidationError):
         ProfileActionDraft.model_validate(common | change)
 
 
-@pytest.mark.parametrize(("target_profile_class", "guardian_generation", "operation"), [
-    ("owner", None, "replace"), ("adult", None, "clear"),
-    ("k2", 3, "replace"), ("n1", 4, "clear"),
-])
-def test_profile_edit_allows_exact_server_derived_self_or_guardian_shape(target_profile_class, guardian_generation, operation) -> None:
-    traits = PersonaTraits(context="early_learning" if target_profile_class in {"k2", "n1"} else "general", tone="warm", depth="brief", learning_level=target_profile_class if target_profile_class in {"k2", "n1"} else "none")
+@pytest.mark.parametrize(
+    ("target_profile_class", "guardian_generation", "operation"),
+    [
+        ("owner", None, "replace"),
+        ("adult", None, "clear"),
+        ("k2", 3, "replace"),
+        ("n1", 4, "clear"),
+    ],
+)
+def test_profile_edit_allows_exact_server_derived_self_or_guardian_shape(
+    target_profile_class: Literal["owner", "adult", "k2", "n1"],
+    guardian_generation: int | None,
+    operation: Literal["replace", "clear"],
+) -> None:
+    learning_level: Literal["none", "n1", "k2"]
+    if target_profile_class == "k2":
+        learning_level = "k2"
+    elif target_profile_class == "n1":
+        learning_level = "n1"
+    else:
+        learning_level = "none"
+    traits = PersonaTraits(
+        context="early_learning" if target_profile_class in {"k2", "n1"} else "general",
+        tone="warm",
+        depth="brief",
+        learning_level=learning_level,
+    )
     draft = ProfileActionDraft(
-        proposal_id=UUID(int=24), schema_version="1.0", action_name="profile.edit",
-        resource_type="profile", resource_id=UUID(int=25), subject_id=UUID(int=25),
+        proposal_id=UUID(int=24),
+        schema_version="1.0",
+        action_name="profile.edit",
+        resource_type="profile",
+        resource_id=UUID(int=25),
+        subject_id=UUID(int=25),
         target_profile_class=target_profile_class,
         persona_traits=traits if operation == "replace" else None,
-        clear_persona_traits=operation == "clear", expected_version=2,
+        clear_persona_traits=operation == "clear",
+        expected_version=2,
         guardian_generation=guardian_generation,
-        parameters_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="),
-        uncertainty_micros=0, expires_at=datetime(2026, 8, 27, tzinfo=UTC), idempotency_key=UUID(int=26),
+        parameters_commitment=Commitment(
+            algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="
+        ),
+        uncertainty_micros=0,
+        expires_at=datetime(2026, 8, 27, tzinfo=UTC),
+        idempotency_key=UUID(int=26),
     )
     assert draft.target_profile_class == target_profile_class
     if guardian_generation is not None:
-        assert canonical_bytes(draft) != canonical_bytes(draft.model_copy(update={"guardian_generation": guardian_generation + 1}))
+        assert canonical_bytes(draft) != canonical_bytes(
+            draft.model_copy(update={"guardian_generation": guardian_generation + 1})
+        )
 
 
-@pytest.mark.parametrize(("target_profile_class", "guardian_generation"), [
-    ("owner", 1), ("adult", 1), ("k2", None), ("n1", None),
-])
-def test_profile_edit_rejects_cross_role_or_null_guardian_generation(target_profile_class, guardian_generation) -> None:
+@pytest.mark.parametrize(
+    ("target_profile_class", "guardian_generation"),
+    [
+        ("owner", 1),
+        ("adult", 1),
+        ("k2", None),
+        ("n1", None),
+    ],
+)
+def test_profile_edit_rejects_cross_role_or_null_guardian_generation(
+    target_profile_class: Literal["owner", "adult", "k2", "n1"],
+    guardian_generation: int | None,
+) -> None:
     with pytest.raises(ValidationError):
         ProfileActionDraft(
-            proposal_id=UUID(int=27), schema_version="1.0", action_name="profile.edit",
-            resource_type="profile", resource_id=UUID(int=28), subject_id=UUID(int=28),
+            proposal_id=UUID(int=27),
+            schema_version="1.0",
+            action_name="profile.edit",
+            resource_type="profile",
+            resource_id=UUID(int=28),
+            subject_id=UUID(int=28),
             target_profile_class=target_profile_class,
-            persona_traits=PersonaTraits(context="general", tone="neutral", depth="brief", learning_level="none"),
-            expected_version=1, guardian_generation=guardian_generation,
-            parameters_commitment=Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="),
-            uncertainty_micros=0, expires_at=datetime(2026, 8, 27, tzinfo=UTC), idempotency_key=UUID(int=29),
+            persona_traits=PersonaTraits(
+                context="general", tone="neutral", depth="brief", learning_level="none"
+            ),
+            expected_version=1,
+            guardian_generation=guardian_generation,
+            parameters_commitment=Commitment(
+                algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="
+            ),
+            uncertainty_micros=0,
+            expires_at=datetime(2026, 8, 27, tzinfo=UTC),
+            idempotency_key=UUID(int=29),
         )
 
 
@@ -7291,43 +7865,140 @@ def test_profile_edit_rejects_cross_role_or_null_guardian_generation(target_prof
 def valid_action_payloads() -> dict[str, dict[str, object]]:
     def base(action_name: str, resource_id: int) -> dict[str, object]:
         return {
-            "proposal_id": UUID(int=100 + resource_id), "schema_version": "1.0", "action_name": action_name,
-            "resource_type": action_name.split(".", 1)[0], "resource_id": UUID(int=resource_id),
-            "parameters_commitment": Commitment(algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="),
-            "uncertainty_micros": 0, "expires_at": datetime(2026, 8, 27, tzinfo=UTC),
+            "proposal_id": UUID(int=100 + resource_id),
+            "schema_version": "1.0",
+            "action_name": action_name,
+            "resource_type": action_name.split(".", 1)[0],
+            "resource_id": UUID(int=resource_id),
+            "parameters_commitment": Commitment(
+                algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="
+            ),
+            "uncertainty_micros": 0,
+            "expires_at": datetime(2026, 8, 27, tzinfo=UTC),
             "idempotency_key": UUID(int=200 + resource_id),
         }
-    edited = PreferenceContent(category="food", key="spice", value="medium", strength_micros=500_000)
+
+    edited = PreferenceContent(
+        category="food", key="spice", value="medium", strength_micros=500_000
+    )
     return {
         "privacy.off": base("privacy.off", 41) | {"typed_confirmation": "TURN OFF PRIVACY"},
-        "provider.configure": base("provider.configure", 42) | {"provider": "openai", "enabled": True, "review_record_id": UUID(int=242), "expected_provider_version": 1},
-        "credential.passkey.revoke": base("credential.passkey.revoke", 43) | {"credential_id": UUID(int=243), "expected_version": 1},
-        "backup.restore": base("backup.restore", 44) | {"backup_id": UUID(int=244), "manifest_sha256": "a" * 64},
-        "memory.edit_approve": base("memory.edit_approve", 45) | {"subject_id": UUID(int=245), "proposal_id_ref": UUID(int=246), "expected_version": 1, "decision": "approve", "edited_content": edited},
-        "memory.export": base("memory.export", 49) | {"resource_id": UUID(int=253), "subject_id": UUID(int=254), "memory_id": UUID(int=253), "expected_version": 3, "export_format": "json"},
-        "identity.enroll": base("identity.enroll", 46) | {"subject_id": UUID(int=247), "modality": "face", "expected_profile_version": 1, "expected_consent_receipt_id": UUID(int=248), "reenrollment_days": 180},
-        "search.profile_mode.change": base("search.profile_mode.change", 47) | {"subject_id": UUID(int=249), "expected_profile_version": 1, "mode": "controlled", "expected_web_consent_receipt_id": UUID(int=250)},
-        "search.experimental.activate": base("search.experimental.activate", 48) | {"subject_id": UUID(int=251), "expected_profile_version": 1, "expected_web_consent_receipt_id": UUID(int=252), "provider_review_version": 1, "pricing_version": 1, "privacy_generation": 1, "feature_generation": 1, "activation_issued_at": datetime(2026, 8, 27, 0, 0, tzinfo=UTC), "activation_expires_at": datetime(2026, 8, 27, 0, 30, tzinfo=UTC), "max_passes": 4, "max_sources": 20, "max_duration_seconds": 1800, "no_memory": True, "no_authenticated_sites": True, "no_files": True, "no_tools": True},
+        "provider.configure": base("provider.configure", 42)
+        | {
+            "provider": "openai",
+            "enabled": True,
+            "review_record_id": UUID(int=242),
+            "expected_provider_version": 1,
+        },
+        "credential.passkey.revoke": base("credential.passkey.revoke", 43)
+        | {"credential_id": UUID(int=243), "expected_version": 1},
+        "backup.restore": base("backup.restore", 44)
+        | {"backup_id": UUID(int=244), "manifest_sha256": "a" * 64},
+        "memory.edit_approve": base("memory.edit_approve", 45)
+        | {
+            "subject_id": UUID(int=245),
+            "proposal_id_ref": UUID(int=246),
+            "expected_version": 1,
+            "decision": "approve",
+            "edited_content": edited,
+        },
+        "memory.export": base("memory.export", 49)
+        | {
+            "resource_id": UUID(int=253),
+            "subject_id": UUID(int=254),
+            "memory_id": UUID(int=253),
+            "expected_version": 3,
+            "export_format": "json",
+        },
+        "identity.enroll": base("identity.enroll", 46)
+        | {
+            "subject_id": UUID(int=247),
+            "modality": "face",
+            "expected_profile_version": 1,
+            "expected_consent_receipt_id": UUID(int=248),
+            "reenrollment_days": 180,
+        },
+        "search.profile_mode.change": base("search.profile_mode.change", 47)
+        | {
+            "subject_id": UUID(int=249),
+            "expected_profile_version": 1,
+            "mode": "controlled",
+            "expected_web_consent_receipt_id": UUID(int=250),
+        },
+        "search.experimental.activate": base("search.experimental.activate", 48)
+        | {
+            "subject_id": UUID(int=251),
+            "expected_profile_version": 1,
+            "expected_web_consent_receipt_id": UUID(int=252),
+            "provider_review_version": 1,
+            "pricing_version": 1,
+            "privacy_generation": 1,
+            "feature_generation": 1,
+            "activation_issued_at": datetime(2026, 8, 27, 0, 0, tzinfo=UTC),
+            "activation_expires_at": datetime(2026, 8, 27, 0, 30, tzinfo=UTC),
+            "max_passes": 4,
+            "max_sources": 20,
+            "max_duration_seconds": 1800,
+            "no_memory": True,
+            "no_authenticated_sites": True,
+            "no_files": True,
+            "no_tools": True,
+        },
     }
 
 
-@pytest.mark.parametrize("action_name,invalid", [
-    ("privacy.off", {"typed_confirmation": "UNMUTE"}),
-    ("provider.configure", {"provider": "openai", "enabled": True, "expected_provider_version": 1, "hard_limit_micros_sgd": 1}),
-    ("credential.passkey.revoke", {"credential_id": UUID(int=31), "expected_version": None}),
-    ("backup.restore", {"backup_id": None, "manifest_sha256": None}),
-    ("memory.edit_approve", {"proposal_id_ref": UUID(int=32), "expected_version": 1, "decision": "approve", "edited_content": None}),
-    ("memory.export", {"memory_id": None}),
-    ("memory.export", {"expected_version": None}),
-    ("memory.export", {"resource_id": UUID(int=35)}),
-    ("memory.export", {"profile_id": UUID(int=36)}),
-    ("identity.enroll", {"subject_id": UUID(int=33), "modality": "face", "expected_profile_version": None}),
-    ("search.profile_mode.change", {"subject_id": UUID(int=34), "mode": None, "expected_profile_version": 1}),
-    ("search.profile_mode.change", {"expected_web_consent_receipt_id": None}),
-    ("search.profile_mode.change", {"mode": "no_web", "expected_web_consent_receipt_id": UUID(int=35)}),
-    ("search.experimental.activate", {"subject_id": UUID(int=34), "mode": "controlled", "expected_profile_version": 1}),
-])
-def test_grouped_action_variants_reject_null_or_cross_operation_substitution(action_name, invalid, valid_action_payloads) -> None:
+@pytest.mark.parametrize(
+    "action_name,invalid",
+    [
+        ("privacy.off", {"typed_confirmation": "UNMUTE"}),
+        (
+            "provider.configure",
+            {
+                "provider": "openai",
+                "enabled": True,
+                "expected_provider_version": 1,
+                "hard_limit_micros_sgd": 1,
+            },
+        ),
+        ("credential.passkey.revoke", {"credential_id": UUID(int=31), "expected_version": None}),
+        ("backup.restore", {"backup_id": None, "manifest_sha256": None}),
+        (
+            "memory.edit_approve",
+            {
+                "proposal_id_ref": UUID(int=32),
+                "expected_version": 1,
+                "decision": "approve",
+                "edited_content": None,
+            },
+        ),
+        ("memory.export", {"memory_id": None}),
+        ("memory.export", {"expected_version": None}),
+        ("memory.export", {"resource_id": UUID(int=35)}),
+        ("memory.export", {"profile_id": UUID(int=36)}),
+        (
+            "identity.enroll",
+            {"subject_id": UUID(int=33), "modality": "face", "expected_profile_version": None},
+        ),
+        (
+            "search.profile_mode.change",
+            {"subject_id": UUID(int=34), "mode": None, "expected_profile_version": 1},
+        ),
+        ("search.profile_mode.change", {"expected_web_consent_receipt_id": None}),
+        (
+            "search.profile_mode.change",
+            {"mode": "no_web", "expected_web_consent_receipt_id": UUID(int=35)},
+        ),
+        (
+            "search.experimental.activate",
+            {"subject_id": UUID(int=34), "mode": "controlled", "expected_profile_version": 1},
+        ),
+    ],
+)
+def test_grouped_action_variants_reject_null_or_cross_operation_substitution(
+    action_name: str,
+    invalid: dict[str, object],
+    valid_action_payloads: dict[str, dict[str, object]],
+) -> None:
     payload = valid_action_payloads[action_name] | invalid
     with pytest.raises(ValidationError):
         TypeAdapter(ActionProposalDraft).validate_python(payload)
@@ -7335,9 +8006,17 @@ def test_grouped_action_variants_reject_null_or_cross_operation_substitution(act
 
 def test_action_binding_is_household_proposal_turn_and_idempotency_bound() -> None:
     assert tuple(ActionBinding.model_fields) == (
-        "household_id", "proposal_id", "turn_id", "idempotency_key", "action_name",
-        "resource_type", "resource_id", "parameter_commitment", "policy_version",
-        "session_id", "subject_id",
+        "household_id",
+        "proposal_id",
+        "turn_id",
+        "idempotency_key",
+        "action_name",
+        "resource_type",
+        "resource_id",
+        "parameter_commitment",
+        "policy_version",
+        "session_id",
+        "subject_id",
     )
 
 
@@ -7352,6 +8031,9 @@ def test_external_ports_are_async() -> None:
     assert inspect.iscoroutinefunction(AuthenticationPort.consume)
     assert inspect.iscoroutinefunction(MemoryRepositoryPort.create)
     assert inspect.iscoroutinefunction(RouteAuthorizerPort.consume)
+    assert inspect.iscoroutinefunction(AuditPort.append)
+    assert inspect.iscoroutinefunction(AsyncTransactionBoundary.commit)
+    assert inspect.iscoroutinefunction(AsyncTransactionBoundary.rollback)
 ```
 
 ```python
@@ -7361,7 +8043,7 @@ from pathlib import Path
 
 def test_domain_services_and_workflows_do_not_import_adapters() -> None:
     root = Path("apps/core/src/tuntun_core")
-    violations = []
+    violations: list[str] = []
     for area in ("domain", "services", "workflows"):
         for path in (root / area).rglob("*.py") if (root / area).exists() else ():
             if "tuntun_core.adapters" in path.read_text(encoding="utf-8"):
@@ -7373,17 +8055,22 @@ def test_domain_services_and_workflows_do_not_import_adapters() -> None:
 
 Run: `uv run pytest tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py -q`
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_contracts.memory'`.
+Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_contracts.actions'`. From a completed Task 4 state, `import tuntun_contracts` succeeds and Ruff's canonical import order reaches the first new owning module, `tuntun_contracts.actions`, before any other Task 5 module; this is the truthful RED sentinel and no artificial import reordering is required.
 
 - [ ] **Step 3: Implement the exact DTO catalog**
 
 ```python
 # packages/contracts/src/tuntun_contracts/speech.py
-from typing import Annotated, AsyncIterator, Literal
+from __future__ import annotations
+
+from typing import Annotated, Literal
 from uuid import UUID
+
 from pydantic import Field, field_validator
+
 from .base import Commitment, ContractModel
 from .provider import RouteAuthorization
+
 
 class AudioFormat(ContractModel):
     sample_format: Literal["float32_le", "s16le"]
@@ -7392,399 +8079,850 @@ class AudioFormat(ContractModel):
     interleaved: bool
     channel_layout: Literal["mono", "stereo", "reachy_native"]
 
+
 class AuthorizedTranscriptionRequest(ContractModel):
-    request_id: UUID; turn_id: UUID; audio_format: AudioFormat
+    request_id: UUID
+    turn_id: UUID
+    audio_format: AudioFormat
     audio_commitment: Commitment
     audio_bytes: Annotated[int, Field(ge=1, le=8_388_608)]
     duration_ms: Annotated[int, Field(ge=1, le=90_000)]
-    language_hints: Annotated[tuple[Literal["en", "hi"], ...], Field(min_length=1, max_length=2)]
+    language_hints: Annotated[
+        tuple[Literal["en", "hi"], ...],
+        Field(min_length=1, max_length=2),
+    ]
     route: RouteAuthorization
 
     @field_validator("language_hints")
     @classmethod
-    def unique_language_hints(cls, value):
-        if len(set(value)) != len(value): raise ValueError("duplicate language hint")
+    def unique_language_hints(
+        cls,
+        value: tuple[Literal["en", "hi"], ...],
+    ) -> tuple[Literal["en", "hi"], ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate language hint")
         return value
 
+
 class TranscriptResult(ContractModel):
-    request_id: UUID; text: Annotated[str, Field(min_length=1, max_length=32_000)]
-    language: Literal["en", "hi", "hinglish", "unknown"]; duration_ms: Annotated[int, Field(ge=0, le=90_000)]
+    request_id: UUID
+    text: Annotated[str, Field(min_length=1, max_length=32_000)]
+    language: Literal["en", "hi", "hinglish", "unknown"]
+    duration_ms: Annotated[int, Field(ge=0, le=90_000)]
+
 
 class AuthorizedSynthesisRequest(ContractModel):
-    request_id: UUID; turn_id: UUID; text: Annotated[str, Field(min_length=1, max_length=4_096)]
+    request_id: UUID
+    turn_id: UUID
+    text: Annotated[str, Field(min_length=1, max_length=4_096)]
     text_commitment: Commitment
     segment_index: Annotated[int, Field(ge=0, le=255)]
     segment_count: Annotated[int, Field(ge=1, le=256)]
-    language: Literal["en", "hi", "hinglish"]; dlp_receipt_id: UUID; route: RouteAuthorization
+    language: Literal["en", "hi", "hinglish"]
+    dlp_receipt_id: UUID
+    route: RouteAuthorization
+
 
 class SpeechChunk(ContractModel):
-    request_id: UUID; sequence: Annotated[int, Field(ge=0)]; pcm: bytes = Field(max_length=65_536)
+    request_id: UUID
+    sequence: Annotated[int, Field(ge=0)]
+    pcm: Annotated[bytes, Field(max_length=65_536)]
     final: bool
 ```
 
 ```python
 # packages/contracts/src/tuntun_contracts/provider.py
+from __future__ import annotations
+
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
+
 from pydantic import AwareDatetime, Field, field_validator
+
 from .base import Commitment, ContractModel, Sensitivity
+
 
 class ProviderName(StrEnum):
     OPENAI = "openai"
     QWEN = "qwen"
 
+
 class RouteAuthorization(ContractModel):
-    authorization_id: UUID; request_id: UUID; attempt_id: UUID
+    authorization_id: UUID
+    request_id: UUID
+    attempt_id: UUID
     purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"]
-    household_id: UUID; subject_id: UUID | None; session_id: UUID; turn_id: UUID
+    household_id: UUID
+    subject_id: UUID | None
+    session_id: UUID
+    turn_id: UUID
     provider: Literal["openai", "qwen"]
     model: Annotated[str, Field(min_length=1, max_length=128)]
     request_commitment: Commitment
     max_input_bytes: Annotated[int, Field(ge=1, le=8_388_608)]
     max_input_units: Annotated[int, Field(ge=1)]
-    privacy_receipt_id: UUID; consent_receipt_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=8)]
-    budget_reservation_id: UUID; maximum_sensitivity: Sensitivity; expires_at: AwareDatetime
+    privacy_receipt_id: UUID
+    consent_receipt_ids: Annotated[
+        tuple[UUID, ...],
+        Field(min_length=1, max_length=8),
+    ]
+    budget_reservation_id: UUID
+    maximum_sensitivity: Sensitivity
+    expires_at: AwareDatetime
+
 
 class RouteAuthorizationRequest(ContractModel):
-    request_id: UUID; attempt_id: UUID; purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"]
-    household_id: UUID; subject_id: UUID | None; session_id: UUID; turn_id: UUID
-    provider: Literal["openai", "qwen"]; model: Annotated[str, Field(min_length=1, max_length=128)]
-    request_commitment: Commitment; max_input_bytes: Annotated[int, Field(ge=1, le=8_388_608)]; max_input_units: Annotated[int, Field(ge=1)]
-    privacy_receipt_id: UUID; consent_receipt_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=8)]; budget_reservation_id: UUID; maximum_sensitivity: Sensitivity
+    request_id: UUID
+    attempt_id: UUID
+    purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"]
+    household_id: UUID
+    subject_id: UUID | None
+    session_id: UUID
+    turn_id: UUID
+    provider: Literal["openai", "qwen"]
+    model: Annotated[str, Field(min_length=1, max_length=128)]
+    request_commitment: Commitment
+    max_input_bytes: Annotated[int, Field(ge=1, le=8_388_608)]
+    max_input_units: Annotated[int, Field(ge=1)]
+    privacy_receipt_id: UUID
+    consent_receipt_ids: Annotated[
+        tuple[UUID, ...],
+        Field(min_length=1, max_length=8),
+    ]
+    budget_reservation_id: UUID
+    maximum_sensitivity: Sensitivity
+
 
 class RouteConsumption(ContractModel):
-    request_id: UUID; attempt_id: UUID; purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"]
-    household_id: UUID; subject_id: UUID | None; session_id: UUID; turn_id: UUID
-    provider: Literal["openai", "qwen"]; model: Annotated[str, Field(min_length=1, max_length=128)]
-    request_commitment: Commitment; input_bytes: Annotated[int, Field(ge=0, le=8_388_608)]; input_units: Annotated[int, Field(ge=0)]
+    request_id: UUID
+    attempt_id: UUID
+    purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"]
+    household_id: UUID
+    subject_id: UUID | None
+    session_id: UUID
+    turn_id: UUID
+    provider: Literal["openai", "qwen"]
+    model: Annotated[str, Field(min_length=1, max_length=128)]
+    request_commitment: Commitment
+    input_bytes: Annotated[int, Field(ge=0, le=8_388_608)]
+    input_units: Annotated[int, Field(ge=0)]
     consumed_at: AwareDatetime
 
+
 class ProviderResponseReceipt(ContractModel):
-    receipt_id: UUID; request_id: UUID; attempt_id: UUID; authorization_id: UUID
-    household_id: UUID; subject_id: UUID | None; session_id: UUID; turn_id: UUID
-    provider: Literal["openai","qwen"]; model: Annotated[str, Field(min_length=1, max_length=128)]
-    output_schema_version: Literal["assistant-turn-v1"]; response_commitment: Commitment
-    receipt_hmac_key_id: str; receipt_hmac_b64: str; produced_at: AwareDatetime
+    receipt_id: UUID
+    request_id: UUID
+    attempt_id: UUID
+    authorization_id: UUID
+    household_id: UUID
+    subject_id: UUID | None
+    session_id: UUID
+    turn_id: UUID
+    provider: Literal["openai", "qwen"]
+    model: Annotated[str, Field(min_length=1, max_length=128)]
+    output_schema_version: Literal["assistant-turn-v1"]
+    response_commitment: Commitment
+    receipt_hmac_key_id: str
+    receipt_hmac_b64: str
+    produced_at: AwareDatetime
+
 
 class SanitizedProviderMessage(ContractModel):
     role: Literal["system", "user", "assistant", "memory_data"]
     content: Annotated[str, Field(min_length=1, max_length=32_000)]
 
+
 class SanitizedToolReference(ContractModel):
     registered_name: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_.-]{1,127}$")]
-    schema_version: Literal["1.0"]; schema_commitment: Commitment
+    schema_version: Literal["1.0"]
+    schema_commitment: Commitment
+
 
 class SanitizedProviderRequest(ContractModel):
-    request_id: UUID; provider: ProviderName
+    request_id: UUID
+    provider: ProviderName
     model: Annotated[str, Field(min_length=1, max_length=128)]
-    messages: Annotated[tuple[SanitizedProviderMessage, ...], Field(min_length=1, max_length=32)]
-    allowed_tools: Annotated[tuple[SanitizedToolReference, ...], Field(min_length=0, max_length=8)]
-    max_output_tokens: Annotated[int, Field(ge=1, le=16_384)]; store: Literal[False] = False
-    redaction_receipt_id: UUID; route: RouteAuthorization
+    messages: Annotated[
+        tuple[SanitizedProviderMessage, ...],
+        Field(min_length=1, max_length=32),
+    ]
+    allowed_tools: Annotated[
+        tuple[SanitizedToolReference, ...],
+        Field(min_length=0, max_length=8),
+    ]
+    max_output_tokens: Annotated[int, Field(ge=1, le=16_384)]
+    store: Literal[False] = False
+    redaction_receipt_id: UUID
+    route: RouteAuthorization
     timeout_ms: Annotated[int, Field(ge=1_000, le=120_000)]
 
+
 class ProviderResponse(ContractModel):
-    request_id: UUID; text: Annotated[str, Field(min_length=1, max_length=8_000)]
-    language: Literal["en", "hi", "hinglish"]; provider_usage_receipt_id: UUID | None
+    request_id: UUID
+    text: Annotated[str, Field(min_length=1, max_length=8_000)]
+    language: Literal["en", "hi", "hinglish"]
+    provider_usage_receipt_id: UUID | None
+
+
 class RedactionReceipt(ContractModel):
-    receipt_id: UUID; purpose: Literal["cloud_reasoning","cloud_tts"]
-    input_commitment: Commitment; output_commitment: Commitment
-    removed_categories: Annotated[tuple[Annotated[str,Field(min_length=1,max_length=64)],...],Field(min_length=0,max_length=16)]
+    receipt_id: UUID
+    purpose: Literal["cloud_reasoning", "cloud_tts"]
+    input_commitment: Commitment
+    output_commitment: Commitment
+    removed_categories: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=64)], ...],
+        Field(min_length=0, max_length=16),
+    ]
     removed_count: Annotated[int, Field(ge=0)]
-    policy_version: str; maximum_sensitivity: Sensitivity
+    policy_version: str
+    maximum_sensitivity: Sensitivity
+
     @field_validator("removed_categories")
     @classmethod
-    def unique_removed_categories(cls,value):
-        if len(set(value))!=len(value): raise ValueError("duplicate redaction category")
+    def unique_removed_categories(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate redaction category")
         return value
 ```
 
 ```python
 # packages/contracts/src/tuntun_contracts/memory.py
+from __future__ import annotations
+
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self, TypeAlias
 from uuid import UUID
+
 from pydantic import AwareDatetime, Field, field_validator, model_validator
+
 from .base import Commitment, ContractModel, Sensitivity
 
+
 class MemoryKind(StrEnum):
-    WORKING="working"; EPISODIC="episodic"; SEMANTIC="semantic"; PREFERENCE="preference"
-    PROCEDURAL="procedural"; RELATIONAL="relational"; POLICY="policy"
+    WORKING = "working"
+    EPISODIC = "episodic"
+    SEMANTIC = "semantic"
+    PREFERENCE = "preference"
+    PROCEDURAL = "procedural"
+    RELATIONAL = "relational"
+    POLICY = "policy"
+
 
 class MemoryAudience(StrEnum):
-    SUBJECT_PRIVATE="subject_private"; GUARDIAN_CHILD="guardian_child"
-    HOUSEHOLD_ADULTS="household_adults"; HOUSEHOLD_ALL="household_all"
+    SUBJECT_PRIVATE = "subject_private"
+    GUARDIAN_CHILD = "guardian_child"
+    HOUSEHOLD_ADULTS = "household_adults"
+    HOUSEHOLD_ALL = "household_all"
+
 
 class WorkingContent(ContractModel):
-    kind: Literal["working"]; state_summary: str = Field(max_length=2_000)
-    unresolved_intents: Annotated[tuple[Annotated[str,Field(min_length=1,max_length=256)],...],Field(min_length=0,max_length=8)]
+    kind: Literal["working"]
+    state_summary: Annotated[str, Field(max_length=2_000)]
+    unresolved_intents: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=256)], ...],
+        Field(min_length=0, max_length=8),
+    ]
+
+
 class EpisodicContent(ContractModel):
-    kind: Literal["episodic"]; event_summary: str = Field(max_length=2_000); occurred_at: AwareDatetime
-    participant_ids: Annotated[tuple[UUID,...],Field(min_length=0,max_length=16)]
+    kind: Literal["episodic"]
+    event_summary: Annotated[str, Field(max_length=2_000)]
+    occurred_at: AwareDatetime
+    participant_ids: Annotated[
+        tuple[UUID, ...],
+        Field(min_length=0, max_length=16),
+    ]
+
     @field_validator("participant_ids")
     @classmethod
-    def unique_participants(cls,value):
-        if len(set(value))!=len(value): raise ValueError("duplicate participant")
+    def unique_participants(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate participant")
         return value
-class SemanticContent(ContractModel):
-    kind: Literal["semantic"]; subject: str = Field(max_length=256); predicate: str = Field(max_length=128); object: str = Field(max_length=2_000)
-class PreferenceContent(ContractModel):
-    kind: Literal["preference"] = "preference"; category: str = Field(max_length=128); key: str = Field(max_length=128); value: str = Field(max_length=2_000); strength_micros: Annotated[int, Field(ge=0, le=1_000_000)]
-class ProceduralContent(ContractModel):
-    kind: Literal["procedural"]; name: str = Field(max_length=256)
-    steps: Annotated[tuple[Annotated[str,Field(min_length=1,max_length=512)],...],Field(min_length=1,max_length=32)]
-    tool_label: str | None = Field(default=None, max_length=128)
-class RelationalContent(ContractModel):
-    kind: Literal["relational"]; subject_id: UUID; relation: str = Field(max_length=128); object_subject_id: UUID; note: str | None = Field(default=None, max_length=1_000)
-class PolicyContent(ContractModel):
-    kind: Literal["policy"]; key: str = Field(max_length=128); value: str | int | bool
 
-MemoryContent = Annotated[
-    WorkingContent | EpisodicContent | SemanticContent | PreferenceContent | ProceduralContent | RelationalContent | PolicyContent,
+
+class SemanticContent(ContractModel):
+    kind: Literal["semantic"]
+    subject: Annotated[str, Field(max_length=256)]
+    predicate: Annotated[str, Field(max_length=128)]
+    object: Annotated[str, Field(max_length=2_000)]
+
+
+class PreferenceContent(ContractModel):
+    kind: Literal["preference"] = "preference"
+    category: Annotated[str, Field(max_length=128)]
+    key: Annotated[str, Field(max_length=128)]
+    value: Annotated[str, Field(max_length=2_000)]
+    strength_micros: Annotated[int, Field(ge=0, le=1_000_000)]
+
+
+class ProceduralContent(ContractModel):
+    kind: Literal["procedural"]
+    name: Annotated[str, Field(max_length=256)]
+    steps: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=512)], ...],
+        Field(min_length=1, max_length=32),
+    ]
+    tool_label: Annotated[str, Field(max_length=128)] | None = None
+
+
+class RelationalContent(ContractModel):
+    kind: Literal["relational"]
+    subject_id: UUID
+    relation: Annotated[str, Field(max_length=128)]
+    object_subject_id: UUID
+    note: Annotated[str, Field(max_length=1_000)] | None = None
+
+
+class PolicyContent(ContractModel):
+    kind: Literal["policy"]
+    key: Annotated[str, Field(max_length=128)]
+    value: str | int | bool
+
+
+MemoryContent: TypeAlias = Annotated[  # noqa: UP040 -- Python 3.11 compatibility.
+    WorkingContent
+    | EpisodicContent
+    | SemanticContent
+    | PreferenceContent
+    | ProceduralContent
+    | RelationalContent
+    | PolicyContent,
     Field(discriminator="kind"),
 ]
 
+
 class MemoryProposalDraft(ContractModel):
-    proposal_id: UUID; schema_version: Literal["1.0"]; operation: Literal["create", "replace", "delete"]
-    household_id: UUID; subject_id: UUID; session_id: UUID; turn_id: UUID; idempotency_key: UUID
-    content: MemoryContent | None; audience: MemoryAudience | None
-    target_memory_id: UUID | None; expected_version: int | None
+    proposal_id: UUID
+    schema_version: Literal["1.0"]
+    operation: Literal["create", "replace", "delete"]
+    household_id: UUID
+    subject_id: UUID
+    session_id: UUID
+    turn_id: UUID
+    idempotency_key: UUID
+    content: MemoryContent | None
+    audience: MemoryAudience | None
+    target_memory_id: UUID | None
+    expected_version: int | None
     sensitivity: Sensitivity
     confidence_micros: Annotated[int, Field(ge=0, le=1_000_000)]
     reason: Annotated[str, Field(min_length=1, max_length=256)]
     claim_commitment: Commitment
     source_receipt_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=8)]
     expires_at: AwareDatetime
+
     @model_validator(mode="after")
-    def operation_shape(self) -> "MemoryProposalDraft":
-        has_target=self.target_memory_id is not None and self.expected_version is not None
-        if self.operation=="create" and (self.content is None or self.audience is None or has_target): raise ValueError("create memory proposal shape")
-        if self.operation=="replace" and (self.content is None or self.audience is None or not has_target): raise ValueError("replace memory proposal shape")
-        if self.operation=="delete" and (self.content is not None or self.audience is not None or not has_target): raise ValueError("delete memory proposal shape")
+    def operation_shape(self) -> Self:
+        target_present = self.target_memory_id is not None
+        version_present = self.expected_version is not None
+        if self.operation == "create" and (
+            self.content is None or self.audience is None or target_present or version_present
+        ):
+            raise ValueError("create memory proposal shape")
+        if self.operation == "replace" and (
+            self.content is None
+            or self.audience is None
+            or not target_present
+            or not version_present
+        ):
+            raise ValueError("replace memory proposal shape")
+        if self.operation == "delete" and (
+            self.content is not None
+            or self.audience is not None
+            or not target_present
+            or not version_present
+        ):
+            raise ValueError("delete memory proposal shape")
         return self
 
+
 class MemoryProposal(ContractModel):
-    draft: MemoryProposalDraft; status: Literal["pending", "approved", "rejected", "expired"]
+    draft: MemoryProposalDraft
+    status: Literal["pending", "approved", "rejected", "expired"]
+
+
 class MemoryRecord(ContractModel):
-    memory_id: UUID; household_id: UUID; subject_id: UUID; version: Annotated[int, Field(ge=1)]
-    content: MemoryContent; audience: MemoryAudience; sensitivity: Sensitivity; valid_until: AwareDatetime | None
+    memory_id: UUID
+    household_id: UUID
+    subject_id: UUID
+    version: Annotated[int, Field(ge=1)]
+    content: MemoryContent
+    audience: MemoryAudience
+    sensitivity: Sensitivity
+    valid_until: AwareDatetime | None
+
+
 class MemoryQuery(ContractModel):
-    household_id: UUID; subject_id: UUID
-    kinds: Annotated[tuple[MemoryKind,...],Field(min_length=1,max_length=7)]
-    maximum_sensitivity: Sensitivity; limit: Annotated[int, Field(ge=1, le=6)] = 6
+    household_id: UUID
+    subject_id: UUID
+    kinds: Annotated[tuple[MemoryKind, ...], Field(min_length=1, max_length=7)]
+    maximum_sensitivity: Sensitivity
+    limit: Annotated[int, Field(ge=1, le=6)] = 6
+
     @field_validator("kinds")
     @classmethod
-    def unique_kinds(cls,value):
-        if len(set(value))!=len(value): raise ValueError("duplicate memory kind")
+    def unique_kinds(cls, value: tuple[MemoryKind, ...]) -> tuple[MemoryKind, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate memory kind")
         return value
+
+
 class ApprovedMemory(ContractModel):
-    memory_id: UUID; household_id: UUID; subject_id: UUID; content: MemoryContent; audience: MemoryAudience; sensitivity: Sensitivity
+    memory_id: UUID
+    household_id: UUID
+    subject_id: UUID
+    content: MemoryContent
+    audience: MemoryAudience
+    sensitivity: Sensitivity
     approved_proposal_id: UUID
-    source_receipt_ids: Annotated[tuple[UUID,...],Field(min_length=1,max_length=8)]
+    source_receipt_ids: Annotated[
+        tuple[UUID, ...],
+        Field(min_length=1, max_length=8),
+    ]
     valid_until: AwareDatetime | None
+
     @field_validator("source_receipt_ids")
     @classmethod
-    def unique_source_receipts(cls,value):
-        if len(set(value))!=len(value): raise ValueError("duplicate source receipt")
+    def unique_source_receipts(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate source receipt")
         return value
+
+
 class ProposalContext(ContractModel):
-    household_id: UUID; subject_id: UUID | None; session_id: UUID; turn_id: UUID; actor_subject_id: UUID | None
+    household_id: UUID
+    subject_id: UUID | None
+    session_id: UUID
+    turn_id: UUID
+    actor_subject_id: UUID | None
+
+
 class DecideMemoryProposal(ContractModel):
-    proposal_id: UUID; decision: Literal["approve","reject"]; edited_content: MemoryContent | None; expected_version: Annotated[int, Field(ge=1)]
+    proposal_id: UUID
+    decision: Literal["approve", "reject"]
+    edited_content: MemoryContent | None
+    expected_version: Annotated[int, Field(ge=1)]
 ```
 
-Create the remaining modules with these exact declarations:
+Create the remaining modules with these exact, complete declarations:
 
 ```python
-# identity.py
-from pydantic import field_validator
+# packages/contracts/src/tuntun_contracts/identity.py
+from __future__ import annotations
 
-class IdentityStatus(StrEnum): VERIFIED="verified"; AMBIGUOUS="ambiguous"; UNKNOWN="unknown"; CONFLICT="conflict"
-class IdentityEvidence(ContractModel):
-    modality: Literal["face","voice"]; subject_id: UUID | None
-    confidence_micros: Annotated[int, Field(ge=0, le=1_000_000)]
-    quality_micros: Annotated[int, Field(ge=0, le=1_000_000)]
-    liveness_accepted: bool; model_version: str; observed_at: AwareDatetime; expires_at: AwareDatetime
-class IdentityRequest(ContractModel):
-    household_id: UUID; session_id: UUID
-    evidence: Annotated[tuple[IdentityEvidence, ...], Field(min_length=0, max_length=2)]
-    @field_validator("evidence")
-    @classmethod
-    def unique_modalities(cls,value):
-        if len({item.modality for item in value}) != len(value): raise ValueError("duplicate identity modality")
-        return value
-class IdentityDecision(ContractModel): status: IdentityStatus; subject_id: UUID | None; reason_code: str; expires_at: AwareDatetime
-class PersonaTraits(ContractModel):
-    context: Literal["general","technical_security","household_practical","early_learning"]
-    tone: Literal["neutral","precise","practical","warm"]
-    depth: Literal["brief","standard","detailed"]
-    learning_level: Literal["none","n1","k2"]
-class PersonaProjection(ContractModel):
-    role: Literal["owner","adult","k2","n1","guest"]
-    context: Literal["general","technical_security","household_practical","early_learning"]
-    tone: Literal["neutral","precise","practical","warm"]
-    depth: Literal["brief","standard","detailed"]
-    learning_level: Literal["none","n1","k2"]
-
-# packages/contracts/src/tuntun_contracts/actions.py
+from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
+
+from pydantic import AwareDatetime, Field, field_validator
+
+from .base import ContractModel
+
+
+class IdentityStatus(StrEnum):
+    VERIFIED = "verified"
+    AMBIGUOUS = "ambiguous"
+    UNKNOWN = "unknown"
+    CONFLICT = "conflict"
+
+
+class IdentityEvidence(ContractModel):
+    modality: Literal["face", "voice"]
+    subject_id: UUID | None
+    confidence_micros: Annotated[int, Field(ge=0, le=1_000_000)]
+    quality_micros: Annotated[int, Field(ge=0, le=1_000_000)]
+    liveness_accepted: bool
+    model_version: str
+    observed_at: AwareDatetime
+    expires_at: AwareDatetime
+
+
+class IdentityRequest(ContractModel):
+    household_id: UUID
+    session_id: UUID
+    evidence: Annotated[tuple[IdentityEvidence, ...], Field(min_length=0, max_length=2)]
+
+    @field_validator("evidence")
+    @classmethod
+    def unique_modalities(
+        cls,
+        value: tuple[IdentityEvidence, ...],
+    ) -> tuple[IdentityEvidence, ...]:
+        if len({item.modality for item in value}) != len(value):
+            raise ValueError("duplicate identity modality")
+        return value
+
+
+class IdentityDecision(ContractModel):
+    status: IdentityStatus
+    subject_id: UUID | None
+    reason_code: str
+    expires_at: AwareDatetime
+
+
+class PersonaTraits(ContractModel):
+    context: Literal["general", "technical_security", "household_practical", "early_learning"]
+    tone: Literal["neutral", "precise", "practical", "warm"]
+    depth: Literal["brief", "standard", "detailed"]
+    learning_level: Literal["none", "n1", "k2"]
+
+
+class PersonaProjection(ContractModel):
+    role: Literal["owner", "adult", "k2", "n1", "guest"]
+    context: Literal["general", "technical_security", "household_practical", "early_learning"]
+    tone: Literal["neutral", "precise", "practical", "warm"]
+    depth: Literal["brief", "standard", "detailed"]
+    learning_level: Literal["none", "n1", "k2"]
+```
+
+```python
+# packages/contracts/src/tuntun_contracts/actions.py
+from __future__ import annotations
+
+from typing import Annotated, Literal, Self, TypeAlias
+from uuid import UUID
+
 from pydantic import AwareDatetime, Field, model_validator
+
 from .base import Commitment, ContractModel
 from .identity import PersonaTraits
 from .memory import MemoryContent, MemoryProposalDraft
 
+
 class ActionDraftBase(ContractModel):
-    proposal_id: UUID; schema_version: Literal["1.0"]
-    resource_type: str; resource_id: UUID | None; parameters_commitment: Commitment
+    proposal_id: UUID
+    schema_version: Literal["1.0"]
+    resource_type: str
+    resource_id: UUID | None
+    parameters_commitment: Commitment
     uncertainty_micros: Annotated[int, Field(ge=0, le=1_000_000)]
-    expires_at: AwareDatetime; idempotency_key: UUID
+    expires_at: AwareDatetime
+    idempotency_key: UUID
+
 
 class TimerCreateActionDraft(ActionDraftBase):
-    action_name: Literal["timer.create"]; duration_seconds: Annotated[int, Field(ge=1, le=86_400)]
+    action_name: Literal["timer.create"]
+    duration_seconds: Annotated[int, Field(ge=1, le=86_400)]
     label: Annotated[str, Field(min_length=1, max_length=64)]
+
     @model_validator(mode="after")
-    def exact_timer_create_shape(self) -> "TimerCreateActionDraft":
+    def exact_timer_create_shape(self) -> Self:
         if self.resource_type != "timer" or self.resource_id is None:
             raise ValueError("timer.create requires a server-generated exact timer resource")
         return self
+
+
 class TimerTargetActionDraft(ActionDraftBase):
-    action_name: Literal["timer.cancel","timer.status"]; timer_id: UUID
+    action_name: Literal["timer.cancel", "timer.status"]
+    timer_id: UUID
+
     @model_validator(mode="after")
-    def exact_timer_target_shape(self) -> "TimerTargetActionDraft":
+    def exact_timer_target_shape(self) -> Self:
         if self.resource_type != "timer" or self.resource_id != self.timer_id:
             raise ValueError("timer target must equal the exact resource")
         return self
+
+
 class SafetyActionDraft(ActionDraftBase):
-    action_name: Literal["privacy.on","mute","stop"]; reason_code: Annotated[str, Field(min_length=1, max_length=64)]
+    action_name: Literal["privacy.on", "mute", "stop"]
+    reason_code: Annotated[str, Field(min_length=1, max_length=64)]
+
+
 class PrivacyReductionActionDraft(ActionDraftBase):
-    action_name: Literal["privacy.off","mute.off"]; typed_confirmation: Literal["TURN OFF PRIVACY","UNMUTE"]
+    action_name: Literal["privacy.off", "mute.off"]
+    typed_confirmation: Literal["TURN OFF PRIVACY", "UNMUTE"]
+
     @model_validator(mode="after")
-    def exact_confirmation(self) -> "PrivacyReductionActionDraft":
+    def exact_confirmation(self) -> PrivacyReductionActionDraft:
         expected = {"privacy.off": "TURN OFF PRIVACY", "mute.off": "UNMUTE"}[self.action_name]
-        if self.typed_confirmation != expected: raise ValueError("privacy reduction confirmation mismatch")
+        if self.typed_confirmation != expected:
+            raise ValueError("privacy reduction confirmation mismatch")
         return self
+
+
 class ComponentStatusActionDraft(ActionDraftBase):
-    action_name: Literal["system.status","reachy.status"]; component: Literal["system","reachy"]
+    action_name: Literal["system.status", "reachy.status"]
+    component: Literal["system", "reachy"]
+
     @model_validator(mode="after")
-    def exact_component(self) -> "ComponentStatusActionDraft":
-        if self.component != self.action_name.removesuffix(".status"): raise ValueError("status component mismatch")
+    def exact_component(self) -> ComponentStatusActionDraft:
+        if self.component != self.action_name.removesuffix(".status"):
+            raise ValueError("status component mismatch")
         return self
+
+
 class DiagnosticActionDraft(ActionDraftBase):
-    action_name: Literal["reachy.gesture_test","offline.prompt_test"]; registered_asset_id: Annotated[str, Field(min_length=1, max_length=128)]
+    action_name: Literal["reachy.gesture_test", "offline.prompt_test"]
+    registered_asset_id: Annotated[str, Field(min_length=1, max_length=128)]
+
+
 class MemoryActionDraft(ActionDraftBase):
-    action_name: Literal["memory.propose","memory.approve","memory.edit_approve","memory.reject","memory.expire","memory.delete","memory.export"]
-    subject_id: UUID; proposal_id_ref: UUID | None = None; memory_id: UUID | None = None
+    action_name: Literal[
+        "memory.propose",
+        "memory.approve",
+        "memory.edit_approve",
+        "memory.reject",
+        "memory.expire",
+        "memory.delete",
+        "memory.export",
+    ]
+    subject_id: UUID
+    proposal_id_ref: UUID | None = None
+    memory_id: UUID | None = None
     expected_version: Annotated[int, Field(ge=1)] | None = None
-    decision: Literal["approve","reject"] | None = None
+    decision: Literal["approve", "reject"] | None = None
     edited_content: MemoryContent | None = None
     memory_proposal: MemoryProposalDraft | None = None
     export_format: Literal["json"] | None = None
+
     @model_validator(mode="after")
-    def exact_memory_operation_shape(self) -> "MemoryActionDraft":
+    def exact_memory_operation_shape(self) -> MemoryActionDraft:
         if self.action_name == "memory.propose":
             if self.memory_proposal is None or self.memory_proposal.subject_id != self.subject_id:
                 raise ValueError("memory.propose requires the exact server-mapped proposal")
-            if any((self.proposal_id_ref, self.memory_id, self.expected_version, self.decision, self.edited_content, self.export_format)):
+            if any(
+                (
+                    self.proposal_id_ref,
+                    self.memory_id,
+                    self.expected_version,
+                    self.decision,
+                    self.edited_content,
+                    self.export_format,
+                )
+            ):
                 raise ValueError("memory.propose contains decision fields")
-        elif self.action_name in {"memory.approve","memory.edit_approve","memory.reject"}:
+        elif self.action_name in {"memory.approve", "memory.edit_approve", "memory.reject"}:
             expected_decision = "reject" if self.action_name == "memory.reject" else "approve"
-            if self.proposal_id_ref is None or self.expected_version is None or self.decision != expected_decision:
+            if (
+                self.proposal_id_ref is None
+                or self.expected_version is None
+                or self.decision != expected_decision
+            ):
                 raise ValueError("memory decision draft is incomplete")
             if (self.action_name == "memory.edit_approve") != (self.edited_content is not None):
                 raise ValueError("edited content is exclusive to memory.edit_approve")
             if any((self.memory_id, self.memory_proposal, self.export_format)):
                 raise ValueError("memory decision draft contains another operation's fields")
         elif self.action_name == "memory.expire":
-            if self.proposal_id_ref is None or self.expected_version is None or any((self.memory_id, self.decision, self.edited_content, self.memory_proposal, self.export_format)):
+            if (
+                self.proposal_id_ref is None
+                or self.expected_version is None
+                or any(
+                    (
+                        self.memory_id,
+                        self.decision,
+                        self.edited_content,
+                        self.memory_proposal,
+                        self.export_format,
+                    )
+                )
+            ):
                 raise ValueError("memory.expire draft is incomplete")
         elif self.action_name == "memory.delete":
-            if self.memory_id is None or self.expected_version is None or any((self.proposal_id_ref, self.decision, self.edited_content, self.memory_proposal, self.export_format)):
+            if (
+                self.memory_id is None
+                or self.expected_version is None
+                or any(
+                    (
+                        self.proposal_id_ref,
+                        self.decision,
+                        self.edited_content,
+                        self.memory_proposal,
+                        self.export_format,
+                    )
+                )
+            ):
                 raise ValueError("memory.delete requires only target and version")
-        elif self.memory_id is None or self.expected_version is None or self.export_format != "json" or self.resource_id != self.memory_id or any((self.proposal_id_ref, self.decision, self.edited_content, self.memory_proposal)):
-            raise ValueError("memory.export requires one exact resource, version, and closed export format")
+        elif (
+            self.memory_id is None
+            or self.expected_version is None
+            or self.export_format != "json"
+            or self.resource_id != self.memory_id
+            or any((self.proposal_id_ref, self.decision, self.edited_content, self.memory_proposal))
+        ):
+            raise ValueError(
+                "memory.export requires one exact resource, version, and closed export format"
+            )
         return self
+
+
 class ProfileActionDraft(ActionDraftBase):
-    action_name: Literal["profile.create","profile.edit","profile.revoke","profile.delete","profile.export"]
-    subject_id: UUID; profile_class: Literal["owner","adult","k2","n1"] | None = None
-    target_profile_class: Literal["owner","adult","k2","n1"] | None = None
-    display_label: Annotated[str | None, Field(default=None, min_length=1, max_length=128)]
+    action_name: Literal[
+        "profile.create", "profile.edit", "profile.revoke", "profile.delete", "profile.export"
+    ]
+    subject_id: UUID
+    profile_class: Literal["owner", "adult", "k2", "n1"] | None = None
+    target_profile_class: Literal["owner", "adult", "k2", "n1"] | None = None
+    display_label: Annotated[str, Field(min_length=1, max_length=128)] | None = None
     guardian_id: UUID | None = None
-    persona_traits: PersonaTraits | None = None; clear_persona_traits: bool = False
+    persona_traits: PersonaTraits | None = None
+    clear_persona_traits: bool = False
     expected_version: Annotated[int, Field(ge=1)] | None = None
     guardian_generation: Annotated[int, Field(ge=1)] | None = None
+
     @model_validator(mode="after")
-    def exact_operation_shape(self) -> "ProfileActionDraft":
+    def exact_operation_shape(self) -> ProfileActionDraft:
         changes_persona = self.persona_traits is not None or self.clear_persona_traits
         if self.action_name == "profile.create":
-            if self.profile_class is None or self.target_profile_class is not None or self.display_label is None or changes_persona or self.expected_version is not None or self.guardian_generation is not None:
+            if (
+                self.profile_class is None
+                or self.target_profile_class is not None
+                or self.display_label is None
+                or changes_persona
+                or self.expected_version is not None
+                or self.guardian_generation is not None
+            ):
                 raise ValueError("profile.create requires class and display label only")
             if self.profile_class not in {"adult", "k2", "n1"}:
                 raise ValueError("ordinary profile.create cannot create or replace the owner")
-            if (self.profile_class in {"k2","n1"}) != (self.guardian_id is not None):
+            if (self.profile_class in {"k2", "n1"}) != (self.guardian_id is not None):
                 raise ValueError("profile.create guardian shape mismatch")
         elif self.action_name == "profile.edit":
-            if not changes_persona: raise ValueError("profile.edit requires replace or clear")
-            if self.persona_traits is not None and self.clear_persona_traits: raise ValueError("replace and clear are exclusive")
-            if self.expected_version is None or self.target_profile_class is None or self.profile_class is not None or self.display_label is not None or self.guardian_id is not None:
+            if not changes_persona:
+                raise ValueError("profile.edit requires replace or clear")
+            if self.persona_traits is not None and self.clear_persona_traits:
+                raise ValueError("replace and clear are exclusive")
+            if (
+                self.expected_version is None
+                or self.target_profile_class is None
+                or self.profile_class is not None
+                or self.display_label is not None
+                or self.guardian_id is not None
+            ):
                 raise ValueError("persona edit requires version and cannot change role")
             child_target = self.target_profile_class in {"k2", "n1"}
             if child_target != (self.guardian_generation is not None):
                 raise ValueError("guardian generation is required exactly for child persona edits")
         elif self.action_name == "profile.revoke":
-            if self.expected_version is None or any((self.profile_class, self.target_profile_class, self.display_label, self.guardian_id, self.persona_traits, self.guardian_generation)) or self.clear_persona_traits:
+            if (
+                self.expected_version is None
+                or any(
+                    (
+                        self.profile_class,
+                        self.target_profile_class,
+                        self.display_label,
+                        self.guardian_id,
+                        self.persona_traits,
+                        self.guardian_generation,
+                    )
+                )
+                or self.clear_persona_traits
+            ):
                 raise ValueError("profile.revoke requires only expected version")
-        elif self.action_name in {"profile.delete","profile.export"}:
-            if self.expected_version is None or any((self.profile_class, self.target_profile_class, self.display_label, self.guardian_id, self.persona_traits, self.guardian_generation)) or self.clear_persona_traits:
+        elif self.action_name in {"profile.delete", "profile.export"}:
+            if (
+                self.expected_version is None
+                or any(
+                    (
+                        self.profile_class,
+                        self.target_profile_class,
+                        self.display_label,
+                        self.guardian_id,
+                        self.persona_traits,
+                        self.guardian_generation,
+                    )
+                )
+                or self.clear_persona_traits
+            ):
                 raise ValueError("profile lifecycle draft requires only expected version")
         return self
+
+
 class ConsentActionDraft(ActionDraftBase):
-    action_name: Literal["consent.grant","consent.revoke"]; subject_id: UUID
-    purpose: Literal["face","voice","personalization","cloud_stt","cloud_reasoning","cloud_tts","web_search","child_durable_memory_v1"]
+    action_name: Literal["consent.grant", "consent.revoke"]
+    subject_id: UUID
+    purpose: Literal[
+        "face",
+        "voice",
+        "personalization",
+        "cloud_stt",
+        "cloud_reasoning",
+        "cloud_tts",
+        "web_search",
+        "child_durable_memory_v1",
+    ]
     expected_latest_receipt_id: UUID | None
     guardian_generation: Annotated[int, Field(ge=1)] | None = None
     policy_version: Annotated[str, Field(min_length=1, max_length=128)]
     disclosure_version: Annotated[str, Field(min_length=1, max_length=128)]
+
     @model_validator(mode="after")
-    def expected_state_shape(self) -> "ConsentActionDraft":
+    def expected_state_shape(self) -> ConsentActionDraft:
         if self.action_name == "consent.revoke" and self.expected_latest_receipt_id is None:
             raise ValueError("consent.revoke requires expected latest receipt")
         return self
+
+
 class IdentityActionDraft(ActionDraftBase):
-    action_name: Literal["identity.enroll","identity.enrollment.cancel"]
-    subject_id: UUID | None; modality: Literal["face","voice"] | None
+    action_name: Literal["identity.enroll", "identity.enrollment.cancel"]
+    subject_id: UUID | None
+    modality: Literal["face", "voice"] | None
     enrollment_id: UUID | None = None
     expected_profile_version: Annotated[int, Field(ge=1)] | None = None
     expected_consent_receipt_id: UUID | None = None
     reenrollment_days: Annotated[int, Field(ge=30, le=365)] | None = None
+
     @model_validator(mode="after")
-    def exact_enrollment_shape(self) -> "IdentityActionDraft":
+    def exact_enrollment_shape(self) -> IdentityActionDraft:
         if self.action_name == "identity.enroll":
-            if None in (self.subject_id, self.modality, self.expected_profile_version, self.expected_consent_receipt_id, self.reenrollment_days) or self.enrollment_id is not None:
+            if (
+                None
+                in (
+                    self.subject_id,
+                    self.modality,
+                    self.expected_profile_version,
+                    self.expected_consent_receipt_id,
+                    self.reenrollment_days,
+                )
+                or self.enrollment_id is not None
+            ):
                 raise ValueError("identity.enroll draft is incomplete")
             if self.resource_type != "identity" or self.resource_id != self.subject_id:
                 raise ValueError("identity.enroll resource must equal subject")
-        elif self.subject_id is None or self.enrollment_id is None or any((self.modality, self.expected_profile_version, self.expected_consent_receipt_id, self.reenrollment_days)):
-            raise ValueError("identity.enrollment.cancel requires only enrollment and derived subject")
+        elif (
+            self.subject_id is None
+            or self.enrollment_id is None
+            or any(
+                (
+                    self.modality,
+                    self.expected_profile_version,
+                    self.expected_consent_receipt_id,
+                    self.reenrollment_days,
+                )
+            )
+        ):
+            raise ValueError(
+                "identity.enrollment.cancel requires only enrollment and derived subject"
+            )
         elif self.resource_type != "identity" or self.resource_id != self.enrollment_id:
             raise ValueError("identity.enrollment.cancel resource must equal enrollment")
         return self
+
+
 class ProviderActionDraft(ActionDraftBase):
-    action_name: Literal["provider.review","provider.configure","budget.change","access.change"]
-    provider: Literal["openai","qwen"] | None = None; enabled: bool | None = None
-    review_record_id: UUID | None = None; hard_limit_micros_sgd: Annotated[int, Field(ge=1)] | None = None
-    access_mode: Literal["loopback","lan_https"] | None = None
+    action_name: Literal["provider.review", "provider.configure", "budget.change", "access.change"]
+    provider: Literal["openai", "qwen"] | None = None
+    enabled: bool | None = None
+    review_record_id: UUID | None = None
+    hard_limit_micros_sgd: Annotated[int, Field(ge=1)] | None = None
+    access_mode: Literal["loopback", "lan_https"] | None = None
     expected_provider_version: Annotated[int, Field(ge=1)] | None = None
     expected_budget_version: Annotated[int, Field(ge=1)] | None = None
     expected_access_version: Annotated[int, Field(ge=1)] | None = None
+
     @model_validator(mode="after")
-    def exact_provider_operation_shape(self) -> "ProviderActionDraft":
+    def exact_provider_operation_shape(self) -> ProviderActionDraft:
         present = {
-            "provider": self.provider is not None, "enabled": self.enabled is not None,
-            "review": self.review_record_id is not None, "limit": self.hard_limit_micros_sgd is not None,
-            "access": self.access_mode is not None, "provider_version": self.expected_provider_version is not None,
-            "budget_version": self.expected_budget_version is not None, "access_version": self.expected_access_version is not None,
+            "provider": self.provider is not None,
+            "enabled": self.enabled is not None,
+            "review": self.review_record_id is not None,
+            "limit": self.hard_limit_micros_sgd is not None,
+            "access": self.access_mode is not None,
+            "provider_version": self.expected_provider_version is not None,
+            "budget_version": self.expected_budget_version is not None,
+            "access_version": self.expected_access_version is not None,
         }
         expected = {
             "provider.review": {"provider", "provider_version"},
@@ -7795,13 +8933,28 @@ class ProviderActionDraft(ActionDraftBase):
         if {name for name, value in present.items() if value} != expected:
             raise ValueError("provider/admin operation shape mismatch")
         return self
+
+
 class CredentialActionDraft(ActionDraftBase):
-    action_name: Literal["credential.passkey.add","credential.passkey.revoke","credential.pin.change","credential.recovery.rotate"]
-    credential_id: UUID | None = None; capability: Literal["owner_admin","adult_self_consent","profile_persona"] | None = None
-    ceremony_id: UUID | None = None; expected_version: Annotated[int, Field(ge=1)] | None = None
+    action_name: Literal[
+        "credential.passkey.add",
+        "credential.passkey.revoke",
+        "credential.pin.change",
+        "credential.recovery.rotate",
+    ]
+    credential_id: UUID | None = None
+    capability: Literal["owner_admin", "adult_self_consent", "profile_persona"] | None = None
+    ceremony_id: UUID | None = None
+    expected_version: Annotated[int, Field(ge=1)] | None = None
+
     @model_validator(mode="after")
-    def exact_credential_operation_shape(self) -> "CredentialActionDraft":
-        present = {"credential": self.credential_id is not None, "capability": self.capability is not None, "ceremony": self.ceremony_id is not None, "version": self.expected_version is not None}
+    def exact_credential_operation_shape(self) -> CredentialActionDraft:
+        present = {
+            "credential": self.credential_id is not None,
+            "capability": self.capability is not None,
+            "ceremony": self.ceremony_id is not None,
+            "version": self.expected_version is not None,
+        }
         expected = {
             "credential.passkey.add": {"credential", "capability", "ceremony"},
             "credential.passkey.revoke": {"credential", "version"},
@@ -7811,19 +8964,34 @@ class CredentialActionDraft(ActionDraftBase):
         if {name for name, value in present.items() if value} != expected:
             raise ValueError("credential operation shape mismatch")
         return self
+
+
 class AuditActionDraft(ActionDraftBase):
-    action_name: Literal["audit.export","audit.verify"]; from_ordinal: Annotated[int, Field(ge=1)] | None
+    action_name: Literal["audit.export", "audit.verify"]
+    from_ordinal: Annotated[int, Field(ge=1)] | None
+
     @model_validator(mode="after")
-    def exact_audit_operation_shape(self) -> "AuditActionDraft":
-        if self.from_ordinal is None: raise ValueError("audit operation requires starting ordinal")
+    def exact_audit_operation_shape(self) -> AuditActionDraft:
+        if self.from_ordinal is None:
+            raise ValueError("audit operation requires starting ordinal")
         return self
+
+
 class BackupActionDraft(ActionDraftBase):
-    action_name: Literal["backup.recovery_key.create","backup.create","backup.verify","backup.restore"]
-    backup_id: UUID | None = None; recipient_key_id: Annotated[str | None, Field(default=None, min_length=1, max_length=128)]
-    manifest_sha256: Annotated[str | None, Field(default=None, pattern=r"^[0-9a-f]{64}$")]
+    action_name: Literal[
+        "backup.recovery_key.create", "backup.create", "backup.verify", "backup.restore"
+    ]
+    backup_id: UUID | None = None
+    recipient_key_id: Annotated[str, Field(min_length=1, max_length=128)] | None = None
+    manifest_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
+
     @model_validator(mode="after")
-    def exact_backup_operation_shape(self) -> "BackupActionDraft":
-        present = {"backup": self.backup_id is not None, "recipient": self.recipient_key_id is not None, "manifest": self.manifest_sha256 is not None}
+    def exact_backup_operation_shape(self) -> BackupActionDraft:
+        present = {
+            "backup": self.backup_id is not None,
+            "recipient": self.recipient_key_id is not None,
+            "manifest": self.manifest_sha256 is not None,
+        }
         expected = {
             "backup.recovery_key.create": {"recipient"},
             "backup.create": {"backup", "recipient"},
@@ -7833,51 +9001,87 @@ class BackupActionDraft(ActionDraftBase):
         if {name for name, value in present.items() if value} != expected:
             raise ValueError("backup operation shape mismatch")
         return self
+
+
 class SearchActionDraft(ActionDraftBase):
-    action_name: Literal["search.profile_mode.change","search.experimental.activate"]
-    subject_id: UUID; expected_profile_version: Annotated[int, Field(ge=1)]
-    mode: Literal["controlled","no_web"] | None = None
+    action_name: Literal["search.profile_mode.change", "search.experimental.activate"]
+    subject_id: UUID
+    expected_profile_version: Annotated[int, Field(ge=1)]
+    mode: Literal["controlled", "no_web"] | None = None
     expected_web_consent_receipt_id: UUID | None = None
     provider_review_version: Annotated[int, Field(ge=1)] | None = None
     pricing_version: Annotated[int, Field(ge=1)] | None = None
     privacy_generation: Annotated[int, Field(ge=1)] | None = None
     feature_generation: Annotated[int, Field(ge=1)] | None = None
-    activation_issued_at: AwareDatetime | None = None; activation_expires_at: AwareDatetime | None = None
-    max_passes: Literal[4] | None = None; max_sources: Literal[20] | None = None
+    activation_issued_at: AwareDatetime | None = None
+    activation_expires_at: AwareDatetime | None = None
+    max_passes: Literal[4] | None = None
+    max_sources: Literal[20] | None = None
     max_duration_seconds: Literal[1800] | None = None
-    no_memory: Literal[True] | None = None; no_authenticated_sites: Literal[True] | None = None
-    no_files: Literal[True] | None = None; no_tools: Literal[True] | None = None
+    no_memory: Literal[True] | None = None
+    no_authenticated_sites: Literal[True] | None = None
+    no_files: Literal[True] | None = None
+    no_tools: Literal[True] | None = None
+
     @model_validator(mode="after")
-    def exact_search_operation_shape(self) -> "SearchActionDraft":
+    def exact_search_operation_shape(self) -> SearchActionDraft:
         experimental = (
-            self.provider_review_version, self.pricing_version, self.privacy_generation, self.feature_generation,
-            self.activation_issued_at, self.activation_expires_at,
-            self.max_passes, self.max_sources, self.max_duration_seconds,
-            self.no_memory, self.no_authenticated_sites, self.no_files, self.no_tools,
+            self.provider_review_version,
+            self.pricing_version,
+            self.privacy_generation,
+            self.feature_generation,
+            self.max_passes,
+            self.max_sources,
+            self.max_duration_seconds,
+            self.no_memory,
+            self.no_authenticated_sites,
+            self.no_files,
+            self.no_tools,
         )
         if self.action_name == "search.profile_mode.change":
             expected_consent = self.expected_web_consent_receipt_id is not None
-            if self.mode is None or expected_consent != (self.mode == "controlled") or any(value is not None for value in experimental):
+            if (
+                self.mode is None
+                or expected_consent != (self.mode == "controlled")
+                or any(value is not None for value in experimental)
+            ):
                 raise ValueError("search profile-mode draft shape mismatch")
-        elif self.mode is not None or self.expected_web_consent_receipt_id is None or any(value is None for value in experimental):
+        elif (
+            self.mode is not None
+            or self.expected_web_consent_receipt_id is None
+            or self.activation_issued_at is None
+            or self.activation_expires_at is None
+            or any(value is None for value in experimental)
+        ):
             raise ValueError("experimental search draft is incomplete")
-        elif self.activation_expires_at <= self.activation_issued_at or (self.activation_expires_at-self.activation_issued_at).total_seconds() > 1800:
-            raise ValueError("experimental search activation must be positive and at most 30 minutes")
+        elif (
+            self.activation_expires_at <= self.activation_issued_at
+            or (self.activation_expires_at - self.activation_issued_at).total_seconds() > 1800
+        ):
+            raise ValueError(
+                "experimental search activation must be positive and at most 30 minutes"
+            )
         return self
+
+
 class SecurityFindingActionDraft(ActionDraftBase):
     action_name: Literal["security.finding.suppress"]
     finding_id: Annotated[str, Field(min_length=1, max_length=128)]
     finding_fingerprint: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     finding_code: Annotated[str, Field(min_length=1, max_length=128)]
-    finding_severity: Literal["critical","high"]
+    finding_severity: Literal["critical", "high"]
     candidate_version: Annotated[str, Field(min_length=1, max_length=128)]
     candidate_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40,64}$")]
     suppression_expires_at: AwareDatetime
+
+
 class ReleaseP1R0ActionDraft(ActionDraftBase):
     action_name: Literal["release.p1r0"]
     candidate_version: Annotated[str, Field(min_length=1, max_length=128)]
     candidate_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40,64}$")]
     evidence_commitment: Commitment
+
+
 class LatencyDeviationActionDraft(ActionDraftBase):
     action_name: Literal["release.latency.accept"]
     candidate_version: Annotated[str, Field(min_length=1, max_length=128)]
@@ -7887,180 +9091,550 @@ class LatencyDeviationActionDraft(ActionDraftBase):
     observed_ms: Annotated[int, Field(ge=0, le=120_000)]
     limit_ms: Annotated[int, Field(ge=1, le=120_000)]
     release_notes_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
 class FamilyStageReviewActionDraft(ActionDraftBase):
     action_name: Literal["release.family_stage.review"]
     candidate_version: Annotated[str, Field(min_length=1, max_length=128)]
     candidate_commit: Annotated[str, Field(pattern=r"^[0-9a-f]{40,64}$")]
     reviewed_stage_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
-    decision: Literal["proceed","stop"]
+    decision: Literal["proceed", "stop"]
 
-ActionProposalDraft = Annotated[
-    TimerCreateActionDraft | TimerTargetActionDraft | SafetyActionDraft | PrivacyReductionActionDraft |
-    ComponentStatusActionDraft | DiagnosticActionDraft |
-    MemoryActionDraft | ProfileActionDraft | ConsentActionDraft | IdentityActionDraft |
-    ProviderActionDraft | CredentialActionDraft | AuditActionDraft | BackupActionDraft | SearchActionDraft |
-    SecurityFindingActionDraft | LatencyDeviationActionDraft | FamilyStageReviewActionDraft | ReleaseP1R0ActionDraft,
+
+ActionProposalDraft: TypeAlias = Annotated[  # noqa: UP040 -- Python 3.11 compatibility.
+    TimerCreateActionDraft
+    | TimerTargetActionDraft
+    | SafetyActionDraft
+    | PrivacyReductionActionDraft
+    | ComponentStatusActionDraft
+    | DiagnosticActionDraft
+    | MemoryActionDraft
+    | ProfileActionDraft
+    | ConsentActionDraft
+    | IdentityActionDraft
+    | ProviderActionDraft
+    | CredentialActionDraft
+    | AuditActionDraft
+    | BackupActionDraft
+    | SearchActionDraft
+    | SecurityFindingActionDraft
+    | LatencyDeviationActionDraft
+    | FamilyStageReviewActionDraft
+    | ReleaseP1R0ActionDraft,
     Field(discriminator="action_name"),
 ]
+
+
 class ActionBinding(ContractModel):
-    household_id: UUID; proposal_id: UUID; turn_id: UUID; idempotency_key: UUID
-    action_name: str; resource_type: str; resource_id: UUID | None
-    parameter_commitment: Commitment; policy_version: str; session_id: UUID; subject_id: UUID | None
+    household_id: UUID
+    proposal_id: UUID
+    turn_id: UUID
+    idempotency_key: UUID
+    action_name: str
+    resource_type: str
+    resource_id: UUID | None
+    parameter_commitment: Commitment
+    policy_version: str
+    session_id: UUID
+    subject_id: UUID | None
+
+
 class ValidatedActionProposal(ContractModel):
-    draft: ActionProposalDraft; binding: ActionBinding
+    draft: ActionProposalDraft
+    binding: ActionBinding
     resource_scope: Annotated[str, Field(min_length=1, max_length=256)]
-    required_assurance: Literal["guest","identified","confirmed","pin_verified","passkey_verified","recovery_verified"]
+    required_assurance: Literal[
+        "guest", "identified", "confirmed", "pin_verified", "passkey_verified", "recovery_verified"
+    ]
+
+
 class ActionReceipt(ContractModel):
-    receipt_id: UUID; proposal_id: UUID; household_id: UUID; action_name: str
+    receipt_id: UUID
+    proposal_id: UUID
+    household_id: UUID
+    action_name: str
     resource_scope: Annotated[str, Field(min_length=1, max_length=256)]
-    resource_id: UUID | None; idempotency_key: UUID
-    outcome: Literal["executed","denied","duplicate","failed"]; reason_code: str; occurred_at: AwareDatetime
+    resource_id: UUID | None
+    idempotency_key: UUID
+    outcome: Literal["executed", "denied", "duplicate", "failed"]
+    reason_code: str
+    occurred_at: AwareDatetime
+```
 
+```python
 # packages/contracts/src/tuntun_contracts/policy.py
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Annotated, Literal, Self
+from uuid import UUID
+
+from pydantic import AwareDatetime, Field, model_validator
+
 from .actions import ActionBinding, ActionProposalDraft
+from .base import Commitment, ContractModel
 
-class RiskTier(StrEnum): PERSONALIZATION="personalization"; LOW="low"; MEDIUM="medium"; HIGH="high"
-class AssuranceLevel(StrEnum): GUEST="guest"; IDENTIFIED="identified"; CONFIRMED="confirmed"; PIN_VERIFIED="pin_verified"; PASSKEY_VERIFIED="passkey_verified"; RECOVERY_VERIFIED="recovery_verified"
-class PolicyEffect(StrEnum): ALLOW="allow"; DENY="deny"; STEP_UP="step_up"
-class PolicyRequest(ContractModel): household_id: UUID; subject_id: UUID | None; action: ActionProposalDraft; requested_risk: RiskTier; assurance: AssuranceLevel
-class PolicyDecision(ContractModel): effect: PolicyEffect; reason_code: str; policy_version: str; required_assurance: AssuranceLevel | None; expires_at: AwareDatetime
-class AuthenticationRequest(ContractModel): subject_id: UUID; binding: ActionBinding; requested_assurance: AssuranceLevel
-class AuthenticationChallenge(ContractModel): challenge_id: UUID; subject_id: UUID; binding: ActionBinding; factor: Literal["confirmation","pin","passkey"]; expires_at: AwareDatetime
-class AuthenticationResponse(ContractModel): challenge_id: UUID; response: Annotated[str, Field(min_length=1, max_length=16_384)]; occurred_at: AwareDatetime
+
+class RiskTier(StrEnum):
+    PERSONALIZATION = "personalization"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class AssuranceLevel(StrEnum):
+    GUEST = "guest"
+    IDENTIFIED = "identified"
+    CONFIRMED = "confirmed"
+    PIN_VERIFIED = "pin_verified"
+    PASSKEY_VERIFIED = "passkey_verified"
+    RECOVERY_VERIFIED = "recovery_verified"
+
+
+class PolicyEffect(StrEnum):
+    ALLOW = "allow"
+    DENY = "deny"
+    STEP_UP = "step_up"
+
+
+class PolicyRequest(ContractModel):
+    household_id: UUID
+    subject_id: UUID | None
+    action: ActionProposalDraft
+    requested_risk: RiskTier
+    assurance: AssuranceLevel
+
+
+class PolicyDecision(ContractModel):
+    effect: PolicyEffect
+    reason_code: str
+    policy_version: str
+    required_assurance: AssuranceLevel | None
+    expires_at: AwareDatetime
+
+
+class AuthenticationRequest(ContractModel):
+    subject_id: UUID
+    binding: ActionBinding
+    requested_assurance: AssuranceLevel
+
+
+class AuthenticationChallenge(ContractModel):
+    challenge_id: UUID
+    subject_id: UUID
+    binding: ActionBinding
+    factor: Literal["confirmation", "pin", "passkey"]
+    expires_at: AwareDatetime
+
+
+class AuthenticationResponse(ContractModel):
+    challenge_id: UUID
+    response: Annotated[str, Field(min_length=1, max_length=16_384)]
+    occurred_at: AwareDatetime
+
+
 class AuthGrant(ContractModel):
-    grant_id: UUID; subject_id: UUID; binding: ActionBinding; assurance: AssuranceLevel
-    assurance_source: Literal["explicit_confirmation","pin","passkey","recovery"]; issued_at: AwareDatetime; expires_at: AwareDatetime
+    grant_id: UUID
+    subject_id: UUID
+    binding: ActionBinding
+    assurance: AssuranceLevel
+    assurance_source: Literal["explicit_confirmation", "pin", "passkey", "recovery"]
+    issued_at: AwareDatetime
+    expires_at: AwareDatetime
+
     @model_validator(mode="after")
-    def source_matches_assurance(self) -> "AuthGrant":
-        expected={"explicit_confirmation":AssuranceLevel.CONFIRMED,"pin":AssuranceLevel.PIN_VERIFIED,"passkey":AssuranceLevel.PASSKEY_VERIFIED,"recovery":AssuranceLevel.RECOVERY_VERIFIED}
-        if self.assurance is not expected[self.assurance_source]: raise ValueError("assurance source mismatch")
+    def source_matches_assurance(self) -> Self:
+        expected = {
+            "explicit_confirmation": AssuranceLevel.CONFIRMED,
+            "pin": AssuranceLevel.PIN_VERIFIED,
+            "passkey": AssuranceLevel.PASSKEY_VERIFIED,
+            "recovery": AssuranceLevel.RECOVERY_VERIFIED,
+        }
+        if self.assurance is not expected[self.assurance_source]:
+            raise ValueError("assurance source mismatch")
         return self
+
+
 class AuthContext(ContractModel):
-    grant_id: UUID | None; subject_id: UUID | None; binding: ActionBinding; assurance: AssuranceLevel
-    assurance_source: Literal["guest","identity","explicit_confirmation","pin","passkey","recovery"]; consumed_at: AwareDatetime
+    grant_id: UUID | None
+    subject_id: UUID | None
+    binding: ActionBinding
+    assurance: AssuranceLevel
+    assurance_source: Literal[
+        "guest",
+        "identity",
+        "explicit_confirmation",
+        "pin",
+        "passkey",
+        "recovery",
+    ]
+    consumed_at: AwareDatetime
+
     @model_validator(mode="after")
-    def source_matches_assurance(self) -> "AuthContext":
-        expected={"guest":AssuranceLevel.GUEST,"identity":AssuranceLevel.IDENTIFIED,"explicit_confirmation":AssuranceLevel.CONFIRMED,"pin":AssuranceLevel.PIN_VERIFIED,"passkey":AssuranceLevel.PASSKEY_VERIFIED,"recovery":AssuranceLevel.RECOVERY_VERIFIED}
-        if self.assurance is not expected[self.assurance_source]: raise ValueError("assurance source mismatch")
-        if (self.assurance_source in {"guest","identity"}) != (self.grant_id is None): raise ValueError("grant presence mismatch")
+    def source_matches_assurance(self) -> Self:
+        expected = {
+            "guest": AssuranceLevel.GUEST,
+            "identity": AssuranceLevel.IDENTIFIED,
+            "explicit_confirmation": AssuranceLevel.CONFIRMED,
+            "pin": AssuranceLevel.PIN_VERIFIED,
+            "passkey": AssuranceLevel.PASSKEY_VERIFIED,
+            "recovery": AssuranceLevel.RECOVERY_VERIFIED,
+        }
+        if self.assurance is not expected[self.assurance_source]:
+            raise ValueError("assurance source mismatch")
+        if (self.assurance_source in {"guest", "identity"}) != (self.grant_id is None):
+            raise ValueError("grant presence mismatch")
         return self
+
+
 class CurrentOwnerAuthority(ContractModel):
-    household_id: UUID; subject_id: UUID
-    owner_generation: Annotated[int, Field(ge=1)]; profile_version: Annotated[int, Field(ge=1)]
+    household_id: UUID
+    subject_id: UUID
+    owner_generation: Annotated[int, Field(ge=1)]
+    profile_version: Annotated[int, Field(ge=1)]
     observed_at: AwareDatetime
+
+
 class AdminSessionPrincipal(ContractModel):
-    admin_session_id: UUID; household_id: UUID; subject_id: UUID
-    owner_generation: Annotated[int, Field(ge=1)]; profile_version: Annotated[int, Field(ge=1)]
-    session_version: Annotated[int, Field(ge=1)]; access_mode: Literal["loopback","lan_https"]
-    authenticated_at: AwareDatetime; idle_expires_at: AwareDatetime; absolute_expires_at: AwareDatetime
-class TimerIntent(ContractModel): timer_id: UUID; operation: Literal["create","cancel","status"]; duration_seconds: Annotated[int, Field(ge=1, le=86_400)] | None; label_commitment: Commitment | None; idempotency_key: UUID
+    admin_session_id: UUID
+    household_id: UUID
+    subject_id: UUID
+    owner_generation: Annotated[int, Field(ge=1)]
+    profile_version: Annotated[int, Field(ge=1)]
+    session_version: Annotated[int, Field(ge=1)]
+    access_mode: Literal["loopback", "lan_https"]
+    authenticated_at: AwareDatetime
+    idle_expires_at: AwareDatetime
+    absolute_expires_at: AwareDatetime
 
-# budget.py
-from pydantic import field_validator
 
-MAX_USAGE_UNITS=10_000_000
-MAX_AUDIO_MILLIS=3_600_000
-MAX_WEB_SEARCH_CALLS=16
-MAX_CHARGE_MICROS_SGD=1_000_000_000_000
-class LlmUsageUnits(ContractModel): category: Literal["llm"]; input_tokens: Annotated[int, Field(ge=0,le=MAX_USAGE_UNITS)]; output_tokens: Annotated[int, Field(ge=0,le=MAX_USAGE_UNITS)]
-class SttUsageUnits(ContractModel): category: Literal["stt"]; audio_millis: Annotated[int, Field(ge=0,le=MAX_AUDIO_MILLIS)]
-class TtsUsageUnits(ContractModel): category: Literal["tts"]; characters: Annotated[int, Field(ge=0,le=4_096)]
-class WebSearchUsageUnits(ContractModel): category: Literal["web_search"]; input_tokens: Annotated[int,Field(ge=0,le=MAX_USAGE_UNITS)]; output_tokens: Annotated[int,Field(ge=0,le=MAX_USAGE_UNITS)]; web_search_calls: Annotated[int,Field(ge=0,le=MAX_WEB_SEARCH_CALLS)]
-UsageUnits=Annotated[LlmUsageUnits|SttUsageUnits|TtsUsageUnits|WebSearchUsageUnits,Field(discriminator="category")]
+class TimerIntent(ContractModel):
+    timer_id: UUID
+    operation: Literal["create", "cancel", "status"]
+    duration_seconds: Annotated[int, Field(ge=1, le=86_400)] | None
+    label_commitment: Commitment | None
+    idempotency_key: UUID
+```
+
+```python
+# packages/contracts/src/tuntun_contracts/budget.py
+from __future__ import annotations
+
+from typing import Annotated, Literal, Self, TypeAlias
+from uuid import UUID
+
+from pydantic import AwareDatetime, Field, field_validator, model_validator
+
+from .base import Commitment, ContractModel
+
+MAX_USAGE_UNITS = 10_000_000
+MAX_AUDIO_MILLIS = 3_600_000
+MAX_WEB_SEARCH_CALLS = 16
+MAX_CHARGE_MICROS_SGD = 1_000_000_000_000
+
+
+class LlmUsageUnits(ContractModel):
+    category: Literal["llm"]
+    input_tokens: Annotated[int, Field(ge=0, le=MAX_USAGE_UNITS)]
+    output_tokens: Annotated[int, Field(ge=0, le=MAX_USAGE_UNITS)]
+
+
+class SttUsageUnits(ContractModel):
+    category: Literal["stt"]
+    audio_millis: Annotated[int, Field(ge=0, le=MAX_AUDIO_MILLIS)]
+
+
+class TtsUsageUnits(ContractModel):
+    category: Literal["tts"]
+    characters: Annotated[int, Field(ge=0, le=4_096)]
+
+
+class WebSearchUsageUnits(ContractModel):
+    category: Literal["web_search"]
+    input_tokens: Annotated[int, Field(ge=0, le=MAX_USAGE_UNITS)]
+    output_tokens: Annotated[int, Field(ge=0, le=MAX_USAGE_UNITS)]
+    web_search_calls: Annotated[int, Field(ge=0, le=MAX_WEB_SEARCH_CALLS)]
+
+
+UsageUnits: TypeAlias = Annotated[  # noqa: UP040 -- Python 3.11 compatibility.
+    LlmUsageUnits | SttUsageUnits | TtsUsageUnits | WebSearchUsageUnits,
+    Field(discriminator="category"),
+]
+
+
 def usage_total(value: UsageUnits) -> int:
-    if isinstance(value,LlmUsageUnits): return value.input_tokens+value.output_tokens
-    if isinstance(value,SttUsageUnits): return value.audio_millis
-    if isinstance(value,TtsUsageUnits): return value.characters
-    return value.input_tokens+value.output_tokens+value.web_search_calls
+    if isinstance(value, LlmUsageUnits):
+        return value.input_tokens + value.output_tokens
+    if isinstance(value, SttUsageUnits):
+        return value.audio_millis
+    if isinstance(value, TtsUsageUnits):
+        return value.characters
+    return value.input_tokens + value.output_tokens + value.web_search_calls
+
+
 class BudgetReservationRequest(ContractModel):
-    household_id: UUID; turn_id: UUID; request_id: UUID; attempt_id: UUID
-    provider: Literal["openai","qwen"]; model: Annotated[str,Field(min_length=1,max_length=128)]
-    category: Literal["stt","llm","tts","web_search"]; usage_ceiling: UsageUnits
-    month_key: Annotated[str,Field(pattern=r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")]
+    household_id: UUID
+    turn_id: UUID
+    request_id: UUID
+    attempt_id: UUID
+    provider: Literal["openai", "qwen"]
+    model: Annotated[str, Field(min_length=1, max_length=128)]
+    category: Literal["stt", "llm", "tts", "web_search"]
+    usage_ceiling: UsageUnits
+    month_key: Annotated[str, Field(pattern=r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")]
+
     @model_validator(mode="after")
-    def exact_pricing_purpose(self) -> "BudgetReservationRequest":
-        if self.usage_ceiling.category!=self.category or usage_total(self.usage_ceiling)<=0:
+    def exact_pricing_purpose(self) -> Self:
+        if self.usage_ceiling.category != self.category or usage_total(self.usage_ceiling) <= 0:
             raise ValueError("budget_usage_ceiling_invalid")
-        if isinstance(self.usage_ceiling,WebSearchUsageUnits) and self.usage_ceiling.web_search_calls!=1:
+        if (
+            isinstance(self.usage_ceiling, WebSearchUsageUnits)
+            and self.usage_ceiling.web_search_calls != 1
+        ):
             raise ValueError("web_search_reservation_must_price_exactly_one_call")
         return self
+
+
 class BudgetReservation(ContractModel):
-    reservation_id: UUID; request_id: UUID; attempt_id: UUID
-    outcome: Literal["allow","allow_soft_warning","deny_hard_limit","deny_unknown_price","deny_cloud_egress_frozen"]
-    amount_micros_sgd: Annotated[int,Field(ge=0,le=MAX_CHARGE_MICROS_SGD)]
-    pricing_commitment: Commitment|None; expires_at: AwareDatetime
+    reservation_id: UUID
+    request_id: UUID
+    attempt_id: UUID
+    outcome: Literal[
+        "allow",
+        "allow_soft_warning",
+        "deny_hard_limit",
+        "deny_unknown_price",
+        "deny_cloud_egress_frozen",
+    ]
+    amount_micros_sgd: Annotated[int, Field(ge=0, le=MAX_CHARGE_MICROS_SGD)]
+    pricing_commitment: Commitment | None
+    expires_at: AwareDatetime
+
     @model_validator(mode="after")
-    def exact_quote_shape(self) -> "BudgetReservation":
-        quote_absent=self.outcome in {"deny_unknown_price","deny_cloud_egress_frozen"}
-        if quote_absent!=(self.pricing_commitment is None): raise ValueError("budget_reservation_quote_shape_invalid")
-        allowed=self.outcome in {"allow","allow_soft_warning"}
-        if allowed!=(self.amount_micros_sgd>0): raise ValueError("budget_reservation_amount_shape_invalid")
+    def exact_quote_shape(self) -> Self:
+        quote_absent = self.outcome in {"deny_unknown_price", "deny_cloud_egress_frozen"}
+        if quote_absent != (self.pricing_commitment is None):
+            raise ValueError("budget_reservation_quote_shape_invalid")
+        allowed = self.outcome in {"allow", "allow_soft_warning"}
+        if allowed != (self.amount_micros_sgd > 0):
+            raise ValueError("budget_reservation_amount_shape_invalid")
         return self
-class BudgetSettlementRequest(ContractModel): reservation_id: UUID; attempt_id: UUID
+
+
+class BudgetSettlementRequest(ContractModel):
+    reservation_id: UUID
+    attempt_id: UUID
+
+
 class BudgetSettlement(ContractModel):
-    reservation_id: UUID; charged_micros_sgd: Annotated[int,Field(ge=0,le=MAX_CHARGE_MICROS_SGD)]
-    conservative_estimate_used: bool; estimate_overrun: bool; cloud_egress_frozen: bool
+    reservation_id: UUID
+    charged_micros_sgd: Annotated[int, Field(ge=0, le=MAX_CHARGE_MICROS_SGD)]
+    conservative_estimate_used: bool
+    estimate_overrun: bool
+    cloud_egress_frozen: bool
+
+
 class ProviderUsageReceiptV1(ContractModel):
     schema_version: Literal["tuntun.provider-usage-receipt.v1"]
-    receipt_id: UUID; provider_call_id: UUID; reservation_id: UUID; request_id: UUID; attempt_id: UUID; authorization_id: UUID
-    provider: Literal["openai","qwen"]; model: Annotated[str,Field(min_length=1,max_length=128)]
-    category: Literal["stt","llm","tts","web_search"]
-    accounting_basis: Literal["provider_reported_exact","request_bound_exact","conservative_full_reservation"]
+    receipt_id: UUID
+    provider_call_id: UUID
+    reservation_id: UUID
+    request_id: UUID
+    attempt_id: UUID
+    authorization_id: UUID
+    provider: Literal["openai", "qwen"]
+    model: Annotated[str, Field(min_length=1, max_length=128)]
+    category: Literal["stt", "llm", "tts", "web_search"]
+    accounting_basis: Literal[
+        "provider_reported_exact",
+        "request_bound_exact",
+        "conservative_full_reservation",
+    ]
     billable_usage: UsageUnits
-    provider_response_commitment: Commitment; observed_at: AwareDatetime; receipt_commitment: Commitment
+    provider_response_commitment: Commitment
+    observed_at: AwareDatetime
+    receipt_commitment: Commitment
+
     @model_validator(mode="after")
-    def exact_usage_category(self) -> "ProviderUsageReceiptV1":
-        if self.category!=self.billable_usage.category: raise ValueError("provider_usage_category_mismatch")
-        if isinstance(self.billable_usage,WebSearchUsageUnits) and self.billable_usage.web_search_calls!=1:
+    def exact_usage_category(self) -> Self:
+        if self.category != self.billable_usage.category:
+            raise ValueError("provider_usage_category_mismatch")
+        if (
+            isinstance(self.billable_usage, WebSearchUsageUnits)
+            and self.billable_usage.web_search_calls != 1
+        ):
             raise ValueError("web_search_receipt_requires_exactly_one_call")
         return self
-class TransportProof(ContractModel): reservation_id: UUID; attempt_id: UUID; disposition: Literal["never_sent","sent","unknown"]; evidence_code: str; observed_at: AwareDatetime
+
+
+class TransportProof(ContractModel):
+    reservation_id: UUID
+    attempt_id: UUID
+    disposition: Literal["never_sent", "sent", "unknown"]
+    evidence_code: str
+    observed_at: AwareDatetime
+
+
 class BudgetReconciliationRequest(ContractModel):
     turn_id: UUID
     proofs: Annotated[tuple[TransportProof, ...], Field(min_length=0, max_length=8)]
+
     @field_validator("proofs")
     @classmethod
-    def unique_attempt_proofs(cls,value):
-        keys={(item.reservation_id,item.attempt_id) for item in value}
-        if len(keys) != len(value): raise ValueError("duplicate transport proof")
+    def unique_attempt_proofs(
+        cls,
+        value: tuple[TransportProof, ...],
+    ) -> tuple[TransportProof, ...]:
+        keys = {(item.reservation_id, item.attempt_id) for item in value}
+        if len(keys) != len(value):
+            raise ValueError("duplicate transport proof")
         return value
+```
 
-# audit.py
-class AuditDraft(ContractModel): event_id: UUID; occurred_at: AwareDatetime; actor_pseudonym: str; action_code: str; outcome: str; reason_code: str; correlation_id: UUID; payload_commitment: Commitment
-class AuditReceipt(ContractModel): receipt_id: UUID; ordinal: Annotated[int, Field(ge=1)]; public_hash_hex: str = Field(pattern=r"^[0-9a-f]{64}$"); hmac_key_id: str; hmac_b64: str; occurred_at: AwareDatetime
+```python
+# packages/contracts/src/tuntun_contracts/audit.py
+from __future__ import annotations
 
-# reachy.py
-class ReachyState(StrEnum): BOOTING="booting"; CONNECTING="connecting"; IDLE="idle"; WAKE_LISTENING="wake_listening"; THINKING="thinking"; SPEAKING="speaking"; MUTED="muted"; PRIVACY="privacy"; OFFLINE_ESSENTIAL="offline_essential"; ERROR_SAFE="error_safe"; SHUTTING_DOWN="shutting_down"
+from typing import Annotated
+from uuid import UUID
+
+from pydantic import AwareDatetime, Field
+
+from .base import Commitment, ContractModel
+
+
+class AuditDraft(ContractModel):
+    event_id: UUID
+    occurred_at: AwareDatetime
+    actor_pseudonym: str
+    action_code: str
+    outcome: str
+    reason_code: str
+    correlation_id: UUID
+    payload_commitment: Commitment
+
+
+class AuditReceipt(ContractModel):
+    receipt_id: UUID
+    ordinal: Annotated[int, Field(ge=1)]
+    public_hash_hex: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    hmac_key_id: str
+    hmac_b64: str
+    occurred_at: AwareDatetime
+```
+
+```python
+# packages/contracts/src/tuntun_contracts/reachy.py
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Annotated, Literal, Self
+from uuid import UUID
+
+from pydantic import AwareDatetime, Field, model_validator
+
+from .base import Commitment, ContractModel
+
+
+class ReachyState(StrEnum):
+    BOOTING = "booting"
+    CONNECTING = "connecting"
+    IDLE = "idle"
+    WAKE_LISTENING = "wake_listening"
+    THINKING = "thinking"
+    SPEAKING = "speaking"
+    MUTED = "muted"
+    PRIVACY = "privacy"
+    OFFLINE_ESSENTIAL = "offline_essential"
+    ERROR_SAFE = "error_safe"
+    SHUTTING_DOWN = "shutting_down"
+
+
 class ReachyCommand(ContractModel):
-    command_id: UUID; turn_id: UUID | None; kind: Literal["state","playback","gesture","stop_all"]
-    state: ReachyState | None = None; media_stream_id: UUID | None = None
+    command_id: UUID
+    turn_id: UUID | None
+    kind: Literal["state", "playback", "gesture", "stop_all"]
+    state: ReachyState | None = None
+    media_stream_id: UUID | None = None
     gesture_id: Annotated[str | None, Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,63}$")]
     expires_at: AwareDatetime
+
     @model_validator(mode="after")
-    def exact_payload(self) -> "ReachyCommand":
-        present = (self.state is not None, self.media_stream_id is not None, self.gesture_id is not None)
-        expected = {"state": (True,False,False), "playback": (False,True,False), "gesture": (False,False,True), "stop_all": (False,False,False)}[self.kind]
-        if present != expected: raise ValueError("reachy command payload mismatch")
-        if self.kind in {"playback","gesture"} and self.turn_id is None: raise ValueError("turn-scoped Reachy command required")
+    def exact_payload(self) -> Self:
+        present = (
+            self.state is not None,
+            self.media_stream_id is not None,
+            self.gesture_id is not None,
+        )
+        expected = {
+            "state": (True, False, False),
+            "playback": (False, True, False),
+            "gesture": (False, False, True),
+            "stop_all": (False, False, False),
+        }[self.kind]
+        if present != expected:
+            raise ValueError("reachy command payload mismatch")
+        if self.kind in {"playback", "gesture"} and self.turn_id is None:
+            raise ValueError("turn-scoped Reachy command required")
         return self
-class ReachyReceipt(ContractModel): command_id: UUID; accepted: bool; reason_code: str
-class ReachyHealth(ContractModel): state: ReachyState; daemon_connected: bool; queue_depth: Annotated[int, Field(ge=0)]
-class SafetyReceipt(ContractModel): turn_id: UUID | None; playback_stopped: bool; motion_stopped: bool; buffers_cleared: bool
+
+
+class ReachyReceipt(ContractModel):
+    command_id: UUID
+    accepted: bool
+    reason_code: str
+
+
+class ReachyHealth(ContractModel):
+    state: ReachyState
+    daemon_connected: bool
+    queue_depth: Annotated[int, Field(ge=0)]
+
+
+class SafetyReceipt(ContractModel):
+    turn_id: UUID | None
+    playback_stopped: bool
+    motion_stopped: bool
+    buffers_cleared: bool
+
+
 class StopAllReceiptBundleV1(ContractModel):
-    schema_version: Literal["tuntun.reachy-stop-all-receipts.v1"]="tuntun.reachy-stop-all-receipts.v1"
+    schema_version: Literal["tuntun.reachy-stop-all-receipts.v1"] = (
+        "tuntun.reachy-stop-all-receipts.v1"
+    )
     command_receipt: ReachyReceipt
     safety_receipt: SafetyReceipt
-class StopSignal(ContractModel): signal_id: UUID; source: Literal["edge_keyword","physical_input","owner_console","watchdog"]; occurred_at: AwareDatetime
+
+
+class StopSignal(ContractModel):
+    signal_id: UUID
+    source: Literal["edge_keyword", "physical_input", "owner_console", "watchdog"]
+    occurred_at: AwareDatetime
+
+
 class CameraWindowGrant(ContractModel):
-    grant_id: UUID; household_id: UUID; device_id: UUID; session_id: UUID; turn_id: UUID
-    subject_id: UUID | None; action_name: Literal["identity.enroll","identity.observe"]
-    purpose: Literal["explicit_enrollment","active_conversation_identity"]
-    max_frames: Annotated[int, Field(ge=1, le=20)]; max_frame_bytes: Annotated[int, Field(ge=1, le=1_048_576)]
-    max_total_bytes: Annotated[int, Field(ge=1, le=10_485_760)]; max_frames_per_second: Annotated[int, Field(ge=1, le=2)]
-    issued_at: AwareDatetime; expires_at: AwareDatetime; grant_commitment: Commitment
+    grant_id: UUID
+    household_id: UUID
+    device_id: UUID
+    session_id: UUID
+    turn_id: UUID
+    subject_id: UUID | None
+    action_name: Literal["identity.enroll", "identity.observe"]
+    purpose: Literal["explicit_enrollment", "active_conversation_identity"]
+    max_frames: Annotated[int, Field(ge=1, le=20)]
+    max_frame_bytes: Annotated[int, Field(ge=1, le=1_048_576)]
+    max_total_bytes: Annotated[int, Field(ge=1, le=10_485_760)]
+    max_frames_per_second: Annotated[int, Field(ge=1, le=2)]
+    issued_at: AwareDatetime
+    expires_at: AwareDatetime
+    grant_commitment: Commitment
+
     @model_validator(mode="after")
-    def bounded_window(self) -> "CameraWindowGrant":
-        if self.expires_at <= self.issued_at or (self.expires_at - self.issued_at).total_seconds() > 10:
+    def bounded_window(self) -> Self:
+        if (
+            self.expires_at <= self.issued_at
+            or (self.expires_at - self.issued_at).total_seconds() > 10
+        ):
             raise ValueError("camera window must be positive and at most 10 seconds")
         if self.max_frames * self.max_frame_bytes < self.max_total_bytes:
             raise ValueError("camera aggregate bound exceeds frame bounds")
@@ -8068,12 +9642,653 @@ class CameraWindowGrant(ContractModel):
             raise ValueError("enrollment camera window requires subject")
         return self
 
-# ports.py turn DTOs
-class TurnInput(ContractModel): turn_id: UUID; household_id: UUID; device_id: UUID
-class TurnOutput(ContractModel): turn_id: UUID; outcome: Literal["completed","cancelled","denied","failed"]
+
+# packages/contracts/src/tuntun_contracts/reachy.py ends here.
 ```
 
-Use `StrEnum`, `Literal`, `Annotated`, `Field`, `AwareDatetime`, `model_validator`, and UUID imports exactly as required by those declarations. In `ports.py`, declare every protocol from the Interfaces block with `@runtime_checkable`; import `AsyncIterator`, `Protocol`, and the DTOs from their owning modules. Export all public names from `tuntun_contracts/__init__.py` without importing any application package.
+```python
+# packages/contracts/src/tuntun_contracts/ports.py
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from typing import Literal, Protocol, runtime_checkable
+from uuid import UUID
+
+from pydantic import AwareDatetime
+
+from .actions import ActionBinding, ActionReceipt, ValidatedActionProposal
+from .audit import AuditDraft, AuditReceipt
+from .base import ContractModel
+from .budget import (
+    BudgetReconciliationRequest,
+    BudgetReservation,
+    BudgetReservationRequest,
+    BudgetSettlement,
+    BudgetSettlementRequest,
+    TransportProof,
+)
+from .identity import IdentityDecision, IdentityRequest
+from .memory import (
+    ApprovedMemory,
+    DecideMemoryProposal,
+    MemoryProposal,
+    MemoryProposalDraft,
+    MemoryQuery,
+    MemoryRecord,
+    ProposalContext,
+)
+from .policy import (
+    AuthContext,
+    AuthenticationChallenge,
+    AuthenticationRequest,
+    AuthenticationResponse,
+    AuthGrant,
+    PolicyDecision,
+    PolicyRequest,
+)
+from .provider import (
+    ProviderResponse,
+    RouteAuthorization,
+    RouteAuthorizationRequest,
+    RouteConsumption,
+    SanitizedProviderRequest,
+)
+from .reachy import ReachyCommand, ReachyHealth, ReachyReceipt, SafetyReceipt, StopSignal
+from .speech import (
+    AudioFormat,
+    AuthorizedSynthesisRequest,
+    AuthorizedTranscriptionRequest,
+    SpeechChunk,
+    TranscriptResult,
+)
+
+
+class TurnInput(ContractModel):
+    turn_id: UUID
+    household_id: UUID
+    device_id: UUID
+
+
+class TurnOutput(ContractModel):
+    turn_id: UUID
+    outcome: Literal["completed", "cancelled", "denied", "failed"]
+
+
+@runtime_checkable
+class ClockPort(Protocol):
+    def now(self) -> AwareDatetime: ...
+
+    def monotonic(self) -> float: ...
+
+
+@runtime_checkable
+class ReachyPort(Protocol):
+    async def send(self, command: ReachyCommand) -> ReachyReceipt: ...
+
+    async def health(self) -> ReachyHealth: ...
+
+    async def stop_all(self, turn_id: UUID | None) -> SafetyReceipt: ...
+
+
+@runtime_checkable
+class StopInputPort(Protocol):
+    async def receive(self) -> StopSignal: ...
+
+
+@runtime_checkable
+class AudioConverterPort(Protocol):
+    def convert(
+        self,
+        audio: AsyncIterator[bytes],
+        source: AudioFormat,
+        target: AudioFormat,
+    ) -> AsyncIterator[bytes]: ...
+
+
+@runtime_checkable
+class SpeechToTextPort(Protocol):
+    async def transcribe(
+        self,
+        request: AuthorizedTranscriptionRequest,
+        audio: AsyncIterator[bytes],
+    ) -> TranscriptResult: ...
+
+
+@runtime_checkable
+class TextToSpeechPort(Protocol):
+    def synthesize(
+        self,
+        request: AuthorizedSynthesisRequest,
+    ) -> AsyncIterator[SpeechChunk]: ...
+
+
+@runtime_checkable
+class LanguageModelPort(Protocol):
+    async def complete(self, request: SanitizedProviderRequest) -> ProviderResponse: ...
+
+
+@runtime_checkable
+class IdentityFusionPort(Protocol):
+    async def resolve(self, request: IdentityRequest) -> IdentityDecision: ...
+
+
+@runtime_checkable
+class MemoryRepositoryPort(Protocol):
+    async def create(
+        self,
+        memory: ApprovedMemory,
+        expected_absent: bool = True,
+    ) -> MemoryRecord: ...
+
+    async def replace(
+        self,
+        memory_id: UUID,
+        expected_version: int,
+        memory: ApprovedMemory,
+    ) -> MemoryRecord: ...
+
+    async def delete(
+        self,
+        memory_id: UUID,
+        expected_version: int,
+        auth: AuthContext,
+        approved_proposal_id: UUID,
+    ) -> None: ...
+
+    async def query(self, query: MemoryQuery) -> tuple[MemoryRecord, ...]: ...
+
+
+@runtime_checkable
+class MemoryProposalServicePort(Protocol):
+    async def stage(
+        self,
+        draft: MemoryProposalDraft,
+        context: ProposalContext,
+    ) -> MemoryProposal: ...
+
+    async def decide(
+        self,
+        command: DecideMemoryProposal,
+        auth: AuthContext,
+    ) -> MemoryProposal: ...
+
+
+@runtime_checkable
+class PolicyEnginePort(Protocol):
+    async def decide(self, request: PolicyRequest) -> PolicyDecision: ...
+
+
+@runtime_checkable
+class AuthenticationPort(Protocol):
+    async def start(self, request: AuthenticationRequest) -> AuthenticationChallenge: ...
+
+    async def verify(self, response: AuthenticationResponse) -> AuthGrant: ...
+
+    async def consume(self, grant_id: UUID, binding: ActionBinding) -> AuthContext: ...
+
+
+@runtime_checkable
+class ActionProviderPort(Protocol):
+    async def execute(
+        self,
+        proposal: ValidatedActionProposal,
+        auth: AuthContext,
+    ) -> ActionReceipt: ...
+
+
+@runtime_checkable
+class AsyncTransactionBoundary(Protocol):
+    async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...
+
+
+@runtime_checkable
+class AuditPort(Protocol):
+    async def append(
+        self,
+        uow: AsyncTransactionBoundary,
+        draft: AuditDraft,
+    ) -> AuditReceipt: ...
+
+
+@runtime_checkable
+class BudgetPort(Protocol):
+    async def reserve(self, request: BudgetReservationRequest) -> BudgetReservation: ...
+
+    async def mark_sent(self, reservation_id: UUID, attempt_id: UUID) -> None: ...
+
+    async def settle(self, request: BudgetSettlementRequest) -> BudgetSettlement: ...
+
+    async def release_unsent(
+        self,
+        reservation_id: UUID,
+        attempt_id: UUID,
+        proof: TransportProof,
+    ) -> None: ...
+
+    async def reconcile_turn(
+        self,
+        request: BudgetReconciliationRequest,
+    ) -> tuple[BudgetSettlement, ...]: ...
+
+
+@runtime_checkable
+class RouteAuthorizerPort(Protocol):
+    async def authorize(self, request: RouteAuthorizationRequest) -> RouteAuthorization: ...
+
+    async def consume(
+        self,
+        authorization_id: UUID,
+        consumption: RouteConsumption,
+    ) -> None: ...
+
+
+@runtime_checkable
+class ConversationWorkflow(Protocol):
+    async def run(self, turn: TurnInput) -> TurnOutput: ...
+```
+
+```python
+# packages/contracts/src/tuntun_contracts/__init__.py
+from typing import Final
+
+from .actions import (
+    ActionBinding,
+    ActionDraftBase,
+    ActionProposalDraft,
+    ActionReceipt,
+    AuditActionDraft,
+    BackupActionDraft,
+    ComponentStatusActionDraft,
+    ConsentActionDraft,
+    CredentialActionDraft,
+    DiagnosticActionDraft,
+    FamilyStageReviewActionDraft,
+    IdentityActionDraft,
+    LatencyDeviationActionDraft,
+    MemoryActionDraft,
+    PrivacyReductionActionDraft,
+    ProfileActionDraft,
+    ProviderActionDraft,
+    ReleaseP1R0ActionDraft,
+    SafetyActionDraft,
+    SearchActionDraft,
+    SecurityFindingActionDraft,
+    TimerCreateActionDraft,
+    TimerTargetActionDraft,
+    ValidatedActionProposal,
+)
+from .audit import AuditDraft, AuditReceipt
+from .base import (
+    JCS_MAX_SAFE_INTEGER,
+    JCS_MIN_SAFE_INTEGER,
+    Commitment,
+    ContractModel,
+    ContractParseError,
+    JSONValue,
+    Sensitivity,
+    canonical_bytes,
+    canonical_mapping_bytes,
+    parse_bounded_json_value,
+    parse_contract_json,
+    registered_contract_models,
+)
+from .budget import (
+    BudgetReconciliationRequest,
+    BudgetReservation,
+    BudgetReservationRequest,
+    BudgetSettlement,
+    BudgetSettlementRequest,
+    LlmUsageUnits,
+    ProviderUsageReceiptV1,
+    SttUsageUnits,
+    TransportProof,
+    TtsUsageUnits,
+    UsageUnits,
+    WebSearchUsageUnits,
+)
+from .events import (
+    EventEnvelope,
+    EventPayload,
+    EventType,
+    SignedEventEnvelope,
+    StopRequestedPayload,
+    WakeDetectedPayload,
+)
+from .identity import (
+    IdentityDecision,
+    IdentityEvidence,
+    IdentityRequest,
+    IdentityStatus,
+    PersonaProjection,
+    PersonaTraits,
+)
+from .memory import (
+    ApprovedMemory,
+    DecideMemoryProposal,
+    EpisodicContent,
+    MemoryAudience,
+    MemoryContent,
+    MemoryKind,
+    MemoryProposal,
+    MemoryProposalDraft,
+    MemoryQuery,
+    MemoryRecord,
+    PolicyContent,
+    PreferenceContent,
+    ProceduralContent,
+    ProposalContext,
+    RelationalContent,
+    SemanticContent,
+    WorkingContent,
+)
+from .policy import (
+    AdminSessionPrincipal,
+    AssuranceLevel,
+    AuthContext,
+    AuthenticationChallenge,
+    AuthenticationRequest,
+    AuthenticationResponse,
+    AuthGrant,
+    CurrentOwnerAuthority,
+    PolicyDecision,
+    PolicyEffect,
+    PolicyRequest,
+    RiskTier,
+    TimerIntent,
+)
+from .ports import (
+    ActionProviderPort,
+    AsyncTransactionBoundary,
+    AudioConverterPort,
+    AuditPort,
+    AuthenticationPort,
+    BudgetPort,
+    ClockPort,
+    ConversationWorkflow,
+    IdentityFusionPort,
+    LanguageModelPort,
+    MemoryProposalServicePort,
+    MemoryRepositoryPort,
+    PolicyEnginePort,
+    ReachyPort,
+    RouteAuthorizerPort,
+    SpeechToTextPort,
+    StopInputPort,
+    TextToSpeechPort,
+    TurnInput,
+    TurnOutput,
+)
+from .provider import (
+    ProviderName,
+    ProviderResponse,
+    ProviderResponseReceipt,
+    RedactionReceipt,
+    RouteAuthorization,
+    RouteAuthorizationRequest,
+    RouteConsumption,
+    SanitizedProviderMessage,
+    SanitizedProviderRequest,
+    SanitizedToolReference,
+)
+from .reachy import (
+    CameraWindowGrant,
+    ReachyCommand,
+    ReachyHealth,
+    ReachyReceipt,
+    ReachyState,
+    SafetyReceipt,
+    StopAllReceiptBundleV1,
+    StopSignal,
+)
+from .speech import (
+    AudioFormat,
+    AuthorizedSynthesisRequest,
+    AuthorizedTranscriptionRequest,
+    SpeechChunk,
+    TranscriptResult,
+)
+
+__version__: str = "0.1.0.dev0"
+
+_REGISTERED_CONTRACT_MODELS: Final[tuple[type[ContractModel], ...]] = (
+    ActionBinding,
+    ActionDraftBase,
+    ActionReceipt,
+    AuditActionDraft,
+    BackupActionDraft,
+    ComponentStatusActionDraft,
+    ConsentActionDraft,
+    CredentialActionDraft,
+    DiagnosticActionDraft,
+    FamilyStageReviewActionDraft,
+    IdentityActionDraft,
+    LatencyDeviationActionDraft,
+    MemoryActionDraft,
+    PrivacyReductionActionDraft,
+    ProfileActionDraft,
+    ProviderActionDraft,
+    ReleaseP1R0ActionDraft,
+    SafetyActionDraft,
+    SearchActionDraft,
+    SecurityFindingActionDraft,
+    TimerCreateActionDraft,
+    TimerTargetActionDraft,
+    ValidatedActionProposal,
+    AuditDraft,
+    AuditReceipt,
+    Commitment,
+    BudgetReconciliationRequest,
+    BudgetReservation,
+    BudgetReservationRequest,
+    BudgetSettlement,
+    BudgetSettlementRequest,
+    LlmUsageUnits,
+    ProviderUsageReceiptV1,
+    SttUsageUnits,
+    TransportProof,
+    TtsUsageUnits,
+    WebSearchUsageUnits,
+    EventEnvelope,
+    SignedEventEnvelope,
+    StopRequestedPayload,
+    WakeDetectedPayload,
+    IdentityDecision,
+    IdentityEvidence,
+    IdentityRequest,
+    PersonaProjection,
+    PersonaTraits,
+    ApprovedMemory,
+    DecideMemoryProposal,
+    EpisodicContent,
+    MemoryProposal,
+    MemoryProposalDraft,
+    MemoryQuery,
+    MemoryRecord,
+    PolicyContent,
+    PreferenceContent,
+    ProceduralContent,
+    ProposalContext,
+    RelationalContent,
+    SemanticContent,
+    WorkingContent,
+    AdminSessionPrincipal,
+    AuthContext,
+    AuthGrant,
+    AuthenticationChallenge,
+    AuthenticationRequest,
+    AuthenticationResponse,
+    CurrentOwnerAuthority,
+    PolicyDecision,
+    PolicyRequest,
+    TimerIntent,
+    TurnInput,
+    TurnOutput,
+    ProviderResponse,
+    ProviderResponseReceipt,
+    RedactionReceipt,
+    RouteAuthorization,
+    RouteAuthorizationRequest,
+    RouteConsumption,
+    SanitizedProviderMessage,
+    SanitizedProviderRequest,
+    SanitizedToolReference,
+    CameraWindowGrant,
+    ReachyCommand,
+    ReachyHealth,
+    ReachyReceipt,
+    SafetyReceipt,
+    StopAllReceiptBundleV1,
+    StopSignal,
+    AudioFormat,
+    AuthorizedSynthesisRequest,
+    AuthorizedTranscriptionRequest,
+    SpeechChunk,
+    TranscriptResult,
+)
+
+__all__ = (
+    "JCS_MAX_SAFE_INTEGER",
+    "JCS_MIN_SAFE_INTEGER",
+    "JSONValue",
+    "Commitment",
+    "ContractModel",
+    "ContractParseError",
+    "Sensitivity",
+    "__version__",
+    "canonical_bytes",
+    "canonical_mapping_bytes",
+    "parse_bounded_json_value",
+    "parse_contract_json",
+    "registered_contract_models",
+    "EventEnvelope",
+    "EventPayload",
+    "EventType",
+    "SignedEventEnvelope",
+    "StopRequestedPayload",
+    "WakeDetectedPayload",
+    "ActionBinding",
+    "ActionDraftBase",
+    "ActionProposalDraft",
+    "ActionReceipt",
+    "AuditActionDraft",
+    "BackupActionDraft",
+    "ComponentStatusActionDraft",
+    "ConsentActionDraft",
+    "CredentialActionDraft",
+    "DiagnosticActionDraft",
+    "FamilyStageReviewActionDraft",
+    "IdentityActionDraft",
+    "LatencyDeviationActionDraft",
+    "MemoryActionDraft",
+    "PrivacyReductionActionDraft",
+    "ProfileActionDraft",
+    "ProviderActionDraft",
+    "ReleaseP1R0ActionDraft",
+    "SafetyActionDraft",
+    "SearchActionDraft",
+    "SecurityFindingActionDraft",
+    "TimerCreateActionDraft",
+    "TimerTargetActionDraft",
+    "ValidatedActionProposal",
+    "AuditDraft",
+    "AuditReceipt",
+    "BudgetReconciliationRequest",
+    "BudgetReservation",
+    "BudgetReservationRequest",
+    "BudgetSettlement",
+    "BudgetSettlementRequest",
+    "LlmUsageUnits",
+    "ProviderUsageReceiptV1",
+    "SttUsageUnits",
+    "TransportProof",
+    "TtsUsageUnits",
+    "UsageUnits",
+    "WebSearchUsageUnits",
+    "IdentityDecision",
+    "IdentityEvidence",
+    "IdentityRequest",
+    "IdentityStatus",
+    "PersonaProjection",
+    "PersonaTraits",
+    "ApprovedMemory",
+    "DecideMemoryProposal",
+    "EpisodicContent",
+    "MemoryAudience",
+    "MemoryContent",
+    "MemoryKind",
+    "MemoryProposal",
+    "MemoryProposalDraft",
+    "MemoryQuery",
+    "MemoryRecord",
+    "PolicyContent",
+    "PreferenceContent",
+    "ProceduralContent",
+    "ProposalContext",
+    "RelationalContent",
+    "SemanticContent",
+    "WorkingContent",
+    "AdminSessionPrincipal",
+    "AssuranceLevel",
+    "AuthContext",
+    "AuthGrant",
+    "AuthenticationChallenge",
+    "AuthenticationRequest",
+    "AuthenticationResponse",
+    "CurrentOwnerAuthority",
+    "PolicyDecision",
+    "PolicyEffect",
+    "PolicyRequest",
+    "RiskTier",
+    "TimerIntent",
+    "ActionProviderPort",
+    "AsyncTransactionBoundary",
+    "AudioConverterPort",
+    "AuthenticationPort",
+    "AuditPort",
+    "BudgetPort",
+    "ClockPort",
+    "ConversationWorkflow",
+    "IdentityFusionPort",
+    "LanguageModelPort",
+    "MemoryProposalServicePort",
+    "MemoryRepositoryPort",
+    "PolicyEnginePort",
+    "ReachyPort",
+    "RouteAuthorizerPort",
+    "SpeechToTextPort",
+    "StopInputPort",
+    "TextToSpeechPort",
+    "TurnInput",
+    "TurnOutput",
+    "ProviderName",
+    "ProviderResponse",
+    "ProviderResponseReceipt",
+    "RedactionReceipt",
+    "RouteAuthorization",
+    "RouteAuthorizationRequest",
+    "RouteConsumption",
+    "SanitizedProviderMessage",
+    "SanitizedProviderRequest",
+    "SanitizedToolReference",
+    "CameraWindowGrant",
+    "ReachyCommand",
+    "ReachyHealth",
+    "ReachyReceipt",
+    "ReachyState",
+    "SafetyReceipt",
+    "StopAllReceiptBundleV1",
+    "StopSignal",
+    "AudioFormat",
+    "AuthorizedSynthesisRequest",
+    "AuthorizedTranscriptionRequest",
+    "SpeechChunk",
+    "TranscriptResult",
+)
+```
+
+Use the imports shown by each complete module. Every validator has an explicit input and return type, every Python 3.11 alias uses `TypeAlias` plus the targeted Ruff compatibility suppression, and no file has an unused import. Export the public DTO, enum, alias, and protocol names from `tuntun_contracts/__init__.py` without importing any application package; do not root-export Task 5 constants or helper functions.
 
 The contract semantics are also frozen: `IdentityFusionPort` returns identity only and cannot mint assurance. `AuthGrant`/`AuthContext.assurance_source` deliberately has no biometric value, so face/voice evidence cannot create `confirmed` or a stronger assurance. `CurrentOwnerAuthority` is the current database observation of one exact household owner subject, owner generation, and active profile version. `AdminSessionPrincipal` additionally binds that authority snapshot to one exact admin-session version plus idle/absolute expiries; request and mutation boundaries must re-open the session row, reject `revoked_at`, compare every principal field, and revalidate the current owner snapshot before use. It proves only a current owner console session and can never substitute for an action-bound `AuthGrant`/`AuthContext`; every mutation reconstructs its exact binding on the server and consumes a fresh matching grant when the registry requires one. The same admin principal grants no implicit memory-body visibility: every memory create/replace persists one closed `MemoryAudience`, and later read projections use subject, current guardian, and audience policy before decryption. An `ActionBinding` includes household, proposal, turn, idempotency, action, resource, parameter commitment, policy, conversation session, and subject, so a proof cannot be transplanted across any of those boundaries. `ActionReceipt` additionally persists `household_id` and the server-derived `resource_scope`; its idempotency boundary is exactly `(household_id, action_name, resource_scope, idempotency_key)`, matching `action_proposals`, and a global unique idempotency key is forbidden. Frozen DTOs remain fields-only: callers use explicit binding comparators, policy-request factories, and audit-draft mappers rather than calling undeclared methods on them. `RouteAuthorizerPort.consume` is single-use and must compare every `RouteConsumption` binding field to the stored authorization in constant time for commitments before any adapter I/O. `BudgetReservationRequest` carries only a closed, positive, bounded usage ceiling; extra caller monetary estimates are forbidden. Reservation pricing is recomputed locally from the exact provider/model/category and one current price/FX record, and the returned `pricing_commitment` is null exactly for unknown-price or already-frozen denials. `BudgetSettlementRequest` carries no caller cost or usage-presence claim: settlement loads and purpose-verifies the full `ProviderUsageReceiptV1` persisted by the gateway against the exact call/reservation/request/attempt/authorization/provider/model/category and the provider-response commitment, then recomputes the charge from the immutable reservation price snapshot. `ProviderResponse` exposes only the nullable ID of that already-persisted receipt, never raw usage or an authority boolean; a non-null ID is gateway-bound to the exact call/route, while missing or malformed usage never means zero and a succeeded call without one valid persisted receipt freezes/alerts and fails settlement as an unknown possible overage. `BudgetPort.release_unsent` accepts only a matching `TransportProof(disposition="never_sent")`; `sent` and `unknown` reconcile conservatively through settlement, while every retry retains `request_id` and receives a fresh `attempt_id`. A verified actual above the reservation is never clipped; `estimate_overrun` and `cloud_egress_frozen` expose the durable overrun/freeze truth. `CameraWindowGrant` is the only contract that permits camera frames; it is action/subject/session/turn/purpose-bound, single-use, at most 10 seconds/20 frames/10 MiB, and its byte/frame/rate/expiry bounds may only be narrowed downstream.
 
@@ -8081,19 +10296,47 @@ The contract semantics are also frozen: `IdentityFusionPort` returns identity on
 
 `PersonaTraits` is the only prepared profile-personalization payload. Its four closed fields contain no arbitrary text, exact child identifier, profession/name string, secret, contact, or household fact. `PersonaProjection` adds only the canonical role and is the complete value allowed into persona/context construction. `profile.edit` must be exactly one of replace or clear, must carry an expected profile version, and cannot carry a role change. Its server mapper loads and freezes `target_profile_class`; owner/adult self-edits require a null `guardian_generation`, while K2/N1 edits require the exact current guardian generation. The parameter commitment binds subject, actor via `ActionBinding`, operation, version, target class, guardian generation, and the full typed payload. The mutation service reconstructs and verifies that commitment before its first profile read, then rechecks the loaded immutable class and current guardian relation/generation in the mutation UoW; stale or substituted generations fail closed. Credential capability `profile_persona` is distinct from `adult_self_consent`: it can authorize only that exact bound `profile.edit` replace/clear path, never consent or administration. This contract work is folded into the existing contract task and changes no task or effort total.
 
-`memory.export` is the one-record export action: `memory_id`, the server-loaded `expected_version`, `resource_id=memory_id`, subject, and `export_format="json"` are all mandatory and commitment-bound. It cannot represent a profile-wide export, omit the version, or carry another memory operation's fields; whole-profile export remains the distinct `profile.export` action. Exact record/version/subject substitution fails before memory projection or decryption.
+`MemoryProposalDraft` has one total target shape: `create` requires both `target_memory_id` and `expected_version` to be null, while the update operation `replace` and the terminal operation `delete` require both to be non-null. Either partial pair and a create carrying either target field fail validation. `memory.export` is the one-record export action: `memory_id`, the server-loaded `expected_version`, `resource_id=memory_id`, subject, and `export_format="json"` are all mandatory and commitment-bound. It cannot represent a profile-wide export, omit the version, or carry another memory operation's fields; whole-profile export remains the distinct `profile.export` action. Exact record/version/subject substitution fails before memory projection or decryption.
 
 - [ ] **Step 4: Run the green DTO/port gate**
 
-Run: `uv run python scripts/generate_schemas.py --write && uv run python scripts/generate_openapi.py --write && uv run pytest tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py tests/contract/test_contract_generators.py -q && uv run python scripts/generate_schemas.py --check && uv run python scripts/generate_openapi.py --check && uv run ruff check packages/contracts/src tests/contract && uv run mypy packages/contracts/src`
+Run:
 
-Expected: PASS; required enum values match exactly, every asserted port operation is async, both generated artifacts contain exactly the complete post-DTO public registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output.
+```bash
+uv run python scripts/generate_schemas.py --write
+uv run python scripts/generate_openapi.py --write
+uv run pytest tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py tests/contract/test_contract_generators.py -q
+uv run python scripts/generate_schemas.py --check
+uv run python scripts/generate_openapi.py --check
+task5_python_paths=(
+  packages/contracts/src/tuntun_contracts/actions.py
+  packages/contracts/src/tuntun_contracts/audit.py
+  packages/contracts/src/tuntun_contracts/budget.py
+  packages/contracts/src/tuntun_contracts/identity.py
+  packages/contracts/src/tuntun_contracts/memory.py
+  packages/contracts/src/tuntun_contracts/policy.py
+  packages/contracts/src/tuntun_contracts/ports.py
+  packages/contracts/src/tuntun_contracts/provider.py
+  packages/contracts/src/tuntun_contracts/reachy.py
+  packages/contracts/src/tuntun_contracts/speech.py
+  packages/contracts/src/tuntun_contracts/__init__.py
+  tests/contract/conftest.py
+  tests/contract/test_v1_types_and_ports.py
+  tests/contract/test_dependency_direction.py
+)
+uv run ruff format --check "${task5_python_paths[@]}"
+uv run ruff check "${task5_python_paths[@]}"
+MYPYPATH=packages/contracts/src:. uv run mypy --explicit-package-bases --python-version 3.11 "${task5_python_paths[@]}"
+git diff --check
+```
+
+Expected: PASS with `84 passed` from the focused pytest command; required enum values match exactly, every asserted port operation is async, `registered_contract_models()` is the immutable sorted 93-model singleton, and root exports contain exactly 136 unique names spanning 10 enums, 5 aliases, and 18 runtime-checkable protocols without exposing Task 5 constants/helpers. Both generated artifacts contain exactly that complete post-DTO public model registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output. Ruff format/check and strict mypy under Python 3.11 semantics report no errors on all 14 Task 5 Python paths.
 
 - [ ] **Step 5: Commit exact Task 5 paths**
 
 ```bash
 git status --short
-git add packages/contracts/src/tuntun_contracts/actions.py packages/contracts/src/tuntun_contracts/audit.py packages/contracts/src/tuntun_contracts/budget.py packages/contracts/src/tuntun_contracts/identity.py packages/contracts/src/tuntun_contracts/memory.py packages/contracts/src/tuntun_contracts/policy.py packages/contracts/src/tuntun_contracts/provider.py packages/contracts/src/tuntun_contracts/reachy.py packages/contracts/src/tuntun_contracts/speech.py packages/contracts/src/tuntun_contracts/ports.py packages/contracts/src/tuntun_contracts/__init__.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py
+git add packages/contracts/src/tuntun_contracts/actions.py packages/contracts/src/tuntun_contracts/audit.py packages/contracts/src/tuntun_contracts/budget.py packages/contracts/src/tuntun_contracts/identity.py packages/contracts/src/tuntun_contracts/memory.py packages/contracts/src/tuntun_contracts/policy.py packages/contracts/src/tuntun_contracts/provider.py packages/contracts/src/tuntun_contracts/reachy.py packages/contracts/src/tuntun_contracts/speech.py packages/contracts/src/tuntun_contracts/ports.py packages/contracts/src/tuntun_contracts/__init__.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/conftest.py tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(contracts): define versioned DTOs and ports"
