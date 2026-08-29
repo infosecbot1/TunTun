@@ -4183,13 +4183,13 @@ git commit -m "security: add fail-closed assurance scanners"
 - Test: `tests/contract/test_contract_generators.py`
 
 **Interfaces:**
-- Consumes: Task 1's existing `tuntun_contracts.__version__: str = "0.1.0.dev0"`; Task 3's root `PyYAML>=6.0,<7` development dependency and `scripts.assurance_common.AssuranceInputError`, `lexical_path`, `read_regular_file`, `validate_root`, and `walk_regular_files`; Pydantic v2; and `rfc8785.dumps(value) -> bytes` plus `rfc8785.CanonicalizationError`.
+- Consumes: Task 1's existing `tuntun_contracts.__version__: str = "0.1.0.dev0"`; Task 3's root `PyYAML>=6.0,<7` development dependency and `scripts.assurance_common.AssuranceInputError`, `FrozenRegularFile`, `lexical_path`, `read_regular_file`, `validate_root`, and `walk_regular_files`; Pydantic v2; and `rfc8785.dumps(value) -> bytes` plus `rfc8785.CanonicalizationError`.
 - Produces: Python 3.11-compatible recursive `JSONValue`; `JCS_MIN_SAFE_INTEGER == -(2**53 - 1)` and `JCS_MAX_SAFE_INTEGER == 2**53 - 1`; `ContractParseError`; bounded duplicate-safe `parse_bounded_json_value(raw, *, max_bytes, max_depth=32, max_containers=4096, max_structure_tokens=16384)`; `ContractModel`; closed package-owned `registered_contract_models()`; `Sensitivity`; `Commitment`; `canonical_bytes(model: ContractModel) -> bytes`; `canonical_mapping_bytes(value: Mapping[str, Any]) -> bytes`; `parse_contract_json(model_type, raw: bytes, *, max_bytes, require_canonical=False)`; `EventType`; `WakeDetectedPayload`; `StopRequestedPayload`; `EventEnvelope`; and `SignedEventEnvelope` exactly as shown below.
-- The Task 4 registry is the immutable, explicitly named tuple in `tuntun_contracts/__init__.py`; it contains exactly these five fully qualified names in sorted order: `tuntun_contracts.base.Commitment`, `tuntun_contracts.events.EventEnvelope`, `tuntun_contracts.events.SignedEventEnvelope`, `tuntun_contracts.events.StopRequestedPayload`, and `tuntun_contracts.events.WakeDetectedPayload`. There is no subclass hook, mutable set/list, import-time callback, or reflective subclass walk. Task 5 already owns `tuntun_contracts/__init__.py`; when it adds DTOs, it must replace this tuple with the new explicit complete sorted tuple. `registered_contract_models()` remains importable from `tuntun_contracts.base` for the already-frozen Task 5 consumer.
+- The Task 4 registry is the immutable, explicitly named tuple in `tuntun_contracts/__init__.py`; at the end of Task 4 it contains exactly these five fully qualified names in sorted order: `tuntun_contracts.base.Commitment`, `tuntun_contracts.events.EventEnvelope`, `tuntun_contracts.events.SignedEventEnvelope`, `tuntun_contracts.events.StopRequestedPayload`, and `tuntun_contracts.events.WakeDetectedPayload`. There is no subclass hook, mutable set/list, import-time callback, or reflective subclass walk. Task 5 already owns `tuntun_contracts/__init__.py`; when it adds public DTOs, it must replace this tuple with the new explicit complete sorted tuple. The Task 4 test oracle independently derives the exhaustive expected tuple from public `ContractModel` class exports named by `tuntun_contracts.__all__`, excludes only `ContractModel` itself, and separately requires the five Task 4 names, package ownership, sorted uniqueness, tuple identity, and equality to the package-owned tuple. It never derives its expected set from `registered_contract_models()`, so omitting a later public model fails while a correctly exported and explicitly registered Task 5 model passes without editing the Task 4 test. `registered_contract_models()` remains importable from `tuntun_contracts.base` for the already-frozen Task 5 consumer.
 - Task 1 remains the owner of the package version. Task 4 must preserve `__version__: str = "0.1.0.dev0"`, test it, and explicitly import and re-export every Task 4 event type from the package root. Task 4 owns `scripts/contract_generator_common.py` as the single shared schema/OpenAPI generation helper; Task 5 and later contract tasks consume it and may not fork its registry, reference rewriting, checking, or publication logic.
 - Hostile bytes (size, UTF-8, syntax, duplicate, shape, unsafe integer, non-finite/range, schema, or canonicality faults) normalize to `ContractParseError`. `model_type` is validated before any hostile byte is decoded. Caller/programmer errors such as an invalid parser configuration, a non-`bytes` raw value, a non-contract model type, or a non-string canonical mapping key remain ordinary `TypeError`/`ValueError`. RFC 8785 canonicalizer domain failures, including nested unsafe integers, non-finite floats, and invalid Unicode code points, normalize to `ContractParseError`.
 - A `SignedEventEnvelope` signs exactly `canonical_bytes(signed.envelope)`; neither `signing_key_id` nor `signature_b64` is part of the signing input. Its key ID grammar is exactly `ed25519:<label>:v<positive-version>`, where `<label>` matches `[a-z0-9][a-z0-9._-]{0,63}` and the version matches `[1-9][0-9]{0,8}`. Its signature is standard canonical base64 of exactly 64 bytes: exactly 88 ASCII characters matching `[A-Za-z0-9+/]{86}==`, strict-decoding to 64 bytes, and byte-for-byte equal to its own re-encoding.
-- This task owns the sole deterministic `generate_schemas.py` and `generate_openapi.py` and their complete generated outputs. Each exposes exactly `OUTPUT_PATH`, `render() -> bytes`, and `main(argv: Sequence[str] | None = None) -> int`; each supports exactly one of `--check` or explicit maintainer-only `--write`, with success `0` and every usage, drift, unsafe-input, render, race, or publication failure `1`. Check mode performs two renders in a private temporary tree, nofollow/race-safely reads and walks the checked output using Task 3 helpers, byte-compares the exact sole artifact, and never mutates the repository. Write mode rejects symlink/special/changing outputs and siblings, writes a same-directory `0600` temporary regular file, fsyncs it, detects an output-directory race, atomically replaces, fsyncs the parent, and verifies the sole final bytes. Missing/stale/nondeterministic outputs and any extra regular/symlink/special entry below the owned output parent fail closed.
+- This task owns the sole deterministic `generate_schemas.py` and `generate_openapi.py` and their complete generated outputs. Each exposes exactly `OUTPUT_PATH`, `render() -> bytes`, and `main(argv: Sequence[str] | None = None) -> int`; each supports exactly one of `--check` or explicit maintainer-only `--write`, with success `0` and every usage, drift, unsafe-input, render, race, or publication failure `1`. Check mode performs two renders in a private temporary tree, nofollow/race-safely reads and walks the checked output using Task 3 helpers, byte-compares the exact sole artifact, and never mutates the repository. Write mode rejects symlink/special/changing outputs and siblings; `_ensure_output_parent()` returns one retained nofollow descriptor plus its captured device/inode identity, `_owned_snapshot()` revalidates that same identity before and after the baseline capture, and publication never reopens the parent by path. The helper revalidates the retained identity again immediately after the baseline seam, before atomic replacement, and after replacement; writes a same-directory `0600` temporary regular file through the retained descriptor; fsyncs it; atomically replaces through that descriptor; fsyncs the same parent; and verifies the sole final bytes. Missing/stale/nondeterministic outputs, a parent replaced at the baseline/publication seam, and any extra regular/symlink/special entry below the owned output parent fail closed without publishing into either the replacement or old tree.
 - The JSON Schema artifact has exactly top-level `$schema`, `schema_version`, and `models`; `$schema` is `https://json-schema.org/draft/2020-12/schema` and `schema_version` is `1.0`. The OpenAPI artifact has exactly top-level `openapi`, `info`, `paths`, and `components`; `openapi` is `3.1.0`; `info` is exactly `{title: "Tuntun Admin API", version: "1.0.0", description: "Foundation contract components; no HTTP paths are owned yet."}`; and `paths` is empty. Both model maps use exact sorted FQNs. For each independently generated Pydantic model schema, the shared helper recursively rewrites only `#/$defs/...` references to that model's escaped JSON Pointer location under `#/models/<FQN>/$defs/...` or `#/components/schemas/<FQN>/$defs/...`; any other local reference fails generation. Tests walk every `$ref` and prove that every local JSON Pointer resolves.
 - `PyYAML` remains the Task 3-pinned runtime dependency. Because PyYAML 6 does not publish a `py.typed` marker, only its two import sites carry the fully scoped `# type: ignore[import-untyped]` annotation; Task 4 does not add `types-PyYAML`, edit dependency metadata, or churn `uv.lock`.
 - Neither generator imports app bootstrap, reads household state/credentials, opens listeners, performs network access, or reads private-data matcher fixtures.
@@ -4743,22 +4743,30 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
+import tuntun_contracts
 import yaml  # type: ignore[import-untyped]  # PyYAML 6 has no py.typed marker.
+from scripts.contract_generator_common import GeneratorError
 from tuntun_contracts.base import ContractModel, registered_contract_models
 
 from scripts import contract_generator_common, generate_openapi, generate_schemas
-from scripts.assurance_common import AssuranceInputError, lexical_path, read_regular_file
-from scripts.contract_generator_common import GeneratorError
+from scripts.assurance_common import (
+    AssuranceInputError,
+    FrozenRegularFile,
+    lexical_path,
+    read_regular_file,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_OUTPUT = Path("packages/contracts/schema/v1/contracts.schema.json")
 OPENAPI_OUTPUT = Path("packages/contracts/openapi/admin-v1.yaml")
-EXPECTED_TASK4_MODELS = (
-    "tuntun_contracts.base.Commitment",
-    "tuntun_contracts.events.EventEnvelope",
-    "tuntun_contracts.events.SignedEventEnvelope",
-    "tuntun_contracts.events.StopRequestedPayload",
-    "tuntun_contracts.events.WakeDetectedPayload",
+REQUIRED_TASK4_MODELS = frozenset(
+    {
+        "tuntun_contracts.base.Commitment",
+        "tuntun_contracts.events.EventEnvelope",
+        "tuntun_contracts.events.SignedEventEnvelope",
+        "tuntun_contracts.events.StopRequestedPayload",
+        "tuntun_contracts.events.WakeDetectedPayload",
+    }
 )
 
 
@@ -4777,10 +4785,36 @@ def _mapping(value: object) -> Mapping[str, object]:
     return cast(dict[str, object], value)
 
 
-def _registered_names() -> tuple[str, ...]:
-    return tuple(
-        f"{model.__module__}.{model.__qualname__}" for model in registered_contract_models()
-    )
+def _model_name(model: type[ContractModel]) -> str:
+    return f"{model.__module__}.{model.__qualname__}"
+
+
+def _public_contract_models() -> tuple[type[ContractModel], ...]:
+    models: list[type[ContractModel]] = []
+    for export_name in tuntun_contracts.__all__:
+        exported = getattr(tuntun_contracts, export_name)
+        if (
+            isinstance(exported, type)
+            and issubclass(exported, ContractModel)
+            and exported is not ContractModel
+        ):
+            models.append(exported)
+    return tuple(sorted(models, key=_model_name))
+
+
+def _public_model_names() -> tuple[str, ...]:
+    return tuple(_model_name(model) for model in _public_contract_models())
+
+
+def _assert_registry_matches_public_exports(
+    models: tuple[type[ContractModel], ...],
+) -> None:
+    names = tuple(_model_name(model) for model in models)
+    assert names == tuple(sorted(names))
+    assert len(set(names)) == len(names)
+    assert frozenset(names) >= REQUIRED_TASK4_MODELS
+    assert all(name.startswith("tuntun_contracts.") for name in names)
+    assert models == _public_contract_models()
 
 
 def _subprocess_render(module_name: str, *, hash_seed: str) -> bytes:
@@ -4863,10 +4897,45 @@ def _tree_snapshot(root: Path) -> tuple[tuple[str, int, int, bytes], ...]:
     return tuple(snapshot)
 
 
-def test_task4_registry_is_closed_exact_and_package_owned() -> None:
-    assert _registered_names() == EXPECTED_TASK4_MODELS
-    assert isinstance(registered_contract_models(), tuple)
-    assert registered_contract_models() is registered_contract_models()
+def test_registry_is_closed_exhaustive_immutable_and_package_owned() -> None:
+    registered = registered_contract_models()
+    assert type(registered) is tuple
+    _assert_registry_matches_public_exports(registered)
+    assert registered is registered_contract_models()
+    assert registered is tuntun_contracts._REGISTERED_CONTRACT_MODELS
+
+
+def test_registry_oracle_adapts_and_rejects_every_public_model_omission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    public_models = _public_contract_models()
+    for omitted in public_models:
+        with pytest.raises(AssertionError):
+            _assert_registry_matches_public_exports(
+                tuple(model for model in public_models if model is not omitted)
+            )
+
+    class FuturePublicModel(ContractModel):
+        marker: str
+
+    FuturePublicModel.__module__ = "tuntun_contracts.future"
+    monkeypatch.setattr(
+        tuntun_contracts,
+        "FuturePublicModel",
+        FuturePublicModel,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        tuntun_contracts,
+        "__all__",
+        (*tuntun_contracts.__all__, "FuturePublicModel"),
+    )
+    expanded_models: tuple[type[ContractModel], ...] = (
+        *registered_contract_models(),
+        FuturePublicModel,
+    )
+    expanded = tuple(sorted(expanded_models, key=_model_name))
+    _assert_registry_matches_public_exports(expanded)
 
 
 def test_generators_freeze_metadata_exact_models_and_independent_process_determinism() -> None:
@@ -4880,11 +4949,12 @@ def test_generators_freeze_metadata_exact_models_and_independent_process_determi
     assert schema_first == schema_second == generate_schemas.render()
     assert openapi_first == openapi_second == generate_openapi.render()
 
+    expected_models = _public_model_names()
     schema = _mapping(json.loads(schema_first))
     assert set(schema) == {"$schema", "schema_version", "models"}
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert schema["schema_version"] == "1.0"
-    assert tuple(_mapping(schema["models"])) == EXPECTED_TASK4_MODELS
+    assert tuple(_mapping(schema["models"])) == expected_models
 
     openapi = _mapping(yaml.safe_load(openapi_first))
     assert set(openapi) == {"openapi", "info", "paths", "components"}
@@ -4897,7 +4967,7 @@ def test_generators_freeze_metadata_exact_models_and_independent_process_determi
     assert openapi["paths"] == {}
     components = _mapping(openapi["components"])
     assert set(components) == {"schemas"}
-    assert tuple(_mapping(components["schemas"])) == EXPECTED_TASK4_MODELS
+    assert tuple(_mapping(components["schemas"])) == expected_models
 
 
 @pytest.mark.parametrize(
@@ -4972,14 +5042,20 @@ def test_nondeterministic_render_fails_without_output_mutation(
     parent.mkdir()
     output = parent / generator.OUTPUT_PATH.name
     monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+    output.write_bytes(b"first render\n")
+    output.chmod(0o600)
     renders = iter((b"first render\n", b"second render\n"))
+    render_count = 0
 
     def nondeterministic_render() -> bytes:
+        nonlocal render_count
+        render_count += 1
         return next(renders)
 
     monkeypatch.setattr(generator, "render", nondeterministic_render)
     before = _tree_snapshot(parent)
     assert generator.main(["--check"]) == 1
+    assert render_count == 2
     assert _tree_snapshot(parent) == before
 
 
@@ -5090,6 +5166,47 @@ def test_write_failure_preserves_prior_output_and_removes_private_temp(
     assert generator.main(["--write"]) == 1
     assert _tree_snapshot(parent) == before
     assert output.read_bytes() == b"prior bytes\n"
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+def test_write_rejects_parent_swap_between_baseline_and_publication(
+    generator: _GeneratorModule,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / generator.__name__
+    parent.mkdir()
+    replacement = tmp_path / f"{generator.__name__}-replacement"
+    replacement.mkdir()
+    old_tree = tmp_path / f"{generator.__name__}-old"
+    output = parent / generator.OUTPUT_PATH.name
+    monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+    original_snapshot = contract_generator_common._owned_snapshot
+    swapped = False
+
+    def swap_after_baseline(
+        output_path: Path,
+        *,
+        allow_missing: bool,
+        output_parent: contract_generator_common.OutputParent | None = None,
+    ) -> tuple[FrozenRegularFile, ...]:
+        nonlocal swapped
+        result = original_snapshot(
+            output_path,
+            allow_missing=allow_missing,
+            output_parent=output_parent,
+        )
+        if allow_missing and not swapped:
+            parent.rename(old_tree)
+            replacement.rename(parent)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(contract_generator_common, "_owned_snapshot", swap_after_baseline)
+    assert generator.main(["--write"]) == 1
+    assert swapped
+    assert _tree_snapshot(parent) == ()
+    assert _tree_snapshot(old_tree) == ()
 
 
 @pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
@@ -5633,6 +5750,7 @@ import secrets
 import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 from typing import Literal, TypeAlias
@@ -5652,6 +5770,16 @@ MAX_GENERATED_BYTES = 4 * 1024 * 1024
 MAX_PARENT_FILES = 3
 GeneratorMode: TypeAlias = Literal["check", "write"]  # noqa: UP040
 Renderer: TypeAlias = Callable[[], bytes]  # noqa: UP040
+
+
+@dataclass(frozen=True)
+class OutputParent:
+    """Open output-parent descriptor and the directory identity it captured."""
+
+    path: Path
+    descriptor: int
+    device: int
+    inode: int
 
 
 class GeneratorError(RuntimeError):
@@ -5785,26 +5913,50 @@ def _scan_parent(parent: Path) -> tuple[FrozenRegularFile, ...]:
     )
 
 
+def _output_parent_is_current(output_parent: OutputParent) -> bool:
+    try:
+        named = os.stat(output_parent.path, follow_symlinks=False)
+        opened = os.fstat(output_parent.descriptor)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(named.st_mode)
+        and stat.S_ISDIR(opened.st_mode)
+        and named.st_dev == output_parent.device == opened.st_dev
+        and named.st_ino == output_parent.inode == opened.st_ino
+    )
+
+
 def _owned_snapshot(
     output_path: Path,
     *,
     allow_missing: bool,
+    output_parent: OutputParent | None = None,
 ) -> tuple[FrozenRegularFile, ...]:
     expected = lexical_path(output_path)
+    if output_parent is not None and (
+        expected.parent != output_parent.path or not _output_parent_is_current(output_parent)
+    ):
+        raise GeneratorError("output parent changed during generation")
     files = _scan_parent(expected.parent)
+    if output_parent is not None and not _output_parent_is_current(output_parent):
+        raise GeneratorError("output parent changed during generation")
     if not files and allow_missing:
         return ()
     if len(files) != 1 or files[0].path != expected:
         raise GeneratorError("owned output inventory is not exact")
     if read_regular_file(expected, max_bytes=MAX_GENERATED_BYTES) != files[0].raw:
         raise AssuranceInputError(expected, "input-changed-during-scan")
+    if output_parent is not None and not _output_parent_is_current(output_parent):
+        raise GeneratorError("output parent changed during generation")
     return files
 
 
-def _ensure_output_parent(output_path: Path) -> Path:
+def _ensure_output_parent(output_path: Path) -> OutputParent:
     parent = lexical_path(output_path).parent
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     current_fd = os.open(os.path.sep, flags)
+    keep_descriptor = False
     try:
         for index, part in enumerate(parent.parts[1:]):
             display = Path(os.path.sep).joinpath(*parent.parts[1 : index + 2])
@@ -5824,30 +5976,21 @@ def _ensure_output_parent(output_path: Path) -> Path:
                 raise AssuranceInputError(display, "input-changed-during-scan")
             os.close(current_fd)
             current_fd = child_fd
-        return validate_root(parent)
+        validated = validate_root(parent)
+        opened = os.fstat(current_fd)
+        output_parent = OutputParent(
+            path=validated,
+            descriptor=current_fd,
+            device=opened.st_dev,
+            inode=opened.st_ino,
+        )
+        if not _output_parent_is_current(output_parent):
+            raise GeneratorError("output parent changed during generation")
+        keep_descriptor = True
+        return output_parent
     finally:
-        os.close(current_fd)
-
-
-def _directory_matches_descriptor(path: Path, descriptor: int) -> bool:
-    named = os.stat(path, follow_symlinks=False)
-    opened = os.fstat(descriptor)
-    return (
-        stat.S_ISDIR(named.st_mode)
-        and named.st_dev == opened.st_dev
-        and named.st_ino == opened.st_ino
-    )
-
-
-def _open_parent_descriptor(parent: Path) -> int:
-    descriptor = os.open(
-        parent,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-    )
-    if not _directory_matches_descriptor(parent, descriptor):
-        os.close(descriptor)
-        raise GeneratorError("output parent changed during generation")
-    return descriptor
+        if not keep_descriptor:
+            os.close(current_fd)
 
 
 def _atomic_replace(source_name: str, destination_name: str, parent_fd: int) -> None:
@@ -5861,19 +6004,24 @@ def _atomic_replace(source_name: str, destination_name: str, parent_fd: int) -> 
 
 def _write_atomically(output_path: Path, rendered: bytes) -> None:
     output = lexical_path(output_path)
-    parent = _ensure_output_parent(output)
-    baseline = _owned_snapshot(output, allow_missing=True)
-    parent_fd = _open_parent_descriptor(parent)
+    output_parent = _ensure_output_parent(output)
     temporary_name = f".{output.name}.{secrets.token_hex(16)}.tmp"
-    temporary_path = parent / temporary_name
+    temporary_path = output_parent.path / temporary_name
     temporary_fd: int | None = None
     published = False
     try:
+        baseline = _owned_snapshot(
+            output,
+            allow_missing=True,
+            output_parent=output_parent,
+        )
+        if not _output_parent_is_current(output_parent):
+            raise GeneratorError("output parent changed during generation")
         temporary_fd = os.open(
             temporary_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             0o600,
-            dir_fd=parent_fd,
+            dir_fd=output_parent.descriptor,
         )
         os.fchmod(temporary_fd, 0o600)
         _write_all(temporary_fd, rendered)
@@ -5881,7 +6029,7 @@ def _write_atomically(output_path: Path, rendered: bytes) -> None:
         os.close(temporary_fd)
         temporary_fd = None
 
-        current = _scan_parent(parent)
+        current = _scan_parent(output_parent.path)
         temporary_entries = tuple(
             item for item in current if item.path == lexical_path(temporary_path)
         )
@@ -5892,22 +6040,24 @@ def _write_atomically(output_path: Path, rendered: bytes) -> None:
             or stat.S_IMODE(os.stat(temporary_path, follow_symlinks=False).st_mode) != 0o600
         ):
             raise GeneratorError("private publication file verification failed")
-        if remaining != baseline or not _directory_matches_descriptor(parent, parent_fd):
+        if remaining != baseline or not _output_parent_is_current(output_parent):
             raise GeneratorError("output changed during generation")
 
-        _atomic_replace(temporary_name, output.name, parent_fd)
+        _atomic_replace(temporary_name, output.name, output_parent.descriptor)
         published = True
-        os.fsync(parent_fd)
+        if not _output_parent_is_current(output_parent):
+            raise GeneratorError("output parent changed during generation")
+        os.fsync(output_parent.descriptor)
     finally:
         if temporary_fd is not None:
             os.close(temporary_fd)
         if not published:
             try:
-                os.unlink(temporary_name, dir_fd=parent_fd)
-                os.fsync(parent_fd)
+                os.unlink(temporary_name, dir_fd=output_parent.descriptor)
+                os.fsync(output_parent.descriptor)
             except FileNotFoundError:
                 pass
-        os.close(parent_fd)
+        os.close(output_parent.descriptor)
 
     final = _owned_snapshot(output, allow_missing=False)
     if final[0].raw != rendered:
@@ -5949,13 +6099,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-from tuntun_contracts.base import registered_contract_models
-
 from scripts.contract_generator_common import (
     build_model_schemas,
     render_json_document,
     run_generator,
 )
+from tuntun_contracts.base import registered_contract_models
 
 OUTPUT_PATH: Final = Path("packages/contracts/schema/v1/contracts.schema.json")
 
@@ -5993,9 +6142,8 @@ from pathlib import Path
 from typing import Final, cast
 
 import yaml  # type: ignore[import-untyped]  # PyYAML 6 has no py.typed marker.
-from tuntun_contracts.base import registered_contract_models
-
 from scripts.contract_generator_common import build_model_schemas, run_generator
+from tuntun_contracts.base import registered_contract_models
 
 OUTPUT_PATH: Final = Path("packages/contracts/openapi/admin-v1.yaml")
 
@@ -6068,7 +6216,7 @@ make check
 git diff --check
 ```
 
-Expected: PASS with `65 passed` from the focused pytest command. The package smoke assertion still reports `tuntun_contracts.__version__ == "0.1.0.dev0"`; both independent generator processes report exactly the five Task 4 FQNs; all local `$ref` pointers resolve; unsafe-integer/signature/key-ID/coercion/duplicate-FQN/CLI/symlink/special/race/mutation/error-code cases fail exactly as asserted; both generators return `0` only for current/write success and `1` for every asserted failure. The three before/after values are identical, proving check mode changed neither tracked diffs, worktree inventory, nor either owned artifact. Ruff, strict mypy under Python 3.11 semantics, `make check`, and `git diff --check` exit 0.
+Expected: PASS with `68 passed` from the focused pytest command. The package smoke assertion still reports `tuntun_contracts.__version__ == "0.1.0.dev0"`; both independent generator processes report the exact exhaustive public model registry (the five required Task 4 FQNs now, with correctly exported and explicitly registered later models admitted automatically); the deliberate omission oracle fails for every public model; and all local `$ref` pointers resolve. Unsafe-integer/signature/key-ID/coercion/duplicate-FQN/CLI/symlink/special/race/mutation/error-code cases fail exactly as asserted. The seeded nondeterminism regression observes exactly two renderer calls, and replacing the second call with a reuse of the first render makes that test fail. Replacing the output parent immediately after baseline capture returns `1` without publishing into either the replacement or renamed old tree. Both generators return `0` only for current/write success and `1` for every asserted failure. The three before/after values are identical, proving check mode changed neither tracked diffs, worktree inventory, nor either owned artifact. Ruff, strict mypy under Python 3.11 semantics, `make check`, and `git diff --check` exit 0.
 
 - [ ] **Step 5: Commit exact Task 4 paths**
 
