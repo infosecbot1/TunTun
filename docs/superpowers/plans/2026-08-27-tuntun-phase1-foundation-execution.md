@@ -1101,7 +1101,7 @@ git commit -m "build: add web workspace and baseline CI"
 - `check_migration_ownership.py` accepts `--revisions REV [REV ...]`, optional `--exact-head REVISION_NAME`, and optional `--forbid-branch-merge-orphan`. It parses Alembic modules without importing them, requires each requested numeric revision to have exactly one file/`revision` value, validates `down_revision`, rejects duplicate/edited/unknown ancestry and, under the strict flag, requires one linear reachable head with no branch, merge, or orphan.
 - `scan_browser_artifacts.py` accepts optional `--playwright-output PATH` and required `--forbid CSV`; it scans every existing production browser bundle/source map/manifest plus the explicit Playwright tree when named, including compressed/textual assets, and matches normalized JSON/property names and literal browser persistence/URL/path patterns. A missing explicit output, corrupt map/archive, unreadable bundle, or build tree changing during the scan blocks.
 - `scan_network_surface.py` accepts the closed Phase 3/6 flag vocabulary `--require-listener ADDRESS:PORT=OWNER`, `--forbid-lan-port PORT`, `--optional-exact-commissioned-private-lan-port PORT=OWNER`, `--forbid-wildcard`, `--forbid-ipv6`, `--forbid-core-tcp`, `--forbid-media-proxy-tcp`, `--forbid-camera-ports`, and `--forbid-camera-public`. It obtains one bounded point-in-time process/socket snapshot, joins socket owner PID to executable/service identity, rejects ambiguous/truncated inventory, and never treats an unavailable platform probe as an empty passing surface.
-- `scan_private_data.py` is a thin CLI over the same `verify_private_data.scan` engine, not a second matcher. It preserves the later closed `--paths PATH...`, `--include-git-history`, and `--allow-safe-ids` grammar; history mode uses one bounded fixed-argv Git object stream and applies the same byte/archive budgets. Its incomplete-reason set includes `git-state-unprovable`, `git-inventory-failed`, `git-inventory-timeout`, `git-inventory-output-limit`, `git-inventory-malformed`, `git-index-conflict`, `git-index-mode-invalid`, `source-inventory-drift`, `source-inventory-incomplete`, every `git-batch-*` framing/object failure, `filesystem-symlink-ancestor`, and `duplicate-root`, so every such result exits `2` rather than being mislabeled as a complete policy finding. The pre-existing `--allow-safe-ids` mode remains limited to its documented synthetic/public identifier grammar and cannot suppress a credential/private-key match, forbidden suffix, household/device/subject/network value, or arbitrary caller-supplied pattern/path. Task 3 adds no scanner allowlist or repository-path exemption.
+- `scan_private_data.py` is a thin CLI over the same `verify_private_data.scan` engine, not a second matcher. It preserves the later closed `--paths PATH...`, `--include-git-history`, and `--allow-safe-ids` grammar; history mode uses one bounded fixed-argv Git object stream and applies the same byte/archive budgets. Its incomplete-reason set includes `git-state-unprovable`, `git-inventory-failed`, `git-inventory-timeout`, `git-inventory-output-limit`, `git-inventory-malformed`, `git-object-format-unsupported`, `git-process-reap-timeout`, `git-index-conflict`, `git-index-mode-invalid`, `source-inventory-drift`, `source-inventory-incomplete`, every `git-batch-*` framing/object failure, `filesystem-symlink-ancestor`, and `duplicate-root`, so every such result exits `2` rather than being mislabeled as a complete policy finding. The pre-existing `--allow-safe-ids` mode remains limited to its documented synthetic/public identifier grammar and cannot suppress a credential/private-key match, forbidden suffix, household/device/subject/network value, or arbitrary caller-supplied pattern/path. Task 3 adds no scanner allowlist or repository-path exemption.
 - `scan_backup_artifacts.py --root PATH --require-encrypted --forbid CSV` verifies a bounded nofollow backup tree contains only authenticated ciphertext/manifests and none of the named portable-secret/video/plaintext classes; unknown classes, missing encryption proof, corrupt archives, or incomplete inventory block. `scan_sandbox_residue.py --root PATH --require-empty` proves the descriptor-walked root has no remaining entry/mount/process handle and fails on an absent, changing, symlinked, unreadable, or nonempty root. `scan_sql_schema.py --db-kind vision|canonical --forbid CSV` uses the migration/schema parser without importing migrations, requires the selected registered schema inventory to be complete, and rejects forbidden normalized table/column/index/trigger/view tokens or unowned/unknown DDL.
 - `check_migration_graph.py` is the richer graph-view CLI over `check_migration_ownership.py`'s same parser. It accepts exact core version table/head plus repeated `--exact-edge CHILD:PARENT` and `--forbid-forks|--forbid-merges|--forbid-orphans`; it proves the complete unique closed ancestry without importing migration code. The two CLIs share implementation and fixtures, so no second migration truth exists.
 
@@ -1113,6 +1113,7 @@ import dataclasses
 import os
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1430,15 +1431,33 @@ def test_git_processes_disable_lazy_fetch_prompts_configs_and_proxies(
     assert scan(root) == ()
     assert observed
     for argv, environment, pass_fds in observed:
-        assert argv[:4] == ("git", "-c", "core.excludesFile=/dev/null", "-C")
+        assert argv[:5] == (
+            sys.executable, "-I", "-S", "-c",
+            private_data_scanner.GIT_FD_EXEC_HELPER,
+        )
+        assert argv[5].isascii() and argv[5].isdigit()
+        assert argv[6] == private_data_scanner.GIT_EXECUTABLE
+        git_arguments = argv[6:]
+        assert "-C" not in git_arguments
+        assert "--git-dir=.git" in git_arguments
+        assert "--work-tree=." in git_arguments
+        for override in (
+            "core.excludesFile=/dev/null", "core.fsmonitor=false",
+            "core.hooksPath=/dev/null", "core.untrackedCache=false",
+            "maintenance.auto=false", "gc.auto=0",
+        ):
+            assert override in git_arguments
         assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
         assert environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
         assert environment["GIT_CONFIG_SYSTEM"] == "/dev/null"
+        assert environment["GIT_NO_REPLACE_OBJECTS"] == "1"
         assert environment["GIT_NO_LAZY_FETCH"] == "1"
+        assert environment["GIT_OPTIONAL_LOCKS"] == "0"
+        assert environment["GIT_ATTR_NOSYSTEM"] == "1"
         assert environment["GIT_TERMINAL_PROMPT"] == "0"
         assert environment["GCM_INTERACTIVE"] == "never"
         assert environment["http_proxy"] == environment["https_proxy"] == ""
-        assert pass_fds
+        assert pass_fds == (int(argv[5]),)
 
 
 def test_missing_promised_blob_blocks_without_lazy_fetch(tmp_path: Path) -> None:
@@ -1458,6 +1477,204 @@ def test_missing_promised_blob_blocks_without_lazy_fetch(tmp_path: Path) -> None
     )
     assert private_data_cli.evaluate(["--paths", str(root)]).complete is False
     assert private_data_cli.main(["--paths", str(root)]) == 2
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin descriptor launch contract")
+def test_darwin_git_startup_never_uses_swappable_lexical_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_slot = tmp_path / "selected"
+    clean_slot = tmp_path / "clean"
+    dirty = selected_slot / "repo"
+    clean = clean_slot / "repo"
+    dirty.mkdir(parents=True); clean.mkdir(parents=True)
+    _source_repository(dirty); _source_repository(clean)
+    (dirty / ".gitignore").write_text("ordinary-cache/*\n", encoding="utf-8")
+    (dirty / "private.txt").write_bytes(_credential(b"D"))
+    (clean / ".gitignore").write_text("private.txt\n", encoding="utf-8")
+    (clean / "private.txt").write_text("synthetic\n", encoding="utf-8")
+
+    original_popen = private_data_scanner.subprocess.Popen
+    parked_dirty = tmp_path / "parked-dirty"
+    swaps = 0
+
+    class RestoringProcess:
+        def __init__(self, process):
+            self.process = process
+            self.restored = False
+
+        def restore(self) -> None:
+            if self.restored:
+                return
+            selected_slot.rename(clean_slot)
+            parked_dirty.rename(selected_slot)
+            self.restored = True
+
+        def wait(self, *args, **kwargs):
+            try:
+                return self.process.wait(*args, **kwargs)
+            finally:
+                self.restore()
+
+        def poll(self):
+            return self.process.poll()
+
+        def kill(self):
+            return self.process.kill()
+
+        def __getattr__(self, name):
+            return getattr(self.process, name)
+
+    def swap_for_lexical_git(arguments, *args, **kwargs):
+        nonlocal swaps
+        vector = tuple(os.fspath(item) for item in arguments)
+        lexical_git = (
+            len(vector) >= 5
+            and vector[0] == "git"
+            and "-C" in vector
+            and vector[vector.index("-C") + 1] == str(dirty)
+        )
+        descriptor_helper = (
+            len(vector) >= 8
+            and vector[:4] == (sys.executable, "-I", "-S", "-c")
+            and vector[4] == getattr(
+                private_data_scanner, "GIT_FD_EXEC_HELPER", "not-present",
+            )
+            and "--git-dir=.git" in vector
+        )
+        if not (lexical_git or descriptor_helper):
+            return original_popen(arguments, *args, **kwargs)
+        swaps += 1
+        selected_slot.rename(parked_dirty)
+        clean_slot.rename(selected_slot)
+        try:
+            return RestoringProcess(original_popen(arguments, *args, **kwargs))
+        except BaseException:
+            selected_slot.rename(clean_slot)
+            parked_dirty.rename(selected_slot)
+            raise
+
+    monkeypatch.setattr(private_data_scanner.subprocess, "Popen", swap_for_lexical_git)
+    findings = scan(dirty)
+    assert swaps > 0
+    assert any(item.reason == "credential-pattern" for item in findings)
+
+
+def test_replacement_ref_cannot_replace_index_blob_bytes(tmp_path: Path) -> None:
+    root = _source_repository(tmp_path)
+    payload = root / "payload.txt"
+    payload.write_bytes(_credential(b"R"))
+    _git(root, "add", "payload.txt")
+    indexed_oid = _git(root, "rev-parse", ":payload.txt").strip().decode("ascii")
+    clean_oid = _git(
+        root, "hash-object", "-w", "--stdin", input_bytes=b"ordinary\n",
+    ).strip().decode("ascii")
+    _git(root, "replace", indexed_oid, clean_oid)
+    payload.write_text("ordinary\n", encoding="utf-8")
+    assert any(item.reason == "credential-pattern" for item in scan(root))
+
+
+def test_alternate_object_body_must_match_index_oid(tmp_path: Path) -> None:
+    import zlib
+
+    root = _source_repository(tmp_path)
+    payload = root / "payload.txt"
+    payload.write_bytes(_credential(b"A"))
+    _git(root, "add", "payload.txt")
+    indexed_oid = _git(root, "rev-parse", ":payload.txt").strip().decode("ascii")
+    original = root / ".git" / "objects" / indexed_oid[:2] / indexed_oid[2:]
+    alternate = tmp_path / "alternate-objects"
+    forged = alternate / indexed_oid[:2] / indexed_oid[2:]
+    forged.parent.mkdir(parents=True)
+    clean = b"ordinary\n"
+    forged.write_bytes(zlib.compress(b"blob 9\0" + clean))
+    (root / ".git" / "objects" / "info" / "alternates").write_text(
+        str(alternate) + "\n", encoding="utf-8",
+    )
+    original.unlink()
+    payload.write_bytes(clean)
+    assert scan(root) == (
+        private_data_scanner.Finding(
+            Path("<git-index>/payload.txt"), "git-batch-content-oid-mismatch",
+        ),
+    )
+
+
+def test_repository_fsmonitor_helper_is_never_invoked(tmp_path: Path) -> None:
+    root = _source_repository(tmp_path)
+    (root / "ordinary.txt").write_text("ordinary\n", encoding="utf-8")
+    _git(root, "add", "ordinary.txt")
+    marker = tmp_path / "fsmonitor-was-run"
+    hook = tmp_path / "fsmonitor-hook.sh"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f"/usr/bin/touch {marker}\n"
+        "printf 'token\\n'\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o700)
+    _git(root, "config", "core.fsmonitor", str(hook))
+    assert scan(root) == ()
+    assert not marker.exists()
+
+
+def test_git_batch_trailing_stdout_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    (root / "ordinary.txt").write_bytes(b"ordinary\n")
+    _git(root, "add", "ordinary.txt")
+    original_popen = private_data_scanner.subprocess.Popen
+    script = (
+        "import sys\n"
+        "oid=sys.stdin.buffer.readline().strip()\n"
+        "body=b'ordinary\\n'\n"
+        "sys.stdout.buffer.write(oid+b' blob 9\\n'+body+b'\\n'+b'x'*1024)\n"
+        "sys.stdout.buffer.flush()\n"
+    )
+
+    def inject_trailing_output(arguments, *args, **kwargs):
+        vector = tuple(os.fspath(item) for item in arguments)
+        if "cat-file" in vector and "--batch" in vector:
+            return original_popen(
+                (sys.executable, "-I", "-S", "-c", script), *args, **kwargs,
+            )
+        return original_popen(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(private_data_scanner, "MAX_GIT_BATCH_BUFFER_BYTES", 128, raising=False)
+    monkeypatch.setattr(
+        private_data_scanner.subprocess, "Popen", inject_trailing_output,
+    )
+    assert scan(root)[-1].reason == "git-batch-output-limit"
+
+
+def test_every_git_process_wait_is_deadline_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    (root / "ordinary.txt").write_text("ordinary\n", encoding="utf-8")
+    _git(root, "add", "ordinary.txt")
+    original_popen = private_data_scanner.subprocess.Popen
+    waits = []
+
+    class RecordingProcess:
+        def __init__(self, process):
+            self.process = process
+
+        def wait(self, *args, **kwargs):
+            waits.append(kwargs.get("timeout"))
+            return self.process.wait(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.process, name)
+
+    def record_waits(*args, **kwargs):
+        return RecordingProcess(original_popen(*args, **kwargs))
+
+    monkeypatch.setattr(private_data_scanner.subprocess, "Popen", record_waits)
+    assert scan(root) == ()
+    assert waits
+    assert all(timeout is not None for timeout in waits)
 
 
 def test_index_blobs_use_one_batch_and_charge_before_body_read(
@@ -2192,6 +2409,7 @@ fails because `web-build` does not yet invoke the artifact scan.
 # scripts/verify_private_data.py
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -2218,9 +2436,17 @@ GENERATED_ROOT_PARTS = {
 ARTIFACT_ROOT_PARTS = {"artifact", "artifacts", "candidate", "candidates", "evidence", "release"}
 ARCHIVE_ROOT_SUFFIXES = (".zip", ".whl", ".tar", ".tar.gz", ".tgz")
 GIT_TIMEOUT_SECONDS = 10.0
+GIT_REAP_TIMEOUT_SECONDS = 1.0
+GIT_EXECUTABLE = "/usr/bin/git"
+GIT_FD_EXEC_HELPER = (
+    "import os,sys;"
+    "os.fchdir(int(sys.argv[1]));"
+    "os.execve(sys.argv[2],tuple(sys.argv[2:]),os.environ)"
+)
 MAX_GIT_INVENTORY_BYTES = 64 * 1024 * 1024
 MAX_GIT_STDERR_BYTES = 1024 * 1024
 STREAM_CHUNK_BYTES = 1024 * 1024
+MAX_GIT_BATCH_BUFFER_BYTES = 2 * STREAM_CHUNK_BYTES
 PATTERN_OVERLAP_BYTES = 256
 MAX_RAW_FILE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_COMPRESSED_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
@@ -2856,6 +3082,7 @@ class RootBinding:
 class RepositoryBinding:
     root: RootBinding
     marker_identity: Identity
+    object_format: str | None = None
 
     @property
     def path(self) -> Path:
@@ -2917,7 +3144,10 @@ def _git_environment() -> dict[str, str]:
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_ATTR_NOSYSTEM": "1",
         "GIT_NO_LAZY_FETCH": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
         "GIT_TERMINAL_PROMPT": "0",
         "HTTP_PROXY": "",
         "HTTPS_PROXY": "",
@@ -2932,21 +3162,44 @@ def _git_environment() -> dict[str, str]:
     }
 
 
-def _descriptor_path(fd: int) -> str:
-    prefix = "/dev/fd" if sys.platform == "darwin" else "/proc/self/fd"
-    return f"{prefix}/{fd}"
+def _git_command(arguments: Sequence[str]) -> tuple[str, ...]:
+    return (
+        GIT_EXECUTABLE,
+        "-c", "core.excludesFile=/dev/null",
+        "-c", "core.fsmonitor=false",
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "core.untrackedCache=false",
+        "-c", "maintenance.auto=false",
+        "-c", "gc.auto=0",
+        "--git-dir=.git", "--work-tree=.",
+        *arguments,
+    )
 
 
 def _git_argv(repository: RepositoryBinding, arguments: Sequence[str]) -> tuple[str, ...]:
-    working_tree = (
-        str(repository.path)
-        if sys.platform == "darwin"
-        else _descriptor_path(repository.fd)
-    )
     return (
-        "git", "-c", "core.excludesFile=/dev/null", "-C",
-        working_tree, *arguments,
+        sys.executable, "-I", "-S", "-c", GIT_FD_EXEC_HELPER,
+        str(repository.fd), *_git_command(arguments),
     )
+
+
+def _wait_process(process, deadline: float, path: Path) -> int:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise GitInventoryError(path, "git-inventory-timeout")
+    try:
+        return process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as error:
+        raise GitInventoryError(path, "git-inventory-timeout") from error
+
+
+def _kill_and_reap(process, path: Path) -> None:
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=GIT_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise GitInventoryError(path, "git-process-reap-timeout") from error
 
 
 def _run_git(
@@ -2991,7 +3244,7 @@ def _run_git(
                 limit = max_bytes if key.data == "stdout" else MAX_GIT_STDERR_BYTES
                 if len(target) > limit:
                     raise GitInventoryError(repository.path, "git-inventory-output-limit")
-        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        returncode = _wait_process(process, deadline, repository.path)
         if returncode not in allowed_returncodes or errors:
             raise GitInventoryError(repository.path, "git-inventory-failed")
         repository.revalidate()
@@ -3000,9 +3253,7 @@ def _run_git(
         raise GitInventoryError(repository.path, "git-inventory-failed") from error
     finally:
         selector.close()
-        if process.poll() is None:
-            process.kill()
-        process.wait()
+        _kill_and_reap(process, repository.path)
 
 
 def _git_output(
@@ -3032,22 +3283,19 @@ def _repository_for(root: RootBinding) -> RepositoryBinding | None:
     else:
         return None
     try:
-        raw = _git_output(repository, ("rev-parse", "--show-toplevel"), max_bytes=4096)
-        try:
-            decoded = raw.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise GitInventoryError(repository.path, "git-inventory-malformed") from error
-        if not decoded.endswith("\n") or decoded.count("\n") != 1:
-            raise GitInventoryError(repository.path, "git-inventory-malformed")
-        try:
-            reported = RootBinding.open(Path(decoded[:-1]))
-        except (OSError, ScanLimit) as error:
-            raise GitInventoryError(repository.path, "git-state-unprovable") from error
-        try:
-            if reported.identity != repository.root.identity:
-                raise GitInventoryError(repository.path, "git-state-unprovable")
-        finally:
-            reported.close()
+        state = _git_output(
+            repository,
+            ("rev-parse", "--is-inside-work-tree", "--is-inside-git-dir"),
+            max_bytes=64,
+        )
+        if state != b"true\nfalse\n":
+            raise GitInventoryError(repository.path, "git-state-unprovable")
+        object_format = _git_output(
+            repository, ("rev-parse", "--show-object-format"), max_bytes=16,
+        )
+        if object_format not in {b"sha1\n", b"sha256\n"}:
+            raise GitInventoryError(repository.path, "git-object-format-unsupported")
+        repository.object_format = object_format[:-1].decode("ascii")
         repository.revalidate()
         return repository
     except BaseException:
@@ -3088,7 +3336,7 @@ def _nul_records(raw: bytes, repository: Path) -> tuple[bytes, ...]:
 
 
 def _parse_index_inventory(
-    raw: bytes, repository: Path, scope: PurePosixPath,
+    raw: bytes, repository: Path, scope: PurePosixPath, object_format: str,
 ) -> tuple[IndexEntry, ...]:
     result = []
     seen = set()
@@ -3105,7 +3353,8 @@ def _parse_index_inventory(
             raise GitInventoryError(repository / Path(path.as_posix()), "git-index-conflict")
         if mode not in {b"100644", b"100755"}:
             raise GitInventoryError(repository / Path(path.as_posix()), "git-index-mode-invalid")
-        if len(oid) not in {40, 64} or re.fullmatch(rb"[0-9a-f]+", oid) is None:
+        oid_width = 40 if object_format == "sha1" else 64
+        if len(oid) != oid_width or re.fullmatch(rb"[0-9a-f]+", oid) is None:
             raise GitInventoryError(repository, "git-inventory-malformed")
         if path in seen:
             raise GitInventoryError(repository, "git-inventory-malformed")
@@ -3194,7 +3443,10 @@ def _capture_source_snapshot(
         ),
         max_bytes=MAX_GIT_INVENTORY_BYTES,
     )
-    index = _parse_index_inventory(index_raw, repository.path, scope)
+    assert repository.object_format is not None
+    index = _parse_index_inventory(
+        index_raw, repository.path, scope, repository.object_format,
+    )
     untracked = _parse_untracked_inventory(untracked_raw, repository.path, scope)
     ignored = _parse_ignored_inventory(ignored_raw, repository.path, scope)
     ignore_sources = _parse_untracked_inventory(
@@ -3499,6 +3751,16 @@ def _validate_batch_delimiter(delimiter: bytes, display: Path) -> None:
     raise GitInventoryError(display, "git-batch-framing")
 
 
+class DigestingWriter:
+    def __init__(self, destination, digest):
+        self.destination = destination
+        self.digest = digest
+
+    def write(self, value: bytes) -> int:
+        self.digest.update(value)
+        return self.destination.write(value)
+
+
 class GitBatch:
     def __init__(self, repository: RepositoryBinding, process: subprocess.Popen[bytes]):
         self.repository = repository
@@ -3533,6 +3795,8 @@ class GitBatch:
                 continue
             target = self.output if key.data == "stdout" else self.errors
             target.extend(chunk)
+            if key.data == "stdout" and len(target) > MAX_GIT_BATCH_BUFFER_BYTES:
+                raise GitInventoryError(display, "git-batch-output-limit")
             if key.data == "stderr" and len(target) > MAX_GIT_STDERR_BYTES:
                 raise GitInventoryError(display, "git-inventory-output-limit")
 
@@ -3581,9 +3845,18 @@ class GitBatch:
         budget.path_entry(display)
         budget.file(display)
         budget.input(display, declared_size)
+        object_format = self.repository.object_format
+        if object_format not in {"sha1", "sha256"}:
+            raise GitInventoryError(display, "git-object-format-unsupported")
+        digest = hashlib.new(object_format)
+        digest.update(b"blob " + str(declared_size).encode("ascii") + b"\0")
         with tempfile.TemporaryFile() as source:
-            self._copy_body(source, declared_size, display, budget)
+            self._copy_body(
+                DigestingWriter(source, digest), declared_size, display, budget,
+            )
             _validate_batch_delimiter(self._read_exact(1, display), display)
+            if digest.hexdigest() != entry.oid:
+                raise GitInventoryError(display, "git-batch-content-oid-mismatch")
             source.seek(0)
             yield FrozenFileView(source, declared_size), declared_size, display
 
@@ -3596,20 +3869,15 @@ class GitBatch:
             raise GitInventoryError(self.repository.path, "git-batch-trailing-data")
         if self.errors:
             raise GitInventoryError(self.repository.path, "git-inventory-failed")
-        try:
-            returncode = self.process.wait(
-                timeout=max(0.0, self.deadline - time.monotonic()),
-            )
-        except subprocess.SubprocessError as error:
-            raise GitInventoryError(self.repository.path, "git-inventory-failed") from error
+        returncode = _wait_process(
+            self.process, self.deadline, self.repository.path,
+        )
         if returncode != 0:
             raise GitInventoryError(self.repository.path, "git-inventory-failed")
         self.repository.revalidate()
 
     def _terminate(self) -> None:
-        if self.process.poll() is None:
-            self.process.kill()
-        self.process.wait()
+        _kill_and_reap(self.process, self.repository.path)
 
     def __exit__(self, exc_type, _exc, _traceback) -> bool:
         try:
@@ -3863,11 +4131,13 @@ Use `argparse` sub-free parsers with `allow_abbrev=False`; reject mutually combi
 
 Create `tests/fixtures/synthetic/README.md` stating that fixtures use generated UUIDs and roles only, never recorded media, real names, credentials, addresses, host identifiers, or provider bodies.
 
-Classify every lexical root independently before reading content. Open every absolute ancestor descriptor-relative from `/` with `O_DIRECTORY|O_NOFOLLOW`, retain that descriptor/identity chain through the scan, and reject a symlink or special ancestor. Reject duplicate lexical roots and device/inode aliases before scanning any root. A verified Git worktree root, or a non-ignored descendant that is not itself a generated/evidence/candidate/archive root, is a **source root**. A retained repository descriptor and `.git` identity bind classification, inventory, and candidate opens; Linux Git commands use the inherited descriptor path, while macOS path-based Git commands are bracketed by full retained-chain and marker revalidation because Darwin cannot `chdir` through an inherited `/dev/fd` directory. Every opened working candidate must equal the identity captured for that exact Git-relative path.
+Classify every lexical root independently before reading content. Open every absolute ancestor descriptor-relative from `/` with `O_DIRECTORY|O_NOFOLLOW`, retain that descriptor/identity chain through the scan, and reject a symlink or special ancestor. Reject duplicate lexical roots and device/inode aliases before scanning any root. A verified Git worktree root, or a non-ignored descendant that is not itself a generated/evidence/candidate/archive root, is a **source root**. A retained repository descriptor and `.git` identity bind classification, inventory, and candidate opens. Every Git process on Darwin and Linux starts through the fixed current Python interpreter in `-I -S` mode; the isolated helper inherits only that repository descriptor, calls `os.fchdir(fd)`, and immediately `os.execve`s fixed `/usr/bin/git` with `--git-dir=.git --work-tree=.` and the closed environment. It uses no lexical repository path, shell, site import, or `preexec_fn`, so holding a substitute at the lexical name for the complete child lifetime cannot redirect Git. Every opened working candidate must equal the identity captured for that exact Git-relative path.
 
 Source mode captures the same bounded inventory twice before scanning and once after scanning: complete stage-0 `git ls-files --stage -z` records, visible untracked records using only repository `.gitignore` files, repository-`.gitignore` ignored records used as physical-prune boundaries, identities for every applicable `.gitignore`, and nofollow working-tree identities for every inventoried path within the requested pathspec. A descriptor-relative physical supplement walks the requested source subtree to prove that every unignored regular/symlink entry belongs to the Git inventory and to block unignored FIFOs, devices, sockets, or other omitted special entries; it skips only the bound worktree's `.git` marker and ignored entries proven by the captured repository `.gitignore` inventory. It is a completeness proof, not an artifact content scan. Ordinary ignored pytest/Ruff/mypy caches, build outputs, and pnpm links are therefore omitted only through source classification and the captured ignore inventory; an explicit ignored/generated/evidence/candidate/archive root always takes artifact mode, and ambiguity takes artifact mode or blocks.
 
-Source content scanning uses one bounded `git cat-file --batch` process for all stage-0 objects. For each response it validates the exact requested OID, `blob` type, canonical declared size, header/body delimiter, short read, missing object, and trailing output; charges the per-file and shared input budgets before reading the body; and streams exactly the declared bytes into bounded anonymous temporary storage before matching/archive parsing. It then scans the nofollow bytes of every present tracked working-tree file and every visible untracked/non-ignored file. Thus a staged-only leak is visible and a tracked file below an ignored directory remains visible through the index. A nonzero stage, duplicate/malformed/non-UTF-8/non-canonical/out-of-scope path, invalid mode/object ID, failed/truncated/oversized/timed-out Git command or batch response, unreadable/changing input, physical/Git disagreement, or any before/after inventory or identity drift blocks and terminates the batch process. Git commands use fixed argument vectors, `shell=False`, retained descriptors, bounded stdout/stderr, and a ten-second deadline. They disable system/global config, `core.excludesFile`, lazy fetching, credential prompts, and proxy access; `.git/info/exclude` and ambient exclude/config sources cannot hide source candidates. Inability to prove a discovered worktree's state is never reclassified as an artifact pass.
+Source content scanning first binds exactly one supported repository object format (`sha1` or `sha256`) and its canonical OID width, then uses one bounded `git cat-file --batch` process for all stage-0 objects. For each response it validates the requested OID echo, `blob` type, canonical declared size, header/body delimiter, short read, missing object, and trailing output; charges the per-file and shared input budgets before reading the body; and streams exactly the declared bytes into bounded anonymous temporary storage before matching/archive parsing. During that same stream it independently computes the canonical Git blob digest over `b"blob " + ascii_size + b"\0" + body` and compares it to the stage-0 OID before the bytes can attest. Replacement refs are disabled, and an alternate object stored under a mismatched OID therefore blocks even if `cat-file` echoes the requested name. It then scans the nofollow bytes of every present tracked working-tree file and every visible untracked/non-ignored file. Thus a staged-only leak is visible and a tracked file below an ignored directory remains visible through the index.
+
+A nonzero stage, wrong-width OID, unsupported object format, duplicate/malformed/non-UTF-8/non-canonical/out-of-scope path, invalid mode, failed/truncated/oversized/timed-out Git command or batch response, local blob-digest mismatch, unreadable/changing input, physical/Git disagreement, or any before/after inventory or identity drift blocks and terminates the batch process. Git commands use fixed argument vectors, `shell=False`, retained descriptors, stdout/stderr caps, a two-MiB batch-stdout buffer cap, a ten-second operation deadline, and a one-second bounded kill/reap deadline. They set `GIT_NO_REPLACE_OBJECTS=1`, `GIT_OPTIONAL_LOCKS=0`, and `GIT_ATTR_NOSYSTEM=1`; disable system/global config, `core.excludesFile`, lazy fetching, credential prompts, and proxies; and override local `core.fsmonitor`, `core.hooksPath`, `core.untrackedCache`, `core.worktree`, automatic maintenance, and GC behavior through command-line settings plus the descriptor-relative worktree pair. `.git/info/exclude` and ambient exclude/config sources cannot hide source candidates, and repository config cannot execute an fsmonitor helper or redirect the worktree. Inability to prove a discovered worktree's state is never reclassified as an artifact pass.
 
 An ignored root, a root whose relative path contains a generated/evidence/candidate component, an explicitly named archive, or any root outside Git is an **artifact root** and receives the existing complete physical nofollow walk. Explicit `dist`, `var`, nested generated names, evidence/candidate trees, and archives never inherit source exclusions, even when they are below a worktree or force-tracked. Missing, symlink, FIFO, device, socket, unreadable, or changing explicit roots block. CLI normalization remains lexical so an explicitly supplied symlink reaches the nofollow check. No matcher, suffix, credential/private-key rule, archive parser, race check, limit, or special-file rejection is weakened, and Task 3 adds no repository path allowlist.
 
@@ -3881,7 +4151,7 @@ Replace Task 2's fail-closed `verify-private-data` recipe in `Makefile` with `uv
 
 Run: `uv run pytest tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py tests/ci/test_web_command_contract.py -q && mkdir -p dist var && uv run python scripts/verify_private_data.py . && uv run python scripts/verify_private_data.py dist var && uv run python scripts/verify_private_data.py . dist var && uv run python scripts/scan_private_data.py --paths . dist var && uv run ruff check scripts/verify_private_data.py scripts/assurance_common.py scripts/check_feature_absence.py scripts/check_import_boundaries.py scripts/check_migration_ownership.py scripts/check_migration_graph.py scripts/scan_browser_artifacts.py scripts/scan_network_surface.py scripts/scan_private_data.py scripts/scan_backup_artifacts.py scripts/scan_sandbox_residue.py scripts/scan_sql_schema.py tests/security/test_private_data_scanner.py tests/security/test_shared_assurance_tools.py tests/ci/test_web_command_contract.py && uv run mypy scripts && make check`
 
-Expected: PASS after the test gate creates the two bounded empty artifact/evidence roots. Positional, mixed `. dist var`, and `--paths` forms all use the same shared-budget engine. The repository and non-ignored subtree cases use only stable Git source inventories; normal ignored tool/cache/pnpm output is absent indirectly, while visible untracked, stage-only, and force-tracked-below-ignored leaks are found. Conflicted, malformed, failed, timed-out, or drifting Git inventories block. Explicit ignored/generated/evidence/candidate/archive roots use the complete physical walk, and the mixed source/artifact case proves that their budgets do not reset. The scanner also fails closed for a missing/unreadable/changing or rename-substituted root/file/directory, a regular/symlink/special replacement between entry stat and open, explicit symlink, filesystem/archive special entry, unsafe/duplicate/payload-directory ZIP entry, nested-archive leak, malformed or oversized ZIP central directory, invalid GZip FHCRC, hostile PAX/GNU metadata, nonzero special-member body, nonzero or excessive TAR/GZip padding, or any per-object/scan-wide path, file, physical-input, member, metadata, header, directory-depth, archive-depth, or actual-expansion limit. Literal credential patterns in ZIP comments/extras, GZip optional headers, and TAR header fields are reported. The lazy million-entry fixture stops after the first over-limit entry; explicit/nested generated roots do not skip content; and two individually small archives share one cumulative expansion budget. Complete streaming includes every bounded nested wheel member and a realistic Reachy wheelhouse beyond the old 16 MiB ceiling without extracting into a public tree. The Make contract proves build-before-scan and no scan after a failed build. All five structural tools pass their synthetic positive cases, reject every injected finding, and return `2` for incomplete/raced/unparseable inventories.
+Expected: PASS after the test gate creates the two bounded empty artifact/evidence roots. Positional, mixed `. dist var`, and `--paths` forms all use the same shared-budget engine. The repository and non-ignored subtree cases use only stable Git source inventories; normal ignored tool/cache/pnpm output is absent indirectly, while visible untracked, stage-only, and force-tracked-below-ignored leaks are found. Conflicted, malformed, failed, timed-out, or drifting Git inventories block. Every Git process starts from the inherited repository descriptor through the isolated helper even while the lexical worktree name is replaced for the child's complete lifetime; local fsmonitor is disabled, replacement refs cannot substitute index bytes, a mismatched alternate-store body fails the locally computed canonical blob digest, batch stdout remains bounded through shutdown, and every child wait/reap has a deadline. Explicit ignored/generated/evidence/candidate/archive roots use the complete physical walk, and the mixed source/artifact case proves that their budgets do not reset. The scanner also fails closed for a missing/unreadable/changing or rename-substituted root/file/directory, a regular/symlink/special replacement between entry stat and open, explicit symlink, filesystem/archive special entry, unsafe/duplicate/payload-directory ZIP entry, nested-archive leak, malformed or oversized ZIP central directory, invalid GZip FHCRC, hostile PAX/GNU metadata, nonzero special-member body, nonzero or excessive TAR/GZip padding, or any per-object/scan-wide path, file, physical-input, member, metadata, header, directory-depth, archive-depth, or actual-expansion limit. Literal credential patterns in ZIP comments/extras, GZip optional headers, and TAR header fields are reported. The lazy million-entry fixture stops after the first over-limit entry; explicit/nested generated roots do not skip content; and two individually small archives share one cumulative expansion budget. Complete streaming includes every bounded nested wheel member and a realistic Reachy wheelhouse beyond the old 16 MiB ceiling without extracting into a public tree. The Make contract proves build-before-scan and no scan after a failed build. All five structural tools pass their synthetic positive cases, reject every injected finding, and return `2` for incomplete/raced/unparseable inventories.
 
 - [ ] **Step 5: Commit exact Task 3 paths**
 
