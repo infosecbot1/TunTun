@@ -32,17 +32,21 @@
 |---|---|---|
 | Workspace | `.python-version`, root/package `pyproject.toml`, `uv.lock`, `Makefile`, pnpm files | Reproducible Python/web workspaces and commands |
 | Assurance | `scripts/verify_private_data.py`, `scripts/assurance_common.py`, `scripts/check_feature_absence.py`, `scripts/check_import_boundaries.py`, `scripts/check_migration_ownership.py`, `scripts/scan_browser_artifacts.py`, `scripts/scan_network_surface.py` | First owner of fail-closed cross-phase scanners required by Phases 3–6 |
-| Contracts | `packages/contracts/src/tuntun_contracts/*.py`, `fixtures/v1/*.json` | Frozen DTOs, canonical bytes, and async ports; no adapters |
+| Contracts | `packages/contracts/src/tuntun_contracts/*.py`, `fixtures/v1/*.json`, `scripts/generate_{schemas,openapi}.py`, `packages/contracts/{schema/v1/contracts.schema.json,openapi/admin-v1.yaml}` | Frozen DTOs, canonical bytes, async ports, and their sole complete generated schema/OpenAPI artifacts; no adapters |
 | Configuration | `apps/core/src/tuntun_core/config/*.py`, `config/tuntun.example.yaml` | Strict defaults, YAML/env precedence, owner-only paths |
 | Secrets/logging | `apps/core/src/tuntun_core/adapters/keychain/*.py` | `SecretProvider`, macOS backend, typed redaction |
 | Deterministic tools | `packages/testing/src/tuntun_testing/*.py`, `apps/core/src/tuntun_core/services/models/*.py` | Fake clock/providers/Reachy, scenario runner, governed model registry |
 | Storage | `apps/core/src/tuntun_core/adapters/sqlcipher/*.py` | Key-first SQLCipher connection, record AEAD, engine, unit of work, schema metadata |
-| Migration | `apps/core/migrations/env.py`, `versions/0001_foundation.py` | Exactly the foundation-owned tables and DB triggers |
+| Migration | `apps/core/migrations/env.py`, `versions/0001_foundation.py`, `apps/core/src/tuntun_core/adapters/sqlcipher/foundation_0001.py` | Immutable revision-0001 table snapshot, exactly the foundation-owned tables, and DB triggers |
 | Audit | `apps/core/src/tuntun_core/services/audit/*.py` | Ordered public SHA-256 chain plus versioned HMAC commitments and verification |
 
 Exact cross-task interfaces are fixed here and repeated in the owning task:
 
 ```python
+class ClockPort(Protocol):
+    def now(self) -> AwareDatetime: raise NotImplementedError
+    def monotonic(self) -> float: raise NotImplementedError
+
 class SecretProvider(Protocol):
     def get(self, service: str, account: str) -> bytes: raise NotImplementedError
     def set(self, service: str, account: str, value: bytes) -> None: raise NotImplementedError
@@ -91,10 +95,13 @@ class AtomicMutationScope:
     def require_active_uow(self) -> AsyncUnitOfWorkProtocol: raise NotImplementedError
 
 class AuditLedger:
+    def __init__(self, key_id: str, key: bytes, clock: ClockPort) -> None: raise NotImplementedError
     def append(self, uow: UnitOfWorkProtocol, draft: AuditDraft) -> AuditReceipt: raise NotImplementedError
+    def seal(self, uow: UnitOfWorkProtocol, first_ordinal: int, last_ordinal: int) -> AuditSegment: raise NotImplementedError
 
 class AsyncAuditLedger:
     async def append(self, uow: AsyncUnitOfWorkProtocol, draft: AuditDraft) -> AuditReceipt: raise NotImplementedError
+    async def seal(self, uow: AsyncUnitOfWorkProtocol, first_ordinal: int, last_ordinal: int) -> AuditSegment: raise NotImplementedError
 
 class AuditVerifier:
     def verify(self, connection: Connection) -> AuditVerification: raise NotImplementedError
@@ -427,7 +434,8 @@ def _assert_workflow_policy(path: Path) -> None:
         runner = job["runs-on"]
         if isinstance(runner, str) and runner.startswith("${{"):
             assert runner == "${{ matrix.os }}"
-            assert set(job["strategy"]["matrix"]["os"]) <= FIXED_RUNNERS
+            matrix = job["strategy"]["matrix"]
+            assert matrix == {"os": ["ubuntu-24.04", "macos-15-intel"]}
         else:
             assert runner in FIXED_RUNNERS
         for step in job.get("steps", []):
@@ -442,10 +450,9 @@ def test_every_yml_and_yaml_workflow_has_only_fixed_runners_and_full_sha_actions
 
 def test_ci_matrix_remains_exact() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
-    assert workflow["jobs"]["check"]["strategy"]["matrix"]["os"] == [
-        "ubuntu-24.04",
-        "macos-15-intel",
-    ]
+    assert workflow["jobs"]["check"]["strategy"]["matrix"] == {
+        "os": ["ubuntu-24.04", "macos-15-intel"],
+    }
 
 
 def test_ci_is_unprivileged_and_has_no_hardware_or_provider_secrets() -> None:
@@ -480,6 +487,20 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
         ("release.yaml", {"permissions": {"contents": "write"}}),
         ("security.yml", {"permissions": {"issues": "write"}}),
         ("release.yaml", {"permissions": None}),
+        ("security.yml", {
+            "runs-on": "${{ matrix.os }}",
+            "strategy": {"matrix": {
+                "os": ["ubuntu-24.04", "macos-15-intel"],
+                "include": [{"os": "self-hosted"}],
+            }},
+        }),
+        ("release.yaml", {
+            "runs-on": "${{ matrix.os }}",
+            "strategy": {"matrix": {
+                "os": ["ubuntu-24.04", "macos-15-intel"],
+                "exclude": [{"os": "ubuntu-24.04"}],
+            }},
+        }),
     ):
         changed = {**valid, "jobs": {"check": {**valid["jobs"]["check"], **mutation}}}
         path = root / name
@@ -907,13 +928,13 @@ jobs:
       - run: make lint typecheck test test-security test-contract web-test web-build
 ```
 
-The four action revisions are full reviewed commit SHAs and the comments are informational only. The policy test enumerates the union of `.github/workflows/*.yml` and `.github/workflows/*.yaml` on every run, so later security/release workflows cannot escape review by using the other suffix. It checks job-level reusable workflows and every step-level third-party `uses`, while allowing only repository-local `./` actions, and validates every literal or matrix-expanded runner against the fixed set. Dependabot may propose an update, but CI rejects a tag, branch, abbreviated SHA, `*-latest` runner, unreviewed runner label, secret reference, or hardware/provider job. Linux remains the portable gate; `macos-15-intel` proves hosted Intel compatibility only. It is not evidence for the household Mac, Reachy, network, reboot, thermal, firewall, or lifecycle qualification gates.
+The four action revisions are full reviewed commit SHAs and the comments are informational only. The policy test enumerates the union of `.github/workflows/*.yml` and `.github/workflows/*.yaml` on every run, so later security/release workflows cannot escape review by using the other suffix. It checks job-level reusable workflows and every step-level third-party `uses`, while allowing only repository-local `./` actions, and validates every literal runner against the fixed set. A matrix runner is permitted only when the complete matrix object is exactly the ordered `os` list shown above; `include`, `exclude`, another axis, or another runner label is rejected. Dependabot may propose an update, but CI rejects a tag, branch, abbreviated SHA, `*-latest` runner, unreviewed runner label, secret reference, or hardware/provider job. Linux remains the portable gate; `macos-15-intel` proves hosted Intel compatibility only. It is not evidence for the household Mac, Reachy, network, reboot, thermal, firewall, or lifecycle qualification gates.
 
 - [ ] **Step 4: Run the green web/build gate**
 
 Run: `uv lock && uv sync --all-packages --locked && pnpm install && pnpm --filter @tuntun/admin test && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/admin e2e -- --list && uv run python -c "import coverage, pytest_cov, yaml" && uv run pytest tests/unit/test_package_smoke.py tests/unit/test_cli.py tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py -q && make test && make test-security test-contract && make lint && make typecheck && sh -c 'make verify-private-data; code=$?; test "$code" -eq 2' && sh -c 'make check; code=$?; test "$code" -eq 2'`
 
-Expected: PASS on Linux and Intel macOS; `uv.lock` contains resolved `PyYAML` and `pytest-cov`, `uv sync --locked` accepts it as current, the direct import probe exits 0, the CLI test prints exactly `0.1.0.dev0` and `make test` meets the 85% branch-coverage gate, and both Python policy modules reject root/job write permissions, reusable-job secret forwarding, and dot/index secret expressions. `test-security` and `test-contract` print an explicit zero-file count now and automatically execute every matching future file once its owning directory exists. `verify-private-data` and `check` exit exactly 2 until Task 3 installs the scanner, so Task 2 CI runs only the complete current gates. The app-local/root-unit Vitest sentinels pass, Playwright's `--list` output contains the `testDir`-relative paths `e2e/admin-smoke.spec.ts` and `ui/admin-accessibility.spec.ts` with a nonzero discovery total, all `.ts`/`.tsx` e2e/UI files are in ESLint and TypeScript scopes, the Vite build succeeds, and static checks report zero errors. `git diff -- .gitignore` retains `.worktrees/` and `.superpowers/sdd/` and adds every listed runtime/build/Python-cache ignore.
+Expected: PASS on Linux and Intel macOS; `uv.lock` contains resolved `PyYAML` and `pytest-cov`, `uv sync --locked` accepts it as current, the direct import probe exits 0, the CLI test prints exactly `0.1.0.dev0` and `make test` meets the 85% branch-coverage gate, and both Python policy modules reject root/job write permissions, reusable-job secret forwarding, dot/index secret expressions, and matrix `include`/`exclude` or extra-axis runner expansion. `test-security` and `test-contract` print an explicit zero-file count now and automatically execute every matching future file once its owning directory exists. `verify-private-data` and `check` exit exactly 2 until Task 3 installs the scanner, so Task 2 CI runs only the complete current gates. The app-local/root-unit Vitest sentinels pass, Playwright's `--list` output contains the `testDir`-relative paths `e2e/admin-smoke.spec.ts` and `ui/admin-accessibility.spec.ts` with a nonzero discovery total, all `.ts`/`.tsx` e2e/UI files are in ESLint and TypeScript scopes, the Vite build succeeds, and static checks report zero errors. `git diff -- .gitignore` retains `.worktrees/` and `.superpowers/sdd/` and adds every listed runtime/build/Python-cache ignore.
 
 - [ ] **Step 5: Commit exact Task 2 paths**
 
@@ -2328,6 +2349,8 @@ git commit -m "security: add fail-closed assurance scanners"
 - Create: `packages/contracts/src/tuntun_contracts/events.py`
 - Create: `scripts/generate_schemas.py`
 - Create: `scripts/generate_openapi.py`
+- Create: `packages/contracts/schema/v1/contracts.schema.json`
+- Create: `packages/contracts/openapi/admin-v1.yaml`
 - Modify: `packages/contracts/src/tuntun_contracts/__init__.py`
 - Test: `tests/contract/test_strict_models.py`
 - Test: `tests/contract/test_event_canonicalization.py`
@@ -2335,7 +2358,7 @@ git commit -m "security: add fail-closed assurance scanners"
 
 **Interfaces:**
 - Consumes: Pydantic v2 and `rfc8785.dumps(value) -> bytes`.
-- Produces: `JSONValue`, `ContractParseError`, bounded duplicate-safe `parse_bounded_json_value(raw, *, max_bytes, max_depth=32, max_containers=4096, max_structure_tokens=16384)`, `ContractModel`, `registered_contract_models()`, `Sensitivity`, `Commitment`, `canonical_bytes(model: ContractModel) -> bytes`, `parse_contract_json(model_type, raw: bytes, *, max_bytes, require_canonical=False)`, `EventType`, `WakeDetectedPayload`, `StopRequestedPayload`, `EventEnvelope`, and `SignedEventEnvelope` exactly as shown below. Hostile bytes (size, UTF-8, syntax, duplicate, shape, numeric, schema, or canonicality faults) normalize to `ContractParseError`; caller/programmer errors such as an invalid parser configuration or non-contract model type remain visible as their ordinary `TypeError`/`ValueError`. This task also owns the sole deterministic `generate_schemas.py` and `generate_openapi.py`. Each supports exactly one of `--check` or explicit maintainer-only `--write`; check mode renders the bounded complete registered inventory into a private temporary tree and byte-compares unique normalized output paths without repository mutation. Missing/extra/stale/nondeterministic/symlinked/duplicate/changing inputs or outputs fail closed. Schema generation consumes `registered_contract_models()` plus an explicit model/path registry; OpenAPI generation consumes only the closed route/DTO registry and canonical serializer. Neither imports app bootstrap, reads household state/credentials, opens listeners, or performs network access.
+- Produces: `JSONValue`, `ContractParseError`, bounded duplicate-safe `parse_bounded_json_value(raw, *, max_bytes, max_depth=32, max_containers=4096, max_structure_tokens=16384)`, `ContractModel`, `registered_contract_models()`, `Sensitivity`, `Commitment`, `canonical_bytes(model: ContractModel) -> bytes`, `canonical_mapping_bytes(value: Mapping[str, Any]) -> bytes`, `parse_contract_json(model_type, raw: bytes, *, max_bytes, require_canonical=False)`, `EventType`, `WakeDetectedPayload`, `StopRequestedPayload`, `EventEnvelope`, and `SignedEventEnvelope` exactly as shown below. Hostile bytes (size, UTF-8, syntax, duplicate, shape, numeric, schema, or canonicality faults) normalize to `ContractParseError`; caller/programmer errors such as an invalid parser configuration or non-contract model type remain visible as their ordinary `TypeError`/`ValueError`. This task also owns the sole deterministic `generate_schemas.py` and `generate_openapi.py` plus their complete generated outputs: the single JSON Schema bundle `packages/contracts/schema/v1/contracts.schema.json` and the single OpenAPI document `packages/contracts/openapi/admin-v1.yaml`. Each generator exposes one exact `OUTPUT_PATH`, renders every `registered_contract_models()` entry under its fully qualified name, and supports exactly one of `--check` or explicit maintainer-only `--write`; check mode renders the bounded complete registered inventory into a private temporary tree and byte-compares the exact output without repository mutation. Missing/stale/nondeterministic/symlinked/changing outputs and any extra regular/symlink/special entry beside the sole owned output fail closed. OpenAPI has `openapi: 3.1.0`, an empty foundation `paths` mapping, and the same complete model inventory under `components.schemas`; no route is invented. Neither generator imports app bootstrap, reads household state/credentials, opens listeners, or performs network access.
 
 - [ ] **Step 1: Write strictness and canonical-byte tests**
 
@@ -2557,9 +2580,61 @@ def test_event_type_must_equal_payload_kind() -> None:
         EventEnvelope.model_validate_json(json.dumps({**VALID_WAKE, "event_type":"safety.stop_requested"}))
 ```
 
+```python
+# tests/contract/test_contract_generators.py
+import json
+from pathlib import Path
+
+import yaml
+
+from scripts import generate_openapi, generate_schemas
+from tuntun_contracts.base import registered_contract_models
+
+SCHEMA_OUTPUT=Path("packages/contracts/schema/v1/contracts.schema.json")
+OPENAPI_OUTPUT=Path("packages/contracts/openapi/admin-v1.yaml")
+
+
+def _registered_names() -> set[str]:
+    return {
+        f"{model.__module__}.{model.__qualname__}"
+        for model in registered_contract_models()
+    }
+
+
+def test_generators_own_exact_complete_outputs_and_are_deterministic() -> None:
+    assert generate_schemas.OUTPUT_PATH == SCHEMA_OUTPUT
+    assert generate_openapi.OUTPUT_PATH == OPENAPI_OUTPUT
+    assert generate_schemas.render() == generate_schemas.render()
+    assert generate_openapi.render() == generate_openapi.render()
+    schema=json.loads(generate_schemas.render())
+    openapi=yaml.safe_load(generate_openapi.render())
+    assert set(schema["models"]) == _registered_names()
+    assert set(openapi["components"]["schemas"]) == _registered_names()
+    assert openapi["paths"] == {}
+
+
+def test_check_rejects_missing_stale_symlink_or_extra_output(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    for generator in (generate_schemas,generate_openapi):
+        parent=tmp_path/generator.__name__; parent.mkdir()
+        owned=parent/generator.OUTPUT_PATH.name
+        monkeypatch.setattr(generator,"OUTPUT_PATH",owned)
+        assert generator.main(["--check"]) == 1
+        owned.write_bytes(b"stale\n")
+        assert generator.main(["--check"]) == 1
+        owned.unlink(); owned.symlink_to(parent/"missing")
+        assert generator.main(["--check"]) == 1
+        owned.unlink(); owned.write_bytes(generator.render())
+        (parent/"extra.generated").write_text("unexpected\n")
+        assert generator.main(["--check"]) == 1
+        (parent/"extra.generated").unlink()
+        assert generator.main(["--check"]) == 0
+```
+
 - [ ] **Step 2: Run the red contract tests**
 
-Run: `uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py -q`
+Run: `uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py -q`
 
 Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_contracts.base'`.
 
@@ -2863,17 +2938,19 @@ class SignedEventEnvelope(ContractModel):
     signature_b64: Annotated[str, Field(min_length=80, max_length=128)]
 ```
 
+Implement both generator modules with these exact public values/functions: `OUTPUT_PATH`, `render() -> bytes`, and `main(argv: Sequence[str] | None = None) -> int`. `render()` imports the complete public `tuntun_contracts` package before reading `registered_contract_models()`, rejects duplicate fully qualified names, sorts that name map, and serializes deterministically. The JSON bundle has exactly `$schema`, `schema_version`, and `models`; the OpenAPI document has exactly `openapi`, `info`, `paths`, and `components`, with the same schemas. Shared write/check code creates the parent privately, rejects a symlink or non-regular output, writes a same-directory `0600` temporary file followed by `fsync` and atomic replace for `--write`, and for `--check` compares two independent renders plus the checked-in bytes and scans the output parent for any entry outside `{OUTPUT_PATH.name}`. Exactly one of `--write|--check` is mandatory; every error returns 1 without mutating in check mode.
+
 - [ ] **Step 4: Run the green canonical-contract gate**
 
-Run: `uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py -q && uv run python scripts/generate_schemas.py --check && uv run python scripts/generate_openapi.py --check && uv run ruff check packages/contracts/src scripts/generate_schemas.py scripts/generate_openapi.py tests/contract && uv run mypy packages/contracts/src scripts/generate_schemas.py scripts/generate_openapi.py`
+Run: `uv run python scripts/generate_schemas.py --write && uv run python scripts/generate_openapi.py --write && uv run pytest tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py -q && uv run python scripts/generate_schemas.py --check && uv run python scripts/generate_openapi.py --check && uv run ruff check packages/contracts/src scripts/generate_schemas.py scripts/generate_openapi.py tests/contract && uv run mypy packages/contracts/src scripts/generate_schemas.py scripts/generate_openapi.py`
 
-Expected: PASS with all contract/generator tests passing, two consecutive renders byte-identical, drift/missing/extra/duplicate-path inputs rejected, check mode leaving the worktree byte-identical, and Ruff/mypy exiting 0.
+Expected: PASS with both owned artifacts present, all contract/generator tests passing, each artifact inventory exactly equal to the Task 4 public registry, two consecutive renders byte-identical, drift/missing/extra/symlink inputs rejected, check mode leaving the worktree byte-identical, and Ruff/mypy exiting 0.
 
 - [ ] **Step 5: Commit exact Task 4 paths**
 
 ```bash
 git status --short
-git add packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/generate_schemas.py scripts/generate_openapi.py tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
+git add packages/contracts/src/tuntun_contracts/base.py packages/contracts/src/tuntun_contracts/events.py packages/contracts/src/tuntun_contracts/__init__.py scripts/generate_schemas.py scripts/generate_openapi.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/test_strict_models.py tests/contract/test_event_canonicalization.py tests/contract/test_contract_generators.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(contracts): freeze canonical event primitives"
@@ -2897,11 +2974,13 @@ git commit -m "feat(contracts): freeze canonical event primitives"
 - Create: `packages/contracts/src/tuntun_contracts/speech.py`
 - Create: `packages/contracts/src/tuntun_contracts/ports.py`
 - Modify: `packages/contracts/src/tuntun_contracts/__init__.py`
+- Modify: `packages/contracts/schema/v1/contracts.schema.json`
+- Modify: `packages/contracts/openapi/admin-v1.yaml`
 - Test: `tests/contract/test_v1_types_and_ports.py`
 - Test: `tests/contract/test_dependency_direction.py`
 
 **Interfaces:**
-- Consumes: `ContractModel`, `Commitment`, `Sensitivity`, and event DTOs from Task 4.
+- Consumes: `ContractModel`, `Commitment`, `Sensitivity`, event DTOs, and the sole schema/OpenAPI generators and owned artifact paths from Task 4.
 - Produces the following exact public types and methods; later plans must import these names rather than redefining them:
 
 ```python
@@ -4204,15 +4283,15 @@ The contract semantics are also frozen: `IdentityFusionPort` returns identity on
 
 - [ ] **Step 4: Run the green DTO/port gate**
 
-Run: `uv run pytest tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py -q && uv run ruff check packages/contracts/src tests/contract && uv run mypy packages/contracts/src`
+Run: `uv run python scripts/generate_schemas.py --write && uv run python scripts/generate_openapi.py --write && uv run pytest tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py tests/contract/test_contract_generators.py -q && uv run python scripts/generate_schemas.py --check && uv run python scripts/generate_openapi.py --check && uv run ruff check packages/contracts/src tests/contract && uv run mypy packages/contracts/src`
 
-Expected: PASS; required enum values match exactly and every asserted port operation is async.
+Expected: PASS; required enum values match exactly, every asserted port operation is async, both generated artifacts contain exactly the complete post-DTO public registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output.
 
 - [ ] **Step 5: Commit exact Task 5 paths**
 
 ```bash
 git status --short
-git add packages/contracts/src/tuntun_contracts/actions.py packages/contracts/src/tuntun_contracts/audit.py packages/contracts/src/tuntun_contracts/budget.py packages/contracts/src/tuntun_contracts/identity.py packages/contracts/src/tuntun_contracts/memory.py packages/contracts/src/tuntun_contracts/policy.py packages/contracts/src/tuntun_contracts/provider.py packages/contracts/src/tuntun_contracts/reachy.py packages/contracts/src/tuntun_contracts/speech.py packages/contracts/src/tuntun_contracts/ports.py packages/contracts/src/tuntun_contracts/__init__.py tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py
+git add packages/contracts/src/tuntun_contracts/actions.py packages/contracts/src/tuntun_contracts/audit.py packages/contracts/src/tuntun_contracts/budget.py packages/contracts/src/tuntun_contracts/identity.py packages/contracts/src/tuntun_contracts/memory.py packages/contracts/src/tuntun_contracts/policy.py packages/contracts/src/tuntun_contracts/provider.py packages/contracts/src/tuntun_contracts/reachy.py packages/contracts/src/tuntun_contracts/speech.py packages/contracts/src/tuntun_contracts/ports.py packages/contracts/src/tuntun_contracts/__init__.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(contracts): define versioned DTOs and ports"
@@ -4522,6 +4601,7 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 - Modify: `uv.lock`
 - Create: `apps/core/src/tuntun_core/config/settings.py`
 - Create: `apps/core/src/tuntun_core/config/loader.py`
+- Create: `apps/core/src/tuntun_core/config/secure_paths.py`
 - Create: `apps/core/src/tuntun_core/config/paths.py`
 - Create: `config/tuntun.example.yaml`
 - Create: `.env.example`
@@ -4531,7 +4611,7 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 
 **Interfaces:**
 - Consumes: YAML file and explicit `TUNTUN_` environment overrides.
-- Produces: `Settings` and `load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Settings`; `ApplicationPaths.create(base: Path | None = None) -> ApplicationPaths` with `root`, `data`, `logs`, `models`, and `backups` directories at mode `0700`.
+- Produces: `Settings` and `load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Settings`; descriptor-walked `OwnedPath(path, device, inode).revalidate()` and `ensure_private_directory(path: Path) -> OwnedPath`; `ApplicationPaths.create(base: Path | None = None) -> ApplicationPaths` with `root`, `data`, `logs`, `models`, and `backups` directories at exact mode `0700`. Every path component is opened no-follow relative to its already verified parent; root-owned ancestors must not be group/world writable, user-owned ancestors must be private, and every returned leaf is a user-owned directory whose device/inode/type/mode still match immediately before return.
 
 - [ ] **Step 1: Write red settings/path tests**
 
@@ -4595,14 +4675,54 @@ def test_environment_override_is_one_bounded_plain_scalar(raw) -> None:
 
 ```python
 # tests/unit/config/test_paths.py
+import os
 import stat
 from pathlib import Path
+import pytest
+from tuntun_core.config import secure_paths
 from tuntun_core.config.paths import ApplicationPaths
 
 def test_paths_are_created_owner_only(tmp_path: Path) -> None:
     paths = ApplicationPaths.create(tmp_path / "Tuntun")
     for path in (paths.root, paths.data, paths.logs, paths.models, paths.backups):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("mutation",(
+    "root_symlink","data_symlink","data_fifo","wrong_mode","wrong_owner",
+))
+def test_application_paths_reject_unsafe_existing_components(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,mutation:str,
+) -> None:
+    base=tmp_path/"Tuntun"; target=tmp_path/"target"; target.mkdir(mode=0o700)
+    if mutation=="root_symlink": base.symlink_to(target,directory=True)
+    else:
+        base.mkdir(mode=0o700)
+        if mutation=="data_symlink": (base/"data").symlink_to(target,directory=True)
+        elif mutation=="data_fifo": os.mkfifo(base/"data",0o600)
+        elif mutation=="wrong_mode": base.chmod(0o750)
+        elif mutation=="wrong_owner":
+            actual_euid=os.geteuid()
+            monkeypatch.setattr(secure_paths.os,"geteuid",lambda:actual_euid+1)
+    with pytest.raises(PermissionError,match="unsafe application path"):
+        ApplicationPaths.create(base)
+
+
+def test_application_path_replacement_after_open_fails_identity_check(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
+) -> None:
+    base=tmp_path/"Tuntun"; base.mkdir(mode=0o700)
+    watched=(base.stat().st_dev,base.stat().st_ino)
+    original_fstat=secure_paths.os.fstat; replaced=False
+    def replacing_fstat(fd:int):
+        nonlocal replaced
+        value=original_fstat(fd)
+        if not replaced and (value.st_dev,value.st_ino)==watched:
+            replaced=True; base.rename(tmp_path/"opened-original"); base.mkdir(mode=0o700)
+        return value
+    monkeypatch.setattr(secure_paths.os,"fstat",replacing_fstat)
+    with pytest.raises(PermissionError,match="unsafe application path"):
+        ApplicationPaths.create(base)
 ```
 
 Define `strict_settings_case` in the config subtree where it is consumed. It begins as an owner-only regular valid settings file; every mutation changes exactly one loader invariant:
@@ -4831,21 +4951,77 @@ def load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Setting
 ```
 
 ```python
+# apps/core/src/tuntun_core/config/secure_paths.py
+from dataclasses import dataclass
+import os,stat
+from pathlib import Path
+
+OPEN_FLAGS=os.O_RDONLY|os.O_CLOEXEC|os.O_DIRECTORY|getattr(os,"O_NOFOLLOW",0)
+
+@dataclass(frozen=True,slots=True)
+class OwnedPath:
+    path:Path; device:int; inode:int
+    def revalidate(self) -> None:
+        value=os.lstat(self.path)
+        if (
+            not stat.S_ISDIR(value.st_mode) or value.st_uid!=os.geteuid()
+            or stat.S_IMODE(value.st_mode)!=0o700
+            or (value.st_dev,value.st_ino)!=(self.device,self.inode)
+        ): raise PermissionError("unsafe application path")
+
+def _qualified_directory(fd:int,path:Path,*,leaf:bool) -> os.stat_result:
+    opened=os.fstat(fd); named=os.lstat(path); owner=os.geteuid()
+    if (
+        not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(named.st_mode)
+        or (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino)
+        or opened.st_uid not in {0,owner}
+        or (opened.st_uid==0 and opened.st_mode&0o022)
+        or (opened.st_uid==owner and opened.st_mode&0o077)
+        or (leaf and (opened.st_uid!=owner or stat.S_IMODE(opened.st_mode)!=0o700))
+    ): raise PermissionError("unsafe application path")
+    return opened
+
+def ensure_private_directory(path:Path) -> OwnedPath:
+    absolute=Path(os.path.abspath(os.fspath(path)))
+    if not absolute.is_absolute() or absolute==Path("/"):
+        raise PermissionError("unsafe application path")
+    current=Path("/"); parent_fd=os.open("/",OPEN_FLAGS)
+    try:
+        for index,part in enumerate(absolute.parts[1:]):
+            current=current/part; leaf=index==len(absolute.parts)-2
+            try: child_fd=os.open(part,OPEN_FLAGS,dir_fd=parent_fd)
+            except FileNotFoundError:
+                os.mkdir(part,0o700,dir_fd=parent_fd)
+                child_fd=os.open(part,OPEN_FLAGS,dir_fd=parent_fd)
+            try: opened=_qualified_directory(child_fd,current,leaf=leaf)
+            except BaseException: os.close(child_fd); raise
+            os.close(parent_fd); parent_fd=child_fd
+        result=OwnedPath(absolute,opened.st_dev,opened.st_ino)
+        result.revalidate(); return result
+    except OSError as error:
+        if isinstance(error,PermissionError): raise
+        raise PermissionError("unsafe application path") from error
+    finally: os.close(parent_fd)
+```
+
+```python
 # apps/core/src/tuntun_core/config/paths.py
 from dataclasses import dataclass
 from pathlib import Path
 from platformdirs import user_data_path
+from .secure_paths import OwnedPath,ensure_private_directory
 
 @dataclass(frozen=True, slots=True)
 class ApplicationPaths:
     root: Path; data: Path; logs: Path; models: Path; backups: Path
+    _identities: tuple[OwnedPath,...]
     @classmethod
     def create(cls, base: Path | None = None) -> "ApplicationPaths":
-        root = base or user_data_path("Tuntun", appauthor=False)
-        paths = cls(root, root / "data", root / "logs", root / "models", root / "backups")
-        for path in (paths.root, paths.data, paths.logs, paths.models, paths.backups):
-            path.mkdir(parents=True, exist_ok=True, mode=0o700); path.chmod(0o700)
-        return paths
+        root = Path(base or user_data_path("Tuntun", appauthor=False))
+        values=(root,root/"data",root/"logs",root/"models",root/"backups")
+        identities=tuple(ensure_private_directory(path) for path in values)
+        for identity in identities: identity.revalidate()
+        return cls(*values,identities)
 ```
 
 Add `pydantic-settings>=2.10,<3`, `PyYAML>=6.0,<7`, and `platformdirs>=4.4,<5` to core dependencies. Write `config/tuntun.example.yaml` with exactly the locked defaults asserted above, including all three disabled observability switches, and `.env.example` containing only commented variable names, never credential-shaped values.
@@ -4854,13 +5030,13 @@ Add `pydantic-settings>=2.10,<3`, `PyYAML>=6.0,<7`, and `platformdirs>=4.4,<5` t
 
 Run: `uv lock && uv run pytest tests/unit/config/test_settings.py tests/unit/config/test_paths.py -q && uv run ruff check apps/core/src/tuntun_core/config tests/unit/config && uv run mypy apps/core/src/tuntun_core/config`
 
-Expected: PASS with all settings/path tests passing and Ruff/mypy exiting 0.
+Expected: PASS with all settings/path tests passing, including symlink/special-file/wrong-owner/wrong-mode/device-inode replacement failures; every returned application directory remains the exact descriptor-qualified `0700` inode; Ruff/mypy exit 0.
 
 - [ ] **Step 5: Commit exact Task 7 paths**
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/config/settings.py apps/core/src/tuntun_core/config/loader.py apps/core/src/tuntun_core/config/paths.py config/tuntun.example.yaml .env.example tests/unit/config/test_settings.py tests/unit/config/test_paths.py tests/unit/config/conftest.py
+git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/config/settings.py apps/core/src/tuntun_core/config/loader.py apps/core/src/tuntun_core/config/secure_paths.py apps/core/src/tuntun_core/config/paths.py config/tuntun.example.yaml .env.example tests/unit/config/test_settings.py tests/unit/config/test_paths.py tests/unit/config/conftest.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(core): add fail-closed settings and paths"
@@ -4883,7 +5059,7 @@ git commit -m "feat(core): add fail-closed settings and paths"
 
 **Interfaces:**
 - Consumes: service/account identifiers and byte-valued secrets.
-- Produces: `SecretProvider` signature from the locked map; `InMemorySecretProvider`; `MacOSKeychainSecretProvider`; `validate_production_secrets(provider: SecretProvider) -> None`; `redact_private_fields(logger: object, method: str, event: MutableMapping[str, object]) -> MutableMapping[str, object]`.
+- Produces: `SecretProvider` signature from the locked map; `InMemorySecretProvider`; `MacOSKeychainSecretProvider`; `validate_production_secrets(provider: SecretProvider) -> None`; immutable closed `PRIVATE_KEY_REGISTRY`; `normalize_private_key(key: str) -> str`; and `redact_private_fields(logger: object, method: str, event: MutableMapping[str, object]) -> MutableMapping[str, object]`. The registry covers authorization headers, cookies, API keys/credentials, PINs, recovery codes, audio, transcripts, search queries/results, prompt/messages, memory content, biometric vectors, embeddings, frames/crops, and provider request/response bodies, including the exact singular/plural/structured aliases tested below.
 
 - [ ] **Step 1: Write red secret and logging tests**
 
@@ -4906,16 +5082,60 @@ def test_missing_production_roots_fail_closed() -> None:
 ```python
 # tests/security/test_log_redaction.py
 import json
-from tuntun_core.config.logging import redact_private_fields
+import pytest
+from tuntun_core.config.logging import PRIVATE_KEY_REGISTRY, redact_private_fields
 
-def test_redactor_removes_nested_private_values() -> None:
-    event = {"event":"provider_failed","authorization":"Bearer secret-sentinel","nested":{"transcript":"private words","ok":7},"audio_bytes":b"secret-audio"}
-    redacted = redact_private_fields(None, "error", event)
-    encoded = json.dumps(redacted, sort_keys=True)
-    assert "secret-sentinel" not in encoded
-    assert "private words" not in encoded
-    assert "secret-audio" not in encoded
-    assert redacted["nested"]["ok"] == 7
+EXPECTED_PRIVATE_KEYS={
+    "authorization":frozenset({"authorization","authorization_header","authorization_headers"}),
+    "cookie":frozenset({"cookie","cookies","set_cookie"}),
+    "api_key":frozenset({"api_key","api_keys","provider_api_key","credential","credentials"}),
+    "pin":frozenset({"pin","pins","security_pin"}),
+    "recovery_code":frozenset({"recovery_code","recovery_codes"}),
+    "audio":frozenset({"audio","audio_bytes","audio_chunk","audio_chunks"}),
+    "transcript":frozenset({"transcript","transcripts","transcript_text"}),
+    "search_query":frozenset({"search_query","search_queries","search_query_body"}),
+    "search_result":frozenset({"search_result","search_results","search_result_body","search_excerpts","page_content"}),
+    "prompt_message":frozenset({"prompt","prompts","system_prompt","user_prompt","message","messages","provider_messages"}),
+    "memory_content":frozenset({"memory","memories","memory_content","memory_body"}),
+    "biometric_vector":frozenset({"biometric_vector","biometric_vectors","face_vector","voice_vector"}),
+    "embedding":frozenset({"embedding","embeddings","face_embedding","voice_embedding"}),
+    "frame":frozenset({"frame","frames","face_frame","face_frames","face_crop","camera_frame"}),
+    "provider_body":frozenset({"provider_body","provider_request_body","provider_response_body","request_body","response_body"}),
+}
+
+
+def test_private_key_registry_is_closed_complete_and_aliases_are_unique() -> None:
+    assert PRIVATE_KEY_REGISTRY == EXPECTED_PRIVATE_KEYS
+    aliases=[alias for values in PRIVATE_KEY_REGISTRY.values() for alias in values]
+    assert len(aliases)==len(set(aliases))
+
+
+@pytest.mark.parametrize(
+    "category,key",
+    [(category,key) for category,keys in EXPECTED_PRIVATE_KEYS.items() for key in keys],
+)
+def test_every_private_category_and_structured_alias_removes_literal_and_encoded_sentinel(
+    category: str,key: str,
+) -> None:
+    sentinel=f"private-{category}-sentinel"
+    event={"event":"probe","mapping":{"list":[{"tuple":({key:sentinel},)}]},"ok":7}
+    redacted=redact_private_fields(None,"error",event)
+    encoded=json.dumps(redacted,sort_keys=True)
+    assert sentinel not in encoded
+    assert json.dumps(sentinel)[1:-1] not in encoded
+    assert redacted["mapping"]["list"][0]["tuple"][0][key] == {"redacted":category}
+    assert redacted["ok"]==7
+
+
+@pytest.mark.parametrize("key,category",(
+    ("Authorization Header","authorization"),
+    ("SEARCH-RESULTS","search_result"),
+    ("provider.response.body","provider_body"),
+    ("Biometric Vectors","biometric_vector"),
+))
+def test_key_normalization_cannot_bypass_a_private_category(key: str,category: str) -> None:
+    redacted=redact_private_fields(None,"info",{key:"normalized-sentinel"})
+    assert redacted[key]=={"redacted":category}
 ```
 
 - [ ] **Step 2: Run the red secret/log tests**
@@ -4985,26 +5205,62 @@ class MacOSKeychainSecretProvider(SecretProvider):
 
 ```python
 # apps/core/src/tuntun_core/config/logging.py
-from collections.abc import MutableMapping
+import re
+from collections.abc import Mapping,MutableMapping
+from types import MappingProxyType
 from typing import Any
+from unicodedata import normalize
 
-PRIVATE_KEYS = {"authorization","cookie","api_key","pin","recovery_code","audio","audio_bytes","transcript","prompt","messages","memory","embedding","frame","provider_body"}
+PRIVATE_KEY_REGISTRY=MappingProxyType({
+    "authorization":frozenset({"authorization","authorization_header","authorization_headers"}),
+    "cookie":frozenset({"cookie","cookies","set_cookie"}),
+    "api_key":frozenset({"api_key","api_keys","provider_api_key","credential","credentials"}),
+    "pin":frozenset({"pin","pins","security_pin"}),
+    "recovery_code":frozenset({"recovery_code","recovery_codes"}),
+    "audio":frozenset({"audio","audio_bytes","audio_chunk","audio_chunks"}),
+    "transcript":frozenset({"transcript","transcripts","transcript_text"}),
+    "search_query":frozenset({"search_query","search_queries","search_query_body"}),
+    "search_result":frozenset({"search_result","search_results","search_result_body","search_excerpts","page_content"}),
+    "prompt_message":frozenset({"prompt","prompts","system_prompt","user_prompt","message","messages","provider_messages"}),
+    "memory_content":frozenset({"memory","memories","memory_content","memory_body"}),
+    "biometric_vector":frozenset({"biometric_vector","biometric_vectors","face_vector","voice_vector"}),
+    "embedding":frozenset({"embedding","embeddings","face_embedding","voice_embedding"}),
+    "frame":frozenset({"frame","frames","face_frame","face_frames","face_crop","camera_frame"}),
+    "provider_body":frozenset({"provider_body","provider_request_body","provider_response_body","request_body","response_body"}),
+})
+PRIVATE_KEY_TO_CATEGORY=MappingProxyType({
+    alias:category for category,aliases in PRIVATE_KEY_REGISTRY.items() for alias in aliases
+})
+assert len(PRIVATE_KEY_TO_CATEGORY)==sum(map(len,PRIVATE_KEY_REGISTRY.values()))
+
+def normalize_private_key(key:str) -> str:
+    if type(key) is not str: raise TypeError("structured log key must be a string")
+    return re.sub(r"[^a-z0-9]+","_",normalize("NFKC",key).casefold()).strip("_")
+
 def _redact(value: Any) -> Any:
-    if isinstance(value, MutableMapping): return {key: ({"redacted": key} if key.lower() in PRIVATE_KEYS else _redact(item)) for key, item in value.items()}
+    if isinstance(value,Mapping):
+        result={}
+        for key,item in value.items():
+            normalized=normalize_private_key(key)
+            category=PRIVATE_KEY_TO_CATEGORY.get(normalized)
+            result[key]={"redacted":category} if category is not None else _redact(item)
+        return result
     if isinstance(value, list): return [_redact(item) for item in value]
     if isinstance(value, tuple): return tuple(_redact(item) for item in value)
     return value
 def redact_private_fields(logger: object, method: str, event: MutableMapping[str, object]) -> MutableMapping[str, object]:
-    return _redact(event)
+    redacted=_redact(event)
+    if not isinstance(redacted,MutableMapping): raise TypeError("structured log root invalid")
+    return redacted
 ```
 
 Add `keyring>=25.6,<26` and `structlog>=25.4,<26` to core dependencies.
 
 - [ ] **Step 4: Lock and run the green secret/log gate**
 
-Run: `uv lock && uv run pytest tests/security/test_key_handling.py tests/security/test_log_redaction.py -q && uv run python scripts/verify_private_data.py tests/security && uv run mypy apps/core/src/tuntun_core/adapters/keychain apps/core/src/tuntun_core/config/logging.py`
+Run: `uv lock && uv run pytest tests/security/test_key_handling.py tests/security/test_log_redaction.py -q && uv run python scripts/verify_private_data.py tests/security && uv run ruff check apps/core/src/tuntun_core/adapters/keychain apps/core/src/tuntun_core/config/logging.py tests/security/test_key_handling.py tests/security/test_log_redaction.py && uv run mypy apps/core/src/tuntun_core/adapters/keychain apps/core/src/tuntun_core/config/logging.py`
 
-Expected: PASS with four tests, `private-data scan: PASS`, and mypy exit 0.
+Expected: PASS for both key-provider cases, the exact registry closure, every normative category/alias sentinel, all normalized-key bypass cases, and nested mapping/list/tuple recursion; `private-data scan: PASS`; Ruff/mypy exit 0.
 
 - [ ] **Step 5: Commit exact Task 8 paths**
 
@@ -5038,7 +5294,7 @@ git commit -m "feat(core): add Keychain boundary and log redaction"
 
 **Interfaces:**
 - Consumes: Task 5 DTOs and ports; synthetic audio tokens are UUIDs, never media.
-- Produces: `FakeClock(start: datetime)`, `advance(delta: timedelta) -> None`; `FakeSpeechToText`, `FakeTextToSpeech`, `FakeLanguageModel`, `FakeIdentity`, `FakeMemory`, `FakePolicy`, `FakeAuthentication`, `FakeAudit`, `FakeBudget`, and `FakeReachy`, each rejecting unexpected calls; `ScenarioRunner.run(path: Path) -> ScenarioResult`; `ScenarioResult.canonical_json() -> bytes`; CLI `tuntunctl simulate --scenario PATH --json`; and the repository gate `scripts/run_scenarios.py [--scenario PATH ...] --turns N [--assert-resource-bounds] [--json]`.
+- Produces: `FakeClock(start: datetime)`, read-only-observation counter `calls: int`, and `advance(delta: timedelta) -> None`; `FakeSpeechToText`, `FakeTextToSpeech`, `FakeLanguageModel`, `FakeIdentity`, `FakeMemory`, `FakePolicy`, `FakeAuthentication`, `FakeAudit`, `FakeBudget`, and `FakeReachy`, each rejecting unexpected calls; `ScenarioRunner.run(path: Path) -> ScenarioResult`; `ScenarioResult.canonical_json() -> bytes`; CLI `tuntunctl simulate --scenario PATH --json`; and the repository gate `scripts/run_scenarios.py [--scenario PATH ...] --turns N [--assert-resource-bounds] [--json]`.
 - `run_scenarios.py` accepts `1 <= N <= 10_000`, rejects duplicate/non-regular/symlink scenario paths and over-limit YAML before parsing, sorts either the explicit paths or the default `tests/fixtures/scenarios/*.yaml` set by normalized repository-relative name, installs the test-suite socket/DNS deny guard before loading application code, uses only synthetic fakes, and exits 2 for invalid input or 1 for a failed assertion. Its versioned `scenario_gate.v1` JSON is emitted only to stdout; diagnostics go to stderr. Task C23 extends this same owned executable with the complete fault/privacy/resource measurements used by B2.
 
 - [ ] **Step 1: Write red deterministic tests**
@@ -5096,8 +5352,12 @@ from datetime import UTC, datetime, timedelta
 class FakeClock:
     def __init__(self, start: datetime) -> None:
         if start.tzinfo is None: raise ValueError("start must be timezone-aware")
-        self._now = start.astimezone(UTC); self._monotonic = 0.0
-    def now(self) -> datetime: return self._now
+        self._now = start.astimezone(UTC); self._monotonic = 0.0; self._calls = 0
+    @property
+    def calls(self) -> int: return self._calls
+    def now(self) -> datetime:
+        self._calls += 1
+        return self._now
     def monotonic(self) -> float: return self._monotonic
     def advance(self, delta: timedelta) -> None:
         seconds = delta.total_seconds()
@@ -5280,7 +5540,7 @@ git commit -m "test: add deterministic foundation scenario"
 
 **Interfaces:**
 - Consumes: owner-invoked immutable HTTPS URL on an exact host allowlist, declared bounded byte size/SHA-256, a bounded duplicate-free manifest, and owner-only no-follow model directory descriptors.
-- Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only a verified exact nonempty tuple of stable read-only file descriptors; derived read-only property `ActivatedModel.all_files_verified: bool`; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. `all_files_verified` rechecks the descriptor type/mode/size/access mode and exact manifest hash when read; it is not a dataclass field, constructor argument, mutable latch, or caller-authored trust bit. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
+- Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only a verified exact nonempty tuple of stable read-only file descriptors; immutable private `_ManifestBoundFile(path, size, sha256, device, inode)` expectations; frozen `VerifiedModelFile`/`ActivatedModel`; derived read-only property `ActivatedModel.all_files_verified: bool`; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. Public `fd`, `size`, `sha256`, and `files` are getter-only views. `all_files_verified` and runtime receipt comparison use the sealed private manifest tuple and recheck descriptor access/type/mode/device/inode/size/hash; they never derive trust from a caller-replaceable public field. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
 
 - [ ] **Step 1: Write red model-governance tests**
 
@@ -5290,6 +5550,7 @@ import fcntl
 import inspect
 import os
 import stat
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 import pytest
 from tuntun_core.services.models.installer import ModelInstaller
@@ -5397,6 +5658,25 @@ def test_installer_retains_only_same_inode_read_only_verified_descriptor(
     assert "return read_fd" in source
     assert "return write_fd" not in source and "return fd" not in source
     assert runtime_adapter.path_opens==[]
+
+
+def test_activated_manifest_expectations_and_file_tuple_cannot_be_rebased(
+    installed_model,tmp_path:Path,
+) -> None:
+    activated=installed_model.registry.activate(installed_model.model_id)
+    handle=activated.files[0]
+    attacker=tmp_path/"attacker.onnx"; attacker.write_bytes(b"attacker-bytes"); attacker.chmod(0o400)
+    attacker_fd=os.open(attacker,os.O_RDONLY)
+    try:
+        for attribute,value in (
+            ("fd",attacker_fd),("size",os.fstat(attacker_fd).st_size),("sha256","0"*64),
+        ):
+            with pytest.raises((FrozenInstanceError,AttributeError)):
+                setattr(handle,attribute,value)
+        with pytest.raises((FrozenInstanceError,AttributeError)):
+            activated.files=(handle,)
+        assert activated.all_files_verified is True
+    finally: os.close(attacker_fd)
 
 
 @pytest.mark.parametrize("prior_offset",(0,1,"eof"))
@@ -5808,7 +6088,7 @@ class ModelEntry:
             or any(not value for value in scalar_values[2:])
         ): raise ValueError("invalid model manifest")
 
-@dataclass(slots=True)
+@dataclass(frozen=True,slots=True)
 class PreadOnlyModelReader:
     __fd:int
     size:int
@@ -5826,56 +6106,95 @@ class PreadOnlyModelReader:
             offset+=len(chunk); yield chunk
     def close(self): os.close(self.__fd)
 
-@dataclass(slots=True)
+@dataclass(frozen=True,slots=True)
+class _ManifestBoundFile:
+    path:str; size:int; sha256:str; device:int; inode:int
+
+@dataclass(frozen=True,slots=True)
 class VerifiedModelFile:
-    path:str; size:int; sha256:str; fd:int
+    __fd:int; __expected:_ManifestBoundFile
+    @classmethod
+    def from_manifest(cls,item:ModelFile,fd:int) -> "VerifiedModelFile":
+        metadata=os.fstat(fd)
+        return cls(fd,_ManifestBoundFile(
+            item.path,item.size,item.sha256,metadata.st_dev,metadata.st_ino,
+        ))
+    @property
+    def path(self) -> str: return self.__expected.path
+    @property
+    def size(self) -> int: return self.__expected.size
+    @property
+    def sha256(self) -> str: return self.__expected.sha256
+    @property
+    def fd(self) -> int: return self.__fd
+    def verified(self) -> bool:
+        try:
+            metadata=os.fstat(self.__fd)
+            if (
+                fcntl.fcntl(self.__fd,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY
+                or not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode)!=0o400
+                or (metadata.st_dev,metadata.st_ino)!=(self.__expected.device,self.__expected.inode)
+                or metadata.st_size!=self.__expected.size
+            ): return False
+            hash_exact_fd(self.__fd,self.__expected.size,self.__expected.sha256)
+        except (OSError,RuntimeError): return False
+        return True
     def load_with(self,adapter):
         # Adapter receives a bounded reader over this dup; the reader hashes the
         # exact bytes it supplies, requires EOF/size/digest, and returns a signed
         # per-file loader receipt. It has no pathname API.
-        reader=PreadOnlyModelReader(os.dup(self.fd),self.size)
+        duplicate=os.dup(self.__fd); reader=None
         try:
+            duplicate_metadata=os.fstat(duplicate)
+            if (
+                (duplicate_metadata.st_dev,duplicate_metadata.st_ino)!=
+                (self.__expected.device,self.__expected.inode)
+            ): raise ModelVerificationError("runtime model descriptor mismatch")
+            hash_exact_fd(duplicate,self.__expected.size,self.__expected.sha256)
+            reader=PreadOnlyModelReader(duplicate,self.__expected.size); duplicate=-1
             return adapter.load_verified_reader(
-                reader,self.path,self.size,self.sha256,
+                reader,self.__expected.path,self.__expected.size,self.__expected.sha256,
             )
-        finally: reader.close()
+        finally:
+            if duplicate>=0: os.close(duplicate)
+            elif reader is not None: reader.close()
 
-@dataclass(slots=True)
+@dataclass(frozen=True,slots=True)
 class ActivatedModel:
-    model_id:str; revision:str; files:tuple[VerifiedModelFile,...]
+    model_id:str; revision:str
+    __files:tuple[VerifiedModelFile,...]
+    __manifest_files:tuple[tuple[str,int,str],...]
+    @classmethod
+    def from_manifest(
+        cls,entry:ModelEntry,files:tuple[VerifiedModelFile,...],
+    ) -> "ActivatedModel":
+        expected=tuple((item.path,item.size,item.sha256) for item in entry.files)
+        observed=tuple((item.path,item.size,item.sha256) for item in files)
+        if not files or observed!=expected:
+            raise ModelVerificationError("activated model is not manifest-bound")
+        return cls(entry.model_id,entry.revision,files,expected)
+    @property
+    def files(self) -> tuple[VerifiedModelFile,...]: return self.__files
     @property
     def all_files_verified(self) -> bool:
-        if not self.files:
-            return False
-        try:
-            for file in self.files:
-                metadata=os.fstat(file.fd)
-                if (
-                    fcntl.fcntl(file.fd,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY
-                    or not stat.S_ISREG(metadata.st_mode)
-                    or stat.S_IMODE(metadata.st_mode)!=0o400
-                    or metadata.st_size!=file.size
-                ):
-                    return False
-                hash_exact_fd(file.fd,file.size,file.sha256)
-        except (OSError,RuntimeError):
-            return False
-        return True
+        return bool(self.__files) and all(file.verified() for file in self.__files)
     def load_with(self,adapter,receipt_verifier):
         receipts=[]
         try:
-            for file in self.files: receipts.append(file.load_with(adapter))
-            expected=tuple((f.path,f.size,f.sha256) for f in self.files)
+            if not self.all_files_verified:
+                raise ModelVerificationError("activated model descriptor mismatch")
+            for file in self.__files: receipts.append(file.load_with(adapter))
             try: observed=tuple((r.path,r.size,r.sha256) for r in receipts)
             except (AttributeError,TypeError,ValueError) as error:
                 raise ModelVerificationError("runtime model receipt mismatch") from error
-            if observed!=expected:
+            if observed!=self.__manifest_files:
                 raise ModelVerificationError("runtime model receipt mismatch")
             candidate=adapter.finish_model(self.model_id,self.revision,tuple(receipts))
             try:
                 return receipt_verifier.require_exact_signed_current(
                     candidate,signature_domain="tuntun.runtime-model-loader-receipt.v1",
-                    model_id=self.model_id,revision=self.revision,files=expected,
+                    model_id=self.model_id,revision=self.revision,files=self.__manifest_files,
                 )
             except Exception as error:
                 raise ModelVerificationError("runtime model receipt mismatch") from error
@@ -5885,7 +6204,7 @@ class ActivatedModel:
                 raise RuntimeError("runtime model abort failed; disable capability") from abort_error
             raise
     def close(self):
-        for file in self.files: os.close(file.fd)
+        for file in self.__files: os.close(file.fd)
 
 class ModelRegistry:
     def __init__(self,entries,model_root): self._entries,self._root=entries,model_root
@@ -5919,8 +6238,8 @@ class ModelRegistry:
             for item in entry.files:
                 fd=open_regular_at(revision,item.path,os.O_RDONLY)
                 hash_exact_fd(fd,item.size,item.sha256)
-                handles.append(VerifiedModelFile(item.path,item.size,item.sha256,fd))
-            return ActivatedModel(entry.model_id,entry.revision,tuple(handles))
+                handles.append(VerifiedModelFile.from_manifest(item,fd))
+            return ActivatedModel.from_manifest(entry,tuple(handles))
         except Exception:
             for handle in handles: os.close(handle.fd)
             raise RuntimeError("model is not installed and verified")
@@ -6137,9 +6456,7 @@ class ModelInstaller:
                         download_deadline=time.monotonic()+self.MAX_TOTAL_DOWNLOAD_SECONDS
                         for item in entry.files:
                             fd=self._download(stage,item,download_deadline)
-                            handles.append(VerifiedModelFile(
-                                item.path,item.size,item.sha256,fd,
-                            ))
+                            handles.append(VerifiedModelFile.from_manifest(item,fd))
                         # Rehash the retained same-inode O_RDONLY descriptions
                         # that are handed to the runtime; publication never
                         # qualifies one pathname and later reopens it.
@@ -6150,9 +6467,7 @@ class ModelInstaller:
                         atomic_publish_dir_noreplace(model,stage_name,entry.revision)
                         published=True
                         model.fsync()
-                        return ActivatedModel(
-                            entry.model_id,entry.revision,tuple(handles),
-                        )
+                        return ActivatedModel.from_manifest(entry,tuple(handles))
                     except Exception:
                         for handle in handles: os.close(handle.fd)
                         if not published:
@@ -6189,7 +6504,7 @@ git commit -m "feat(models): add governed registry and explicit installer"
 ### Task 11: Prove key-first SQLCipher compatibility and add the storage probe
 
 **Master package:** 05
-**Depends on:** Tasks 4 and 8.
+**Depends on:** Task 10.
 **Estimated effort:** 0.5 person-day.
 
 **Files:**
@@ -6203,8 +6518,8 @@ git commit -m "feat(models): add governed registry and explicit installer"
 - Create: `docs/operations/sqlcipher-compatibility.md`
 
 **Interfaces:**
-- Consumes: a 32-byte database key and owner-only database path.
-- Produces: `open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection`; `probe_storage(path: Path, key: bytes) -> StorageProbe`; CLI `tuntunctl storage probe --path PATH --json`.
+- Consumes: a 32-byte database key; Task 7 `ensure_private_directory`/`OwnedPath`; and an owner-only database path whose parent chain and file entry can be descriptor-qualified.
+- Produces: `qualified_database_identity(path: Path) -> tuple[int, int]`; `open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection`; `probe_storage(path: Path, key: bytes) -> StorageProbe`; CLI `tuntunctl storage probe --path PATH --json`. The database parent is held by its verified no-follow directory descriptor during open; the database file is created/opened `O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK` at `0600`, must be one regular single-link user-owned inode on the parent's device, and is rechecked by `dir_fd` device/inode/type/owner/mode immediately after SQLCipher opens it. No chmod/touch follows a caller pathname.
 
 - [ ] **Step 1: Pin dependencies and write the red encryption tests**
 
@@ -6214,9 +6529,11 @@ Add `sqlcipher3==0.6.2` and `cryptography>=45,<46` to core dependencies and run 
 # tests/security/test_sqlcipher.py
 from pathlib import Path
 import json
+import os
 import sqlite3
 import pytest
 from sqlcipher3 import dbapi2 as sqlcipher3
+from tuntun_core.adapters.sqlcipher import connection as connection_module
 from tuntun_core.adapters.sqlcipher.connection import open_sqlcipher
 
 KEY = bytes(range(32)); WRONG = bytes(reversed(range(32)))
@@ -6233,6 +6550,37 @@ def test_connection_enables_integrity_foreign_keys_and_secure_delete(tmp_path: P
     assert db.execute("PRAGMA cipher_integrity_check").fetchone()[0] == "ok"
     assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert db.execute("PRAGMA secure_delete").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("mutation",(
+    "parent_symlink","database_symlink","database_fifo","wrong_mode",
+    "wrong_owner","replace_during_connect",
+))
+def test_database_path_is_nofollow_owner_only_and_identity_stable(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,mutation:str,
+) -> None:
+    private=tmp_path/"private"; private.mkdir(mode=0o700); path=private/"database.db"
+    if mutation=="parent_symlink":
+        target=tmp_path/"target"; target.mkdir(mode=0o700)
+        private.rmdir(); private.symlink_to(target,directory=True)
+    elif mutation=="database_symlink":
+        target=tmp_path/"target.db"; target.write_bytes(b""); target.chmod(0o600)
+        path.symlink_to(target)
+    elif mutation=="database_fifo": os.mkfifo(path,0o600)
+    else:
+        path.write_bytes(b""); path.chmod(0o640 if mutation=="wrong_mode" else 0o600)
+        if mutation=="wrong_owner":
+            owner=os.geteuid()
+            monkeypatch.setattr(connection_module,"_database_owner",lambda:owner+1)
+        elif mutation=="replace_during_connect":
+            original_connect=connection_module.sqlcipher3.connect
+            def replacing_connect(*args,**kwargs):
+                path.rename(private/"qualified-original.db")
+                path.write_bytes(b""); path.chmod(0o600)
+                return original_connect(*args,**kwargs)
+            monkeypatch.setattr(connection_module.sqlcipher3,"connect",replacing_connect)
+    with pytest.raises(PermissionError,match="unsafe database path"):
+        open_sqlcipher(path,KEY)
 ```
 
 - [ ] **Step 2: Run the red SQLCipher test**
@@ -6245,14 +6593,60 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 
 ```python
 # apps/core/src/tuntun_core/adapters/sqlcipher/connection.py
+import os,stat
 from pathlib import Path
 from sqlcipher3 import dbapi2 as sqlcipher3
+from tuntun_core.config.secure_paths import ensure_private_directory
+
+FILE_FLAGS=os.O_RDWR|os.O_CLOEXEC|os.O_NONBLOCK|getattr(os,"O_NOFOLLOW",0)
+
+def _database_owner() -> int: return os.geteuid()
+
+def _require_database_file(parent_fd:int,name:str,parent_device:int,fd:int):
+    opened=os.fstat(fd); named=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+    if (
+        not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(named.st_mode)
+        or opened.st_uid!=_database_owner() or opened.st_nlink!=1
+        or stat.S_IMODE(opened.st_mode)!=0o600 or opened.st_dev!=parent_device
+        or (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino)
+    ): raise PermissionError("unsafe database path")
+    return opened
+
+def _open_qualified_database(path:Path):
+    parent=ensure_private_directory(path.parent)
+    parent_fd=os.open(
+        parent.path,os.O_RDONLY|os.O_CLOEXEC|os.O_DIRECTORY|getattr(os,"O_NOFOLLOW",0),
+    )
+    try:
+        parent_stat=os.fstat(parent_fd)
+        if (parent_stat.st_dev,parent_stat.st_ino)!=(parent.device,parent.inode):
+            raise PermissionError("unsafe database path")
+        fd=os.open(path.name,FILE_FLAGS|os.O_CREAT,0o600,dir_fd=parent_fd)
+        try: opened=_require_database_file(parent_fd,path.name,parent.device,fd)
+        except BaseException: os.close(fd); raise
+        return parent_fd,fd,opened
+    except BaseException:
+        os.close(parent_fd); raise
+
+def qualified_database_identity(path:Path) -> tuple[int,int]:
+    parent_fd,fd,opened=_open_qualified_database(path)
+    try: return opened.st_dev,opened.st_ino
+    finally: os.close(fd); os.close(parent_fd)
 
 def open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection:
     if len(key) != 32: raise ValueError("SQLCipher key must be exactly 32 bytes")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700); path.parent.chmod(0o700)
-    connection=sqlcipher3.connect(str(path), isolation_level=None, check_same_thread=False)
+    parent_fd,qualified_fd,before=_open_qualified_database(path)
+    connection=None
     try:
+        # /dev/fd keeps resolution relative to the already qualified parent on
+        # the target macOS/Linux platforms; unsupported descriptor paths fail.
+        descriptor_path=f"/dev/fd/{parent_fd}/{path.name}"
+        connection=sqlcipher3.connect(
+            descriptor_path,isolation_level=None,check_same_thread=False,
+        )
+        after=_require_database_file(parent_fd,path.name,before.st_dev,qualified_fd)
+        if (after.st_dev,after.st_ino)!=(before.st_dev,before.st_ino):
+            raise PermissionError("unsafe database path")
         connection.execute(f'PRAGMA key = "x\'{key.hex()}\'"')
         version=connection.execute("PRAGMA cipher_version").fetchone()
         if version is None or not version[0]: raise RuntimeError("SQLCipher support is unavailable")
@@ -6260,18 +6654,20 @@ def open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection:
         connection.execute("PRAGMA journal_mode=WAL"); connection.execute("PRAGMA busy_timeout=5000")
         integrity=connection.execute("PRAGMA cipher_integrity_check").fetchone()
         if integrity is not None and integrity[0] != "ok": raise RuntimeError("SQLCipher integrity check failed")
-        path.touch(mode=0o600, exist_ok=True); path.chmod(0o600)
         return connection
     except BaseException:
-        connection.close(); raise
+        if connection is not None: connection.close()
+        raise
+    finally:
+        os.close(qualified_fd); os.close(parent_fd)
 ```
 
 ```python
 # apps/core/src/tuntun_core/adapters/sqlcipher/probe.py
 from dataclasses import asdict, dataclass
 from pathlib import Path
-import platform, stat, sys
-from .connection import open_sqlcipher
+import platform, sys
+from .connection import open_sqlcipher,qualified_database_identity
 
 @dataclass(frozen=True, slots=True)
 class StorageProbe:
@@ -6280,8 +6676,9 @@ class StorageProbe:
 def probe_storage(path: Path, key: bytes) -> StorageProbe:
     db=open_sqlcipher(path, key)
     try:
+        qualified_database_identity(path)
         cipher=str(db.execute("PRAGMA cipher_version").fetchone()[0]); integrity=db.execute("PRAGMA cipher_integrity_check").fetchone()[0] == "ok"
-        return StorageProbe(platform.machine(), platform.python_version(), "sqlcipher3==0.6.2", cipher, integrity, oct(stat.S_IMODE(path.stat().st_mode)))
+        return StorageProbe(platform.machine(), platform.python_version(), "sqlcipher3==0.6.2", cipher, integrity, "0o600")
     finally: db.close()
 ```
 
@@ -6291,7 +6688,7 @@ Implement the Typer command so `--json` prints `json.dumps(probe.as_dict(), sort
 
 Run: `uv run pytest tests/security/test_sqlcipher.py -q && uv run tuntunctl storage probe --path var/probe/foundation.db --json`
 
-Expected: PASS with two tests. Probe JSON has `"driver":"sqlcipher3==0.6.2"`, non-empty `cipher`, `"integrity_ok":true`, and `"mode":"0o600"`; it contains no username, absolute path, or key material.
+Expected: PASS with the two SQLCipher behavior tests plus all six database-path mutations. Parent/file symlinks, FIFO, wrong mode/owner, or device/inode replacement fail before a connection is returned. Probe JSON has `"driver":"sqlcipher3==0.6.2"`, non-empty `cipher`, `"integrity_ok":true`, and `"mode":"0o600"`; it contains no username, absolute path, or key material.
 
 Record the exact probe JSON, macOS version, Intel architecture, `uv.lock` hash, date, and PASS decision in `docs/operations/sqlcipher-compatibility.md`. Also document that WAL/SHM remain SQLCipher-managed sidecars, maintenance checkpoints WAL before backup, and startup refuses missing/wrong keys or failed cipher integrity.
 
@@ -6308,7 +6705,7 @@ git commit -m "feat(storage): verify SQLCipher compatibility"
 ### Task 12: Implement purpose-bound record encryption and nonce-reuse defense
 
 **Master package:** 05
-**Depends on:** Tasks 4 and 8.
+**Depends on:** Tasks 4 and 11.
 **Estimated effort:** 0.5 person-day.
 
 **Files:**
@@ -6467,6 +6864,7 @@ git commit -m "feat(storage): add purpose-bound record encryption"
 **Files:**
 - Modify: `apps/core/pyproject.toml`
 - Modify: `uv.lock`
+- Create: `apps/core/src/tuntun_core/adapters/sqlcipher/foundation_0001.py`
 - Create: `apps/core/src/tuntun_core/adapters/sqlcipher/models.py`
 - Create: `apps/core/src/tuntun_core/adapters/sqlcipher/engine.py`
 - Create: `apps/core/src/tuntun_core/adapters/sqlcipher/migrations.py`
@@ -6479,7 +6877,7 @@ git commit -m "feat(storage): add purpose-bound record encryption"
 
 **Interfaces:**
 - Consumes: `open_sqlcipher(path, key)` from Task 11.
-- Produces: `FOUNDATION_TABLE_NAMES: frozenset[str]`; SQLAlchemy `metadata`; `create_sqlcipher_engine(path: Path, key: bytes) -> Engine`; `encrypted_backup(source: Path, destination: Path, key: bytes) -> None`; `upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None`; Alembic revision `0001_foundation`, down revision `None`.
+- Produces: immutable revision-scoped `FOUNDATION_0001_METADATA` and `FOUNDATION_TABLE_NAMES: frozenset[str]` in `foundation_0001.py`; extensible application `models.metadata` created by copying only that frozen collection before future tables are declared; `create_sqlcipher_engine(path: Path, key: bytes) -> Engine`; `encrypted_backup(source: Path, destination: Path, key: bytes) -> None`; `upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None`; Alembic revision `0001_foundation`, down revision `None`. Revision 0001 imports only `FOUNDATION_0001_METADATA`, never live application metadata; upgrade/drop therefore remain the exact frozen 16-table snapshot after later metadata grows.
 - Migration owns exactly 16 application tables: `households`, `devices`, `sessions`, `event_receipts`, `idempotency_receipts`, `audit_receipts`, `audit_segments`, `redaction_receipts`, `provider_calls`, `provider_response_receipts`, `provider_prices`, `budget_reservations`, `cost_ledger`, `runtime_settings`, and the reserved content-free `reachy_core_tx_sequences|reachy_duplex_correlations` tables required by the later duplex repository task without a future-migration dependency. The complete post-upgrade table inventory is those 16 plus Alembic's `alembic_version`, for exactly 17 non-`sqlite_` tables.
 - `request_id` groups all attempts for one logical STT/reasoning/TTS/web-search request. `attempt_id` is the unique idempotency boundary for both `budget_reservations` and `provider_calls`; every retry receives a new attempt, authorization, and reservation while retaining its logical request ID. The `(month_key, state, reserved_micros_sgd, charged_micros_sgd)` index supports the `BEGIN IMMEDIATE` atomic monthly sum: use immutable reserved cost for `reserved|sent`, authoritative charged cost for `settled`, and exclude `released|denied`.
 - Budget pricing persistence is authoritative and bounded. `provider_prices` keys one exact provider/model/category/pricing-version/FX-version/tier-basis/tier-range record and stores input/output per-million, audio per-minute, and web-search per-call micro-USD rates; the closed primary accounting basis and missing-evidence policy; FX; both immutable version strings; the exact bounded HTTPS price-source URL; and both lowercase SHA-256 source digests. `tier_basis='flat'` requires the canonical `0,0` range; `tier_basis='llm_input_tokens'` is allowed only for LLM input-token ranges bounded by `0..10_000_000`. The catalog must reject overlapping, gapped, mixed-version, mixed-source-URL/digest, mixed-validity, or incomplete tier schedules before any row becomes current. Every signed reservation snapshot carries the complete schedule: reservation chooses the highest applicable rate for its signed input-token ceiling, while exact settlement reselects the tier from the verified provider input-token receipt and never applies a cheaper ceiling tier after a boundary crossing. TTS is `request_bound_exact` with no fabricated response usage. Web search is `provider_reported_exact`, reserves exactly one fixed tool call plus token ceilings, and alone permits `conservative_full_reservation` when missing evidence remains provably within that one-call ceiling. One allowed quote is in `1..1_000_000_000_000` micro-SGD; every denied row stores zero. Checked aggregate arithmetic is limited to `0..9_000_000_000_000_000`; overflow or an out-of-range result fails closed, freezes cloud egress, and requires owner repair.
@@ -6496,7 +6894,8 @@ import sqlite3
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine
+from sqlalchemy import Column,Engine,Integer,Table
+from tuntun_core.adapters.sqlcipher.models import metadata
 from tuntun_core.adapters.sqlcipher.connection import open_sqlcipher
 
 EXPECTED={"alembic_version","households","devices","sessions","event_receipts","idempotency_receipts","audit_receipts","audit_segments","redaction_receipts","provider_calls","provider_response_receipts","provider_prices","budget_reservations","cost_ledger","runtime_settings","reachy_core_tx_sequences","reachy_duplex_correlations"}
@@ -6517,6 +6916,29 @@ def test_foundation_upgrade_downgrade_upgrade(tmp_path: Path) -> None:
     command.downgrade(config,"base")
     db=open_sqlcipher(path,key); assert {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'") if not row[0].startswith("sqlite_")} == {"alembic_version"}; db.close()
     command.upgrade(config,"head")
+
+def test_revision_0001_ignores_tables_added_to_future_application_metadata(
+    tmp_path:Path,
+) -> None:
+    future=Table("future_phase_table",metadata,Column("id",Integer,primary_key=True))
+    try:
+        path=tmp_path/"frozen-0001.db"; key=bytes(range(32))
+        command.upgrade(_config(path,key),"0001_foundation")
+        db=open_sqlcipher(path,key)
+        names={row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ) if not row[0].startswith("sqlite_")}
+        db.close(); assert names==EXPECTED
+    finally: metadata.remove(future)
+
+def test_revision_source_uses_only_its_frozen_table_collection() -> None:
+    from tuntun_core.adapters.sqlcipher.foundation_0001 import (
+        FOUNDATION_0001_METADATA,FOUNDATION_TABLE_NAMES,
+    )
+    source=Path("apps/core/migrations/versions/0001_foundation.py").read_text()
+    assert "adapters.sqlcipher.models" not in source
+    assert "adapters.sqlcipher.foundation_0001" in source
+    assert set(FOUNDATION_0001_METADATA.tables)==FOUNDATION_TABLE_NAMES
 
 def test_existing_database_is_backed_up_encrypted_before_upgrade(tmp_path: Path) -> None:
     source=tmp_path/"source.db"; backup=tmp_path/"backup.db"; key=bytes(range(32)); config=_config(source,key)
@@ -6760,10 +7182,11 @@ def upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None:
 ```
 
 ```python
-# beginning of apps/core/src/tuntun_core/adapters/sqlcipher/models.py
+# beginning of immutable apps/core/src/tuntun_core/adapters/sqlcipher/foundation_0001.py
 from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, LargeBinary, MetaData, String, Table, Text, UniqueConstraint
 
-metadata=MetaData()
+FOUNDATION_0001_METADATA=MetaData()
+metadata=FOUNDATION_0001_METADATA
 FOUNDATION_TABLE_NAMES=frozenset({"households","devices","sessions","event_receipts","idempotency_receipts","audit_receipts","audit_segments","redaction_receipts","provider_calls","provider_response_receipts","provider_prices","budget_reservations","cost_ledger","runtime_settings","reachy_core_tx_sequences","reachy_duplex_correlations"})
 assert len(FOUNDATION_TABLE_NAMES)==16
 def uuid_pk(name: str="id") -> Column[str]: return Column(name,String(36),primary_key=True)
@@ -6775,7 +7198,7 @@ sessions=Table("sessions",metadata,uuid_pk(),Column("household_id",String(36),Fo
 Index("uq_sessions_one_active_household",sessions.c.household_id,unique=True,sqlite_where=sessions.c.closed_at.is_(None))
 ```
 
-Add the following exact table declarations to `models.py` after the three declarations shown above:
+Add the following exact table declarations to `foundation_0001.py` after the three declarations shown above. This module is the immutable revision 0001 snapshot; later tasks must never add a table or alter a column here:
 
 ```python
 event_receipts=Table("event_receipts",metadata,uuid_pk(),Column("household_id",String(36),ForeignKey("households.id",ondelete="CASCADE"),nullable=False),Column("device_id",String(36),ForeignKey("devices.id"),nullable=False),Column("event_type",String(128),nullable=False),Column("correlation_id",String(36),nullable=False),Column("device_sequence",Integer,nullable=False),Column("payload_hmac_key_id",String(128),nullable=False),Column("payload_hmac_b64",String(128),nullable=False),Column("decision",String(64),nullable=False),utc_text("occurred_at"),CheckConstraint("device_sequence >= 0"),UniqueConstraint("device_id","device_sequence",name="uq_event_device_sequence"))
@@ -6796,20 +7219,36 @@ reachy_core_tx_sequences=Table("reachy_core_tx_sequences",metadata,Column("devic
 reachy_duplex_correlations=Table("reachy_duplex_correlations",metadata,Column("device_id",String(36),ForeignKey("devices.id"),primary_key=True),Column("correlation_id",String(36),primary_key=True),Column("purpose",String(64),nullable=False),Column("request_direction",String(16),nullable=False),Column("state",String(16),nullable=False),Column("first_sequence",Integer,nullable=False),Column("last_sequence",Integer,nullable=False),utc_text("created_at"),utc_text("updated_at"),CheckConstraint("request_direction IN ('edge_to_core','core_to_edge')"),CheckConstraint("state IN ('pending','completed','abandoned')"),CheckConstraint("first_sequence >= 1 AND last_sequence >= 1"))
 ```
 
+```python
+# apps/core/src/tuntun_core/adapters/sqlcipher/models.py
+from sqlalchemy import MetaData
+from .foundation_0001 import FOUNDATION_0001_METADATA,FOUNDATION_TABLE_NAMES
+
+metadata=MetaData()
+for frozen_table in FOUNDATION_0001_METADATA.sorted_tables:
+    frozen_table.to_metadata(metadata)
+globals().update({name:metadata.tables[name] for name in FOUNDATION_TABLE_NAMES})
+
+# Future revisions declare their new tables only against this application
+# metadata. They never edit FOUNDATION_0001_METADATA.
+```
+
 Every UUID is `String(36)`, every timestamp is `String(27)`, money/counts are bounded `Integer` values, booleans have `CHECK (value IN (0,1))` using the real column name, JSON columns have `CHECK json_valid(column_name)` using the real column name, and no table contains raw audio, transcript, frame, prompt, memory body, credential, or secret. Budget rates, usage units, one-attempt charge, and aggregate arithmetic additionally use the exact frozen maxima above; application code performs checked multiply/add/ceil operations before SQLite and treats any overflow or out-of-range aggregate as `budget_arithmetic_out_of_bounds`. The two Reachy duplex tables are deliberately content-free foundation reservations: later transport work implements repositories against them and must not add another migration.
 
 ```python
 # apps/core/migrations/versions/0001_foundation.py
 from alembic import op
-from tuntun_core.adapters.sqlcipher.models import metadata
+from tuntun_core.adapters.sqlcipher.foundation_0001 import FOUNDATION_0001_METADATA
 revision="0001_foundation"; down_revision=None; branch_labels=None; depends_on=None
 def upgrade() -> None:
-    bind=op.get_bind(); metadata.create_all(bind=bind)
+    bind=op.get_bind(); FOUNDATION_0001_METADATA.create_all(bind=bind)
     op.execute("CREATE TRIGGER audit_receipts_no_update BEFORE UPDATE ON audit_receipts BEGIN SELECT RAISE(ABORT, 'audit receipts are append-only'); END")
     op.execute("CREATE TRIGGER audit_receipts_no_delete BEFORE DELETE ON audit_receipts BEGIN SELECT RAISE(ABORT, 'audit receipts are append-only'); END")
 def downgrade() -> None:
-    bind=op.get_bind(); metadata.drop_all(bind=bind)
+    bind=op.get_bind(); FOUNDATION_0001_METADATA.drop_all(bind=bind)
 ```
+
+The source-direction test above and the future-table injection jointly prevent an implementation from silently returning to live `models.metadata.create_all()`.
 
 ```python
 # apps/core/migrations/env.py core online path
@@ -6858,13 +7297,13 @@ def migrated_database(tmp_path: Path):
 
 Run: `uv lock && uv run pytest tests/integration/storage/test_migrations.py -q && uv run mypy apps/core/src/tuntun_core/adapters/sqlcipher apps/core/migrations`
 
-Expected: PASS with upgrade → downgrade → upgrade completing against SQLCipher and exact table/trigger ownership asserted.
+Expected: PASS with upgrade → downgrade → upgrade completing against SQLCipher and exact table/trigger ownership asserted; injecting `future_phase_table` into live application metadata does not change revision 0001's exact set; source assertions prove the revision imports only its frozen snapshot.
 
 - [ ] **Step 5: Commit exact Task 13 paths**
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/adapters/sqlcipher/models.py apps/core/src/tuntun_core/adapters/sqlcipher/engine.py apps/core/src/tuntun_core/adapters/sqlcipher/migrations.py apps/core/migrations/env.py apps/core/migrations/script.py.mako apps/core/migrations/versions/0001_foundation.py apps/core/alembic.ini tests/integration/storage/conftest.py tests/integration/storage/test_migrations.py
+git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/adapters/sqlcipher/foundation_0001.py apps/core/src/tuntun_core/adapters/sqlcipher/models.py apps/core/src/tuntun_core/adapters/sqlcipher/engine.py apps/core/src/tuntun_core/adapters/sqlcipher/migrations.py apps/core/migrations/env.py apps/core/migrations/script.py.mako apps/core/migrations/versions/0001_foundation.py apps/core/alembic.ini tests/integration/storage/conftest.py tests/integration/storage/test_migrations.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(storage): add reversible encrypted foundation schema"
@@ -6890,7 +7329,7 @@ git commit -m "feat(storage): add reversible encrypted foundation schema"
 
 **Interfaces:**
 - Consumes: SQLAlchemy `Engine`; SQLite busy errors; one application-owned serialized database worker.
-- Produces: project-owned runtime-checkable structural `UnitOfWorkProtocol` and `AsyncUnitOfWorkProtocol` in `tuntun_core.services.transactions.protocols`; exact low-level adapter `UnitOfWork` signature from the locked map conforming structurally without services importing adapters; `AsyncUnitOfWorkFactory(repository_facades) -> AsyncUnitOfWork`; startup-only fixed `register_commit_signal(name, target.offer_nowait)` plus transaction-local `signal_after_commit(name)`; `AsyncRepositoryFacade`; and `AtomicMutationScope.open()/require_active_uow()`. Both unit-of-work layers use `BEGIN IMMEDIATE`, explicit commit/rollback, no implicit commit on context exit, and bounded busy retry of 3 attempts at 25/50/100 ms. The async facade runs enter, every repository operation, audit append, commit/rollback, and close on the same single worker/connection; it never moves a live transaction between threads. Each bounded context declares a typed structural protocol such as `IdentityUnitOfWork(AsyncUnitOfWorkProtocol)` listing its async repository properties (`profiles`, `consent_receipts`, and so on); the factory installs matching `AsyncRepositoryFacade` instances, so the plan's `await uow.profiles.insert(...)` notation is typed and every call internally delegates through that exact unit's `run_sync`.
+- Produces: project-owned runtime-checkable structural `UnitOfWorkProtocol` and `AsyncUnitOfWorkProtocol` in `tuntun_core.services.transactions.protocols`; exact low-level adapter `UnitOfWork` signature from the locked map conforming structurally without services importing adapters; `AsyncUnitOfWorkFactory(repository_facades) -> AsyncUnitOfWork`; startup-only fixed `register_commit_signal(name, target.offer_nowait)` plus transaction-local `signal_after_commit(name)`; `AsyncRepositoryFacade`; and `AtomicMutationScope.open()/require_active_uow()`. Both unit-of-work layers use `BEGIN IMMEDIATE`, explicit commit/rollback, no implicit commit on context exit, and bounded busy retry of 3 attempts at 25/50/100 ms. The async facade runs enter, every repository operation, audit append, commit/rollback, and close on the same single worker/connection; it never moves a live transaction between threads. Entry is cancellation-terminal: cancellation before lock acquisition creates nothing; cancellation while or immediately after the worker executes `BEGIN IMMEDIATE` waits for that exact worker call, then rolls back/closes on the same worker before releasing the application lock and propagating cancellation. Each bounded context declares a typed structural protocol such as `IdentityUnitOfWork(AsyncUnitOfWorkProtocol)` listing its async repository properties (`profiles`, `consent_receipts`, and so on); the factory installs matching `AsyncRepositoryFacade` instances, so the plan's `await uow.profiles.insert(...)` notation is typed and every call internally delegates through that exact unit's `run_sync`.
 
 - [ ] **Step 1: Write red rollback and explicit-commit tests**
 
@@ -6918,10 +7357,11 @@ def test_explicit_commit_persists(migrated_database) -> None:
 ```python
 # tests/integration/storage/test_async_transactions.py
 import asyncio
-from threading import get_ident
+from threading import Event,get_ident
 import pytest
 from sqlalchemy import text
 from tuntun_core.adapters.sqlcipher.async_unit_of_work import AsyncUnitOfWorkFactory
+from tuntun_core.adapters.sqlcipher.unit_of_work import UnitOfWork
 
 @pytest.mark.asyncio
 async def test_async_facade_keeps_one_worker_and_commits(migrated_database) -> None:
@@ -6941,6 +7381,41 @@ async def test_cancelled_context_rolls_back_and_never_leaves_writer_lock(migrate
             raise asyncio.CancelledError
     async with factory() as next_uow:
         assert await next_uow.run_sync(lambda tx: tx.execute(text("SELECT count(*) FROM households")).scalar_one())==0
+        await next_uow.rollback()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("point",("before_lock","during_begin","after_begin"))
+async def test_cancelled_entry_is_terminal_before_application_lock_release(
+    migrated_database,monkeypatch:pytest.MonkeyPatch,point:str,
+) -> None:
+    factory=AsyncUnitOfWorkFactory(migrated_database.engine); created=[]
+    original_enter=UnitOfWork.__enter__; begin_started=Event(); release_begin=Event()
+    def controlled_enter(unit):
+        created.append(unit)
+        if point=="during_begin":
+            begin_started.set(); release_begin.wait(timeout=5)
+        result=original_enter(unit)
+        if point=="after_begin":
+            begin_started.set(); release_begin.wait(timeout=5)
+        return result
+    monkeypatch.setattr(UnitOfWork,"__enter__",controlled_enter)
+    if point=="before_lock": await factory._transaction_lock.acquire()
+    pending=factory(); task=asyncio.create_task(pending.__aenter__())
+    if point=="before_lock":
+        await asyncio.sleep(0); task.cancel()
+        with pytest.raises(asyncio.CancelledError): await task
+        factory._transaction_lock.release()
+    else:
+        assert await asyncio.to_thread(begin_started.wait,5)
+        task.cancel(); release_begin.set()
+        with pytest.raises(asyncio.CancelledError): await task
+    assert pending._sync is None and not factory._transaction_lock.locked()
+    assert all(unit.connection is None or unit.connection.closed for unit in created)
+    async with factory() as next_uow:
+        assert await next_uow.run_sync(
+            lambda tx:tx.execute(text("SELECT count(*) FROM households")).scalar_one()
+        )==0
         await next_uow.rollback()
 
 @pytest.mark.asyncio
@@ -7192,23 +7667,36 @@ class AsyncUnitOfWork:
     async def _call(self,operation):
         loop=asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor,operation)
-    async def _finish(self,operation):
+    async def _terminal_call(self,operation):
         task=asyncio.create_task(self._call(operation))
-        try: return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
+        cancellation=None
+        while not task.done():
+            try: await asyncio.shield(task)
+            except asyncio.CancelledError as error: cancellation=error
+        try: result=task.result()
+        except BaseException:
+            if cancellation is not None: raise cancellation
             raise
+        if cancellation is not None: raise cancellation
+        return result
     async def __aenter__(self):
         await self._transaction_lock.acquire()
         try:
             self._sync=UnitOfWork(self._engine)
-            await self._call(self._sync.__enter__)
-        except BaseException:
-            self._transaction_lock.release()
+            await self._terminal_call(self._sync.__enter__)
+            for name,facade_factory in self._repository_facades.items():
+                setattr(self,name,facade_factory.bind(self))
+            return self
+        except BaseException as error:
+            try:
+                if self._sync is not None and self._sync.connection is not None:
+                    await self._terminal_call(
+                        lambda:self._sync.__exit__(type(error),error,error.__traceback__)
+                    )
+            finally:
+                self._sync=None
+                self._transaction_lock.release()
             raise
-        for name,facade_factory in self._repository_facades.items():
-            setattr(self,name,facade_factory.bind(self))
-        return self
     async def run_sync(self,operation):
         if self._sync is None: raise RuntimeError("async unit of work is not active")
         return await self._call(lambda: operation(self._sync))
@@ -7218,18 +7706,18 @@ class AsyncUnitOfWork:
         self._signals_after_commit.add(name)
     async def commit(self):
         if self._sync is None: raise RuntimeError("async unit of work is not active")
-        await self._finish(self._sync.commit)
+        await self._terminal_call(self._sync.commit)
         signals=tuple(sorted(self._signals_after_commit)); self._signals_after_commit.clear()
         for name in signals:
             try: self._commit_signals[name].offer_nowait()
             except BaseException: self._signal_failures[name]=self._signal_failures.get(name,0)+1
     async def rollback(self):
         self._signals_after_commit.clear()
-        if self._sync is not None: await self._finish(self._sync.rollback)
+        if self._sync is not None: await self._terminal_call(self._sync.rollback)
     async def __aexit__(self,exc_type,exc,tb):
         try:
             if self._sync is not None:
-                await self._finish(lambda: self._sync.__exit__(exc_type,exc,tb))
+                await self._terminal_call(lambda: self._sync.__exit__(exc_type,exc,tb))
         finally:
             self._transaction_lock.release()
         return False
@@ -7257,13 +7745,13 @@ class AsyncUnitOfWorkFactory:
 
 `AtomicMutationScope` is an async context manager backed by a task-local `ContextVar[AsyncUnitOfWorkProtocol | None]`. `open()` rejects nesting, enters exactly one factory unit, installs it only for the current task, commits only when the coordinator explicitly calls `uow.commit()`, and always clears the context after cancellation, rollback, or close. `require_active_uow()` returns `AsyncUnitOfWorkProtocol` and fails closed outside the scope. Child tasks receive no usable mutation authority: the stored scope token also binds the creating `asyncio.current_task()`, and a different task is rejected even if context variables were copied.
 
-The factory is a single application-lifecycle object and closes its worker only during orderly shutdown after all units of work finish. Before the first unit opens, composition may register a closed set of fixed internal post-commit signals whose targets expose only constant-time `offer_nowait()`. A transaction can mark a registered signal by name; rollback/context failure clears it, while successful shielded commit invokes it only after the database commit is terminal. Signal failure is counted and swallowed so it cannot rewrite a committed mutation; the durable outbox plus periodic/startup drain remains authoritative. Arbitrary callbacks and late registration are forbidden. The fair application-level async transaction lock is acquired before `BEGIN IMMEDIATE` and held through close, so operations from two live units can never interleave and a second writer waits instead of exhausting SQLite busy retries behind the first. Lock acquisition is cancellable; once acquired, enter failure or context exit always releases it. A transaction may await those local serialized repository/audit operations only; it must never await provider, robot, browser, timer, filesystem, or other unbounded I/O while holding `BEGIN IMMEDIATE`. Commit and rollback are cancellation-shielded and awaited to a terminal state before cancellation propagates.
+The factory is a single application-lifecycle object and closes its worker only during orderly shutdown after all units of work finish. Before the first unit opens, composition may register a closed set of fixed internal post-commit signals whose targets expose only constant-time `offer_nowait()`. A transaction can mark a registered signal by name; rollback/context failure clears it, while successful terminal commit invokes it only after the database commit is terminal. Signal failure is counted and swallowed so it cannot rewrite a committed mutation; the durable outbox plus periodic/startup drain remains authoritative. Arbitrary callbacks and late registration are forbidden. The fair application-level async transaction lock is acquired before `BEGIN IMMEDIATE` and held through close, so operations from two live units can never interleave and a second writer waits instead of exhausting SQLite busy retries behind the first. Lock acquisition is cancellable; once acquired, `_terminal_call` absorbs any number of cancellation deliveries until the single-worker operation finishes, preserves the first cancellation, and entry failure/cancellation executes `UnitOfWork.__exit__` on that worker before clearing `_sync` and releasing the lock. A transaction may await those local serialized repository/audit operations only; it must never await provider, robot, browser, timer, filesystem, or other unbounded I/O while holding `BEGIN IMMEDIATE`. Enter, commit, rollback, and close are terminal before cancellation propagates.
 
 - [ ] **Step 4: Run the green transaction gate**
 
 Run: `uv run pytest tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/test_mutation_scope.py -q && uv run ruff check apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/repository_facade.py apps/core/src/tuntun_core/services/transactions/mutation_scope.py tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/test_mutation_scope.py && uv run mypy apps/core/src/tuntun_core/adapters/sqlcipher apps/core/src/tuntun_core/services/transactions`
 
-Expected: PASS for all transaction and mutation-scope tests and zero Ruff/mypy errors.
+Expected: PASS for all transaction and mutation-scope tests, including cancellation before lock acquisition, while the worker is entering, and immediately after `BEGIN IMMEDIATE`; every case observes `_sync is None`, a released application lock, closed worker connections, zero persisted rows, and a succeeding next writer; Ruff/mypy report zero errors.
 
 - [ ] **Step 5: Commit exact Task 14 paths**
 
@@ -7291,8 +7779,8 @@ git commit -m "feat(storage): add explicit encrypted unit of work"
 - Create: `docs/operations/foundation-storage.md`
 
 **Interfaces:**
-- Consumes: `AuditDraft`, `AuditReceipt`, `canonical_bytes`, HMAC key ID/key, and Task 14 project-owned `UnitOfWorkProtocol` or `AsyncUnitOfWorkProtocol`. Audit service modules never import `tuntun_core.adapters`; composition supplies the structurally conforming SQLCipher adapters.
-- Produces: `AuditLedger.append(uow, draft) -> AuditReceipt`; `AsyncAuditLedger.append(uow, draft) -> Awaitable[AuditReceipt]`; `AuditLedger.seal(uow, first_ordinal: int, last_ordinal: int) -> AuditSegment`; `AuditVerifier.verify(connection) -> AuditVerification(valid: bool, count: int, terminal_public_hash_hex: str | None, reason: str)`. `AsyncAuditLedger` delegates through `uow.run_sync` and never opens or commits a transaction. A rotated ledger may append with a new `hmac_key_id`; verification requires every key ID still referenced by a retained receipt/segment.
+- Consumes: `AuditDraft`, `AuditReceipt`, `canonical_bytes`, HMAC key ID/key, the Task 5 project-owned `ClockPort`, the Task 9 `FakeClock`, and the Task 14 project-owned `UnitOfWorkProtocol` or `AsyncUnitOfWorkProtocol`. Audit service modules never import `tuntun_core.adapters`; composition supplies the structurally conforming SQLCipher adapters and an application-owned clock.
+- Produces: `AuditLedger(key_id: str, key: bytes, clock: ClockPort)`; `AuditLedger.append(uow, draft) -> AuditReceipt`; `AsyncAuditLedger.append(uow, draft) -> Awaitable[AuditReceipt]`; `AuditLedger.seal(uow, first_ordinal: int, last_ordinal: int) -> AuditSegment`; `AuditVerifier.verify(connection) -> AuditVerification(valid: bool, count: int, terminal_public_hash_hex: str | None, reason: str)`. `seal` calls the injected clock exactly once, rejects a naive result, normalizes an aware result to UTC, persists the exact six-fractional-digit `YYYY-MM-DDTHH:MM:SS.ffffffZ` value, and returns the same instant as `AuditSegment.sealed_at`; it never reads ambient wall-clock time. `AsyncAuditLedger` delegates through `uow.run_sync` and never opens or commits a transaction. A rotated ledger may append with a new `hmac_key_id`; verification requires every key ID still referenced by a retained receipt/segment.
 - Chain formula: `public_hash = SHA256(previous_public_hash_bytes || canonical_body_bytes)`; `hmac = HMAC-SHA-256(key, b"tuntun:audit:v1\x00" || public_hash_bytes || canonical_body_bytes)`.
 
 - [ ] **Step 1: Write red chain, tamper, rollback, and concurrency tests**
@@ -7318,6 +7806,15 @@ def test_rotation_and_segment_sealing_require_all_retained_keys(audit_fixture) -
     assert (segment.first_ordinal,segment.last_ordinal,segment.receipt_count) == (1,2,2)
     assert audit_fixture.verify({"audit-v1":b"K"*32,"audit-v2":b"R"*32}).valid is True
     assert audit_fixture.verify({"audit-v2":b"R"*32}).reason == "missing-hmac-key"
+
+def test_segment_seal_uses_the_injected_clock_exactly(audit_fixture) -> None:
+    audit_fixture.append_index(1)
+    audit_fixture.append_index(2)
+    segment=audit_fixture.seal(1,2)
+    expected=datetime(2026,8,27,12,34,56,789123,tzinfo=UTC)
+    assert segment.sealed_at == expected
+    assert audit_fixture.segment_sealed_at(segment.segment_id) == "2026-08-27T12:34:56.789123Z"
+    assert audit_fixture.clock.calls == 1
 
 def test_audit_service_depends_only_on_project_owned_transaction_protocol() -> None:
     import inspect
@@ -7385,6 +7882,7 @@ from tuntun_core.adapters.sqlcipher.engine import create_sqlcipher_engine
 from tuntun_core.adapters.sqlcipher.unit_of_work import UnitOfWork
 from tuntun_core.services.audit.ledger import AuditLedger
 from tuntun_core.services.audit.verifier import AuditVerifier
+from tuntun_testing.fake_clock import FakeClock
 
 
 @dataclass(frozen=True,slots=True)
@@ -7413,9 +7911,13 @@ def _draft(index:int) -> AuditDraft:
     )
 
 
-def _append(database:AuditedDatabase,key_id:str,key:bytes,index:int):
+def _audit_clock() -> FakeClock:
+    return FakeClock(datetime(2026,8,27,12,34,56,789123,tzinfo=UTC))
+
+
+def _append(database:AuditedDatabase,key_id:str,key:bytes,index:int,clock:FakeClock):
     with UnitOfWork(database.engine) as uow:
-        receipt=AuditLedger(key_id,key).append(uow,_draft(index)); uow.commit()
+        receipt=AuditLedger(key_id,key,clock).append(uow,_draft(index)); uow.commit()
     return receipt
 
 
@@ -7426,16 +7928,22 @@ def _dispose(database:AuditedDatabase) -> None:
 
 
 class AuditFixture:
-    def __init__(self,database:AuditedDatabase):
-        self.database=database; self.keys={"audit-v1":b"K"*32}
+    def __init__(self,database:AuditedDatabase,clock:FakeClock):
+        self.database=database; self.clock=clock; self.keys={"audit-v1":b"K"*32}
     def append_with_key(self,key_id: str,key:bytes,index:int):
-        self.keys[key_id]=key; return _append(self.database,key_id,key,index)
+        self.keys[key_id]=key; return _append(self.database,key_id,key,index,self.clock)
     def append_index(self,index:int):
         return self.append_with_key("audit-v1",b"K"*32,index)
     def seal(self,first_ordinal:int,last_ordinal:int):
         with UnitOfWork(self.database.engine) as uow:
-            segment=AuditLedger("audit-v1",b"K"*32).seal(uow,first_ordinal,last_ordinal)
+            segment=AuditLedger("audit-v1",b"K"*32,self.clock).seal(uow,first_ordinal,last_ordinal)
             uow.commit(); return segment
+    def segment_sealed_at(self,segment_id:str) -> str:
+        with self.database.engine.connect() as connection:
+            value=connection.exec_driver_sql(
+                "SELECT sealed_at FROM audit_segments WHERE id=?",(segment_id,),
+            ).scalar_one()
+        return str(value)
     def verify(self,keys=None):
         with self.database.engine.connect() as connection:
             return AuditVerifier(self.keys if keys is None else keys).verify(connection)
@@ -7461,7 +7969,8 @@ class AuditFixture:
 @pytest.fixture
 def audited_database(tmp_path:Path):
     database=_create_database(tmp_path/"audited.db")
-    _append(database,"audit-v1",b"K"*32,1); _append(database,"audit-v1",b"K"*32,2)
+    clock=_audit_clock()
+    _append(database,"audit-v1",b"K"*32,1,clock); _append(database,"audit-v1",b"K"*32,2,clock)
     try: yield database
     finally: _dispose(database)
 
@@ -7469,12 +7978,12 @@ def audited_database(tmp_path:Path):
 @pytest.fixture
 def audit_fixture(tmp_path:Path):
     database=_create_database(tmp_path/"audit-fixture.db")
-    fixture=AuditFixture(database)
+    fixture=AuditFixture(database,_audit_clock())
     try: yield fixture
     finally: _dispose(database)
 ```
 
-The helper methods above are the full fixture interface consumed by the shown tests. Mutation bodies are injected only after migration by dropping the update trigger inside that fixture database, modeling an offline attacker; production ledger/verifier code is never monkeypatched. `append_index(index)` uses `UUID(int=700+index)`, correlation `UUID(int=800+index)`, and the fixed aware time plus `index` microseconds. Every teardown disposes the engine and removes DB/WAL/SHM.
+The helper methods above are the full fixture interface consumed by the shown tests. `audit_fixture.clock` is a Task 9 `FakeClock` fixed at `2026-08-27T12:34:56.789123Z`, counts `now()` calls, and `segment_sealed_at(segment_id)` returns the exact persisted text. Mutation bodies are injected only after migration by dropping the update trigger inside that fixture database, modeling an offline attacker; production ledger/verifier code is never monkeypatched. `append_index(index)` uses `UUID(int=700+index)`, correlation `UUID(int=800+index)`, and the fixed aware time plus `index` microseconds. Every teardown disposes the engine and removes DB/WAL/SHM.
 
 - [ ] **Step 2: Run the red audit tests**
 
@@ -7493,6 +8002,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from tuntun_contracts.audit import AuditDraft, AuditReceipt
 from tuntun_contracts.base import canonical_bytes
+from tuntun_contracts.ports import ClockPort
 from tuntun_core.services.transactions.protocols import (
     AsyncUnitOfWorkProtocol,UnitOfWorkProtocol,
 )
@@ -7504,14 +8014,15 @@ class ChainValues: public_hash_hex: str; hmac_b64: str; canonical_body_json: str
 class AuditSegment:
     segment_id: str; first_ordinal: int; last_ordinal: int; receipt_count: int
     terminal_public_hash_hex: str; terminal_hmac_b64: str; hmac_key_id: str
+    sealed_at: datetime
 def compute_chain_values(previous_public_hash_hex: str | None, draft: AuditDraft, key_id: str, key: bytes) -> ChainValues:
     body=canonical_bytes(draft); previous=bytes.fromhex(previous_public_hash_hex) if previous_public_hash_hex else b""
     public=hashlib.sha256(previous+body).digest(); mac=hmac.new(key,PURPOSE+public+body,hashlib.sha256).digest()
     return ChainValues(public.hex(),base64.b64encode(mac).decode("ascii"),body.decode("utf-8"))
 class AuditLedger:
-    def __init__(self, key_id: str, key: bytes) -> None:
+    def __init__(self, key_id: str, key: bytes, clock: ClockPort) -> None:
         if len(key)<32: raise ValueError("audit HMAC key must be at least 32 bytes")
-        self.key_id=key_id; self.key=key
+        self.key_id=key_id; self.key=key; self.clock=clock
     def append(self, uow: UnitOfWorkProtocol, draft: AuditDraft) -> AuditReceipt:
         row=uow.execute(text("SELECT ordinal,public_hash_hex FROM audit_receipts ORDER BY ordinal DESC LIMIT 1")).mappings().first()
         ordinal=1 if row is None else int(row["ordinal"])+1; previous=None if row is None else str(row["public_hash_hex"])
@@ -7521,9 +8032,12 @@ class AuditLedger:
     def seal(self, uow: UnitOfWorkProtocol, first_ordinal: int, last_ordinal: int) -> AuditSegment:
         rows=uow.execute(text("SELECT ordinal,public_hash_hex,hmac_b64,hmac_key_id FROM audit_receipts WHERE ordinal BETWEEN :first AND :last ORDER BY ordinal"),{"first":first_ordinal,"last":last_ordinal}).mappings().all()
         if not rows or rows[0]["ordinal"] != first_ordinal or rows[-1]["ordinal"] != last_ordinal or len(rows) != last_ordinal-first_ordinal+1: raise ValueError("segment range is not contiguous")
-        terminal=rows[-1]; segment_id=str(uuid4())
-        uow.execute(text("INSERT INTO audit_segments(id,first_ordinal,last_ordinal,receipt_count,terminal_public_hash_hex,terminal_hmac_b64,hmac_key_id,sealed_at,exported_at) VALUES(:id,:first,:last,:count,:public,:mac,:key_id,:sealed,NULL)"),{"id":segment_id,"first":first_ordinal,"last":last_ordinal,"count":len(rows),"public":terminal["public_hash_hex"],"mac":terminal["hmac_b64"],"key_id":terminal["hmac_key_id"],"sealed":datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")})
-        return AuditSegment(segment_id,first_ordinal,last_ordinal,len(rows),str(terminal["public_hash_hex"]),str(terminal["hmac_b64"]),str(terminal["hmac_key_id"]))
+        terminal=rows[-1]; segment_id=str(uuid4()); sealed_at=self.clock.now()
+        if sealed_at.tzinfo is None: raise ValueError("audit seal clock must be timezone-aware")
+        sealed_at=sealed_at.astimezone(UTC)
+        sealed_text=sealed_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        uow.execute(text("INSERT INTO audit_segments(id,first_ordinal,last_ordinal,receipt_count,terminal_public_hash_hex,terminal_hmac_b64,hmac_key_id,sealed_at,exported_at) VALUES(:id,:first,:last,:count,:public,:mac,:key_id,:sealed,NULL)"),{"id":segment_id,"first":first_ordinal,"last":last_ordinal,"count":len(rows),"public":terminal["public_hash_hex"],"mac":terminal["hmac_b64"],"key_id":terminal["hmac_key_id"],"sealed":sealed_text})
+        return AuditSegment(segment_id,first_ordinal,last_ordinal,len(rows),str(terminal["public_hash_hex"]),str(terminal["hmac_b64"]),str(terminal["hmac_key_id"]),sealed_at)
 
 class AsyncAuditLedger:
     def __init__(self, ledger: AuditLedger) -> None: self._ledger=ledger
