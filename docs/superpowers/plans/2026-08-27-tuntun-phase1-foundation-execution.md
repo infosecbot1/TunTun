@@ -4189,7 +4189,7 @@ git commit -m "security: add fail-closed assurance scanners"
 - Task 1 remains the owner of the package version. Task 4 must preserve `__version__: str = "0.1.0.dev0"`, test it, and explicitly import and re-export every Task 4 event type from the package root. Task 4 owns `scripts/contract_generator_common.py` as the single shared schema/OpenAPI generation helper; Task 5 and later contract tasks consume it and may not fork its registry, reference rewriting, checking, or publication logic.
 - Hostile bytes (size, UTF-8, syntax, duplicate, shape, unsafe integer, non-finite/range, schema, or canonicality faults) normalize to `ContractParseError`. `model_type` is validated before any hostile byte is decoded. Caller/programmer errors such as an invalid parser configuration, a non-`bytes` raw value, a non-contract model type, or a non-string canonical mapping key remain ordinary `TypeError`/`ValueError`. RFC 8785 canonicalizer domain failures, including nested unsafe integers, non-finite floats, and invalid Unicode code points, normalize to `ContractParseError`.
 - A `SignedEventEnvelope` signs exactly `canonical_bytes(signed.envelope)`; neither `signing_key_id` nor `signature_b64` is part of the signing input. Its key ID grammar is exactly `ed25519:<label>:v<positive-version>`, where `<label>` matches `[a-z0-9][a-z0-9._-]{0,63}` and the version matches `[1-9][0-9]{0,8}`. Its signature is standard canonical base64 of exactly 64 bytes: exactly 88 ASCII characters matching `[A-Za-z0-9+/]{86}==`, strict-decoding to 64 bytes, and byte-for-byte equal to its own re-encoding.
-- This task owns the sole deterministic `generate_schemas.py` and `generate_openapi.py` and their complete generated outputs. Each exposes exactly `OUTPUT_PATH`, `render() -> bytes`, and `main(argv: Sequence[str] | None = None) -> int`; each supports exactly one of `--check` or explicit maintainer-only `--write`, with success `0` and every usage, drift, unsafe-input, render, race, or publication failure `1`. Check mode performs two renders in a private temporary tree, nofollow/race-safely reads and walks the checked output using Task 3 helpers, byte-compares the exact sole artifact, and never mutates the repository. Write mode rejects symlink/special/changing outputs and siblings; `_ensure_output_parent()` returns one retained nofollow descriptor plus its captured device/inode identity, `_owned_snapshot()` revalidates that same identity before and after the baseline capture, and publication never reopens the parent by path. The helper revalidates the retained identity again immediately after the baseline seam, before atomic replacement, and after replacement; writes a same-directory `0600` temporary regular file through the retained descriptor; fsyncs it; atomically replaces through that descriptor; fsyncs the same parent; and verifies the sole final bytes. Missing/stale/nondeterministic outputs, a parent replaced at the baseline/publication seam, and any extra regular/symlink/special entry below the owned output parent fail closed without publishing into either the replacement or old tree.
+- This task owns the sole deterministic `generate_schemas.py` and `generate_openapi.py` and their complete generated outputs. Each exposes exactly `OUTPUT_PATH`, `render() -> bytes`, and `main(argv: Sequence[str] | None = None) -> int`; each supports exactly one of `--check` or explicit maintainer-only `--write`, with success `0` and every usage, drift, unsafe-input, render, race, or publication failure `1`. Check mode performs two renders in a private temporary tree, nofollow/race-safely reads and walks the checked output using Task 3 helpers, byte-compares the exact sole artifact, and never mutates the repository. Write mode rejects symlink/special/changing outputs and siblings; `_ensure_output_parent()` returns one retained nofollow descriptor plus its captured device/inode identity, `_capture_output_baseline()` retains the exact prior bytes and mode, and publication never reopens the parent by path. The helper revalidates the retained identity after baseline capture, immediately after descriptor-relative atomic replacement, during final artifact verification, and at one terminal postcondition after the parent fsync. Any parent substitution observed before that terminal point triggers descriptor-relative rollback: an existing output is restored atomically with its exact bytes and mode, or a newly published output is unlinked; rollback-owned temporary entries are cleaned and the retained parent descriptor is fsynced. Successful rollback therefore leaves both the lexical replacement tree and renamed old tree equal to their full pre-run snapshots. A rollback-operation failure follows the distinct `publication failed and rollback failed` path, still returns `1`, cleans any rollback temporary entry and fsyncs when those cleanup operations remain available, but may leave the renamed old tree requiring operator handling; no non-mutation claim applies to a failed rollback. The terminal identity check is the end of the bounded publication operation, and this contract makes no impossible claim about an unobservable directory substitution after that final postcondition point. Missing/stale/nondeterministic outputs, either tested parent-swap seam, and any extra regular/symlink/special entry below the owned output parent fail closed.
 - The JSON Schema artifact has exactly top-level `$schema`, `schema_version`, and `models`; `$schema` is `https://json-schema.org/draft/2020-12/schema` and `schema_version` is `1.0`. The OpenAPI artifact has exactly top-level `openapi`, `info`, `paths`, and `components`; `openapi` is `3.1.0`; `info` is exactly `{title: "Tuntun Admin API", version: "1.0.0", description: "Foundation contract components; no HTTP paths are owned yet."}`; and `paths` is empty. Both model maps use exact sorted FQNs. For each independently generated Pydantic model schema, the shared helper recursively rewrites only `#/$defs/...` references to that model's escaped JSON Pointer location under `#/models/<FQN>/$defs/...` or `#/components/schemas/<FQN>/$defs/...`; any other local reference fails generation. Tests walk every `$ref` and prove that every local JSON Pointer resolves.
 - `PyYAML` remains the Task 3-pinned runtime dependency. Because PyYAML 6 does not publish a `py.typed` marker, only its two import sites carry the fully scoped `# type: ignore[import-untyped]` annotation; Task 4 does not add `types-PyYAML`, edit dependency metadata, or churn `uv.lock`.
 - Neither generator imports app bootstrap, reads household state/credentials, opens listeners, performs network access, or reads private-data matcher fixtures.
@@ -5210,6 +5210,109 @@ def test_write_rejects_parent_swap_between_baseline_and_publication(
 
 
 @pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+@pytest.mark.parametrize("baseline", (None, b"prior bytes\n"))
+def test_write_rolls_back_parent_swap_inside_atomic_replace(
+    generator: _GeneratorModule,
+    baseline: bytes | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / generator.__name__
+    parent.mkdir()
+    replacement = tmp_path / f"{generator.__name__}-replacement"
+    replacement.mkdir()
+    replacement_sentinel = replacement / "replacement.sentinel"
+    replacement_sentinel.write_bytes(b"replacement tree\n")
+    old_tree = tmp_path / f"{generator.__name__}-old"
+    output = parent / generator.OUTPUT_PATH.name
+    if baseline is not None:
+        output.write_bytes(baseline)
+        output.chmod(0o640)
+    monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+    old_before = _tree_snapshot(parent)
+    replacement_before = _tree_snapshot(replacement)
+    real_replace = contract_generator_common._atomic_replace
+    swapped = False
+
+    def swap_inside_replace(source_name: str, destination_name: str, parent_fd: int) -> None:
+        nonlocal swapped
+        if not swapped:
+            parent.rename(old_tree)
+            replacement.rename(parent)
+            swapped = True
+        real_replace(source_name, destination_name, parent_fd)
+
+    monkeypatch.setattr(contract_generator_common, "_atomic_replace", swap_inside_replace)
+    assert generator.main(["--write"]) == 1
+    assert swapped
+    assert _tree_snapshot(parent) == replacement_before
+    assert _tree_snapshot(old_tree) == old_before
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+@pytest.mark.parametrize("baseline", (None, b"prior bytes\n"))
+def test_parent_swap_rollback_failure_returns_one_and_cleans_temps(
+    generator: _GeneratorModule,
+    baseline: bytes | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / generator.__name__
+    parent.mkdir()
+    replacement = tmp_path / f"{generator.__name__}-replacement"
+    replacement.mkdir()
+    replacement_sentinel = replacement / "replacement.sentinel"
+    replacement_sentinel.write_bytes(b"replacement tree\n")
+    old_tree = tmp_path / f"{generator.__name__}-old"
+    output = parent / generator.OUTPUT_PATH.name
+    if baseline is not None:
+        output.write_bytes(baseline)
+        output.chmod(0o640)
+    monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+    old_before = _tree_snapshot(parent)
+    replacement_before = _tree_snapshot(replacement)
+    real_replace = contract_generator_common._atomic_replace
+    real_write = contract_generator_common._write_atomically
+    swapped = False
+
+    def swap_inside_replace(source_name: str, destination_name: str, parent_fd: int) -> None:
+        nonlocal swapped
+        if not swapped:
+            parent.rename(old_tree)
+            replacement.rename(parent)
+            swapped = True
+        real_replace(source_name, destination_name, parent_fd)
+
+    rollback_failures = 0
+
+    def fail_rollback(source_or_destination: str, *arguments: object) -> None:
+        nonlocal rollback_failures
+        rollback_failures += 1
+        raise OSError(f"injected rollback failure: {source_or_destination}")
+
+    observed_errors: list[str] = []
+
+    def capture_rollback_error(output_path: Path, rendered: bytes) -> None:
+        try:
+            real_write(output_path, rendered)
+        except GeneratorError as error:
+            observed_errors.append(str(error))
+            raise
+
+    monkeypatch.setattr(contract_generator_common, "_atomic_replace", swap_inside_replace)
+    rollback_operation = "_rollback_unlink" if baseline is None else "_rollback_replace"
+    monkeypatch.setattr(contract_generator_common, rollback_operation, fail_rollback)
+    monkeypatch.setattr(contract_generator_common, "_write_atomically", capture_rollback_error)
+    assert generator.main(["--write"]) == 1
+    assert swapped
+    assert rollback_failures == 1
+    assert observed_errors == ["publication failed and rollback failed"]
+    assert _tree_snapshot(parent) == replacement_before
+    assert _tree_snapshot(old_tree) != old_before
+    assert all(not entry[0].startswith(".") for entry in _tree_snapshot(old_tree))
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
 def test_task3_race_signal_fails_check_closed_without_generator_mutation(
     generator: _GeneratorModule,
     tmp_path: Path,
@@ -5750,6 +5853,7 @@ import secrets
 import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
@@ -5780,6 +5884,14 @@ class OutputParent:
     descriptor: int
     device: int
     inode: int
+
+
+@dataclass(frozen=True)
+class OutputBaseline:
+    """Exact sole-output snapshot retained for descriptor-relative rollback."""
+
+    snapshot: tuple[FrozenRegularFile, ...]
+    mode: int | None
 
 
 class GeneratorError(RuntimeError):
@@ -5952,6 +6064,32 @@ def _owned_snapshot(
     return files
 
 
+def _capture_output_baseline(output: Path, output_parent: OutputParent) -> OutputBaseline:
+    snapshot = _owned_snapshot(
+        output,
+        allow_missing=True,
+        output_parent=output_parent,
+    )
+    if not snapshot:
+        return OutputBaseline(snapshot=(), mode=None)
+    metadata = os.stat(
+        output.name,
+        dir_fd=output_parent.descriptor,
+        follow_symlinks=False,
+    )
+    frozen = snapshot[0]
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_dev != frozen.device
+        or metadata.st_ino != frozen.inode
+        or metadata.st_size != frozen.size
+        or metadata.st_mtime_ns != frozen.modified_ns
+        or metadata.st_ctime_ns != frozen.changed_ns
+    ):
+        raise AssuranceInputError(output, "input-changed-during-scan")
+    return OutputBaseline(snapshot=snapshot, mode=stat.S_IMODE(metadata.st_mode))
+
+
 def _ensure_output_parent(output_path: Path) -> OutputParent:
     parent = lexical_path(output_path).parent
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -6002,6 +6140,61 @@ def _atomic_replace(source_name: str, destination_name: str, parent_fd: int) -> 
     )
 
 
+def _rollback_replace(source_name: str, destination_name: str, parent_fd: int) -> None:
+    os.replace(
+        source_name,
+        destination_name,
+        src_dir_fd=parent_fd,
+        dst_dir_fd=parent_fd,
+    )
+
+
+def _rollback_unlink(destination_name: str, parent_fd: int) -> None:
+    os.unlink(destination_name, dir_fd=parent_fd)
+
+
+def _rollback_publication(
+    output_name: str,
+    baseline: OutputBaseline,
+    parent_fd: int,
+) -> None:
+    rollback_name: str | None = None
+    rollback_fd: int | None = None
+    try:
+        if baseline.snapshot:
+            if baseline.mode is None:
+                raise GeneratorError("existing baseline is missing its mode")
+            rollback_name = f".{output_name}.{secrets.token_hex(16)}.rollback"
+            rollback_fd = os.open(
+                rollback_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=parent_fd,
+            )
+            _write_all(rollback_fd, baseline.snapshot[0].raw)
+            os.fchmod(rollback_fd, baseline.mode)
+            os.fsync(rollback_fd)
+            os.close(rollback_fd)
+            rollback_fd = None
+            _rollback_replace(rollback_name, output_name, parent_fd)
+            rollback_name = None
+        else:
+            if baseline.mode is not None:
+                raise GeneratorError("missing baseline unexpectedly has a mode")
+            with suppress(FileNotFoundError):
+                _rollback_unlink(output_name, parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        if rollback_fd is not None:
+            os.close(rollback_fd)
+        try:
+            if rollback_name is not None:
+                with suppress(FileNotFoundError):
+                    os.unlink(rollback_name, dir_fd=parent_fd)
+        finally:
+            os.fsync(parent_fd)
+
+
 def _write_atomically(output_path: Path, rendered: bytes) -> None:
     output = lexical_path(output_path)
     output_parent = _ensure_output_parent(output)
@@ -6010,11 +6203,7 @@ def _write_atomically(output_path: Path, rendered: bytes) -> None:
     temporary_fd: int | None = None
     published = False
     try:
-        baseline = _owned_snapshot(
-            output,
-            allow_missing=True,
-            output_parent=output_parent,
-        )
+        baseline = _capture_output_baseline(output, output_parent)
         if not _output_parent_is_current(output_parent):
             raise GeneratorError("output parent changed during generation")
         temporary_fd = os.open(
@@ -6040,14 +6229,36 @@ def _write_atomically(output_path: Path, rendered: bytes) -> None:
             or stat.S_IMODE(os.stat(temporary_path, follow_symlinks=False).st_mode) != 0o600
         ):
             raise GeneratorError("private publication file verification failed")
-        if remaining != baseline or not _output_parent_is_current(output_parent):
+        if remaining != baseline.snapshot or not _output_parent_is_current(output_parent):
             raise GeneratorError("output changed during generation")
 
         _atomic_replace(temporary_name, output.name, output_parent.descriptor)
         published = True
-        if not _output_parent_is_current(output_parent):
-            raise GeneratorError("output parent changed during generation")
-        os.fsync(output_parent.descriptor)
+        try:
+            if not _output_parent_is_current(output_parent):
+                raise GeneratorError("output parent changed during publication")
+            os.fsync(output_parent.descriptor)
+            final = _owned_snapshot(
+                output,
+                allow_missing=False,
+                output_parent=output_parent,
+            )
+            if final[0].raw != rendered:
+                raise GeneratorError("published generated artifact verification failed")
+            if not _output_parent_is_current(output_parent):
+                raise GeneratorError("output parent changed at final postcondition")
+        except Exception as publication_error:
+            try:
+                _rollback_publication(
+                    output.name,
+                    baseline,
+                    output_parent.descriptor,
+                )
+            except Exception as rollback_error:
+                raise GeneratorError("publication failed and rollback failed") from rollback_error
+            raise GeneratorError(
+                "publication failed and baseline was restored"
+            ) from publication_error
     finally:
         if temporary_fd is not None:
             os.close(temporary_fd)
@@ -6058,10 +6269,6 @@ def _write_atomically(output_path: Path, rendered: bytes) -> None:
             except FileNotFoundError:
                 pass
         os.close(output_parent.descriptor)
-
-    final = _owned_snapshot(output, allow_missing=False)
-    if final[0].raw != rendered:
-        raise GeneratorError("published generated artifact verification failed")
 
 
 def _parse_mode(argv: Sequence[str] | None) -> GeneratorMode:
@@ -6216,7 +6423,7 @@ make check
 git diff --check
 ```
 
-Expected: PASS with `68 passed` from the focused pytest command. The package smoke assertion still reports `tuntun_contracts.__version__ == "0.1.0.dev0"`; both independent generator processes report the exact exhaustive public model registry (the five required Task 4 FQNs now, with correctly exported and explicitly registered later models admitted automatically); the deliberate omission oracle fails for every public model; and all local `$ref` pointers resolve. Unsafe-integer/signature/key-ID/coercion/duplicate-FQN/CLI/symlink/special/race/mutation/error-code cases fail exactly as asserted. The seeded nondeterminism regression observes exactly two renderer calls, and replacing the second call with a reuse of the first render makes that test fail. Replacing the output parent immediately after baseline capture returns `1` without publishing into either the replacement or renamed old tree. Both generators return `0` only for current/write success and `1` for every asserted failure. The three before/after values are identical, proving check mode changed neither tracked diffs, worktree inventory, nor either owned artifact. Ruff, strict mypy under Python 3.11 semantics, `make check`, and `git diff --check` exit 0.
+Expected: PASS with `76 passed` from the focused pytest command. The package smoke assertion still reports `tuntun_contracts.__version__ == "0.1.0.dev0"`; both independent generator processes report the exact exhaustive public model registry (the five required Task 4 FQNs now, with correctly exported and explicitly registered later models admitted automatically); the deliberate omission oracle fails for every public model; and all local `$ref` pointers resolve. Unsafe-integer/signature/key-ID/coercion/duplicate-FQN/CLI/symlink/special/race/mutation/error-code cases fail exactly as asserted. The seeded nondeterminism regression observes exactly two renderer calls, and replacing the second call with a reuse of the first render makes that test fail. Replacing the output parent immediately after baseline capture returns `1` without mutation. Replacing it inside `_atomic_replace`, immediately before the real descriptor-relative `os.replace`, returns `1`; normal rollback leaves both the lexical replacement and renamed old tree equal to their full pre-run snapshots for both missing and existing baselines, restoring the latter's exact bytes and `0640` mode. Injected rollback-unlink and rollback-replace failures each return `1`, expose the distinct `publication failed and rollback failed` evidence, leave the lexical replacement unchanged, and leave no rollback temporary entry; the test explicitly records that the renamed old tree differs and therefore requires operator handling rather than claiming non-mutation. Both generators return `0` only for current/write success and `1` for every asserted failure. The three before/after values are identical, proving check mode changed neither tracked diffs, worktree inventory, nor either owned artifact. Ruff, strict mypy under Python 3.11 semantics, `make check`, and `git diff --check` exit 0.
 
 - [ ] **Step 5: Commit exact Task 4 paths**
 
