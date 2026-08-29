@@ -782,8 +782,8 @@ def test_playwright_discovers_root_e2e_and_ui_suites() -> None:
     )
     output = completed.stdout + completed.stderr
     assert completed.returncode == 0, output
-    assert "tests/e2e/admin-smoke.spec.ts" in output
-    assert "tests/ui/admin-accessibility.spec.ts" in output
+    assert "e2e/admin-smoke.spec.ts" in output
+    assert "ui/admin-accessibility.spec.ts" in output
     discovered = re.search(r"Total:\s+(\d+)\s+tests?", output)
     assert discovered and int(discovered.group(1)) >= 2, output
 
@@ -913,7 +913,7 @@ The four action revisions are full reviewed commit SHAs and the comments are inf
 
 Run: `uv lock && uv sync --all-packages --locked && pnpm install && pnpm --filter @tuntun/admin test && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/admin e2e -- --list && uv run python -c "import coverage, pytest_cov, yaml" && uv run pytest tests/unit/test_package_smoke.py tests/unit/test_cli.py tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py -q && make test && make test-security test-contract && make lint && make typecheck && sh -c 'make verify-private-data; code=$?; test "$code" -eq 2' && sh -c 'make check; code=$?; test "$code" -eq 2'`
 
-Expected: PASS on Linux and Intel macOS; `uv.lock` contains resolved `PyYAML` and `pytest-cov`, `uv sync --locked` accepts it as current, the direct import probe exits 0, the CLI test prints exactly `0.1.0.dev0` and `make test` meets the 85% branch-coverage gate, and both Python policy modules reject root/job write permissions, reusable-job secret forwarding, and dot/index secret expressions. `test-security` and `test-contract` print an explicit zero-file count now and automatically execute every matching future file once its owning directory exists. `verify-private-data` and `check` exit exactly 2 until Task 3 installs the scanner, so Task 2 CI runs only the complete current gates. The app-local/root-unit Vitest sentinels pass, both root Playwright suites are listed with a nonzero discovery total, all `.ts`/`.tsx` e2e/UI files are in ESLint and TypeScript scopes, the Vite build succeeds, and static checks report zero errors. `git diff -- .gitignore` retains `.worktrees/` and `.superpowers/sdd/` and adds every listed runtime/build/Python-cache ignore.
+Expected: PASS on Linux and Intel macOS; `uv.lock` contains resolved `PyYAML` and `pytest-cov`, `uv sync --locked` accepts it as current, the direct import probe exits 0, the CLI test prints exactly `0.1.0.dev0` and `make test` meets the 85% branch-coverage gate, and both Python policy modules reject root/job write permissions, reusable-job secret forwarding, and dot/index secret expressions. `test-security` and `test-contract` print an explicit zero-file count now and automatically execute every matching future file once its owning directory exists. `verify-private-data` and `check` exit exactly 2 until Task 3 installs the scanner, so Task 2 CI runs only the complete current gates. The app-local/root-unit Vitest sentinels pass, Playwright's `--list` output contains the `testDir`-relative paths `e2e/admin-smoke.spec.ts` and `ui/admin-accessibility.spec.ts` with a nonzero discovery total, all `.ts`/`.tsx` e2e/UI files are in ESLint and TypeScript scopes, the Vite build succeeds, and static checks report zero errors. `git diff -- .gitignore` retains `.worktrees/` and `.superpowers/sdd/` and adds every listed runtime/build/Python-cache ignore.
 
 - [ ] **Step 5: Commit exact Task 2 paths**
 
