@@ -18388,7 +18388,9 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 ### Task 7: Implement strict settings and owner-only filesystem paths
 
 **Master package:** 03
-**Depends on:** Tasks 1 and 3.
+**Depends on:** Tasks 1, 2, and 3. Task 2 owns the dual-host workflow that this
+task amends and must remain byte-for-byte unchanged outside the final check
+step's pytest environment.
 **Estimated effort:** 1.5 person-days.
 
 **Files:**
@@ -18396,6 +18398,7 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 - Modify: apps/core/pyproject.toml
 - Modify: uv.lock
 - Modify: .github/workflows/ci.yml
+- Modify: scripts/check_import_boundaries.py
 - Create: apps/core/src/tuntun_core/config/settings.py
 - Create: apps/core/src/tuntun_core/config/loader.py
 - Create: apps/core/src/tuntun_core/config/secure_paths.py
@@ -18406,6 +18409,7 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 - Test: tests/unit/config/test_paths.py
 - Create: tests/unit/config/conftest.py
 - Modify: tests/ci/test_workflow_policy.py
+- Modify: tests/security/test_shared_assurance_tools.py
 
 **Interfaces:**
 - Consumes: a bounded YAML settings file and an explicit Mapping[str, str] of
@@ -18429,12 +18433,56 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
   is current-user-owned mode 0700. Private settings leaves are current-user
   regular single-link files at exact mode 0600. General checked-in controls may
   be mode 0644 but are never group/world writable.
+- Every opened descriptor has exactly one owner. Acquisition closes a raw
+  descriptor exactly once if ownership construction fails. Component handoff,
+  ordinary close, context exit, and settings-file teardown detach before one
+  close attempt, never retry an ambiguous close, preserve the original failure
+  as primary, and add only the fixed `additional descriptor cleanup failure`
+  note when secondary cleanup also fails. Filesystem failures crossing the
+  settings/path API remain content-free `PermissionError` values with native
+  diagnostics and implicit exception context suppressed.
+- Descriptor ACL inspection is mandatory. Darwin enumerates the exact extended
+  ACL type, accepts only an absent ACL or deny-only entries, rejects granting or
+  unknown entries, caps enumeration, and releases native ACL memory exactly
+  once while preserving a primary enumeration/tag failure with only the fixed
+  ACL-release note. Linux first accepts only the reviewed ext2/3/4, XFS, Btrfs,
+  tmpfs, overlayfs, and F2FS filesystem magics, then performs a bounded stable
+  descriptor-relative xattr-name inventory: either POSIX access/default ACL
+  attribute rejects, unsupported discretionary ACL namespaces reject, and
+  unsupported filesystems or inspection/race errors fail closed.
 - The YAML reader opens the verified parent and leaf descriptor-relatively,
   holds both descriptors through the read, compares opened/named identities,
   verifies stable size/mtime/ctime, and freshly re-walks the parent before
   returning. No application or settings path is accepted by resolve()/realpath()
   through an untrusted symlink. Tests canonicalize only pytest's trusted Darwin
   temporary-directory alias once.
+- Hostile YAML UTF-8/syntax/composition failures normalize to exactly
+  `ValueError("invalid configuration") from None`. Settings open/stat/read and
+  outer filesystem failures normalize to exactly
+  `PermissionError("unsafe configuration file") from None`; lexical
+  absolutization, root open, and held-directory revalidation failures normalize
+  to exactly `PermissionError("unsafe application path") from None`. The
+  one-line `_absolute_path(raw: str) -> str` seam exists solely so the otherwise
+  platform-dependent `os.path.abspath` OSError boundary is deterministically
+  injected. Root descriptor acquisition occurs inside the protected walk so an
+  opener failure is sanitized without attempting cleanup of an unowned value.
+- Content-free at this public/rendering boundary means the exception args,
+  explicit cause, and complete normally rendered traceback disclose none of the
+  injected filename, YAML, or native-error marker. Python may retain an internal
+  `__context__` object, so callers must not traverse or serialize it; `from None`
+  marks that context suppressed. The regressions render
+  `traceback.format_exception`, assert the fixed args, `__cause__ is None`, and
+  `__suppress_context__ is True`, and run once focused and again inside
+  `make check`'s coverage-instrumented `pytest --cov --cov-branch` process.
+  Coverage/tracing must not make a suppressed private marker observable.
+- This sanitization deliberately ends before operational model validation.
+  After strict bounded parsing produces an ordinary Python mapping/scalar,
+  `Settings.model_validate` keeps Pydantic's diagnostic `ValidationError`
+  (including field path, violated constraint, and potentially the rejected
+  operational value) for local owner/operator correction. Such validation
+  errors are never family-facing, public, or log-safe by default; a later UI or
+  logging boundary must map/redact them rather than treating them as the
+  content-free parser/filesystem errors above.
 - Python 3.12 is the only Mac-core runtime. These source files remain
   syntax-compatible with Python 3.11, but Task 7 does not widen core package
   metadata or claim a Python 3.11 core runtime. Tasks 4-6 retain their separate
@@ -18442,6 +18490,21 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 - The existing dual-host check job supplies one short, per-run pytest base
   beneath root-owned sticky /tmp. This keeps Task 3's AF_UNIX inventory fixture
   below Darwin's sockaddr path limit without skipping or changing that test.
+- The native ACL regression has no Task 7 skip/xfail branch. On hosted Intel
+  macOS it proves a deny-only Darwin ACL is accepted and a granting ACL is
+  rejected; on hosted Ubuntu it proves a real POSIX ACL is rejected. The fixture
+  verifies installed raw ACL bytes and mode remain unchanged during inspection,
+  then restores the original raw ACL and exact mode.
+- External SSD deployment is supported only when the volume provides the same
+  ownership and ACL guarantees. Use APFS with ownership enabled and working
+  native ACL inspection. exFAT, an APFS volume mounted with ownership disabled
+  (including Finder's "Ignore ownership on this volume"), or any filesystem
+  outside the reviewed native semantics must fail closed and is not an approved
+  Task 7 application/settings root.
+- Task 3's import-boundary scanner gains exactly one reviewed immutable
+  distribution-to-import alias: `PyYAML`/`pyyaml` declares top-level `yaml`
+  (including `yaml.nodes`). Undeclared `yaml` remains blocking, and no unrelated
+  distribution or import is broadened.
 
 - [ ] **Step 1: Write the complete red settings/path and portability suite**
 
@@ -18449,11 +18512,241 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 # tests/unit/config/conftest.py
 from __future__ import annotations
 
+import errno
 import os
+import stat
+import struct
+import subprocess
+import sys
+from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pytest
+
+LINUX_POSIX_ACL_ACCESS = b"system.posix_acl_access"
+LINUX_POSIX_ACL_DEFAULT = b"system.posix_acl_default"
+AclKind = Literal["access", "inherit", "deny"]
+
+
+@dataclass
+class DescriptorAudit:
+    _real_close: Callable[[int], None]
+    active: dict[int, str]
+    opened: list[str]
+    closed: list[str]
+    repeated: list[int]
+    fail_label: str | None = None
+    _failure_raised: bool = False
+
+    @classmethod
+    def create(cls) -> DescriptorAudit:
+        return cls(os.close, {}, [], [], [])
+
+    def acquire(self, descriptor: int, label: str) -> int:
+        assert descriptor not in self.active
+        token = f"{len(self.opened)}:{label}"
+        self.active[descriptor] = token
+        self.opened.append(token)
+        return descriptor
+
+    def close(self, descriptor: int) -> None:
+        token = self.active.pop(descriptor, None)
+        if token is None:
+            self.repeated.append(descriptor)
+            raise AssertionError("descriptor close was attempted more than once")
+        self.closed.append(token)
+        self._real_close(descriptor)
+        if self.fail_label is not None and self.fail_label in token and not self._failure_raised:
+            self._failure_raised = True
+            raise OSError("sensitive ambiguous descriptor close failure")
+
+    def assert_all_closed_once(self) -> None:
+        assert self.active == {}
+        assert self.repeated == []
+        assert sorted(self.closed) == sorted(self.opened)
+
+    def cleanup(self) -> None:
+        for descriptor in tuple(self.active):
+            with suppress(OSError):
+                self._real_close(descriptor)
+            self.active.pop(descriptor, None)
+
+
+@pytest.fixture
+def descriptor_audit() -> Iterator[DescriptorAudit]:
+    audit = DescriptorAudit.create()
+    yield audit
+    audit.cleanup()
+
+
+@dataclass
+class NativeUnsafeAclLease:
+    original_raw: bytes | None
+    installed_raw: bytes | None
+    original_mode: int
+    installed_mode: int
+    _snapshot: Callable[[], bytes | None]
+    _snapshot_mode: Callable[[], int]
+    _restore: Callable[[], None]
+
+    def assert_installed_unchanged(self) -> None:
+        assert self._snapshot() == self.installed_raw
+        assert self._snapshot_mode() == self.installed_mode == self.original_mode
+
+    def restore_original(self) -> None:
+        self._restore()
+        assert self._snapshot() == self.original_raw
+        assert self._snapshot_mode() == self.original_mode
+
+
+UnsafeAclInstaller = Callable[[Path, AclKind], NativeUnsafeAclLease]
+
+
+def _darwin_acl_lease(path: Path, kind: AclKind) -> NativeUnsafeAclLease:
+    def snapshot() -> bytes:
+        raw = subprocess.run(
+            ["/bin/ls", "-lde", str(path)],
+            check=True,
+            capture_output=True,
+        ).stdout
+        return b"".join(raw.splitlines(keepends=True)[1:])
+
+    original = snapshot()
+
+    def snapshot_mode() -> int:
+        return stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
+
+    original_mode = snapshot_mode()
+    acl = {
+        "access": "everyone allow read",
+        "inherit": (
+            "everyone allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit"
+        ),
+        "deny": "everyone deny delete",
+    }[kind]
+    completed = subprocess.run(
+        ["/bin/chmod", "+a#", "0", acl, str(path)],
+        check=False,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, "filesystem cannot establish a Darwin extended ACL"
+
+    def restore() -> None:
+        subprocess.run(
+            ["/bin/chmod", "-a#", "0", str(path)],
+            check=True,
+            capture_output=True,
+        )
+
+    lease = NativeUnsafeAclLease(
+        original,
+        snapshot(),
+        original_mode,
+        snapshot_mode(),
+        snapshot,
+        snapshot_mode,
+        restore,
+    )
+    if lease.installed_raw == original:
+        lease.restore_original()
+        pytest.fail("filesystem did not retain a Darwin extended ACL")
+    return lease
+
+
+def _linux_acl_lease(path: Path, kind: AclKind) -> NativeUnsafeAclLease:
+    getter = getattr(os, "getxattr", None)
+    setter = getattr(os, "setxattr", None)
+    remover = getattr(os, "removexattr", None)
+    if not callable(getter) or not callable(setter) or not callable(remover):
+        pytest.fail("platform has no extended-attribute API")
+    missing_errnos = {errno.ENODATA, getattr(errno, "ENOATTR", errno.ENODATA)}
+    attribute = LINUX_POSIX_ACL_DEFAULT if kind == "inherit" else LINUX_POSIX_ACL_ACCESS
+
+    def snapshot_attribute(target_attribute: bytes) -> bytes | None:
+        try:
+            return getter(path, target_attribute)
+        except OSError as error:
+            if error.errno in missing_errnos:
+                return None
+            raise
+
+    def snapshot() -> bytes | None:
+        return snapshot_attribute(attribute)
+
+    original = snapshot()
+    original_access = snapshot_attribute(LINUX_POSIX_ACL_ACCESS)
+
+    def snapshot_mode() -> int:
+        return stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
+
+    original_mode = snapshot_mode()
+    owner_permissions = original_mode >> 6 & 0o7
+    group_permissions = original_mode >> 3 & 0o7
+    other_permissions = original_mode & 0o7
+    payload = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, identifier)
+        for tag, permissions, identifier in (
+            (0x01, owner_permissions, 0xFFFFFFFF),
+            (0x02, 0, os.geteuid() + 1),
+            (0x04, group_permissions, 0xFFFFFFFF),
+            (0x10, group_permissions, 0xFFFFFFFF),
+            (0x20, other_permissions, 0xFFFFFFFF),
+        )
+    )
+    setter(path, attribute, payload)
+
+    def restore() -> None:
+        if original is None:
+            try:
+                remover(path, attribute)
+            except OSError as error:
+                if error.errno not in missing_errnos:
+                    raise
+        else:
+            setter(path, attribute, original)
+        if snapshot_mode() != original_mode:
+            path.chmod(original_mode)
+            if original_access is not None:
+                setter(path, LINUX_POSIX_ACL_ACCESS, original_access)
+
+    lease = NativeUnsafeAclLease(
+        original,
+        snapshot(),
+        original_mode,
+        snapshot_mode(),
+        snapshot,
+        snapshot_mode,
+        restore,
+    )
+    if lease.installed_raw is None or lease.installed_raw == original:
+        lease.restore_original()
+        pytest.fail("filesystem did not retain a Linux POSIX ACL")
+    if lease.installed_mode != original_mode:
+        lease.restore_original()
+        pytest.fail("installing a Linux POSIX ACL changed the existing mode")
+    return lease
+
+
+@pytest.fixture
+def native_unsafe_acl_installer() -> Iterator[UnsafeAclInstaller]:
+    leases: list[NativeUnsafeAclLease] = []
+
+    def install(path: Path, kind: AclKind) -> NativeUnsafeAclLease:
+        if sys.platform == "darwin":
+            lease = _darwin_acl_lease(path, kind)
+        elif sys.platform.startswith("linux"):
+            lease = _linux_acl_lease(path, kind)
+        else:
+            pytest.fail("native ACL regression requires Darwin or Linux")
+        leases.append(lease)
+        return lease
+
+    yield install
+    for lease in reversed(leases):
+        lease.restore_original()
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -18614,21 +18907,55 @@ def strict_settings_case(
 # tests/unit/config/test_settings.py
 from __future__ import annotations
 
+import os
 import re
+import traceback
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ValidationError
-from tuntun_core.config import loader
+from tuntun_core.config import loader, secure_paths
 from tuntun_core.config.loader import load_settings, read_bounded_strict_yaml
 from tuntun_core.config.settings import Settings
 
 PROJECT_ROOT = Path(__file__).parents[3]
+DESCRIPTOR_CLEANUP_NOTE = "additional descriptor cleanup failure"
 
 
 def _write_private(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
     path.chmod(0o600)
+
+
+def _audit_config_descriptors(monkeypatch: pytest.MonkeyPatch, audit) -> None:
+    original_root = secure_paths._open_root
+    original_directory_open = secure_paths._open_directory_at
+    original_file_open = loader._open_regular_at
+
+    def recording_root() -> int:
+        return audit.acquire(original_root(), "root")
+
+    def recording_directory_open(name: str, parent_fd: int) -> int:
+        descriptor = original_directory_open(name, parent_fd)
+        metadata = os.fstat(descriptor)
+        return audit.acquire(
+            descriptor,
+            f"directory:{name}:{metadata.st_dev}:{metadata.st_ino}",
+        )
+
+    def recording_file_open(name: str, parent_fd: int) -> int:
+        descriptor = original_file_open(name, parent_fd)
+        metadata = os.fstat(descriptor)
+        return audit.acquire(
+            descriptor,
+            f"config-file:{name}:{metadata.st_dev}:{metadata.st_ino}",
+        )
+
+    monkeypatch.setattr(secure_paths, "_open_root", recording_root)
+    monkeypatch.setattr(secure_paths, "_open_directory_at", recording_directory_open)
+    monkeypatch.setattr(secure_paths, "_close_fd", audit.close)
+    monkeypatch.setattr(loader, "_open_regular_at", recording_file_open)
+    monkeypatch.setattr(loader, "_close_fd", audit.close)
 
 
 def test_defaults_are_locked() -> None:
@@ -18696,6 +19023,20 @@ def test_invalid_settings_documents_fail(tmp_path: Path, raw: str) -> None:
 
     with pytest.raises((ValidationError, ValueError)):
         load_settings(config, {})
+
+
+def test_yaml_syntax_failure_is_content_free() -> None:
+    marker = "private-config-value-marker"
+    raw = f"network: [{marker}\n".encode()
+
+    with pytest.raises(ValueError) as rejected:
+        loader.parse_bounded_strict_yaml(raw, max_bytes=len(raw))
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("invalid configuration",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
 
 
 def test_environment_overrides_yaml_but_unspecified_yaml_survives(
@@ -18896,23 +19237,10 @@ def test_env_example_contains_every_name_once_and_no_values() -> None:
 def test_settings_file_descriptor_closes_when_parsing_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
 ) -> None:
     config = tmp_path / "config.yaml"
     _write_private(config, "{}\n")
-    opened: list[int] = []
-    opened_directories: list[int] = []
-    original_open = loader._open_regular_at
-    original_open_directory = loader.open_trusted_directory
-
-    def recording_open(name: str, parent_fd: int) -> int:
-        fd = original_open(name, parent_fd)
-        opened.append(fd)
-        return fd
-
-    def recording_open_directory(path: Path) -> loader.OwnedDirectory:
-        directory = original_open_directory(path)
-        opened_directories.append(directory.fd)
-        return directory
 
     def failing_parse(
         raw: bytes,
@@ -18923,29 +19251,231 @@ def test_settings_file_descriptor_closes_when_parsing_fails(
     ) -> loader.YamlValue:
         raise ValueError("injected parser failure")
 
-    monkeypatch.setattr(loader, "_open_regular_at", recording_open)
-    monkeypatch.setattr(
-        loader,
-        "open_trusted_directory",
-        recording_open_directory,
-    )
+    _audit_config_descriptors(monkeypatch, descriptor_audit)
     monkeypatch.setattr(loader, "parse_bounded_strict_yaml", failing_parse)
 
     with pytest.raises(ValueError, match="injected parser failure"):
         load_settings(config, {})
 
-    assert opened
-    for fd in set(opened + opened_directories):
-        with pytest.raises(OSError):
-            loader.os.fstat(fd)
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_settings_success_closes_every_owned_descriptor_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    config = tmp_path / "config.yaml"
+    _write_private(config, "memory:\n  max_items_per_turn: 5\n")
+    _audit_config_descriptors(monkeypatch, descriptor_audit)
+
+    settings = load_settings(config, {})
+
+    assert settings.memory.max_items_per_turn == 5
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_settings_cleanup_failure_after_success_is_fixed_and_one_shot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    config = tmp_path / "config.yaml"
+    _write_private(config, "{}\n")
+    descriptor_audit.fail_label = "config-file"
+    _audit_config_descriptors(monkeypatch, descriptor_audit)
+
+    with pytest.raises(PermissionError) as rejected:
+        load_settings(config, {})
+
+    assert rejected.value.args == ("unsafe configuration file",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    descriptor_audit.assert_all_closed_once()
+
+
+@pytest.mark.parametrize("failure_point", ("open", "stat", "read"))
+def test_settings_os_failures_are_content_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+    failure_point: str,
+) -> None:
+    marker = "private-settings-marker"
+    config = tmp_path / f"{marker}.yaml"
+    if failure_point != "open":
+        _write_private(config, "{}\n")
+    _audit_config_descriptors(monkeypatch, descriptor_audit)
+
+    if failure_point == "stat":
+        original_stat = loader._stat_regular_at
+
+        def failing_stat(name: str, parent_fd: int) -> os.stat_result:
+            if name == config.name:
+                raise OSError(marker)
+            return original_stat(name, parent_fd)
+
+        monkeypatch.setattr(loader, "_stat_regular_at", failing_stat)
+    elif failure_point == "read":
+
+        def failing_read(descriptor: int, size: int) -> bytes:
+            del descriptor, size
+            raise OSError(marker)
+
+        monkeypatch.setattr(loader.os, "read", failing_read)
+
+    with pytest.raises(PermissionError) as rejected:
+        load_settings(config, {})
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("unsafe configuration file",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_settings_owner_construction_failure_closes_raw_descriptor_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    config = tmp_path / "constructor-settings.yaml"
+    _write_private(config, "{}\n")
+    file_label = f"config-file:{config.name}:"
+    descriptor_audit.fail_label = file_label
+    original_owner = secure_paths._OwnedDescriptor
+
+    def reject_file_owner(descriptor: int | None):
+        if descriptor is not None and file_label in descriptor_audit.active[descriptor]:
+            raise RuntimeError("primary settings owner construction failure")
+        return original_owner(descriptor)
+
+    _audit_config_descriptors(monkeypatch, descriptor_audit)
+    monkeypatch.setattr(secure_paths, "_OwnedDescriptor", reject_file_owner)
+
+    with pytest.raises(
+        RuntimeError, match="primary settings owner construction failure"
+    ) as primary:
+        load_settings(config, {})
+
+    assert primary.value.__notes__ == [DESCRIPTOR_CLEANUP_NOTE]
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_settings_read_preserves_primary_when_file_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    config = tmp_path / "config.yaml"
+    _write_private(config, "{}\n")
+    descriptor_audit.fail_label = "config-file"
+    _audit_config_descriptors(monkeypatch, descriptor_audit)
+
+    def fail_read(descriptor: int, size: int) -> bytes:
+        del descriptor, size
+        raise RuntimeError("primary configuration read failure")
+
+    monkeypatch.setattr(loader.os, "read", fail_read)
+
+    with pytest.raises(RuntimeError, match="primary configuration read failure") as primary:
+        load_settings(config, {})
+
+    assert primary.value.__notes__ == [DESCRIPTOR_CLEANUP_NOTE]
+    assert "sensitive" not in primary.value.__notes__[0]
+    descriptor_audit.assert_all_closed_once()
+
+
+@pytest.mark.parametrize("reject_on_inspection", (1, 2, None))
+def test_settings_file_acl_inspection_brackets_the_stable_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reject_on_inspection: int | None,
+) -> None:
+    config = tmp_path / "config.yaml"
+    _write_private(config, "memory:\n  max_items_per_turn: 5\n")
+    identity = (config.stat().st_dev, config.stat().st_ino)
+    original_read = loader.os.read
+    read_started = False
+    inspection_states: list[bool] = []
+
+    def recording_read(descriptor: int, size: int) -> bytes:
+        nonlocal read_started
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) == identity:
+            read_started = True
+        return original_read(descriptor, size)
+
+    def has_unsafe_acl(descriptor: int) -> bool:
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != identity:
+            return False
+        inspection_states.append(read_started)
+        return reject_on_inspection == len(inspection_states)
+
+    monkeypatch.setattr(loader.os, "read", recording_read)
+    monkeypatch.setattr(secure_paths, "_descriptor_has_unsafe_acl", has_unsafe_acl)
+
+    if reject_on_inspection is None:
+        settings = load_settings(config, {})
+        assert settings.memory.max_items_per_turn == 5
+        assert inspection_states == [False, True]
+    else:
+        with pytest.raises(PermissionError) as rejected:
+            load_settings(config, {})
+        assert rejected.value.args == ("unsafe configuration file",)
+        assert inspection_states == [False, True][:reject_on_inspection]
+
+
+def test_settings_unsafe_acl_inspection_failure_is_content_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.yaml"
+    _write_private(config, "{}\n")
+    identity = (config.stat().st_dev, config.stat().st_ino)
+
+    def fail_inspection(descriptor: int) -> bool:
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) == identity:
+            raise OSError("sensitive native ACL diagnostic")
+        return False
+
+    monkeypatch.setattr(secure_paths, "_descriptor_has_unsafe_acl", fail_inspection)
+    with pytest.raises(PermissionError) as rejected:
+        load_settings(config, {})
+
+    assert rejected.value.args == ("unsafe configuration file",)
+    assert "sensitive" not in str(rejected.value)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+
+
+def test_native_granting_settings_acl_is_rejected_without_mutating_raw_acl(
+    tmp_path: Path,
+    native_unsafe_acl_installer,
+) -> None:
+    config = tmp_path / "config.yaml"
+    _write_private(config, "{}\n")
+    lease = native_unsafe_acl_installer(config, "access")
+
+    with pytest.raises(PermissionError, match="unsafe configuration file"):
+        load_settings(config, {})
+
+    lease.assert_installed_unchanged()
 ~~~
 
 ~~~python
 # tests/unit/config/test_paths.py
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import stat
+import sys
+import traceback
 from pathlib import Path
 
 import pytest
@@ -18956,11 +19486,33 @@ from tuntun_core.config.secure_paths import (
     open_owned_directory,
 )
 
+DESCRIPTOR_CLEANUP_NOTE = "additional descriptor cleanup failure"
+
 
 def _fixture_root(tmp_path: Path) -> Path:
     # pytest owns this root. Darwin may report it through a trusted temporary-
     # directory alias; production code never resolves an untrusted path.
     return Path(os.path.realpath(tmp_path))
+
+
+def _audit_directory_descriptors(monkeypatch: pytest.MonkeyPatch, audit) -> None:
+    original_root = secure_paths._open_root
+    original_open = secure_paths._open_directory_at
+
+    def recording_root() -> int:
+        return audit.acquire(original_root(), "root")
+
+    def recording_open(name: str, parent_fd: int) -> int:
+        descriptor = original_open(name, parent_fd)
+        metadata = os.fstat(descriptor)
+        return audit.acquire(
+            descriptor,
+            f"component:{name}:{metadata.st_dev}:{metadata.st_ino}",
+        )
+
+    monkeypatch.setattr(secure_paths, "_open_root", recording_root)
+    monkeypatch.setattr(secure_paths, "_open_directory_at", recording_open)
+    monkeypatch.setattr(secure_paths, "_close_fd", audit.close)
 
 
 def test_paths_are_absolute_and_created_owner_only(tmp_path: Path) -> None:
@@ -19006,6 +19558,46 @@ def test_relative_base_returns_absolute_bound_identities(
     paths.revalidate()
 
 
+def test_lexical_absolutization_os_failure_is_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "private-abspath-marker"
+
+    def failing_abspath(path: str) -> str:
+        del path
+        raise OSError(marker)
+
+    monkeypatch.setattr(secure_paths, "_absolute_path", failing_abspath)
+    with pytest.raises(PermissionError) as rejected:
+        secure_paths.absolute_lexical_path(Path("private"))
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("unsafe application path",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
+
+
+def test_root_open_os_failure_is_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "private-root-open-marker"
+
+    def failing_root_open() -> int:
+        raise OSError(marker)
+
+    monkeypatch.setattr(secure_paths, "_open_root", failing_root_open)
+
+    with pytest.raises(PermissionError) as rejected:
+        secure_paths.open_trusted_directory(Path("/"))
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("unsafe application path",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
+
+
 @pytest.mark.parametrize("mode", (0o750, 0o755))
 def test_nonwritable_readable_user_ancestor_is_accepted(
     tmp_path: Path,
@@ -19028,6 +19620,320 @@ def test_root_sticky_ancestor_policy_is_explicit() -> None:
         0,
         stat.S_IFDIR | 0o0777,
     )
+
+
+def test_linux_acl_policy_matches_the_task6_allowlist() -> None:
+    for magic in (0xEF53, 0x58465342, 0x9123683E, 0x01021994, 0x794C7630, 0xF2F52010):
+        secure_paths._require_supported_linux_acl_filesystem_magic(magic)
+    for magic in (0x6969, 0xFF534D42, 0x2FC12FC1, 0xDEADBEEF):
+        with pytest.raises(ValueError, match="unsupported Linux filesystem ACL semantics"):
+            secure_paths._require_supported_linux_acl_filesystem_magic(magic)
+
+    for attribute in (b"system.posix_acl_access", b"system.posix_acl_default"):
+        assert secure_paths._classify_linux_acl_attribute(attribute) == "posix"
+    assert secure_paths._classify_linux_acl_attribute(b"security.selinux") == "other"
+    for attribute in (
+        b"system.nfs4_acl",
+        b"system.cifs_acl",
+        b"system.richacl",
+        b"security.NTACL",
+        b"trusted.SGI_ACL_FILE",
+    ):
+        with pytest.raises(ValueError, match="unsupported Linux discretionary ACL"):
+            secure_paths._classify_linux_acl_attribute(attribute)
+
+
+def test_linux_acl_inventory_is_bounded_and_fails_closed_when_unsupported() -> None:
+    class OversizedLister:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, descriptor: int, names: object, size: int) -> int:
+            del descriptor, names, size
+            return 65_537
+
+    class UnsupportedLister:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, descriptor: int, names: object, size: int) -> int:
+            del descriptor, names, size
+            ctypes.set_errno(errno.EOPNOTSUPP)
+            return -1
+
+    for lister, message in (
+        (OversizedLister(), "inventory is too large"),
+        (UnsupportedLister(), "ACL inspection failed"),
+    ):
+        library = type("FakeLibrary", (), {"flistxattr": lister})()
+        with pytest.raises(ValueError, match=message):
+            secure_paths._linux_extended_attribute_names(library, 42)
+
+
+def test_darwin_acl_inspection_uses_acl_type_extended() -> None:
+    acl_types: list[int] = []
+
+    class NoAclGetter:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, descriptor: int, acl_type: int) -> None:
+            del descriptor
+            acl_types.append(acl_type)
+            ctypes.set_errno(errno.ENOENT)
+            return None
+
+    class UnusedNativeFunction:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, *args: object) -> int:
+            del args
+            raise AssertionError("no-entry ACL must not inspect entries")
+
+    library = type(
+        "FakeLibrary",
+        (),
+        {
+            "acl_get_fd_np": NoAclGetter(),
+            "acl_get_entry": UnusedNativeFunction(),
+            "acl_get_tag_type": UnusedNativeFunction(),
+            "acl_free": UnusedNativeFunction(),
+        },
+    )()
+
+    assert secure_paths._darwin_descriptor_has_unsafe_acl(library, 42) is False
+    assert acl_types == [0x00000100]
+
+
+def test_darwin_acl_inspection_allows_deny_only_and_rejects_allow_or_unknown() -> None:
+    class Getter:
+        argtypes: object = None
+        restype: object = None
+
+        def __init__(self) -> None:
+            self.acl_types: list[int] = []
+
+        def __call__(self, descriptor: int, acl_type: int) -> int:
+            del descriptor
+            self.acl_types.append(acl_type)
+            return 99
+
+    class EntryIterator:
+        argtypes: object = None
+        restype: object = None
+
+        def __init__(self, tags: tuple[int, ...]) -> None:
+            self.tags = tags
+            self.index = 0
+
+        def __call__(self, acl: object, entry_id: int, entry_pointer: object) -> int:
+            del acl
+            self.index = 0 if entry_id == 0 else self.index + 1
+            if self.index >= len(self.tags):
+                ctypes.set_errno(errno.EINVAL)
+                return -1
+            pointer = ctypes.cast(entry_pointer, ctypes.POINTER(ctypes.c_void_p))
+            pointer[0] = ctypes.c_void_p(self.index + 1)
+            return 0
+
+    class TagGetter:
+        argtypes: object = None
+        restype: object = None
+
+        def __init__(self, tags: tuple[int, ...]) -> None:
+            self.tags = tags
+
+        def __call__(self, entry: ctypes.c_void_p, tag_pointer: object) -> int:
+            assert entry.value is not None
+            pointer = ctypes.cast(tag_pointer, ctypes.POINTER(ctypes.c_int))
+            pointer[0] = self.tags[entry.value - 1]
+            return 0
+
+    class Freer:
+        argtypes: object = None
+        restype: object = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, acl: object) -> int:
+            del acl
+            self.calls += 1
+            return 0
+
+    def inspect(tags: tuple[int, ...]) -> bool:
+        getter = Getter()
+        freer = Freer()
+        library = type(
+            "FakeLibrary",
+            (),
+            {
+                "acl_get_fd_np": getter,
+                "acl_get_entry": EntryIterator(tags),
+                "acl_get_tag_type": TagGetter(tags),
+                "acl_free": freer,
+            },
+        )()
+        try:
+            return secure_paths._darwin_descriptor_has_unsafe_acl(library, 42)
+        finally:
+            assert getter.acl_types == [0x00000100]
+            assert freer.calls == 1
+
+    assert inspect((2, 2)) is False
+    assert inspect((2, 1)) is True
+    with pytest.raises(ValueError, match="unsupported Darwin ACL entry type"):
+        inspect((3,))
+    with pytest.raises(ValueError, match="inventory is too large"):
+        inspect((2,) * 129)
+
+
+def test_darwin_acl_inspection_preserves_iterator_error_when_release_also_fails() -> None:
+    class Getter:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, descriptor: int, acl_type: int) -> int:
+            del descriptor, acl_type
+            return 99
+
+    class FailingIterator:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, acl: object, entry_id: int, entry_pointer: object) -> int:
+            del acl, entry_id, entry_pointer
+            ctypes.set_errno(errno.EIO)
+            return -1
+
+    class UnusedTagGetter:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, entry: object, tag_pointer: object) -> int:
+            del entry, tag_pointer
+            raise AssertionError("iterator failure must remain primary")
+
+    class FailingFreer:
+        argtypes: object = None
+        restype: object = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, acl: object) -> int:
+            del acl
+            self.calls += 1
+            raise RuntimeError("sensitive ACL release exception")
+
+    freer = FailingFreer()
+    library = type(
+        "FakeLibrary",
+        (),
+        {
+            "acl_get_fd_np": Getter(),
+            "acl_get_entry": FailingIterator(),
+            "acl_get_tag_type": UnusedTagGetter(),
+            "acl_free": freer,
+        },
+    )()
+
+    with pytest.raises(ValueError, match="ACL entry inspection failed") as primary:
+        secure_paths._darwin_descriptor_has_unsafe_acl(library, 42)
+
+    assert freer.calls == 1
+    assert primary.value.__notes__ == ["additional ACL release failure"]
+
+
+@pytest.mark.parametrize("failure", ("tag", "free"))
+def test_darwin_acl_tag_and_release_errors_fail_closed(failure: str) -> None:
+    class Getter:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, descriptor: int, acl_type: int) -> int:
+            del descriptor, acl_type
+            return 99
+
+    class EntryIterator:
+        argtypes: object = None
+        restype: object = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, acl: object, entry_id: int, entry_pointer: object) -> int:
+            del acl, entry_id
+            self.calls += 1
+            if self.calls == 1:
+                pointer = ctypes.cast(entry_pointer, ctypes.POINTER(ctypes.c_void_p))
+                pointer[0] = ctypes.c_void_p(1)
+                return 0
+            ctypes.set_errno(errno.EINVAL)
+            return -1
+
+    class TagGetter:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, entry: object, tag_pointer: object) -> int:
+            del entry
+            if failure == "tag":
+                ctypes.set_errno(errno.EIO)
+                return -1
+            pointer = ctypes.cast(tag_pointer, ctypes.POINTER(ctypes.c_int))
+            pointer[0] = secure_paths.DARWIN_ACL_EXTENDED_DENY
+            return 0
+
+    class Freer:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, acl: object) -> int:
+            del acl
+            if failure == "free":
+                ctypes.set_errno(errno.EIO)
+                return -1
+            return 0
+
+    library = type(
+        "FakeLibrary",
+        (),
+        {
+            "acl_get_fd_np": Getter(),
+            "acl_get_entry": EntryIterator(),
+            "acl_get_tag_type": TagGetter(),
+            "acl_free": Freer(),
+        },
+    )()
+
+    expected = "ACL tag inspection failed" if failure == "tag" else "ACL release failed"
+    with pytest.raises(ValueError, match=expected):
+        secure_paths._darwin_descriptor_has_unsafe_acl(library, 42)
+
+
+def test_native_platform_acl_policy_case_is_deterministic_and_preserves_raw_state(
+    tmp_path: Path,
+    native_unsafe_acl_installer,
+) -> None:
+    ancestor = _fixture_root(tmp_path) / "policy-ancestor"
+    descendant = ancestor / "private"
+    descendant.mkdir(mode=0o700, parents=True)
+    lease = native_unsafe_acl_installer(ancestor, "deny")
+
+    if sys.platform == "darwin":
+        with open_owned_directory(descendant) as opened:
+            opened.revalidate()
+        lease.assert_installed_unchanged()
+        granting_lease = native_unsafe_acl_installer(ancestor, "access")
+        with pytest.raises(PermissionError, match="unsafe application path"):
+            open_owned_directory(descendant)
+        granting_lease.assert_installed_unchanged()
+    else:
+        with pytest.raises(PermissionError, match="unsafe application path"):
+            open_owned_directory(descendant)
+        lease.assert_installed_unchanged()
 
 
 @pytest.mark.parametrize(
@@ -19105,6 +20011,36 @@ def test_live_directory_guard_rejects_parent_replacement_and_closes_fd(
     directory.close()
     with pytest.raises(OSError):
         os.fstat(held_fd)
+
+
+def test_live_directory_revalidation_os_failure_is_content_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _fixture_root(tmp_path)
+    base = root / "Tuntun"
+    base.mkdir(mode=0o700)
+    marker = "private-directory-marker"
+
+    with open_owned_directory(base) as directory:
+        held_fd = directory.fd
+        original_fstat = secure_paths.os.fstat
+
+        def failing_fstat(descriptor: int) -> os.stat_result:
+            if descriptor == held_fd:
+                raise OSError(marker)
+            return original_fstat(descriptor)
+
+        monkeypatch.setattr(secure_paths.os, "fstat", failing_fstat)
+
+        with pytest.raises(PermissionError) as rejected:
+            directory.revalidate()
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("unsafe application path",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
 
 
 def test_owned_path_fresh_walk_rejects_one_way_ancestor_replacement(
@@ -19204,6 +20140,365 @@ def test_walk_closes_every_opened_component_on_failure(
             os.fstat(fd)
 
 
+def test_walk_transition_close_failure_does_not_retry_or_lose_child_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    target = _fixture_root(tmp_path) / "private"
+    target.mkdir(mode=0o700)
+    descriptor_audit.fail_label = "root"
+    _audit_directory_descriptors(monkeypatch, descriptor_audit)
+
+    with pytest.raises(PermissionError) as rejected:
+        open_owned_directory(target)
+
+    assert rejected.value.args == ("unsafe application path",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert "sensitive" not in str(rejected.value)
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_root_owner_construction_failure_closes_raw_descriptor_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    target = _fixture_root(tmp_path) / "private"
+    target.mkdir(mode=0o700)
+    descriptor_audit.fail_label = "root"
+    original_owner = secure_paths._OwnedDescriptor
+
+    def reject_root_owner(descriptor: int):
+        if descriptor_audit.active[descriptor].endswith(":root"):
+            raise RuntimeError("primary root owner construction failure")
+        return original_owner(descriptor)
+
+    _audit_directory_descriptors(monkeypatch, descriptor_audit)
+    monkeypatch.setattr(secure_paths, "_OwnedDescriptor", reject_root_owner)
+
+    with pytest.raises(RuntimeError, match="primary root owner construction failure") as primary:
+        open_owned_directory(target)
+
+    assert primary.value.__notes__ == [DESCRIPTOR_CLEANUP_NOTE]
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_existing_child_owner_construction_failure_closes_raw_descriptor_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    target_name = "constructor-existing-child"
+    target = _fixture_root(tmp_path) / target_name
+    target.mkdir(mode=0o700)
+    target_label = f"component:{target_name}:"
+    descriptor_audit.fail_label = target_label
+    original_owner = secure_paths._OwnedDescriptor
+
+    def reject_target_owner(descriptor: int):
+        if target_label in descriptor_audit.active[descriptor]:
+            raise RuntimeError("primary existing-child owner construction failure")
+        return original_owner(descriptor)
+
+    _audit_directory_descriptors(monkeypatch, descriptor_audit)
+    monkeypatch.setattr(secure_paths, "_OwnedDescriptor", reject_target_owner)
+
+    with pytest.raises(
+        RuntimeError,
+        match="primary existing-child owner construction failure",
+    ) as primary:
+        open_owned_directory(target)
+
+    assert primary.value.__notes__ == [DESCRIPTOR_CLEANUP_NOTE]
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_created_child_owner_construction_failure_closes_raw_descriptor_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    parent = _fixture_root(tmp_path) / "constructor-parent"
+    parent.mkdir(mode=0o700)
+    target_name = "constructor-created-child"
+    target = parent / target_name
+    target_label = f"component:{target_name}:"
+    descriptor_audit.fail_label = target_label
+    original_owner = secure_paths._OwnedDescriptor
+
+    def reject_target_owner(descriptor: int):
+        if target_label in descriptor_audit.active[descriptor]:
+            raise RuntimeError("primary created-child owner construction failure")
+        return original_owner(descriptor)
+
+    _audit_directory_descriptors(monkeypatch, descriptor_audit)
+    monkeypatch.setattr(secure_paths, "_OwnedDescriptor", reject_target_owner)
+
+    with pytest.raises(
+        RuntimeError,
+        match="primary created-child owner construction failure",
+    ) as primary:
+        ensure_private_directory(target)
+
+    assert primary.value.__notes__ == [DESCRIPTOR_CLEANUP_NOTE]
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_walk_validation_preserves_primary_when_child_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    target = _fixture_root(tmp_path) / "private"
+    target.mkdir(mode=0o700)
+    target_metadata = target.stat(follow_symlinks=False)
+    target_identity = (target_metadata.st_dev, target_metadata.st_ino)
+    descriptor_audit.fail_label = f":{target_identity[0]}:{target_identity[1]}"
+    original_require = secure_paths._require_directory
+
+    def fail_target_validation(
+        descriptor: int,
+        opened: os.stat_result,
+        named: os.stat_result,
+        *,
+        leaf_private: bool,
+    ) -> None:
+        if (opened.st_dev, opened.st_ino) == target_identity:
+            raise RuntimeError("primary directory validation failure")
+        original_require(
+            descriptor,
+            opened,
+            named,
+            leaf_private=leaf_private,
+        )
+
+    _audit_directory_descriptors(monkeypatch, descriptor_audit)
+    monkeypatch.setattr(secure_paths, "_require_directory", fail_target_validation)
+
+    with pytest.raises(RuntimeError, match="primary directory validation failure") as primary:
+        open_owned_directory(target)
+
+    assert primary.value.__notes__ == [DESCRIPTOR_CLEANUP_NOTE]
+    assert "sensitive" not in primary.value.__notes__[0]
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_walk_result_construction_failure_retains_leaf_cleanup_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    target = _fixture_root(tmp_path) / "private"
+    target.mkdir(mode=0o700)
+    _audit_directory_descriptors(monkeypatch, descriptor_audit)
+
+    def fail_construction(*args: object, **kwargs: object):
+        del args, kwargs
+        raise RuntimeError("primary directory result construction failure")
+
+    monkeypatch.setattr(secure_paths, "OwnedDirectory", fail_construction)
+
+    with pytest.raises(RuntimeError, match="primary directory result construction failure"):
+        open_owned_directory(target)
+
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_owned_directory_exit_preserves_body_error_and_invalidates_before_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+) -> None:
+    target = _fixture_root(tmp_path) / "private"
+    target.mkdir(mode=0o700)
+    opened = open_owned_directory(target)
+    descriptor_audit.acquire(opened.fd, "owned-directory")
+    descriptor_audit.fail_label = "owned-directory"
+    monkeypatch.setattr(secure_paths, "_close_fd", descriptor_audit.close)
+
+    with pytest.raises(RuntimeError, match="primary body failure") as primary, opened:
+        raise RuntimeError("primary body failure")
+
+    opened.close()
+    assert primary.value.__notes__ == [DESCRIPTOR_CLEANUP_NOTE]
+    assert "sensitive" not in primary.value.__notes__[0]
+    descriptor_audit.assert_all_closed_once()
+
+
+@pytest.mark.parametrize("release", ("close", "context"))
+def test_owned_directory_cleanup_failure_without_body_is_fixed_and_one_shot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+    release: str,
+) -> None:
+    target = _fixture_root(tmp_path) / "private"
+    target.mkdir(mode=0o700)
+    opened = open_owned_directory(target)
+    descriptor_audit.acquire(opened.fd, "owned-directory")
+    descriptor_audit.fail_label = "owned-directory"
+    monkeypatch.setattr(secure_paths, "_close_fd", descriptor_audit.close)
+
+    with pytest.raises(PermissionError) as rejected:
+        if release == "close":
+            opened.close()
+        else:
+            with opened:
+                pass
+
+    opened.close()
+    assert rejected.value.args == ("unsafe application path",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    descriptor_audit.assert_all_closed_once()
+
+
+def test_every_walked_directory_rejects_an_injected_unsafe_acl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _fixture_root(tmp_path)
+    parent = root / "acl-parent"
+    target = parent / "private"
+    parent.mkdir(mode=0o700)
+    target.mkdir(mode=0o700)
+    components = [Path("/")]
+    for part in target.parts[1:]:
+        components.append(components[-1] / part)
+    identities = [
+        (component.stat(follow_symlinks=False).st_dev, component.stat().st_ino)
+        for component in components
+    ]
+
+    def acl_detector(
+        expected: tuple[int, int],
+        inspected: list[tuple[int, int]],
+    ):
+        def has_unsafe_acl(descriptor: int) -> bool:
+            metadata = os.fstat(descriptor)
+            identity = (metadata.st_dev, metadata.st_ino)
+            inspected.append(identity)
+            return identity == expected
+
+        return has_unsafe_acl
+
+    for unsafe_identity in identities:
+        inspected: list[tuple[int, int]] = []
+
+        monkeypatch.setattr(
+            secure_paths,
+            "_descriptor_has_unsafe_acl",
+            acl_detector(unsafe_identity, inspected),
+            raising=False,
+        )
+        with pytest.raises(PermissionError) as rejected:
+            open_owned_directory(target)
+
+        assert rejected.value.args == ("unsafe application path",)
+        assert unsafe_identity in inspected
+
+
+@pytest.mark.parametrize(
+    "inspection_error",
+    (
+        ctypes.ArgumentError("sensitive ctypes diagnostic"),
+        TypeError("sensitive type diagnostic"),
+        RuntimeError("sensitive runtime diagnostic"),
+    ),
+)
+def test_directory_unsafe_acl_inspection_failure_is_content_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inspection_error: Exception,
+) -> None:
+    target = _fixture_root(tmp_path) / "private"
+    target.mkdir(mode=0o700)
+
+    def fail_inspection(descriptor: int) -> bool:
+        del descriptor
+        raise inspection_error
+
+    monkeypatch.setattr(
+        secure_paths,
+        "_descriptor_has_unsafe_acl",
+        fail_inspection,
+        raising=False,
+    )
+    with pytest.raises(PermissionError) as rejected:
+        open_owned_directory(target)
+
+    assert rejected.value.args == ("unsafe application path",)
+    assert "sensitive" not in str(rejected.value)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+
+
+def test_unsafe_creation_parent_acl_rejects_before_missing_child_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = _fixture_root(tmp_path) / "creation-parent"
+    parent.mkdir(mode=0o700)
+    child = parent / "missing"
+    metadata = parent.stat(follow_symlinks=False)
+    parent_identity = (metadata.st_dev, metadata.st_ino)
+    before = (parent_identity, stat.S_IMODE(metadata.st_mode), tuple(parent.iterdir()))
+
+    def has_unsafe_acl(descriptor: int) -> bool:
+        opened = os.fstat(descriptor)
+        return (opened.st_dev, opened.st_ino) == parent_identity
+
+    monkeypatch.setattr(
+        secure_paths,
+        "_descriptor_has_unsafe_acl",
+        has_unsafe_acl,
+        raising=False,
+    )
+    with pytest.raises(PermissionError, match="unsafe application path"):
+        ensure_private_directory(child)
+
+    after_metadata = parent.stat(follow_symlinks=False)
+    assert not child.exists()
+    assert (
+        (after_metadata.st_dev, after_metadata.st_ino),
+        stat.S_IMODE(after_metadata.st_mode),
+        tuple(parent.iterdir()),
+    ) == before
+
+
+def test_native_granting_directory_acl_is_rejected_without_mutating_raw_acl(
+    tmp_path: Path,
+    native_unsafe_acl_installer,
+) -> None:
+    target = _fixture_root(tmp_path) / "private"
+    target.mkdir(mode=0o700)
+    lease = native_unsafe_acl_installer(target, "access")
+
+    with pytest.raises(PermissionError, match="unsafe application path"):
+        open_owned_directory(target)
+
+    lease.assert_installed_unchanged()
+
+
+def test_native_inheritable_or_default_acl_rejects_creation_without_mutation(
+    tmp_path: Path,
+    native_unsafe_acl_installer,
+) -> None:
+    parent = _fixture_root(tmp_path) / "creation-parent"
+    parent.mkdir(mode=0o700)
+    child = parent / "missing"
+    lease = native_unsafe_acl_installer(parent, "inherit")
+
+    with pytest.raises(PermissionError, match="unsafe application path"):
+        ensure_private_directory(child)
+
+    assert not child.exists()
+    assert tuple(parent.iterdir()) == ()
+    lease.assert_installed_unchanged()
+
+
 @pytest.mark.parametrize(
     "path",
     (
@@ -19221,37 +20516,341 @@ def test_private_directory_rejects_ambiguous_lexical_paths(
         ensure_private_directory(path)
 ~~~
 
-Append this executable policy node to the existing Task 2 test module:
+Append the executable policy node to the existing Task 2 test module, then run
+the repository formatter over that touched file. The complete exact final file
+is below; its pre-existing assertions are unchanged and the other textual
+changes are Ruff's deterministic formatting:
 
 ~~~python
-# tests/ci/test_workflow_policy.py (append)
+# tests/ci/test_workflow_policy.py
+import re
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+import pytest
+import yaml
+
+FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+FIXED_RUNNERS = {"ubuntu-24.04", "macos-15-intel"}
+MATRIX_RUNNER = "${{ matrix.os }}"
+APPROVED_MATRIX = {"os": ["ubuntu-24.04", "macos-15-intel"]}
+WORKFLOW_ROOT = Path(".github/workflows")
+
+
+def workflow_paths(root: Path = WORKFLOW_ROOT) -> tuple[Path, ...]:
+    paths = tuple(sorted((*root.glob("*.yml"), *root.glob("*.yaml"))))
+    assert paths, "at least one workflow is required"
+    return paths
+
+
+def _assert_uses_is_immutable(value: str) -> None:
+    if value.startswith("./"):
+        return
+    assert FULL_SHA.fullmatch(value), value
+
+
+SECRET_EXPRESSION = re.compile(r"\bsecrets\s*(?:\.|\[)", re.IGNORECASE)
+
+
+def _assert_no_secret_channel(value: object) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            assert str(key).casefold() != "secrets"
+            _assert_no_secret_channel(item)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for item in value:
+            _assert_no_secret_channel(item)
+    elif isinstance(value, str):
+        assert value.casefold() != "inherit"
+        assert SECRET_EXPRESSION.search(value) is None
+
+
+def _assert_permissions(owner: Mapping[str, object], *, required: bool) -> None:
+    if "permissions" not in owner:
+        assert not required
+        return
+    assert owner["permissions"] == {"contents": "read"}
+
+
+def _assert_strategy_matches_runner(job: Mapping[str, object]) -> None:
+    runner = job.get("runs-on")
+    strategy = job.get("strategy")
+    if runner != MATRIX_RUNNER:
+        assert strategy is None
+        return
+    assert isinstance(strategy, Mapping)
+    assert set(strategy) <= {"fail-fast", "matrix"}
+    assert strategy["matrix"] == APPROVED_MATRIX
+
+
+def _assert_workflow_policy(path: Path) -> None:
+    assert path.is_file() and not path.is_symlink()
+    raw = path.read_text()
+    lowered = raw.lower()
+    for forbidden in (
+        "contents: write",
+        "pages: write",
+        "gh release create",
+        "git tag ",
+        "npm publish",
+        "pnpm publish",
+        "twine upload",
+        "reachy_hardware",
+        "live_cloud",
+    ):
+        assert forbidden not in lowered, (path, forbidden)
+    workflow = yaml.safe_load(raw)
+    assert isinstance(workflow, dict) and isinstance(workflow.get("jobs"), dict)
+    _assert_permissions(workflow, required=True)
+    _assert_no_secret_channel(workflow)
+    for job in workflow["jobs"].values():
+        assert isinstance(job, dict)
+        _assert_permissions(job, required=False)
+        _assert_strategy_matches_runner(job)
+        if "uses" in job:
+            assert set(job) <= {
+                "name",
+                "needs",
+                "if",
+                "uses",
+                "with",
+                "permissions",
+            }
+            _assert_uses_is_immutable(job["uses"])
+            continue
+        runner = job["runs-on"]
+        if isinstance(runner, str) and runner.startswith("${{"):
+            assert runner == MATRIX_RUNNER
+        else:
+            assert runner in FIXED_RUNNERS
+        for step in job.get("steps", []):
+            if "uses" in step:
+                _assert_uses_is_immutable(step["uses"])
+
+
+def test_every_yml_and_yaml_workflow_has_only_fixed_runners_and_full_sha_actions() -> None:
+    for path in workflow_paths():
+        _assert_workflow_policy(path)
+
+
+def test_ci_matrix_remains_exact() -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
+    assert workflow["jobs"]["check"]["strategy"]["matrix"] == {
+        "os": ["ubuntu-24.04", "macos-15-intel"],
+    }
+
+
+def test_ci_is_unprivileged_and_has_no_hardware_or_provider_secrets() -> None:
+    text = (WORKFLOW_ROOT / "ci.yml").read_text()
+    workflow = yaml.safe_load(text)
+    assert workflow["permissions"] == {"contents": "read"}
+    assert "secrets." not in text
+    assert "reachy_hardware" not in text and "live_cloud" not in text
+
+
+def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path) -> None:
+    root = tmp_path / ".github" / "workflows"
+    root.mkdir(parents=True)
+    valid = {
+        "permissions": {"contents": "read"},
+        "jobs": {
+            "check": {
+                "runs-on": "ubuntu-24.04",
+                "steps": [{"uses": "actions/checkout@" + "a" * 40}],
+            }
+        },
+    }
+    (root / "security.yml").write_text(yaml.safe_dump(valid))
+    (root / "release.yaml").write_text(yaml.safe_dump(valid))
+    assert {path.name for path in workflow_paths(root)} == {"security.yml", "release.yaml"}
+    for name, mutation in (
+        ("security.yml", {"runs-on": "ubuntu-latest"}),
+        ("release.yaml", {"steps": [{"uses": "actions/checkout@v4"}]}),
+        ("security.yml", {"steps": [{"run": "gh release create v1"}]}),
+        ("release.yaml", {"steps": [{"run": "echo ${{ secrets.TOKEN }}"}]}),
+        ("security.yml", {"steps": [{"run": "echo ${{ secrets['TOKEN'] }}"}]}),
+        ("release.yaml", {"permissions": {"contents": "write"}}),
+        ("security.yml", {"permissions": {"issues": "write"}}),
+        ("release.yaml", {"permissions": None}),
+        (
+            "security.yml",
+            {
+                "runs-on": "${{ matrix.os }}",
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "include": [{"os": "self-hosted"}],
+                    }
+                },
+            },
+        ),
+        (
+            "release.yaml",
+            {
+                "runs-on": "${{ matrix.os }}",
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "exclude": [{"os": "ubuntu-24.04"}],
+                    }
+                },
+            },
+        ),
+        ("security.yml", {"strategy": {"matrix": {"python": ["3.12"]}}}),
+        (
+            "release.yaml",
+            {
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "include": [{"os": "ubuntu-24.04"}],
+                    }
+                }
+            },
+        ),
+        (
+            "security.yml",
+            {
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "exclude": [{"os": "macos-15-intel"}],
+                    }
+                }
+            },
+        ),
+        (
+            "release.yaml",
+            {
+                "runs-on": "${{ matrix.os }}",
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "python": ["3.12"],
+                    }
+                },
+            },
+        ),
+    ):
+        changed = {**valid, "jobs": {"check": {**valid["jobs"]["check"], **mutation}}}
+        path = root / name
+        path.write_text(yaml.safe_dump(changed))
+        with pytest.raises(AssertionError):
+            _assert_workflow_policy(path)
+        path.write_text(yaml.safe_dump(valid))
+    privileged = {**valid, "permissions": {"contents": "write"}}
+    path = root / "release.yaml"
+    path.write_text(yaml.safe_dump(privileged))
+    with pytest.raises(AssertionError):
+        _assert_workflow_policy(path)
+
+    for reusable in (
+        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40, "secrets": "inherit"},
+        {
+            "uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+            "secrets": {"token": "${{ secrets['TOKEN'] }}"},
+        },
+        {
+            "uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+            "permissions": {"actions": "write"},
+        },
+        {
+            "uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+            "strategy": {"matrix": {"python": ["3.12"]}},
+        },
+    ):
+        workflow_with_reusable_job = {
+            "permissions": {"contents": "read"},
+            "jobs": {"reuse": reusable},
+        }
+        path.write_text(yaml.safe_dump(workflow_with_reusable_job))
+        with pytest.raises(AssertionError):
+            _assert_workflow_policy(path)
+
+
 def test_ci_check_uses_short_per_run_pytest_basetemp() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
 
     assert workflow["jobs"]["check"]["steps"][-1] == {
         "run": "make check",
         "env": {
-            "PYTEST_ADDOPTS": (
-                "--basetemp=/tmp/t7-"
-                "${{ github.run_id }}-${{ github.run_attempt }}"
-            ),
+            "PYTEST_ADDOPTS": ("--basetemp=/tmp/t7-${{ github.run_id }}-${{ github.run_attempt }}"),
         },
     }
 ~~~
 
+Append these three exact Task 7 alias-registry regressions to the existing Task
+3 assurance module. They are the only Task 7 nodes in that shared module:
+
+~~~python
+# tests/security/test_shared_assurance_tools.py (append)
+def test_import_boundaries_accepts_yaml_only_when_pyyaml_is_declared(
+    shared_assurance_harness,
+) -> None:
+    workspace = shared_assurance_harness.complete_positive_workspace_for(check_import_boundaries)
+    (workspace / "pyproject.toml").write_text(
+        '[project]\nname = "synthetic-workspace"\nversion = "0.0.0"\n'
+        'dependencies = ["PyYAML>=6.0,<7"]\n'
+        '[tool.tuntun-assurance]\nsrc-roots = ["src"]\n',
+        encoding="utf-8",
+    )
+    (workspace / "src" / "vision" / "service.py").write_text(
+        "import yaml\nfrom yaml.nodes import MappingNode, ScalarNode\n",
+        encoding="utf-8",
+    )
+    argv = ["--root", str(workspace), "--all"]
+
+    receipt = check_import_boundaries.evaluate(argv)
+
+    assert receipt.complete is True
+    assert receipt.findings == ()
+    assert check_import_boundaries.main(argv) == 0
+
+
+def test_import_boundaries_rejects_yaml_when_pyyaml_is_undeclared(
+    shared_assurance_harness,
+) -> None:
+    workspace = shared_assurance_harness.complete_positive_workspace_for(check_import_boundaries)
+    (workspace / "src" / "vision" / "service.py").write_text(
+        "import yaml\nfrom yaml.nodes import MappingNode, ScalarNode\n",
+        encoding="utf-8",
+    )
+    argv = ["--root", str(workspace), "--all"]
+
+    receipt = check_import_boundaries.evaluate(argv)
+
+    assert receipt.complete is True
+    assert {finding.code for finding in receipt.findings} == {"undeclared-third-party-import"}
+    assert {finding.detail for finding in receipt.findings} == {"yaml", "yaml.nodes"}
+    assert check_import_boundaries.main(argv) == 1
+
+
+def test_import_boundary_distribution_alias_registry_is_exact_and_immutable() -> None:
+    registry = getattr(check_import_boundaries, "DISTRIBUTION_IMPORT_ALIASES", {})
+
+    assert registry == {"pyyaml": frozenset({"yaml"})}
+    with pytest.raises(TypeError):
+        registry["unreviewed-distribution"] = frozenset({"unreviewed_import"})
+
+
+~~~
+
 - [ ] **Step 2: Run the red suite and prove the oracle is missing**
 
-Run both commands in order:
+Run all three commands in order:
 
 ~~~bash
+uv run pytest tests/security/test_shared_assurance_tools.py::test_import_boundaries_accepts_yaml_only_when_pyyaml_is_declared tests/security/test_shared_assurance_tools.py::test_import_boundaries_rejects_yaml_when_pyyaml_is_undeclared tests/security/test_shared_assurance_tools.py::test_import_boundary_distribution_alias_registry_is_exact_and_immutable -q
 uv run pytest tests/ci/test_workflow_policy.py::test_ci_check_uses_short_per_run_pytest_basetemp -q
 uv run pytest tests/unit/config/test_settings.py tests/unit/config/test_paths.py -q
 ~~~
 
-Expected: the workflow node first fails because the Task 2 check step has no
-short pytest base. The config/path command then stops during collection with
-ModuleNotFoundError naming tuntun_core.config. Neither command creates
-implementation or example artifacts.
+Expected: the assurance command is red because declared `PyYAML` has not yet
+authorized the `yaml` import and the closed immutable registry does not exist.
+The undeclared-`yaml` node remains green. The workflow node fails because the
+Task 2 check step has no short pytest base. The config/path command then stops
+during collection with `ModuleNotFoundError` naming `tuntun_core.config`. None
+of the commands creates implementation or example artifacts.
 
 - [ ] **Step 3: Add direct dependencies and implement the bounded settings model**
 
@@ -19299,6 +20898,47 @@ build-backend = "hatchling.build"
 
 Do not add pydantic-settings: load_settings owns explicit caller-supplied
 source precedence and does not read ambient process state.
+
+In the existing Task 3 import-boundary scanner, add the exact standard-library
+import and closed registry below; there is no generic normalization or fallback
+alias mechanism:
+
+~~~python
+# scripts/check_import_boundaries.py (exact additions)
+from types import MappingProxyType
+
+DISTRIBUTION_IMPORT_ALIASES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {"pyyaml": frozenset({"yaml"})}
+)
+~~~
+
+Replace only `_declared_dependencies` with this exact implementation:
+
+~~~python
+# scripts/check_import_boundaries.py (replace function)
+def _declared_dependencies(document: Mapping[str, object]) -> set[str]:
+    project = document.get("project")
+    if not isinstance(project, Mapping):
+        return set()
+    dependencies = project.get("dependencies", [])
+    if not isinstance(dependencies, list):
+        return set()
+    result = set()
+    for dependency in dependencies:
+        if isinstance(dependency, str):
+            name = re.split(r"[<>=!~;\[]", dependency, maxsplit=1)[0]
+            normalized = name.strip().replace("-", "_").lower()
+            result.add(normalized)
+            result.update(DISTRIBUTION_IMPORT_ALIASES.get(normalized, ()))
+    return result
+
+
+~~~
+
+The registry value is a `MappingProxyType` whose nested values are
+`frozenset`s. The two representations of an imported submodule remain distinct
+findings when undeclared (`yaml` and `yaml.nodes`); declaring `PyYAML` authorizes
+their reviewed top-level package without authorizing another distribution.
 
 ~~~python
 # apps/core/src/tuntun_core/config/settings.py
@@ -19494,19 +21134,102 @@ class Settings(FrozenSettings):
     budget: BudgetSettings = Field(default_factory=BudgetSettings)
 ~~~
 
-- [ ] **Step 4: Implement descriptor-walked paths and strict YAML loading**
+- [ ] **Step 4: Implement descriptor-owned native-ACL paths and strict YAML loading**
 
 ~~~python
 # apps/core/src/tuntun_core/config/secure_paths.py
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import stat
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from types import TracebackType
+from typing import Literal
 
 OPEN_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+MAX_LINUX_XATTR_LIST_BYTES = 64 * 1024
+LINUX_POSIX_ACL_FILESYSTEM_MAGICS = frozenset(
+    {
+        0xEF53,  # ext2/ext3/ext4
+        0x58465342,  # XFS
+        0x9123683E,  # Btrfs
+        0x01021994,  # tmpfs
+        0x794C7630,  # overlayfs
+        0xF2F52010,  # F2FS
+    }
+)
+LINUX_POSIX_ACL_ATTRIBUTES = frozenset({b"system.posix_acl_access", b"system.posix_acl_default"})
+DARWIN_ACL_TYPE_EXTENDED = 0x00000100
+DARWIN_ACL_FIRST_ENTRY = 0
+DARWIN_ACL_NEXT_ENTRY = -1
+DARWIN_ACL_EXTENDED_ALLOW = 1
+DARWIN_ACL_EXTENDED_DENY = 2
+MAX_DARWIN_ACL_ENTRIES = 128
+_DESCRIPTOR_CLEANUP_NOTE = "additional descriptor cleanup failure"
+_ACL_RELEASE_CLEANUP_NOTE = "additional ACL release failure"
+
+
+class _AclInspectionError(ValueError):
+    pass
+
+
+def _absolute_path(raw: str) -> str:
+    return os.path.abspath(raw)
+
+
+@dataclass(slots=True)
+class _OwnedDescriptor:
+    _value: int | None
+
+    def borrow(self) -> int:
+        if self._value is None:
+            raise PermissionError("descriptor is no longer owned")
+        return self._value
+
+    def detach(self) -> int:
+        descriptor = self.borrow()
+        self._value = None
+        return descriptor
+
+    def close(self, closer: Callable[[int], None]) -> None:
+        if self._value is None:
+            return
+        descriptor = self.detach()
+        closer(descriptor)
+
+
+def _acquire_owned_descriptor(
+    opener: Callable[[], int],
+    closer: Callable[[int], None],
+) -> _OwnedDescriptor:
+    descriptor = opener()
+    try:
+        return _OwnedDescriptor(descriptor)
+    except BaseException as error:
+        try:
+            closer(descriptor)
+        except BaseException:
+            error.add_note(_DESCRIPTOR_CLEANUP_NOTE)
+        raise
+
+
+def _close_preserving_primary(
+    owner: _OwnedDescriptor,
+    closer: Callable[[int], None],
+    primary_error: BaseException | None,
+) -> None:
+    try:
+        owner.close(closer)
+    except BaseException:
+        if primary_error is None:
+            raise
+        primary_error.add_note(_DESCRIPTOR_CLEANUP_NOTE)
 
 
 def absolute_lexical_path(
@@ -19514,19 +21237,22 @@ def absolute_lexical_path(
     *,
     allow_root: bool = False,
 ) -> Path:
-    raw = os.fspath(path)
-    if (
-        type(raw) is not str
-        or not raw
-        or "\x00" in raw
-        or raw.startswith(os.sep * 2)
-        or any(component in {".", ".."} for component in raw.split(os.sep))
-    ):
-        raise PermissionError("unsafe application path")
-    absolute = Path(os.path.abspath(raw))
-    if absolute == Path("/") and not allow_root:
-        raise PermissionError("unsafe application path")
-    return absolute
+    try:
+        raw = os.fspath(path)
+        if (
+            type(raw) is not str
+            or not raw
+            or "\x00" in raw
+            or raw.startswith(os.sep * 2)
+            or any(component in {".", ".."} for component in raw.split(os.sep))
+        ):
+            raise PermissionError("unsafe application path")
+        absolute = Path(_absolute_path(raw))
+        if absolute == Path("/") and not allow_root:
+            raise PermissionError("unsafe application path")
+        return absolute
+    except OSError:
+        raise PermissionError("unsafe application path") from None
 
 
 def _reported_owner(value: os.stat_result) -> int:
@@ -19553,6 +21279,176 @@ def _close_fd(fd: int) -> None:
     os.close(fd)
 
 
+def _require_supported_linux_acl_filesystem_magic(magic: int) -> None:
+    if magic not in LINUX_POSIX_ACL_FILESYSTEM_MAGICS:
+        raise _AclInspectionError(f"unsupported Linux filesystem ACL semantics: 0x{magic:x}")
+
+
+def _classify_linux_acl_attribute(attribute: bytes) -> Literal["posix", "other"]:
+    if attribute in LINUX_POSIX_ACL_ATTRIBUTES:
+        return "posix"
+    normalized = attribute.lower()
+    if normalized.startswith((b"system.", b"security.", b"trusted.")) and b"acl" in normalized:
+        raise _AclInspectionError(
+            f"unsupported Linux discretionary ACL attribute: {attribute.decode('ascii', 'replace')}"
+        )
+    return "other"
+
+
+def _linux_filesystem_magic(library: ctypes.CDLL, descriptor: int) -> int:
+    filesystem_words = (ctypes.c_long * 32)()
+    inspector = library.fstatfs
+    inspector.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    inspector.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if inspector(descriptor, ctypes.byref(filesystem_words)) != 0:
+        error_number = ctypes.get_errno()
+        raise _AclInspectionError(f"filesystem ACL inspection failed: {os.strerror(error_number)}")
+    word_bits = ctypes.sizeof(ctypes.c_long) * 8
+    return int(filesystem_words[0]) & ((1 << word_bits) - 1)
+
+
+def _linux_extended_attribute_names(
+    library: ctypes.CDLL,
+    descriptor: int,
+) -> tuple[bytes, ...]:
+    lister = library.flistxattr
+    lister.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_size_t]
+    lister.restype = ctypes.c_ssize_t
+    for _ in range(4):
+        ctypes.set_errno(0)
+        required = lister(descriptor, None, 0)
+        if required < 0:
+            error_number = ctypes.get_errno()
+            raise _AclInspectionError(f"ACL inspection failed: {os.strerror(error_number)}")
+        if required == 0:
+            return ()
+        if required > MAX_LINUX_XATTR_LIST_BYTES:
+            raise _AclInspectionError("extended-attribute inventory is too large")
+        buffer = ctypes.create_string_buffer(required)
+        ctypes.set_errno(0)
+        actual = lister(descriptor, buffer, required)
+        if actual < 0:
+            error_number = ctypes.get_errno()
+            if error_number == errno.ERANGE:
+                continue
+            raise _AclInspectionError(f"ACL inspection failed: {os.strerror(error_number)}")
+        if actual == 0 or actual > required:
+            raise _AclInspectionError("ACL inventory changed during inspection")
+        raw_names = buffer.raw[:actual]
+        if not raw_names.endswith(b"\0"):
+            raise _AclInspectionError("ACL inventory is malformed")
+        names = tuple(raw_names[:-1].split(b"\0"))
+        if not names or any(not name for name in names):
+            raise _AclInspectionError("ACL inventory is malformed")
+        return names
+    raise _AclInspectionError("ACL inventory changed during inspection")
+
+
+def _darwin_descriptor_has_unsafe_acl(
+    library: ctypes.CDLL,
+    descriptor: int,
+) -> bool:
+    getter = library.acl_get_fd_np
+    getter.argtypes = [ctypes.c_int, ctypes.c_int]
+    getter.restype = ctypes.c_void_p
+    iterator = library.acl_get_entry
+    iterator.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+    iterator.restype = ctypes.c_int
+    tag_getter = library.acl_get_tag_type
+    tag_getter.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+    tag_getter.restype = ctypes.c_int
+    freer = library.acl_free
+    freer.argtypes = [ctypes.c_void_p]
+    freer.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    acl_pointer = getter(descriptor, DARWIN_ACL_TYPE_EXTENDED)
+    if acl_pointer is None:
+        error_number = ctypes.get_errno()
+        if error_number == errno.ENOENT:
+            return False
+        raise _AclInspectionError(f"ACL inspection failed: {os.strerror(error_number)}")
+    primary_error: BaseException | None = None
+    unsafe = False
+    try:
+        entry = ctypes.c_void_p()
+        entry_id = DARWIN_ACL_FIRST_ENTRY
+        for index in range(MAX_DARWIN_ACL_ENTRIES + 1):
+            ctypes.set_errno(0)
+            result = iterator(acl_pointer, entry_id, ctypes.byref(entry))
+            error_number = ctypes.get_errno()
+            if result == -1 and entry_id == DARWIN_ACL_NEXT_ENTRY and error_number == errno.EINVAL:
+                break
+            if result != 0:
+                raise _AclInspectionError(
+                    f"ACL entry inspection failed: {os.strerror(error_number)}"
+                )
+            if index >= MAX_DARWIN_ACL_ENTRIES:
+                raise _AclInspectionError("Darwin ACL entry inventory is too large")
+            tag = ctypes.c_int()
+            ctypes.set_errno(0)
+            if tag_getter(entry, ctypes.byref(tag)) != 0:
+                error_number = ctypes.get_errno()
+                raise _AclInspectionError(f"ACL tag inspection failed: {os.strerror(error_number)}")
+            if tag.value == DARWIN_ACL_EXTENDED_ALLOW:
+                unsafe = True
+                break
+            if tag.value != DARWIN_ACL_EXTENDED_DENY:
+                raise _AclInspectionError(f"unsupported Darwin ACL entry type: {tag.value}")
+            entry_id = DARWIN_ACL_NEXT_ENTRY
+        else:
+            raise _AclInspectionError("Darwin ACL entry inventory is too large")
+    except BaseException as error:
+        primary_error = error
+
+    ctypes.set_errno(0)
+    release_error: BaseException | None = None
+    try:
+        if freer(acl_pointer) != 0:
+            error_number = ctypes.get_errno()
+            release_error = _AclInspectionError(f"ACL release failed: {os.strerror(error_number)}")
+    except BaseException:
+        release_error = _AclInspectionError("ACL release failed")
+    if release_error is not None:
+        if primary_error is None:
+            primary_error = release_error
+        else:
+            primary_error.add_note(_ACL_RELEASE_CLEANUP_NOTE)
+    if primary_error is not None:
+        raise primary_error
+    return unsafe
+
+
+def _linux_descriptor_has_unsafe_acl(
+    library: ctypes.CDLL,
+    descriptor: int,
+) -> bool:
+    magic = _linux_filesystem_magic(library, descriptor)
+    _require_supported_linux_acl_filesystem_magic(magic)
+    return any(
+        _classify_linux_acl_attribute(attribute) == "posix"
+        for attribute in _linux_extended_attribute_names(library, descriptor)
+    )
+
+
+def _descriptor_has_unsafe_acl(descriptor: int) -> bool:
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        return _darwin_descriptor_has_unsafe_acl(library, descriptor)
+    if sys.platform.startswith("linux"):
+        return _linux_descriptor_has_unsafe_acl(library, descriptor)
+    raise _AclInspectionError("ACL inspection is unsupported")
+
+
+def _require_no_unsafe_acl(descriptor: int, message: str) -> None:
+    try:
+        has_unsafe_acl = _descriptor_has_unsafe_acl(descriptor)
+    except Exception:
+        raise PermissionError(message) from None
+    if has_unsafe_acl:
+        raise PermissionError(message)
+
+
 def _ancestor_mode_is_safe(owner: int, mode: int) -> bool:
     permissions = stat.S_IMODE(mode)
     if owner == 0:
@@ -19561,6 +21457,7 @@ def _ancestor_mode_is_safe(owner: int, mode: int) -> bool:
 
 
 def _require_directory(
+    descriptor: int,
     opened: os.stat_result,
     named: os.stat_result,
     *,
@@ -19575,24 +21472,26 @@ def _require_directory(
         or (leaf_private and (owner != os.geteuid() or stat.S_IMODE(opened.st_mode) != 0o700))
     ):
         raise PermissionError("unsafe application path")
+    _require_no_unsafe_acl(descriptor, "unsafe application path")
 
 
 @dataclass(slots=True)
 class OwnedDirectory:
     path: Path
-    fd: int
+    _descriptor: _OwnedDescriptor
     device: int
     inode: int
     _leaf_private: bool = field(repr=False)
-    _closed: bool = field(default=False, repr=False)
+
+    @property
+    def fd(self) -> int:
+        return self._descriptor.borrow()
 
     def revalidate(self) -> None:
-        if self._closed:
-            raise PermissionError("unsafe application path")
         try:
             held = os.fstat(self.fd)
-        except OSError as error:
-            raise PermissionError("unsafe application path") from error
+        except (OSError, PermissionError):
+            raise PermissionError("unsafe application path") from None
         with _walk_directory(
             self.path,
             create=False,
@@ -19605,9 +21504,10 @@ class OwnedDirectory:
                 raise PermissionError("unsafe application path")
 
     def close(self) -> None:
-        if not self._closed:
-            _close_fd(self.fd)
-            self._closed = True
+        try:
+            self._descriptor.close(_close_fd)
+        except Exception:
+            raise PermissionError("unsafe application path") from None
 
     def __enter__(self) -> OwnedDirectory:
         return self
@@ -19618,7 +21518,11 @@ class OwnedDirectory:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.close()
+        del exc_type, traceback
+        if exc is None:
+            self.close()
+        else:
+            _close_preserving_primary(self._descriptor, _close_fd, exc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -19642,53 +21546,74 @@ def _walk_directory(
     allow_root = not create and not leaf_private
     absolute = absolute_lexical_path(path, allow_root=allow_root)
     parts = absolute.parts[1:]
-    parent_fd = _open_root()
+    parent: _OwnedDescriptor | None = None
+    primary_error: BaseException | None = None
     try:
+        parent = _acquire_owned_descriptor(_open_root, _close_fd)
+        parent_fd = parent.borrow()
         root = os.fstat(parent_fd)
         _require_directory(
+            parent_fd,
             root,
             os.stat("/", follow_symlinks=False),
             leaf_private=not parts and leaf_private,
         )
         for index, part in enumerate(parts):
+            parent_fd = parent.borrow()
             is_leaf = index == len(parts) - 1
             try:
-                child_fd = _open_directory_at(part, parent_fd)
+                child = _acquire_owned_descriptor(
+                    partial(_open_directory_at, part, parent_fd),
+                    _close_fd,
+                )
             except FileNotFoundError:
                 if not create:
                     raise
                 _mkdir_directory_at(part, parent_fd)
-                child_fd = _open_directory_at(part, parent_fd)
+                child = _acquire_owned_descriptor(
+                    partial(_open_directory_at, part, parent_fd),
+                    _close_fd,
+                )
             try:
+                child_fd = child.borrow()
                 opened = os.fstat(child_fd)
                 named = _stat_directory_at(part, parent_fd)
                 _require_directory(
+                    child_fd,
                     opened,
                     named,
                     leaf_private=is_leaf and leaf_private,
                 )
-            except BaseException:
-                _close_fd(child_fd)
+            except BaseException as error:
+                _close_preserving_primary(child, _close_fd, error)
                 raise
-            _close_fd(parent_fd)
-            parent_fd = child_fd
+            previous_parent = parent
+            parent = child
+            previous_parent.close(_close_fd)
+        parent_fd = parent.borrow()
         leaf_value = os.fstat(parent_fd)
         result = OwnedDirectory(
             absolute,
-            parent_fd,
+            parent,
             leaf_value.st_dev,
             leaf_value.st_ino,
             leaf_private,
         )
-        parent_fd = -1
+        parent = None
         return result
-    except PermissionError:
+    except PermissionError as error:
+        primary_error = error
         raise
-    except OSError as error:
-        raise PermissionError("unsafe application path") from error
+    except OSError:
+        mapped_error = PermissionError("unsafe application path")
+        primary_error = mapped_error
+        raise mapped_error from None
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        if parent_fd >= 0:
-            _close_fd(parent_fd)
+        if parent is not None:
+            _close_preserving_primary(parent, _close_fd, primary_error)
 
 
 def open_trusted_directory(path: Path) -> OwnedDirectory:
@@ -19727,6 +21652,9 @@ from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from .secure_paths import (
     OwnedDirectory,
+    _acquire_owned_descriptor,
+    _close_preserving_primary,
+    _require_no_unsafe_acl,
     absolute_lexical_path,
     open_trusted_directory,
 )
@@ -19843,12 +21771,13 @@ def parse_bounded_strict_yaml(
         if node is not None:
             _validate_mapping_nodes(node)
         loaded = yaml.safe_load(text)
-    except (UnicodeError, yaml.YAMLError, ValueError) as error:
-        raise ValueError("invalid configuration") from error
+    except (UnicodeError, yaml.YAMLError, ValueError):
+        raise ValueError("invalid configuration") from None
     return _require_yaml_value(loaded)
 
 
 def _require_regular_file(
+    descriptor: int,
     opened: os.stat_result,
     named: os.stat_result,
     parent: OwnedDirectory,
@@ -19868,6 +21797,7 @@ def _require_regular_file(
         or (require_private and (owner != os.geteuid() or mode != 0o600))
     ):
         raise PermissionError("unsafe configuration file")
+    _require_no_unsafe_acl(descriptor, "unsafe configuration file")
 
 
 def _stable_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -19897,13 +21827,19 @@ def read_bounded_strict_yaml(
         with open_trusted_directory(absolute.parent) as parent:
             parent.revalidate()
             try:
-                fd = _open_regular_at(absolute.name, parent.fd)
-            except OSError as error:
-                raise PermissionError("unsafe configuration file") from error
+                file_owner = _acquire_owned_descriptor(
+                    lambda: _open_regular_at(absolute.name, parent.fd),
+                    _close_fd,
+                )
+            except OSError:
+                raise PermissionError("unsafe configuration file") from None
+            file_error: BaseException | None = None
             try:
+                fd = file_owner.borrow()
                 before = os.fstat(fd)
                 named_before = _stat_regular_at(absolute.name, parent.fd)
                 _require_regular_file(
+                    fd,
                     before,
                     named_before,
                     parent,
@@ -19928,6 +21864,7 @@ def read_bounded_strict_yaml(
                 named_after = _stat_regular_at(absolute.name, parent.fd)
                 parent.revalidate()
                 _require_regular_file(
+                    fd,
                     after,
                     named_after,
                     parent,
@@ -19940,12 +21877,18 @@ def read_bounded_strict_yaml(
                 ):
                     raise PermissionError("configuration changed during read")
                 raw = b"".join(chunks)
+            except BaseException as error:
+                file_error = error
+                raise
             finally:
-                _close_fd(fd)
+                try:
+                    _close_preserving_primary(file_owner, _close_fd, file_error)
+                except Exception:
+                    raise PermissionError("unsafe configuration file") from None
     except PermissionError:
         raise
-    except OSError as error:
-        raise PermissionError("unsafe configuration file") from error
+    except OSError:
+        raise PermissionError("unsafe configuration file") from None
     return parse_bounded_strict_yaml(raw, max_bytes=max_bytes)
 
 
@@ -20178,42 +22121,133 @@ jobs:
 
 - [ ] **Step 6: Lock and run the local green/regression gate**
 
-Run:
+Run the lock, exact Task 7 node, static-analysis, assurance, wheel, and full
+regression gates in this order:
 
 ~~~bash
 uv lock
+uv lock --check
 uv sync --all-packages --locked
 uv run pytest tests/unit/config/test_settings.py tests/unit/config/test_paths.py tests/ci/test_workflow_policy.py::test_ci_check_uses_short_per_run_pytest_basetemp -q
-uv run ruff format --check apps/core/src/tuntun_core/config tests/unit/config
-uv run ruff check apps/core/src/tuntun_core/config tests/unit/config
-uv run mypy --python-version 3.12 apps/core/src/tuntun_core/config
+uv run pytest tests/security/test_shared_assurance_tools.py::test_import_boundaries_accepts_yaml_only_when_pyyaml_is_declared tests/security/test_shared_assurance_tools.py::test_import_boundaries_rejects_yaml_when_pyyaml_is_undeclared tests/security/test_shared_assurance_tools.py::test_import_boundary_distribution_alias_registry_is_exact_and_immutable -q
+uv run ruff format --check scripts/check_import_boundaries.py apps/core/src/tuntun_core/config tests/unit/config tests/ci/test_workflow_policy.py tests/security/test_shared_assurance_tools.py
+uv run ruff check scripts/check_import_boundaries.py apps/core/src/tuntun_core/config tests/unit/config tests/ci/test_workflow_policy.py tests/security/test_shared_assurance_tools.py
+uv run mypy --python-version 3.12 apps/core/src/tuntun_core/config scripts/check_import_boundaries.py
+uv run python scripts/check_import_boundaries.py --all
 uv run python scripts/verify_private_data.py config/tuntun.example.yaml .env.example
+~~~
+
+Build the core wheel, install that wheel (not the source tree) into a fresh
+Python 3.12 environment, and import the Task 7 API from outside the repository:
+
+~~~bash
+uv run python - <<'PY'
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from zipfile import ZipFile
+
+with TemporaryDirectory(prefix="tuntun-core-wheel-") as temporary:
+    root = Path(temporary)
+    output = root / "dist"
+    environment = root / "venv"
+    subprocess.run(
+        ["uv", "build", "--package", "tuntun-core", "--wheel", "--out-dir", str(output)],
+        check=True,
+    )
+    wheels = tuple(output.glob("tuntun_core-*.whl"))
+    assert len(wheels) == 1, wheels
+    with ZipFile(wheels[0]) as archive:
+        names = set(archive.namelist())
+    assert {
+        "tuntun_core/config/loader.py",
+        "tuntun_core/config/paths.py",
+        "tuntun_core/config/secure_paths.py",
+        "tuntun_core/config/settings.py",
+    } <= names
+    subprocess.run(
+        ["uv", "venv", "--python", "3.12", str(environment)],
+        check=True,
+    )
+    python = environment / "bin" / "python"
+    subprocess.run(
+        ["uv", "pip", "install", "--python", str(python), str(wheels[0])],
+        check=True,
+    )
+    subprocess.run(
+        [
+            str(python),
+            "-Ic",
+            (
+                "from tuntun_core.config.loader import load_settings; "
+                "from tuntun_core.config.paths import ApplicationPaths; "
+                "assert load_settings(None, {}).network.admin_port == 8787; "
+                "assert ApplicationPaths.__name__ == 'ApplicationPaths'"
+            ),
+        ],
+        check=True,
+        cwd=root,
+    )
+PY
 PYTEST_ADDOPTS="--basetemp=/tmp/t7-$$" make check
 git diff --check
 ~~~
 
-Expected: the focused suite reports exactly 91 passed. Ruff format/check and
-strict Python-3.12 mypy report zero issues; the combined two-example scan
-reports private-data scan: PASS; and make check passes all predecessor and Task 7
-Python, security, contract, admin, build, schema, and repository-private-data
-gates. Its ordinary pytest count increases by exactly 91 from the accepted
-Task 6 baseline and no predecessor node disappears. No Python-3.11 core
-installation is attempted.
+Expected: `uv lock --check` and the locked sync succeed without changing
+`uv.lock`. The first focused pytest command reports exactly `131 passed`: 81
+settings nodes, 49 path nodes, and one workflow node. The assurance command
+reports exactly `3 passed`, for exactly 134 Task 7 nodes in total. No Task 7
+node is skipped or xfailed. The four new settings nodes and three new path
+nodes prove content-free YAML syntax, settings open/stat/read, lexical
+absolutization, root-open, and held-directory revalidation failures by checking
+the complete normally rendered traceback; the same nodes pass under the full
+gate's branch-coverage instrumentation. Ruff format/check covers all ten
+changed Python
+paths and reports zero issues; strict Python-3.12 mypy reports success for the
+four config modules plus the modified scanner; the scanner reports
+`import-boundaries: PASS`; and the combined examples report
+`private-data scan: PASS`. The fresh core wheel contains all four config
+modules, installs with its declared dependencies, and imports successfully
+under isolated Python 3.12. `make check` passes every predecessor plus all 134
+Task 7 nodes without losing a predecessor node, and `git diff --check` exits 0.
+No Python-3.11 core installation is attempted.
 
 - [ ] **Step 7: Commit exactly the repaired Task 7 closure**
 
 ~~~bash
 git status --short
-git add pyproject.toml apps/core/pyproject.toml uv.lock .github/workflows/ci.yml apps/core/src/tuntun_core/config/settings.py apps/core/src/tuntun_core/config/loader.py apps/core/src/tuntun_core/config/secure_paths.py apps/core/src/tuntun_core/config/paths.py config/tuntun.example.yaml .env.example tests/unit/config/test_settings.py tests/unit/config/test_paths.py tests/unit/config/conftest.py tests/ci/test_workflow_policy.py
+git add .env.example .github/workflows/ci.yml apps/core/pyproject.toml apps/core/src/tuntun_core/config/loader.py apps/core/src/tuntun_core/config/paths.py apps/core/src/tuntun_core/config/secure_paths.py apps/core/src/tuntun_core/config/settings.py config/tuntun.example.yaml pyproject.toml scripts/check_import_boundaries.py tests/ci/test_workflow_policy.py tests/security/test_shared_assurance_tools.py tests/unit/config/conftest.py tests/unit/config/test_paths.py tests/unit/config/test_settings.py uv.lock
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
 git commit -m "feat(core): add fail-closed settings and paths"
 ~~~
 
-git diff --cached --name-only must equal the 14-entry Files list exactly.
-Generated uv.lock is reviewed but never hand-edited. No Task 4-6 contract,
-fixture, schema, OpenAPI, or privacy-inventory path may be staged.
+`git diff --cached --name-only` must print exactly:
+
+~~~text
+.env.example
+.github/workflows/ci.yml
+apps/core/pyproject.toml
+apps/core/src/tuntun_core/config/loader.py
+apps/core/src/tuntun_core/config/paths.py
+apps/core/src/tuntun_core/config/secure_paths.py
+apps/core/src/tuntun_core/config/settings.py
+config/tuntun.example.yaml
+pyproject.toml
+scripts/check_import_boundaries.py
+tests/ci/test_workflow_policy.py
+tests/security/test_shared_assurance_tools.py
+tests/unit/config/conftest.py
+tests/unit/config/test_paths.py
+tests/unit/config/test_settings.py
+uv.lock
+~~~
+
+This is the exact 16-entry Files closure; no other path is staged. Generated
+`uv.lock` is reviewed but never hand-edited. No Task 4-6 contract, fixture,
+schema, OpenAPI, privacy-inventory path, local coverage fragment, cache, or
+generated wheel may be staged.
 
 - [ ] **Step 8: Require the committed dual-host acceptance matrix**
 
@@ -20221,12 +22255,18 @@ Push the exact Task 7 commit through the Task 2 GitHub Actions workflow amended
 only with the short per-run pytest base. Require both check (ubuntu-24.04) and
 check (macos-15-intel) for the same commit SHA.
 
-Expected: both jobs pass uv sync --all-packages --locked and make check without
-xfail, emulation, or a skipped config/path case. The check step's short unique
-base keeps every AF_UNIX fixture below Darwin's path limit. Linux exercises the
-root-owned sticky /tmp ancestor; Intel macOS exercises the trusted temporary-
-directory alias to its /private/... target. A local run on one operating system is not evidence
-for the other, and Task 8 may not begin until both checks are green.
+Expected: both jobs pass `uv sync --all-packages --locked` and `make check`
+without xfail, emulation, or a skipped Task 7 case. The check step's short
+unique base keeps every AF_UNIX fixture below Darwin's path limit. Hosted Linux
+exercises the root-owned sticky `/tmp` ancestor, the reviewed filesystem/xattr
+inspection, and a real mode-preserving POSIX ACL rejection. Hosted Intel macOS
+exercises the trusted temporary-directory alias to its `/private/...` target,
+accepts a real deny-only extended ACL, and rejects a real granting ACL. Each
+fixture proves the installed raw ACL and mode are unchanged before teardown and
+restores the exact original state. A local run, container, emulation, or result
+from only one operating system is not evidence for the other. Task 8 may not
+begin until both hosted checks are green for the same committed SHA.
+
 ### Task 8: Implement secret providers and recursive log redaction
 
 **Master package:** 03
