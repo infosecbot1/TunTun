@@ -18389,158 +18389,63 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 
 **Master package:** 03
 **Depends on:** Tasks 1 and 3.
-**Estimated effort:** 1 person-day.
+**Estimated effort:** 1.5 person-days.
 
 **Files:**
-- Modify: `apps/core/pyproject.toml`
-- Modify: `uv.lock`
-- Create: `apps/core/src/tuntun_core/config/settings.py`
-- Create: `apps/core/src/tuntun_core/config/loader.py`
-- Create: `apps/core/src/tuntun_core/config/secure_paths.py`
-- Create: `apps/core/src/tuntun_core/config/paths.py`
-- Create: `config/tuntun.example.yaml`
-- Create: `.env.example`
-- Test: `tests/unit/config/test_settings.py`
-- Test: `tests/unit/config/test_paths.py`
-- Create: `tests/unit/config/conftest.py`
+- Modify: pyproject.toml
+- Modify: apps/core/pyproject.toml
+- Modify: uv.lock
+- Modify: .github/workflows/ci.yml
+- Create: apps/core/src/tuntun_core/config/settings.py
+- Create: apps/core/src/tuntun_core/config/loader.py
+- Create: apps/core/src/tuntun_core/config/secure_paths.py
+- Create: apps/core/src/tuntun_core/config/paths.py
+- Create: config/tuntun.example.yaml
+- Create: .env.example
+- Test: tests/unit/config/test_settings.py
+- Test: tests/unit/config/test_paths.py
+- Create: tests/unit/config/conftest.py
+- Modify: tests/ci/test_workflow_policy.py
 
 **Interfaces:**
-- Consumes: YAML file and explicit `TUNTUN_` environment overrides.
-- Produces: `Settings` and `load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Settings`; descriptor-walked `OwnedPath(path, device, inode).revalidate()`; `open_owned_directory(path: Path) -> OwnedDirectory`, whose context-managed live directory FD remains open until `close()`/context exit; `ensure_private_directory(path: Path) -> OwnedPath`; and `ApplicationPaths.create(base: Path | None = None) -> ApplicationPaths` with `root`, `data`, `logs`, `models`, and `backups` directories at exact mode `0700`. Every initial and revalidation walk opens every lexical path component no-follow relative to its already verified parent; root-owned ancestors must not be group/world writable, user-owned ancestors must be private, and every returned leaf is a user-owned directory whose device/inode/type/mode match its named entry and retained FD. No untrusted application path is accepted by calling `resolve()`/`realpath()` through a symlink. On macOS, tests canonicalize pytest's trusted temporary root once from `/var/...` to `/private/var/...`; production path logic does not canonicalize an untrusted alias.
+- Consumes: a bounded YAML settings file and an explicit Mapping[str, str] of
+  TUNTUN_ environment overrides. The source order is defaults, then the complete
+  YAML document, then canonical two-component environment overrides. Invalid
+  lower-priority input is never hidden by a higher-priority override.
+- Produces: immutable Settings and
+  load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Settings;
+  read_bounded_strict_yaml(path: Path, *, max_bytes: int = 262_144,
+  require_private: bool = False) -> YamlValue; absolute_lexical_path();
+  descriptor-walked OwnedPath(path, device, inode).revalidate();
+  open_owned_directory(path: Path) -> OwnedDirectory, whose live directory FD
+  remains open until close()/context exit; ensure_private_directory(path: Path)
+  -> OwnedPath; and ApplicationPaths.create(base: Path | None = None) with
+  absolute root, data, logs, models, and backups paths.
+- Every directory walk opens each lexical component no-follow relative to its
+  already verified parent. Root-owned ancestors are accepted only when they
+  are not group/world writable or are sticky directories such as /tmp.
+  Current-user ancestors may be group/world readable/searchable but never
+  group/world writable. Any other owner rejects. Every private directory leaf
+  is current-user-owned mode 0700. Private settings leaves are current-user
+  regular single-link files at exact mode 0600. General checked-in controls may
+  be mode 0644 but are never group/world writable.
+- The YAML reader opens the verified parent and leaf descriptor-relatively,
+  holds both descriptors through the read, compares opened/named identities,
+  verifies stable size/mtime/ctime, and freshly re-walks the parent before
+  returning. No application or settings path is accepted by resolve()/realpath()
+  through an untrusted symlink. Tests canonicalize only pytest's trusted Darwin
+  temporary-directory alias once.
+- Python 3.12 is the only Mac-core runtime. These source files remain
+  syntax-compatible with Python 3.11, but Task 7 does not widen core package
+  metadata or claim a Python 3.11 core runtime. Tasks 4-6 retain their separate
+  Python 3.11 shared-contract boundary.
+- The existing dual-host check job supplies one short, per-run pytest base
+  beneath root-owned sticky /tmp. This keeps Task 3's AF_UNIX inventory fixture
+  below Darwin's sockaddr path limit without skipping or changing that test.
 
-- [ ] **Step 1: Write red settings/path tests**
+- [ ] **Step 1: Write the complete red settings/path and portability suite**
 
-```python
-# tests/unit/config/test_settings.py
-from pathlib import Path
-import pytest
-from pydantic import ValidationError
-from tuntun_core.config.loader import load_settings
-
-def test_defaults_are_locked() -> None:
-    settings = load_settings(None, {})
-    assert settings.household.timezone == "Asia/Singapore"
-    assert settings.conversation.active_limit == 1
-    assert settings.network.admin_host == "127.0.0.1"
-    assert settings.network.admin_port == 8787
-    assert settings.network.admin_lan_port == 8443
-    assert settings.network.edge_gateway_port == 7443
-    assert settings.providers.primary_model == "gpt-5.6-sol"
-    assert settings.providers.qwen_enabled is False
-    assert (settings.providers.connect_timeout_ms, settings.providers.write_timeout_ms, settings.providers.read_timeout_ms, settings.providers.pool_timeout_ms, settings.providers.max_attempts) == (5_000,30_000,120_000,5_000,2)
-    assert (settings.identity.child_reenrollment_reminder_days, settings.identity.child_biometric_hard_expiry_days) == (180,365)
-    assert (settings.admin.session_idle_seconds, settings.admin.session_absolute_seconds, settings.admin.json_body_max_bytes) == (900,28_800,1_048_576)
-    assert (settings.admin.read_requests_per_minute, settings.admin.mutation_requests_per_minute, settings.admin.auth_requests_per_minute, settings.admin.trust_proxy_headers) == (120,30,10,False)
-    assert (settings.observability.telemetry_enabled, settings.observability.cloud_tracing_enabled, settings.observability.provider_body_logging) == (False,False,False)
-    assert settings.budget.soft_limit_micros_sgd == 100_000_000
-    assert settings.budget.hard_limit_micros_sgd == 150_000_000
-
-def test_public_bind_and_unknown_yaml_fail(tmp_path: Path) -> None:
-    config = tmp_path / "bad.yaml"
-    config.write_text("network:\n  admin_host: 0.0.0.0\nunknown: true\n", encoding="utf-8")
-    with pytest.raises(ValidationError):
-        load_settings(config, {})
-
-def test_environment_overrides_yaml_but_unspecified_yaml_survives(tmp_path: Path) -> None:
-    config=tmp_path/"config.yaml"; config.write_text("providers:\n  primary_model: configured-model\nmemory:\n  max_items_per_turn: 5\n",encoding="utf-8")
-    settings=load_settings(config,{"TUNTUN_PROVIDERS__PRIMARY_MODEL":"environment-model"})
-    assert settings.providers.primary_model == "environment-model"
-    assert settings.memory.max_items_per_turn == 5
-
-
-@pytest.mark.parametrize("mutation",(
-    "duplicate_key","yaml_alias","explicit_tag","overdeep","too_many_events",
-    "oversized_file","symlink","fifo","group_writable","changed_during_read",
-))
-def test_settings_file_is_bounded_duplicate_free_nofollow_and_stable(
-    strict_settings_case,mutation,
-) -> None:
-    strict_settings_case.mutate(mutation)
-    with pytest.raises((PermissionError,ValueError)):
-        load_settings(strict_settings_case.path,{})
-
-
-@pytest.mark.parametrize("raw",(
-    "[1,2]","{x: 1}","&x value","!custom value","x"*1_025,
-))
-def test_environment_override_is_one_bounded_plain_scalar(raw) -> None:
-    with pytest.raises(ValueError):
-        load_settings(None,{"TUNTUN_MEMORY__MAX_ITEMS_PER_TURN":raw})
-```
-
-```python
-# tests/unit/config/test_paths.py
-import os
-import stat
-from pathlib import Path
-import pytest
-from tuntun_core.config import secure_paths
-from tuntun_core.config.paths import ApplicationPaths
-from tuntun_core.config.secure_paths import ensure_private_directory,open_owned_directory
-
-def _fixture_root(tmp_path:Path) -> Path:
-    # pytest owns this root. Darwin may report it through the trusted /var alias;
-    # production code must never use realpath to bless an untrusted symlink.
-    return Path(os.path.realpath(tmp_path))
-
-def test_paths_are_created_owner_only(tmp_path: Path) -> None:
-    paths = ApplicationPaths.create(_fixture_root(tmp_path) / "Tuntun")
-    for path in (paths.root, paths.data, paths.logs, paths.models, paths.backups):
-        assert stat.S_IMODE(path.stat().st_mode) == 0o700
-
-
-@pytest.mark.parametrize("mutation",(
-    "ancestor_symlink","root_symlink","data_symlink","data_fifo",
-    "wrong_mode","wrong_owner",
-))
-def test_application_paths_reject_unsafe_existing_components(
-    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,mutation:str,
-) -> None:
-    root=_fixture_root(tmp_path); base=root/"Tuntun"; target=root/"target"
-    target.mkdir(mode=0o700)
-    if mutation=="ancestor_symlink":
-        real=root/"real-parent"; real.mkdir(mode=0o700)
-        alias=root/"alias-parent"; alias.symlink_to(real,directory=True)
-        base=alias/"Tuntun"
-    elif mutation=="root_symlink": base.symlink_to(target,directory=True)
-    else:
-        base.mkdir(mode=0o700)
-        if mutation=="data_symlink": (base/"data").symlink_to(target,directory=True)
-        elif mutation=="data_fifo": os.mkfifo(base/"data",0o600)
-        elif mutation=="wrong_mode": base.chmod(0o750)
-        elif mutation=="wrong_owner":
-            actual_euid=os.geteuid()
-            monkeypatch.setattr(secure_paths.os,"geteuid",lambda:actual_euid+1)
-    with pytest.raises(PermissionError,match="unsafe application path"):
-        ApplicationPaths.create(base)
-
-
-def test_live_directory_guard_rejects_parent_replacement_and_closes_fd(
-    tmp_path:Path,
-) -> None:
-    root=_fixture_root(tmp_path); base=root/"Tuntun"; base.mkdir(mode=0o700)
-    directory=open_owned_directory(base); held_fd=directory.fd
-    base.rename(root/"opened-original"); base.mkdir(mode=0o700)
-    with pytest.raises(PermissionError,match="unsafe application path"):
-        directory.revalidate()
-    directory.close()
-    with pytest.raises(OSError): os.fstat(held_fd)
-
-
-def test_owned_path_fresh_walk_rejects_one_way_ancestor_replacement(
-    tmp_path:Path,
-) -> None:
-    root=_fixture_root(tmp_path); parent=root/"parent"; leaf=parent/"leaf"
-    parent.mkdir(mode=0o700); identity=ensure_private_directory(leaf)
-    parent.rename(root/"old-parent")
-    parent.mkdir(mode=0o700); (parent/"leaf").mkdir(mode=0o700)
-    with pytest.raises(PermissionError,match="unsafe application path"):
-        identity.revalidate()
-```
-
-Define `strict_settings_case` in the config subtree where it is consumed. It begins as an owner-only regular valid settings file; every mutation changes exactly one loader invariant:
-
-```python
+~~~python
 # tests/unit/config/conftest.py
 from __future__ import annotations
 
@@ -18551,6 +18456,11 @@ from pathlib import Path
 import pytest
 
 
+def _write_private(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o600)
+
+
 @dataclass
 class StrictSettingsCase:
     path: Path
@@ -18558,31 +18468,99 @@ class StrictSettingsCase:
 
     def mutate(self, mutation: str) -> None:
         if mutation == "duplicate_key":
-            self.path.write_text("memory:\n  max_items_per_turn: 5\nmemory: {}\n")
+            _write_private(
+                self.path,
+                "memory:\n  max_items_per_turn: 5\nmemory: {}\n",
+            )
         elif mutation == "yaml_alias":
-            self.path.write_text("memory: &m {max_items_per_turn: 5}\ncopy: *m\n")
+            _write_private(
+                self.path,
+                "memory: &m {max_items_per_turn: 5}\ncopy: *m\n",
+            )
         elif mutation == "explicit_tag":
-            self.path.write_text("memory: !custom {max_items_per_turn: 5}\n")
+            _write_private(
+                self.path,
+                "memory: !custom {max_items_per_turn: 5}\n",
+            )
         elif mutation == "overdeep":
-            self.path.write_text("unknown: " + "[" * 33 + "0" + "]" * 33 + "\n")
+            _write_private(
+                self.path,
+                "unknown: " + "[" * 33 + "0" + "]" * 33 + "\n",
+            )
         elif mutation == "too_many_events":
-            self.path.write_text("unknown: [" + ",".join("0" for _ in range(16_385)) + "]\n")
+            _write_private(
+                self.path,
+                "unknown: [" + ",".join("0" for _ in range(16_385)) + "]\n",
+            )
         elif mutation == "oversized_file":
             self.path.write_bytes(b"#" * 262_145)
+            self.path.chmod(0o600)
+        elif mutation == "invalid_utf8":
+            self.path.write_bytes(b"\xff")
+            self.path.chmod(0o600)
+        elif mutation == "multiple_documents":
+            _write_private(self.path, "---\n{}\n---\n{}\n")
         elif mutation == "symlink":
             target = self.path.with_name("target.yaml")
-            target.write_text("{}\n"); self.path.unlink(); self.path.symlink_to(target.name)
+            _write_private(target, "{}\n")
+            self.path.unlink()
+            self.path.symlink_to(target.name)
+        elif mutation == "hardlink":
+            target = self.path.with_name("target.yaml")
+            _write_private(target, "{}\n")
+            self.path.unlink()
+            os.link(target, self.path)
+        elif mutation == "ancestor_symlink":
+            real_parent = self.path.parent / "real-parent"
+            real_parent.mkdir(mode=0o700)
+            target = real_parent / "settings.yaml"
+            _write_private(target, "memory:\n  max_items_per_turn: 5\n")
+            alias = self.path.parent / "alias-parent"
+            alias.symlink_to(real_parent, target_is_directory=True)
+            self.path = alias / "settings.yaml"
         elif mutation == "fifo":
-            self.path.unlink(); os.mkfifo(self.path, 0o600)
+            self.path.unlink()
+            os.mkfifo(self.path, 0o600)
         elif mutation == "group_writable":
             self.path.chmod(0o620)
+        elif mutation == "group_readable":
+            self.path.chmod(0o640)
+        elif mutation == "world_readable":
+            self.path.chmod(0o604)
+        elif mutation == "wrong_owner":
+            from tuntun_core.config import loader
+
+            self.monkeypatch.setattr(
+                loader,
+                "_reported_file_owner",
+                lambda value: os.geteuid() + 1,
+            )
+        elif mutation == "same_inode_content_change":
+            from tuntun_core.config import loader
+
+            original_read = loader.os.read
+            changed = False
+
+            def rewriting_read(fd: int, size: int) -> bytes:
+                nonlocal changed
+                chunk = original_read(fd, size)
+                if chunk and not changed:
+                    changed = True
+                    _write_private(
+                        self.path,
+                        "memory:\n  max_items_per_turn: 4\n",
+                    )
+                return chunk
+
+            self.monkeypatch.setattr(loader.os, "read", rewriting_read)
         elif mutation == "changed_during_read":
             from tuntun_core.config import loader
+
             replacement = self.path.with_name("replacement.yaml")
-            replacement.write_text("memory:\n  max_items_per_turn: 4\n")
-            replacement.chmod(0o600)
+            _write_private(replacement, "memory:\n  max_items_per_turn: 4\n")
             original_read = loader.os.read
             swapped = False
+
             def replacing_read(fd: int, size: int) -> bytes:
                 nonlocal swapped
                 chunk = original_read(fd, size)
@@ -18591,316 +18569,1664 @@ class StrictSettingsCase:
                     self.path.replace(self.path.with_name("original.yaml"))
                     replacement.replace(self.path)
                 return chunk
+
             self.monkeypatch.setattr(loader.os, "read", replacing_read)
+        elif mutation == "parent_changed_during_read":
+            from tuntun_core.config import loader
+
+            parent = self.path.parent / "settings-parent"
+            parent.mkdir(mode=0o700)
+            target = parent / "settings.yaml"
+            _write_private(target, "memory:\n  max_items_per_turn: 5\n")
+            self.path = target
+            original_read = loader.os.read
+            swapped = False
+
+            def replacing_parent_read(fd: int, size: int) -> bytes:
+                nonlocal swapped
+                chunk = original_read(fd, size)
+                if chunk and not swapped:
+                    swapped = True
+                    parent.rename(parent.with_name("opened-parent"))
+                    parent.mkdir(mode=0o700)
+                    _write_private(
+                        parent / "settings.yaml",
+                        "memory:\n  max_items_per_turn: 4\n",
+                    )
+                return chunk
+
+            self.monkeypatch.setattr(loader.os, "read", replacing_parent_read)
         else:
             raise AssertionError(f"unknown strict-settings mutation: {mutation}")
 
 
 @pytest.fixture
 def strict_settings_case(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> StrictSettingsCase:
     path = tmp_path / "settings.yaml"
-    path.write_text("memory:\n  max_items_per_turn: 5\n", encoding="utf-8")
-    path.chmod(0o600)
+    _write_private(path, "memory:\n  max_items_per_turn: 5\n")
     return StrictSettingsCase(path, monkeypatch)
-```
+~~~
 
-- [ ] **Step 2: Run the red settings tests**
+~~~python
+# tests/unit/config/test_settings.py
+from __future__ import annotations
 
-Run: `uv run pytest tests/unit/config/test_settings.py tests/unit/config/test_paths.py -q`
+import re
+from pathlib import Path
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_core.config'`.
+import pytest
+from pydantic import BaseModel, ValidationError
+from tuntun_core.config import loader
+from tuntun_core.config.loader import load_settings, read_bounded_strict_yaml
+from tuntun_core.config.settings import Settings
 
-- [ ] **Step 3: Implement immutable nested settings and explicit precedence**
+PROJECT_ROOT = Path(__file__).parents[3]
 
-```python
+
+def _write_private(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o600)
+
+
+def test_defaults_are_locked() -> None:
+    settings = load_settings(None, {})
+
+    assert settings.household.timezone == "Asia/Singapore"
+    assert settings.conversation.active_limit == 1
+    assert settings.network.admin_host == "127.0.0.1"
+    assert settings.network.admin_port == 8787
+    assert settings.network.admin_lan_port == 8443
+    assert settings.network.edge_gateway_port == 7443
+    assert settings.providers.primary_model == "gpt-5.6-sol"
+    assert settings.providers.qwen_enabled is False
+    assert (
+        settings.providers.connect_timeout_ms,
+        settings.providers.write_timeout_ms,
+        settings.providers.read_timeout_ms,
+        settings.providers.pool_timeout_ms,
+        settings.providers.max_attempts,
+    ) == (5_000, 30_000, 120_000, 5_000, 2)
+    assert (
+        settings.identity.child_reenrollment_reminder_days,
+        settings.identity.child_biometric_hard_expiry_days,
+    ) == (180, 365)
+    assert (
+        settings.admin.session_idle_seconds,
+        settings.admin.session_absolute_seconds,
+        settings.admin.json_body_max_bytes,
+    ) == (900, 28_800, 1_048_576)
+    assert (
+        settings.admin.read_requests_per_minute,
+        settings.admin.mutation_requests_per_minute,
+        settings.admin.auth_requests_per_minute,
+        settings.admin.trust_proxy_headers,
+    ) == (120, 30, 10, False)
+    assert (
+        settings.observability.telemetry_enabled,
+        settings.observability.cloud_tracing_enabled,
+        settings.observability.provider_body_logging,
+    ) == (False, False, False)
+    assert settings.budget.soft_limit_micros_sgd == 100_000_000
+    assert settings.budget.hard_limit_micros_sgd == 150_000_000
+
+
+def test_settings_and_nested_models_are_frozen() -> None:
+    settings = load_settings(None, {})
+
+    with pytest.raises(ValidationError):
+        settings.network.admin_port = 9999
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "network:\n  admin_host: 0.0.0.0\n",
+        "unknown: true\n",
+        "network:\n  unknown: true\n",
+        "[1, 2]\n",
+        "memory: 5\n",
+    ),
+)
+def test_invalid_settings_documents_fail(tmp_path: Path, raw: str) -> None:
+    config = tmp_path / "invalid.yaml"
+    _write_private(config, raw)
+
+    with pytest.raises((ValidationError, ValueError)):
+        load_settings(config, {})
+
+
+def test_environment_overrides_yaml_but_unspecified_yaml_survives(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.yaml"
+    _write_private(
+        config,
+        "providers:\n  primary_model: configured-model\nmemory:\n  max_items_per_turn: 5\n",
+    )
+
+    settings = load_settings(
+        config,
+        {"TUNTUN_PROVIDERS__PRIMARY_MODEL": "environment-model"},
+    )
+
+    assert settings.providers.primary_model == "environment-model"
+    assert settings.memory.max_items_per_turn == 5
+
+
+def test_environment_cannot_hide_invalid_yaml(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    _write_private(config, "network:\n  admin_port: 0\n")
+
+    with pytest.raises(ValidationError):
+        load_settings(
+            config,
+            {"TUNTUN_NETWORK__ADMIN_PORT": "8787"},
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "duplicate_key",
+        "yaml_alias",
+        "explicit_tag",
+        "overdeep",
+        "too_many_events",
+        "oversized_file",
+        "invalid_utf8",
+        "multiple_documents",
+        "symlink",
+        "hardlink",
+        "ancestor_symlink",
+        "fifo",
+        "group_writable",
+        "group_readable",
+        "world_readable",
+        "wrong_owner",
+        "same_inode_content_change",
+        "changed_during_read",
+        "parent_changed_during_read",
+    ),
+)
+def test_settings_file_is_bounded_duplicate_free_nofollow_and_stable(
+    strict_settings_case,
+    mutation: str,
+) -> None:
+    strict_settings_case.mutate(mutation)
+
+    with pytest.raises((PermissionError, ValueError)):
+        load_settings(strict_settings_case.path, {})
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "[1,2]",
+        "{x: 1}",
+        "&x value",
+        "!custom value",
+        "x" * 1_025,
+        "0",
+    ),
+)
+def test_environment_override_is_one_bounded_strict_scalar(raw: str) -> None:
+    with pytest.raises((ValidationError, ValueError)):
+        load_settings(
+            None,
+            {"TUNTUN_OBSERVABILITY__TELEMETRY_ENABLED": raw},
+        )
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "TUNTUN_network__ADMIN_PORT",
+        "TUNTUN_NETWORK_ADMIN_PORT",
+        "TUNTUN_NETWORK__ADMIN__PORT",
+    ),
+)
+def test_environment_override_name_must_be_canonical(name: str) -> None:
+    with pytest.raises(ValueError, match="invalid TUNTUN override"):
+        load_settings(None, {name: "8787"})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"network": {"admin_port": 0}},
+        {"network": {"admin_lan_port": 8_444}},
+        {"network": {"edge_gateway_port": 65_536}},
+        {"network": {"admin_port": 8_443}},
+        {"conversation": {"active_limit": 2}},
+        {
+            "conversation": {
+                "follow_up_window_seconds": 61,
+                "idle_close_seconds": 60,
+            }
+        },
+        {
+            "conversation": {
+                "idle_close_seconds": 1_801,
+                "absolute_session_limit_minutes": 30,
+            }
+        },
+        {"privacy": {"audit_default_view_days": 0}},
+        {"providers": {"primary_model": "bad model"}},
+        {"providers": {"context_max_tokens": 0}},
+        {"providers": {"read_timeout_ms": 120_001}},
+        {"providers": {"max_attempts": 3}},
+        {
+            "identity": {
+                "child_reenrollment_reminder_days": 365,
+                "child_biometric_hard_expiry_days": 180,
+            }
+        },
+        {
+            "admin": {
+                "session_idle_seconds": 901,
+                "session_absolute_seconds": 900,
+            }
+        },
+        {"admin": {"json_body_max_bytes": 0}},
+        {"admin": {"read_requests_per_minute": 0}},
+        {"admin": {"trust_proxy_headers": True}},
+        {"admin": {"trust_proxy_headers": 0}},
+        {"observability": {"telemetry_enabled": True}},
+        {"observability": {"telemetry_enabled": 0}},
+        {"observability": {"cloud_tracing_enabled": True}},
+        {"observability": {"provider_body_logging": True}},
+        {
+            "budget": {
+                "soft_limit_micros_sgd": -1,
+                "hard_limit_micros_sgd": 1,
+            }
+        },
+        {
+            "budget": {
+                "soft_limit_micros_sgd": 2,
+                "hard_limit_micros_sgd": 1,
+            }
+        },
+        {"household": {"timezone": ""}},
+        {"household": {"timezone": "Not/A_Timezone"}},
+        {"identity": {"passive_discovery_enabled": False}},
+        {"identity": {"unknown_candidate_retention_days": 1}},
+    ),
+)
+def test_invalid_operational_settings_fail_closed(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate(payload)
+
+
+def test_checked_in_yaml_example_exactly_spells_out_defaults() -> None:
+    raw = read_bounded_strict_yaml(
+        PROJECT_ROOT / "config/tuntun.example.yaml",
+        require_private=False,
+    )
+
+    assert raw == Settings().model_dump(mode="python")
+
+
+def _supported_override_names() -> list[str]:
+    names: list[str] = []
+    for section_name, section_field in Settings.model_fields.items():
+        section_type = section_field.annotation
+        assert isinstance(section_type, type)
+        assert issubclass(section_type, BaseModel)
+        for field_name in section_type.model_fields:
+            names.append(f"TUNTUN_{section_name.upper()}__{field_name.upper()}")
+    return sorted(names)
+
+
+def test_env_example_contains_every_name_once_and_no_values() -> None:
+    lines = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    expected = [f"# {name}" for name in _supported_override_names()]
+
+    assert lines == expected
+    assert len(lines) == len(set(lines))
+    assert all(re.fullmatch(r"# TUNTUN_[A-Z0-9_]+__[A-Z0-9_]+", line) for line in lines)
+    assert all("=" not in line for line in lines)
+
+
+def test_settings_file_descriptor_closes_when_parsing_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.yaml"
+    _write_private(config, "{}\n")
+    opened: list[int] = []
+    opened_directories: list[int] = []
+    original_open = loader._open_regular_at
+    original_open_directory = loader.open_trusted_directory
+
+    def recording_open(name: str, parent_fd: int) -> int:
+        fd = original_open(name, parent_fd)
+        opened.append(fd)
+        return fd
+
+    def recording_open_directory(path: Path) -> loader.OwnedDirectory:
+        directory = original_open_directory(path)
+        opened_directories.append(directory.fd)
+        return directory
+
+    def failing_parse(
+        raw: bytes,
+        *,
+        max_bytes: int,
+        max_events: int = 16_384,
+        max_depth: int = 32,
+    ) -> loader.YamlValue:
+        raise ValueError("injected parser failure")
+
+    monkeypatch.setattr(loader, "_open_regular_at", recording_open)
+    monkeypatch.setattr(
+        loader,
+        "open_trusted_directory",
+        recording_open_directory,
+    )
+    monkeypatch.setattr(loader, "parse_bounded_strict_yaml", failing_parse)
+
+    with pytest.raises(ValueError, match="injected parser failure"):
+        load_settings(config, {})
+
+    assert opened
+    for fd in set(opened + opened_directories):
+        with pytest.raises(OSError):
+            loader.os.fstat(fd)
+~~~
+
+~~~python
+# tests/unit/config/test_paths.py
+from __future__ import annotations
+
+import os
+import stat
+from pathlib import Path
+
+import pytest
+from tuntun_core.config import secure_paths
+from tuntun_core.config.paths import ApplicationPaths
+from tuntun_core.config.secure_paths import (
+    ensure_private_directory,
+    open_owned_directory,
+)
+
+
+def _fixture_root(tmp_path: Path) -> Path:
+    # pytest owns this root. Darwin may report it through a trusted temporary-
+    # directory alias; production code never resolves an untrusted path.
+    return Path(os.path.realpath(tmp_path))
+
+
+def test_paths_are_absolute_and_created_owner_only(tmp_path: Path) -> None:
+    base = _fixture_root(tmp_path) / "Tuntun"
+    paths = ApplicationPaths.create(base)
+
+    assert (
+        paths.root,
+        paths.data,
+        paths.logs,
+        paths.models,
+        paths.backups,
+    ) == (
+        base,
+        base / "data",
+        base / "logs",
+        base / "models",
+        base / "backups",
+    )
+
+    for path in (
+        paths.root,
+        paths.data,
+        paths.logs,
+        paths.models,
+        paths.backups,
+    ):
+        assert path.is_absolute()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
+    paths.revalidate()
+
+
+def test_relative_base_returns_absolute_bound_identities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _fixture_root(tmp_path)
+    monkeypatch.chdir(root)
+    paths = ApplicationPaths.create(Path("relative") / "Tuntun")
+    monkeypatch.chdir(root.parent)
+
+    assert paths.root == root / "relative" / "Tuntun"
+    paths.revalidate()
+
+
+@pytest.mark.parametrize("mode", (0o750, 0o755))
+def test_nonwritable_readable_user_ancestor_is_accepted(
+    tmp_path: Path,
+    mode: int,
+) -> None:
+    root = _fixture_root(tmp_path)
+    parent = root / "readable-parent"
+    parent.mkdir(mode=0o700)
+    parent.chmod(mode)
+
+    identity = ensure_private_directory(parent / "private")
+
+    assert stat.S_IMODE(identity.path.stat().st_mode) == 0o700
+    identity.revalidate()
+
+
+def test_root_sticky_ancestor_policy_is_explicit() -> None:
+    assert secure_paths._ancestor_mode_is_safe(0, stat.S_IFDIR | 0o1777)
+    assert not secure_paths._ancestor_mode_is_safe(
+        0,
+        stat.S_IFDIR | 0o0777,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "ancestor_symlink",
+        "root_symlink",
+        "data_symlink",
+        "data_fifo",
+        "root_wrong_mode",
+        "data_wrong_mode",
+        "wrong_owner",
+        "writable_ancestor",
+    ),
+)
+def test_application_paths_reject_unsafe_existing_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    root = _fixture_root(tmp_path)
+    base = root / "Tuntun"
+    target = root / "target"
+    target.mkdir(mode=0o700)
+
+    if mutation == "ancestor_symlink":
+        real = root / "real-parent"
+        real.mkdir(mode=0o700)
+        alias = root / "alias-parent"
+        alias.symlink_to(real, target_is_directory=True)
+        base = alias / "Tuntun"
+    elif mutation == "root_symlink":
+        base.symlink_to(target, target_is_directory=True)
+    elif mutation == "writable_ancestor":
+        parent = root / "writable-parent"
+        parent.mkdir(mode=0o700)
+        parent.chmod(0o770)
+        base = parent / "Tuntun"
+    else:
+        base.mkdir(mode=0o700)
+        if mutation == "data_symlink":
+            (base / "data").symlink_to(target, target_is_directory=True)
+        elif mutation == "data_fifo":
+            os.mkfifo(base / "data", 0o600)
+        elif mutation == "root_wrong_mode":
+            base.chmod(0o750)
+        elif mutation == "data_wrong_mode":
+            (base / "data").mkdir(mode=0o700)
+            (base / "data").chmod(0o750)
+        elif mutation == "wrong_owner":
+            monkeypatch.setattr(
+                secure_paths,
+                "_reported_owner",
+                lambda value: os.geteuid() + 1,
+            )
+
+    with pytest.raises(PermissionError, match="unsafe application path"):
+        ApplicationPaths.create(base)
+
+
+def test_live_directory_guard_rejects_parent_replacement_and_closes_fd(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_root(tmp_path)
+    base = root / "Tuntun"
+    base.mkdir(mode=0o700)
+    directory = open_owned_directory(base)
+    held_fd = directory.fd
+    base.rename(root / "opened-original")
+    base.mkdir(mode=0o700)
+
+    with pytest.raises(PermissionError, match="unsafe application path"):
+        directory.revalidate()
+
+    directory.close()
+    with pytest.raises(OSError):
+        os.fstat(held_fd)
+
+
+def test_owned_path_fresh_walk_rejects_one_way_ancestor_replacement(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_root(tmp_path)
+    parent = root / "parent"
+    leaf = parent / "leaf"
+    parent.mkdir(mode=0o700)
+    identity = ensure_private_directory(leaf)
+    parent.rename(root / "old-parent")
+    parent.mkdir(mode=0o700)
+    (parent / "leaf").mkdir(mode=0o700)
+
+    with pytest.raises(PermissionError, match="unsafe application path"):
+        identity.revalidate()
+
+
+def test_open_then_named_component_swap_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _fixture_root(tmp_path)
+    base = root / "Tuntun"
+    data = base / "data"
+    data.mkdir(mode=0o700, parents=True)
+    original_stat = secure_paths._stat_directory_at
+    swapped = False
+
+    def replacing_stat(name: str, parent_fd: int) -> os.stat_result:
+        nonlocal swapped
+        if name == "data" and not swapped:
+            swapped = True
+            data.rename(base / "opened-data")
+            data.mkdir(mode=0o700)
+        return original_stat(name, parent_fd)
+
+    monkeypatch.setattr(
+        secure_paths,
+        "_stat_directory_at",
+        replacing_stat,
+    )
+
+    with pytest.raises(PermissionError, match="unsafe application path"):
+        open_owned_directory(data)
+
+
+def test_walk_closes_every_opened_component_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _fixture_root(tmp_path)
+    target = root / "private"
+    target.mkdir(mode=0o700)
+    opened: list[int] = []
+    original_root = secure_paths._open_root
+    original_open = secure_paths._open_directory_at
+    original_stat = secure_paths._stat_directory_at
+
+    def recording_root() -> int:
+        fd = original_root()
+        opened.append(fd)
+        return fd
+
+    def recording_open(name: str, parent_fd: int) -> int:
+        fd = original_open(name, parent_fd)
+        opened.append(fd)
+        return fd
+
+    def failing_stat(name: str, parent_fd: int) -> os.stat_result:
+        if name == "private":
+            raise OSError("injected stat failure")
+        return original_stat(name, parent_fd)
+
+    monkeypatch.setattr(
+        secure_paths,
+        "_open_root",
+        recording_root,
+    )
+    monkeypatch.setattr(
+        secure_paths,
+        "_open_directory_at",
+        recording_open,
+    )
+    monkeypatch.setattr(
+        secure_paths,
+        "_stat_directory_at",
+        failing_stat,
+    )
+
+    with pytest.raises(PermissionError, match="unsafe application path"):
+        open_owned_directory(target)
+
+    assert opened
+    for fd in set(opened):
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        Path("/"),
+        Path("."),
+        Path(".."),
+        Path("safe/../escape"),
+        Path("//double-root"),
+    ),
+)
+def test_private_directory_rejects_ambiguous_lexical_paths(
+    path: Path,
+) -> None:
+    with pytest.raises(PermissionError, match="unsafe application path"):
+        ensure_private_directory(path)
+~~~
+
+Append this executable policy node to the existing Task 2 test module:
+
+~~~python
+# tests/ci/test_workflow_policy.py (append)
+def test_ci_check_uses_short_per_run_pytest_basetemp() -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
+
+    assert workflow["jobs"]["check"]["steps"][-1] == {
+        "run": "make check",
+        "env": {
+            "PYTEST_ADDOPTS": (
+                "--basetemp=/tmp/t7-"
+                "${{ github.run_id }}-${{ github.run_attempt }}"
+            ),
+        },
+    }
+~~~
+
+- [ ] **Step 2: Run the red suite and prove the oracle is missing**
+
+Run both commands in order:
+
+~~~bash
+uv run pytest tests/ci/test_workflow_policy.py::test_ci_check_uses_short_per_run_pytest_basetemp -q
+uv run pytest tests/unit/config/test_settings.py tests/unit/config/test_paths.py -q
+~~~
+
+Expected: the workflow node first fails because the Task 2 check step has no
+short pytest base. The config/path command then stops during collection with
+ModuleNotFoundError naming tuntun_core.config. Neither command creates
+implementation or example artifacts.
+
+- [ ] **Step 3: Add direct dependencies and implement the bounded settings model**
+
+Add types-PyYAML>=6.0.12,<7 to the root dev dependency group:
+
+~~~toml
+# pyproject.toml
+[dependency-groups]
+dev = [
+  "coverage[toml]>=7.10,<8",
+  "hypothesis>=6.138,<7",
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "PyYAML>=6.0,<7",
+  "pytest-cov>=6.2,<7",
+  "respx>=0.22,<1",
+  "ruff>=0.12,<1",
+  "types-PyYAML>=6.0.12,<7",
+]
+~~~
+
+The complete core dependency list becomes:
+
+~~~toml
+# apps/core/pyproject.toml
+[project]
+name = "tuntun-core"
+version = "0.1.0.dev0"
+requires-python = "==3.12.*"
+dependencies = [
+  "platformdirs>=4.4,<5",
+  "pydantic>=2.11,<3",
+  "PyYAML>=6.0,<7",
+  "typer>=0.16,<1",
+]
+
+[project.scripts]
+tuntunctl = "tuntun_core.cli.main:app"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+~~~
+
+Do not add pydantic-settings: load_settings owns explicit caller-supplied
+source precedence and does not read ambient process state.
+
+~~~python
 # apps/core/src/tuntun_core/config/settings.py
+from __future__ import annotations
+
 from ipaddress import ip_address
-from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+
 class FrozenSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-class HouseholdSettings(FrozenSettings): timezone: str = "Asia/Singapore"
-class ConversationSettings(FrozenSettings):
-    active_limit: int = Field(default=1, ge=1, le=1); follow_up_window_seconds: int = 30
-    idle_close_seconds: int = 60; absolute_session_limit_minutes: int = 30
-class PrivacySettings(FrozenSettings): audit_default_view_days: int = 180
-class NetworkSettings(FrozenSettings):
-    admin_host: str = "127.0.0.1"; admin_port: int = 8787; admin_lan_port: int = Field(default=8443, ge=8443, le=8443); edge_gateway_port: int = 7443
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        validate_default=True,
+    )
+
+
+class HouseholdSettings(FrozenSettings):
+    timezone: str = Field(
+        default="Asia/Singapore",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)*$",
+    )
+
     @model_validator(mode="after")
-    def private_bind(self) -> "NetworkSettings":
-        address = ip_address(self.admin_host)
+    def valid_timezone(self) -> HouseholdSettings:
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError("timezone must name an installed IANA zone") from error
+        return self
+
+
+class ConversationSettings(FrozenSettings):
+    active_limit: int = Field(default=1, ge=1, le=1)
+    follow_up_window_seconds: int = Field(default=30, ge=1, le=600)
+    idle_close_seconds: int = Field(default=60, ge=1, le=3_600)
+    absolute_session_limit_minutes: int = Field(default=30, ge=1, le=1_440)
+
+    @model_validator(mode="after")
+    def ordered_windows(self) -> ConversationSettings:
+        if self.follow_up_window_seconds > self.idle_close_seconds:
+            raise ValueError("follow-up window must not exceed idle close")
+        if self.idle_close_seconds > self.absolute_session_limit_minutes * 60:
+            raise ValueError("idle close must not exceed absolute session limit")
+        return self
+
+
+class PrivacySettings(FrozenSettings):
+    audit_default_view_days: int = Field(default=180, ge=1, le=3_650)
+
+
+class NetworkSettings(FrozenSettings):
+    admin_host: str = Field(default="127.0.0.1", min_length=2, max_length=64)
+    admin_port: int = Field(default=8_787, ge=1, le=65_535)
+    admin_lan_port: int = Field(default=8_443, ge=8_443, le=8_443)
+    edge_gateway_port: int = Field(default=7_443, ge=1, le=65_535)
+
+    @model_validator(mode="after")
+    def safe_bindings(self) -> NetworkSettings:
+        try:
+            address = ip_address(self.admin_host)
+        except ValueError as error:
+            raise ValueError("admin bind must be an IP literal") from error
         if not address.is_loopback:
             raise ValueError("default admin bind must be loopback")
+        if (
+            len(
+                {
+                    self.admin_port,
+                    self.admin_lan_port,
+                    self.edge_gateway_port,
+                }
+            )
+            != 3
+        ):
+            raise ValueError("network listener ports must be distinct")
         return self
+
+
 class ProviderSettings(FrozenSettings):
-    primary_model: str = "gpt-5.6-sol"; qwen_enabled: bool = False; context_max_tokens: int = 8_000
-    connect_timeout_ms: int = Field(default=5_000, ge=1_000, le=120_000); write_timeout_ms: int = Field(default=30_000, ge=1_000, le=120_000)
-    read_timeout_ms: int = Field(default=120_000, ge=1_000, le=120_000); pool_timeout_ms: int = Field(default=5_000, ge=1_000, le=120_000)
+    primary_model: str = Field(
+        default="gpt-5.6-sol",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+    )
+    qwen_enabled: bool = False
+    context_max_tokens: int = Field(default=8_000, ge=1_024, le=2_000_000)
+    connect_timeout_ms: int = Field(default=5_000, ge=1_000, le=120_000)
+    write_timeout_ms: int = Field(default=30_000, ge=1_000, le=120_000)
+    read_timeout_ms: int = Field(default=120_000, ge=1_000, le=120_000)
+    pool_timeout_ms: int = Field(default=5_000, ge=1_000, le=120_000)
     max_attempts: int = Field(default=2, ge=1, le=2)
-class MemorySettings(FrozenSettings): max_items_per_turn: int = Field(default=6, ge=1, le=6)
+
+
+class MemorySettings(FrozenSettings):
+    max_items_per_turn: int = Field(default=6, ge=1, le=6)
+
+
 class IdentitySettings(FrozenSettings):
-    child_reenrollment_reminder_days: int = Field(default=180, ge=30, le=365); child_biometric_hard_expiry_days: int = Field(default=365, ge=30, le=365)
-class AdminSettings(FrozenSettings):
-    session_idle_seconds: int = 900; session_absolute_seconds: int = 28_800; json_body_max_bytes: int = 1_048_576
-    read_requests_per_minute: int = 120; mutation_requests_per_minute: int = 30; auth_requests_per_minute: int = 10
-    trust_proxy_headers: Literal[False] = False
-class ObservabilitySettings(FrozenSettings):
-    telemetry_enabled: Literal[False] = False; cloud_tracing_enabled: Literal[False] = False; provider_body_logging: Literal[False] = False
-class BudgetSettings(FrozenSettings):
-    soft_limit_micros_sgd: int = 100_000_000; hard_limit_micros_sgd: int = 150_000_000
+    child_reenrollment_reminder_days: int = Field(
+        default=180,
+        ge=30,
+        le=365,
+    )
+    child_biometric_hard_expiry_days: int = Field(
+        default=365,
+        ge=30,
+        le=365,
+    )
+
     @model_validator(mode="after")
-    def ordered_limits(self) -> "BudgetSettings":
+    def ordered_expiry(self) -> IdentitySettings:
+        if self.child_biometric_hard_expiry_days < self.child_reenrollment_reminder_days:
+            raise ValueError("biometric hard expiry must follow reminder")
+        return self
+
+
+class AdminSettings(FrozenSettings):
+    session_idle_seconds: int = Field(default=900, ge=60, le=3_600)
+    session_absolute_seconds: int = Field(default=28_800, ge=300, le=86_400)
+    json_body_max_bytes: int = Field(
+        default=1_048_576,
+        ge=1_024,
+        le=16_777_216,
+    )
+    read_requests_per_minute: int = Field(default=120, ge=1, le=10_000)
+    mutation_requests_per_minute: int = Field(default=30, ge=1, le=10_000)
+    auth_requests_per_minute: int = Field(default=10, ge=1, le=10_000)
+    trust_proxy_headers: bool = False
+
+    @model_validator(mode="after")
+    def safe_admin_policy(self) -> AdminSettings:
+        if self.session_idle_seconds > self.session_absolute_seconds:
+            raise ValueError("admin idle expiry must not exceed absolute expiry")
+        if self.trust_proxy_headers:
+            raise ValueError("proxy headers are disabled in Phase 1")
+        return self
+
+
+class ObservabilitySettings(FrozenSettings):
+    telemetry_enabled: bool = False
+    cloud_tracing_enabled: bool = False
+    provider_body_logging: bool = False
+
+    @model_validator(mode="after")
+    def local_only(self) -> ObservabilitySettings:
+        if any(
+            (
+                self.telemetry_enabled,
+                self.cloud_tracing_enabled,
+                self.provider_body_logging,
+            )
+        ):
+            raise ValueError("Phase 1 observability privacy switches stay disabled")
+        return self
+
+
+class BudgetSettings(FrozenSettings):
+    soft_limit_micros_sgd: int = Field(
+        default=100_000_000,
+        ge=0,
+        le=10_000_000_000,
+    )
+    hard_limit_micros_sgd: int = Field(
+        default=150_000_000,
+        ge=0,
+        le=10_000_000_000,
+    )
+
+    @model_validator(mode="after")
+    def ordered_limits(self) -> BudgetSettings:
         if self.hard_limit_micros_sgd < self.soft_limit_micros_sgd:
             raise ValueError("hard limit must be at least soft limit")
         return self
+
+
 class Settings(FrozenSettings):
-    household: HouseholdSettings = HouseholdSettings(); conversation: ConversationSettings = ConversationSettings()
-    privacy: PrivacySettings = PrivacySettings(); network: NetworkSettings = NetworkSettings()
-    providers: ProviderSettings = ProviderSettings(); memory: MemorySettings = MemorySettings(); identity: IdentitySettings = IdentitySettings()
-    admin: AdminSettings = AdminSettings(); observability: ObservabilitySettings = ObservabilitySettings(); budget: BudgetSettings = BudgetSettings()
-```
+    household: HouseholdSettings = Field(default_factory=HouseholdSettings)
+    conversation: ConversationSettings = Field(default_factory=ConversationSettings)
+    privacy: PrivacySettings = Field(default_factory=PrivacySettings)
+    network: NetworkSettings = Field(default_factory=NetworkSettings)
+    providers: ProviderSettings = Field(default_factory=ProviderSettings)
+    memory: MemorySettings = Field(default_factory=MemorySettings)
+    identity: IdentitySettings = Field(default_factory=IdentitySettings)
+    admin: AdminSettings = Field(default_factory=AdminSettings)
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
+    budget: BudgetSettings = Field(default_factory=BudgetSettings)
+~~~
 
-```python
-# apps/core/src/tuntun_core/config/loader.py
-import os
-from pathlib import Path
-import stat
-from typing import Mapping
-import yaml
-from yaml.events import AliasEvent,CollectionEndEvent,CollectionStartEvent
-from yaml.nodes import MappingNode
-from .settings import Settings
+- [ ] **Step 4: Implement descriptor-walked paths and strict YAML loading**
 
-MAX_SETTINGS_BYTES=262_144
-
-class StrictSettingsLoader(yaml.SafeLoader):
-    def construct_mapping(self,node,deep=False):
-        if not isinstance(node,MappingNode): raise ValueError("invalid configuration")
-        result={}
-        for key_node,value_node in node.value:
-            key=self.construct_object(key_node,deep=deep)
-            if type(key) is not str or key in result:
-                raise ValueError("invalid configuration")
-            result[key]=self.construct_object(value_node,deep=deep)
-        return result
-
-def parse_bounded_strict_yaml(
-    raw:bytes,*,max_bytes:int,max_events:int=16_384,max_depth:int=32,
-):
-    if (
-        type(raw) is not bytes or type(max_bytes) is not int
-        or not 0<=len(raw)<=max_bytes<=1_048_576
-    ): raise ValueError("invalid configuration")
-    text=raw.decode("utf-8",errors="strict"); depth=count=0
-    try:
-        for event in yaml.parse(text):
-            count+=1
-            if (
-                count>max_events or isinstance(event,AliasEvent)
-                or getattr(event,"anchor",None) is not None
-            ):
-                raise ValueError("invalid configuration")
-            if getattr(event,"tag",None) is not None:
-                raise ValueError("invalid configuration")
-            if isinstance(event,CollectionStartEvent):
-                depth+=1
-                if depth>max_depth: raise ValueError("invalid configuration")
-            elif isinstance(event,CollectionEndEvent): depth-=1
-        if depth!=0: raise ValueError("invalid configuration")
-        return yaml.load(text,Loader=StrictSettingsLoader)
-    except (UnicodeError,yaml.YAMLError) as error:
-        raise ValueError("invalid configuration") from error
-
-def read_bounded_strict_yaml(path:Path,*,max_bytes:int=MAX_SETTINGS_BYTES):
-    try:
-        fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_CLOEXEC|getattr(os,"O_NOFOLLOW",0))
-    except OSError as error:
-        raise PermissionError("unsafe configuration file") from error
-    try:
-        before=os.fstat(fd)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_uid not in {0,os.geteuid()} or before.st_mode&0o022
-            or before.st_size>max_bytes
-        ): raise PermissionError("unsafe configuration file")
-        chunks=[]; total=0
-        while True:
-            chunk=os.read(fd,min(65_536,max_bytes+1-total))
-            if not chunk: break
-            total+=len(chunk)
-            if total>max_bytes: raise ValueError("invalid configuration")
-            chunks.append(chunk)
-        after=os.fstat(fd); named=os.lstat(path)
-        if (
-            total!=before.st_size
-            or (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)
-            !=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)
-            or (after.st_dev,after.st_ino)!=(named.st_dev,named.st_ino)
-        ): raise PermissionError("configuration changed during read")
-        return parse_bounded_strict_yaml(b"".join(chunks),max_bytes=max_bytes)
-    finally: os.close(fd)
-
-def load_settings(yaml_path: Path | None, environ: Mapping[str, str]) -> Settings:
-    data: dict[str, object] = {}
-    if yaml_path is not None:
-        loaded = read_bounded_strict_yaml(yaml_path) or {}
-        if not isinstance(loaded, dict): raise ValueError("configuration root must be a mapping")
-        data = loaded
-    for name, raw_value in environ.items():
-        if not name.startswith("TUNTUN_"): continue
-        path=name.removeprefix("TUNTUN_").lower().split("__")
-        if len(path) != 2: raise ValueError(f"invalid TUNTUN override: {name}")
-        encoded=raw_value.encode("utf-8",errors="strict")
-        value=parse_bounded_strict_yaml(
-            encoded,max_bytes=1_024,max_events=8,max_depth=1,
-        )
-        if isinstance(value,(dict,list,tuple,set)) or value is None:
-            raise ValueError(f"invalid TUNTUN override: {name}")
-        section, key=path; nested=dict(data.get(section, {})); nested[key]=value; data[section]=nested
-    return Settings.model_validate(data)
-```
-
-```python
+~~~python
 # apps/core/src/tuntun_core/config/secure_paths.py
-from dataclasses import dataclass
-import os,stat
+from __future__ import annotations
+
+import os
+import stat
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
 
-OPEN_FLAGS=os.O_RDONLY|os.O_CLOEXEC|os.O_DIRECTORY|os.O_NOFOLLOW
+OPEN_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
 
-def _absolute_lexical(path:Path) -> Path:
-    raw=os.fspath(path)
+
+def absolute_lexical_path(
+    path: Path,
+    *,
+    allow_root: bool = False,
+) -> Path:
+    raw = os.fspath(path)
     if (
-        type(raw) is not str or not raw or "\x00" in raw
-        or any(component in {".",".."} for component in raw.split(os.sep))
-    ): raise PermissionError("unsafe application path")
-    absolute=Path(os.path.abspath(raw))
-    if absolute==Path("/") or absolute.name in {".",".."}:
+        type(raw) is not str
+        or not raw
+        or "\x00" in raw
+        or raw.startswith(os.sep * 2)
+        or any(component in {".", ".."} for component in raw.split(os.sep))
+    ):
+        raise PermissionError("unsafe application path")
+    absolute = Path(os.path.abspath(raw))
+    if absolute == Path("/") and not allow_root:
         raise PermissionError("unsafe application path")
     return absolute
 
+
+def _reported_owner(value: os.stat_result) -> int:
+    return value.st_uid
+
+
+def _open_root() -> int:
+    return os.open("/", OPEN_FLAGS)
+
+
+def _open_directory_at(name: str, parent_fd: int) -> int:
+    return os.open(name, OPEN_FLAGS, dir_fd=parent_fd)
+
+
+def _stat_directory_at(name: str, parent_fd: int) -> os.stat_result:
+    return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+
+
+def _mkdir_directory_at(name: str, parent_fd: int) -> None:
+    os.mkdir(name, 0o700, dir_fd=parent_fd)
+
+
+def _close_fd(fd: int) -> None:
+    os.close(fd)
+
+
+def _ancestor_mode_is_safe(owner: int, mode: int) -> bool:
+    permissions = stat.S_IMODE(mode)
+    if owner == 0:
+        return not permissions & 0o022 or bool(mode & stat.S_ISVTX)
+    return owner == os.geteuid() and not permissions & 0o022
+
+
 def _require_directory(
-    opened:os.stat_result,named:os.stat_result,*,leaf:bool,
+    opened: os.stat_result,
+    named: os.stat_result,
+    *,
+    leaf_private: bool,
 ) -> None:
-    owner=os.geteuid()
+    owner = _reported_owner(opened)
     if (
-        not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(named.st_mode)
-        or (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino)
-        or opened.st_uid not in {0,owner}
-        or (opened.st_uid==0 and opened.st_mode&0o022)
-        or (opened.st_uid==owner and opened.st_mode&0o077)
-        or (leaf and (opened.st_uid!=owner or stat.S_IMODE(opened.st_mode)!=0o700))
-    ): raise PermissionError("unsafe application path")
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        or not _ancestor_mode_is_safe(owner, opened.st_mode)
+        or (leaf_private and (owner != os.geteuid() or stat.S_IMODE(opened.st_mode) != 0o700))
+    ):
+        raise PermissionError("unsafe application path")
+
 
 @dataclass(slots=True)
 class OwnedDirectory:
-    path:Path; fd:int; device:int; inode:int; _closed:bool=False
-    def revalidate(self) -> None:
-        if self._closed: raise PermissionError("unsafe application path")
-        held=os.fstat(self.fd)
-        with _walk_owned_directory(self.path,create=False) as fresh:
-            if (
-                (held.st_dev,held.st_ino)!=(self.device,self.inode)
-                or (fresh.device,fresh.inode)!=(self.device,self.inode)
-            ): raise PermissionError("unsafe application path")
-    def close(self) -> None:
-        if not self._closed:
-            os.close(self.fd); self._closed=True
-    def __enter__(self) -> "OwnedDirectory": return self
-    def __exit__(
-        self,exc_type:type[BaseException]|None,exc:BaseException|None,
-        traceback:TracebackType|None,
-    ) -> None: self.close()
+    path: Path
+    fd: int
+    device: int
+    inode: int
+    _leaf_private: bool = field(repr=False)
+    _closed: bool = field(default=False, repr=False)
 
-@dataclass(frozen=True,slots=True)
-class OwnedPath:
-    path:Path; device:int; inode:int
     def revalidate(self) -> None:
-        with open_owned_directory(self.path) as fresh:
-            if (fresh.device,fresh.inode)!=(self.device,self.inode):
+        if self._closed:
+            raise PermissionError("unsafe application path")
+        try:
+            held = os.fstat(self.fd)
+        except OSError as error:
+            raise PermissionError("unsafe application path") from error
+        with _walk_directory(
+            self.path,
+            create=False,
+            leaf_private=self._leaf_private,
+        ) as fresh:
+            if (held.st_dev, held.st_ino) != (self.device, self.inode) or (
+                fresh.device,
+                fresh.inode,
+            ) != (self.device, self.inode):
                 raise PermissionError("unsafe application path")
 
-def _walk_owned_directory(path:Path,*,create:bool) -> OwnedDirectory:
-    absolute=_absolute_lexical(path); parts=absolute.parts[1:]
-    parent_fd=os.open("/",OPEN_FLAGS)
+    def close(self) -> None:
+        if not self._closed:
+            _close_fd(self.fd)
+            self._closed = True
+
+    def __enter__(self) -> OwnedDirectory:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedPath:
+    path: Path
+    device: int
+    inode: int
+
+    def revalidate(self) -> None:
+        with open_owned_directory(self.path) as fresh:
+            if (fresh.device, fresh.inode) != (self.device, self.inode):
+                raise PermissionError("unsafe application path")
+
+
+def _walk_directory(
+    path: Path,
+    *,
+    create: bool,
+    leaf_private: bool,
+) -> OwnedDirectory:
+    allow_root = not create and not leaf_private
+    absolute = absolute_lexical_path(path, allow_root=allow_root)
+    parts = absolute.parts[1:]
+    parent_fd = _open_root()
     try:
-        root=os.fstat(parent_fd); _require_directory(root,os.lstat("/"),leaf=False)
-        for index,part in enumerate(parts):
-            leaf=index==len(parts)-1
+        root = os.fstat(parent_fd)
+        _require_directory(
+            root,
+            os.stat("/", follow_symlinks=False),
+            leaf_private=not parts and leaf_private,
+        )
+        for index, part in enumerate(parts):
+            is_leaf = index == len(parts) - 1
             try:
-                child_fd=os.open(part,OPEN_FLAGS,dir_fd=parent_fd)
+                child_fd = _open_directory_at(part, parent_fd)
             except FileNotFoundError:
-                if not create: raise
-                os.mkdir(part,0o700,dir_fd=parent_fd)
-                child_fd=os.open(part,OPEN_FLAGS,dir_fd=parent_fd)
+                if not create:
+                    raise
+                _mkdir_directory_at(part, parent_fd)
+                child_fd = _open_directory_at(part, parent_fd)
             try:
-                opened=os.fstat(child_fd)
-                named=os.stat(part,dir_fd=parent_fd,follow_symlinks=False)
-                _require_directory(opened,named,leaf=leaf)
-            except BaseException: os.close(child_fd); raise
-            os.close(parent_fd); parent_fd=child_fd
-        leaf_value=os.fstat(parent_fd)
-        result=OwnedDirectory(absolute,parent_fd,leaf_value.st_dev,leaf_value.st_ino)
-        parent_fd=-1
+                opened = os.fstat(child_fd)
+                named = _stat_directory_at(part, parent_fd)
+                _require_directory(
+                    opened,
+                    named,
+                    leaf_private=is_leaf and leaf_private,
+                )
+            except BaseException:
+                _close_fd(child_fd)
+                raise
+            _close_fd(parent_fd)
+            parent_fd = child_fd
+        leaf_value = os.fstat(parent_fd)
+        result = OwnedDirectory(
+            absolute,
+            parent_fd,
+            leaf_value.st_dev,
+            leaf_value.st_ino,
+            leaf_private,
+        )
+        parent_fd = -1
         return result
+    except PermissionError:
+        raise
     except OSError as error:
-        if isinstance(error,PermissionError): raise
         raise PermissionError("unsafe application path") from error
     finally:
-        if parent_fd>=0: os.close(parent_fd)
+        if parent_fd >= 0:
+            _close_fd(parent_fd)
 
-def open_owned_directory(path:Path) -> OwnedDirectory:
-    return _walk_owned_directory(path,create=False)
 
-def ensure_private_directory(path:Path) -> OwnedPath:
-    with _walk_owned_directory(path,create=True) as opened:
-        result=OwnedPath(opened.path,opened.device,opened.inode)
+def open_trusted_directory(path: Path) -> OwnedDirectory:
+    return _walk_directory(path, create=False, leaf_private=False)
+
+
+def open_owned_directory(path: Path) -> OwnedDirectory:
+    return _walk_directory(path, create=False, leaf_private=True)
+
+
+def ensure_private_directory(path: Path) -> OwnedPath:
+    with _walk_directory(path, create=True, leaf_private=True) as opened:
+        result = OwnedPath(
+            opened.path,
+            opened.device,
+            opened.inode,
+        )
     result.revalidate()
     return result
-```
+~~~
 
-```python
+~~~python
+# apps/core/src/tuntun_core/config/loader.py
+from __future__ import annotations
+
+import math
+import os
+import re
+import stat
+from collections.abc import Mapping
+from pathlib import Path
+from typing import TypeAlias, cast
+
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
+
+from .secure_paths import (
+    OwnedDirectory,
+    absolute_lexical_path,
+    open_trusted_directory,
+)
+from .settings import Settings
+
+YamlValue: TypeAlias = (  # noqa: UP040 -- keep Python 3.11 syntax compatibility.
+    None | bool | int | float | str | list["YamlValue"] | dict[str, "YamlValue"]
+)
+
+MAX_SETTINGS_BYTES = 262_144
+MAX_YAML_BYTES = 1_048_576
+OVERRIDE_NAME = re.compile(
+    r"^TUNTUN_([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*)__"
+    r"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*)$"
+)
+READ_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW
+
+
+def _open_regular_at(name: str, parent_fd: int) -> int:
+    return os.open(name, READ_FLAGS, dir_fd=parent_fd)
+
+
+def _stat_regular_at(name: str, parent_fd: int) -> os.stat_result:
+    return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+
+
+def _reported_file_owner(value: os.stat_result) -> int:
+    return value.st_uid
+
+
+def _close_fd(fd: int) -> None:
+    os.close(fd)
+
+
+def _validate_mapping_nodes(node: Node) -> None:
+    if isinstance(node, MappingNode):
+        seen: set[str] = set()
+        for key_node, value_node in node.value:
+            if (
+                not isinstance(key_node, ScalarNode)
+                or key_node.tag != "tag:yaml.org,2002:str"
+                or key_node.value in seen
+            ):
+                raise ValueError("invalid configuration")
+            seen.add(key_node.value)
+            _validate_mapping_nodes(value_node)
+    elif isinstance(node, SequenceNode):
+        for item in node.value:
+            _validate_mapping_nodes(item)
+    elif not isinstance(node, ScalarNode):
+        raise ValueError("invalid configuration")
+
+
+def _require_yaml_value(value: object) -> YamlValue:
+    if value is None or type(value) in {bool, int, str}:
+        return cast(None | bool | int | str, value)
+    if type(value) is float:
+        number = value
+        if not math.isfinite(number):
+            raise ValueError("invalid configuration")
+        return number
+    if type(value) is list:
+        values = cast(list[object], value)
+        return [_require_yaml_value(item) for item in values]
+    if type(value) is dict:
+        mapping = cast(dict[object, object], value)
+        result: dict[str, YamlValue] = {}
+        for key, item in mapping.items():
+            if type(key) is not str:
+                raise ValueError("invalid configuration")
+            result[key] = _require_yaml_value(item)
+        return result
+    raise ValueError("invalid configuration")
+
+
+def parse_bounded_strict_yaml(
+    raw: bytes,
+    *,
+    max_bytes: int,
+    max_events: int = 16_384,
+    max_depth: int = 32,
+) -> YamlValue:
+    if (
+        type(raw) is not bytes
+        or type(max_bytes) is not int
+        or type(max_events) is not int
+        or type(max_depth) is not int
+        or not 0 <= len(raw) <= max_bytes <= MAX_YAML_BYTES
+        or not 1 <= max_events <= 65_536
+        or not 1 <= max_depth <= 64
+    ):
+        raise ValueError("invalid configuration")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        depth = 0
+        for count, event in enumerate(yaml.parse(text), start=1):
+            if (
+                count > max_events
+                or getattr(event, "anchor", None) is not None
+                or getattr(event, "tag", None) is not None
+            ):
+                raise ValueError("invalid configuration")
+            if isinstance(event, yaml.events.AliasEvent):
+                raise ValueError("invalid configuration")
+            if isinstance(event, yaml.events.CollectionStartEvent):
+                depth += 1
+                if depth > max_depth:
+                    raise ValueError("invalid configuration")
+            elif isinstance(event, yaml.events.CollectionEndEvent):
+                depth -= 1
+        if depth != 0:
+            raise ValueError("invalid configuration")
+        node = yaml.compose(text, Loader=yaml.SafeLoader)
+        if node is not None:
+            _validate_mapping_nodes(node)
+        loaded = yaml.safe_load(text)
+    except (UnicodeError, yaml.YAMLError, ValueError) as error:
+        raise ValueError("invalid configuration") from error
+    return _require_yaml_value(loaded)
+
+
+def _require_regular_file(
+    opened: os.stat_result,
+    named: os.stat_result,
+    parent: OwnedDirectory,
+    *,
+    require_private: bool,
+) -> None:
+    owner = _reported_file_owner(opened)
+    mode = stat.S_IMODE(opened.st_mode)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(named.st_mode)
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        or opened.st_dev != parent.device
+        or opened.st_nlink != 1
+        or owner not in {0, os.geteuid()}
+        or mode & 0o022
+        or (require_private and (owner != os.geteuid() or mode != 0o600))
+    ):
+        raise PermissionError("unsafe configuration file")
+
+
+def _stable_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def read_bounded_strict_yaml(
+    path: Path,
+    *,
+    max_bytes: int = MAX_SETTINGS_BYTES,
+    require_private: bool = False,
+) -> YamlValue:
+    if (
+        type(max_bytes) is not int
+        or not 0 <= max_bytes <= MAX_YAML_BYTES
+        or type(require_private) is not bool
+    ):
+        raise ValueError("invalid configuration")
+    absolute = absolute_lexical_path(Path(path))
+    try:
+        with open_trusted_directory(absolute.parent) as parent:
+            parent.revalidate()
+            try:
+                fd = _open_regular_at(absolute.name, parent.fd)
+            except OSError as error:
+                raise PermissionError("unsafe configuration file") from error
+            try:
+                before = os.fstat(fd)
+                named_before = _stat_regular_at(absolute.name, parent.fd)
+                _require_regular_file(
+                    before,
+                    named_before,
+                    parent,
+                    require_private=require_private,
+                )
+                if before.st_size > max_bytes:
+                    raise PermissionError("unsafe configuration file")
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = os.read(
+                        fd,
+                        min(65_536, max_bytes + 1 - total),
+                    )
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError("invalid configuration")
+                    chunks.append(chunk)
+                after = os.fstat(fd)
+                named_after = _stat_regular_at(absolute.name, parent.fd)
+                parent.revalidate()
+                _require_regular_file(
+                    after,
+                    named_after,
+                    parent,
+                    require_private=require_private,
+                )
+                if (
+                    total != before.st_size
+                    or _stable_identity(before) != _stable_identity(after)
+                    or (after.st_dev, after.st_ino) != (named_after.st_dev, named_after.st_ino)
+                ):
+                    raise PermissionError("configuration changed during read")
+                raw = b"".join(chunks)
+            finally:
+                _close_fd(fd)
+    except PermissionError:
+        raise
+    except OSError as error:
+        raise PermissionError("unsafe configuration file") from error
+    return parse_bounded_strict_yaml(raw, max_bytes=max_bytes)
+
+
+def load_settings(
+    yaml_path: Path | None,
+    environ: Mapping[str, str],
+) -> Settings:
+    data: dict[str, object] = {}
+    if yaml_path is not None:
+        loaded = read_bounded_strict_yaml(
+            yaml_path,
+            require_private=True,
+        )
+        if type(loaded) is not dict:
+            raise ValueError("configuration root must be a mapping")
+        data = Settings.model_validate(loaded).model_dump(mode="python")
+    for name, raw_value in environ.items():
+        if type(name) is not str or type(raw_value) is not str:
+            raise ValueError("invalid TUNTUN override")
+        if not name.startswith("TUNTUN_"):
+            continue
+        match = OVERRIDE_NAME.fullmatch(name)
+        if match is None:
+            raise ValueError(f"invalid TUNTUN override: {name}")
+        encoded = raw_value.encode("utf-8", errors="strict")
+        value = parse_bounded_strict_yaml(
+            encoded,
+            max_bytes=1_024,
+            max_events=8,
+            max_depth=1,
+        )
+        if isinstance(value, (dict, list)) or value is None:
+            raise ValueError(f"invalid TUNTUN override: {name}")
+        section, key = (part.lower() for part in match.groups())
+        if section in data:
+            existing = data[section]
+            if type(existing) is not dict:
+                raise ValueError(f"invalid TUNTUN override: {name}")
+            nested = dict(cast(dict[str, object], existing))
+        else:
+            nested = {}
+        nested[key] = value
+        data[section] = nested
+    return Settings.model_validate(data)
+~~~
+
+~~~python
 # apps/core/src/tuntun_core/config/paths.py
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
+
 from platformdirs import user_data_path
-from .secure_paths import OwnedPath,ensure_private_directory
+
+from .secure_paths import OwnedPath, ensure_private_directory
+
 
 @dataclass(frozen=True, slots=True)
 class ApplicationPaths:
-    root: Path; data: Path; logs: Path; models: Path; backups: Path
-    _identities: tuple[OwnedPath,...]
+    root: Path
+    data: Path
+    logs: Path
+    models: Path
+    backups: Path
+    _identities: tuple[OwnedPath, ...]
+
     @classmethod
-    def create(cls, base: Path | None = None) -> "ApplicationPaths":
-        root = Path(base or user_data_path("Tuntun", appauthor=False))
-        values=(root,root/"data",root/"logs",root/"models",root/"backups")
-        identities=tuple(ensure_private_directory(path) for path in values)
-        for identity in identities: identity.revalidate()
-        return cls(*values,identities)
-```
+    def create(cls, base: Path | None = None) -> ApplicationPaths:
+        requested = (
+            Path(base) if base is not None else Path(user_data_path("Tuntun", appauthor=False))
+        )
+        root_identity = ensure_private_directory(requested)
+        identities = (
+            root_identity,
+            ensure_private_directory(root_identity.path / "data"),
+            ensure_private_directory(root_identity.path / "logs"),
+            ensure_private_directory(root_identity.path / "models"),
+            ensure_private_directory(root_identity.path / "backups"),
+        )
+        result = cls(
+            root=identities[0].path,
+            data=identities[1].path,
+            logs=identities[2].path,
+            models=identities[3].path,
+            backups=identities[4].path,
+            _identities=identities,
+        )
+        result.revalidate()
+        return result
 
-Add `pydantic-settings>=2.10,<3`, `PyYAML>=6.0,<7`, and `platformdirs>=4.4,<5` to core dependencies. Write `config/tuntun.example.yaml` with exactly the locked defaults asserted above, including all three disabled observability switches, and `.env.example` containing only commented variable names, never credential-shaped values.
+    def revalidate(self) -> None:
+        for identity in self._identities:
+            identity.revalidate()
+~~~
 
-- [ ] **Step 4: Lock and run the green settings gate**
+- [ ] **Step 5: Publish exact examples and the portable CI temp root**
 
-Run: `uv lock && uv run pytest tests/unit/config/test_settings.py tests/unit/config/test_paths.py -q && uv run ruff check apps/core/src/tuntun_core/config tests/unit/config && uv run mypy apps/core/src/tuntun_core/config`
+~~~yaml
+# config/tuntun.example.yaml
+household:
+  timezone: Asia/Singapore
+conversation:
+  active_limit: 1
+  follow_up_window_seconds: 30
+  idle_close_seconds: 60
+  absolute_session_limit_minutes: 30
+privacy:
+  audit_default_view_days: 180
+network:
+  admin_host: 127.0.0.1
+  admin_port: 8787
+  admin_lan_port: 8443
+  edge_gateway_port: 7443
+providers:
+  primary_model: gpt-5.6-sol
+  qwen_enabled: false
+  context_max_tokens: 8000
+  connect_timeout_ms: 5000
+  write_timeout_ms: 30000
+  read_timeout_ms: 120000
+  pool_timeout_ms: 5000
+  max_attempts: 2
+memory:
+  max_items_per_turn: 6
+identity:
+  child_reenrollment_reminder_days: 180
+  child_biometric_hard_expiry_days: 365
+admin:
+  session_idle_seconds: 900
+  session_absolute_seconds: 28800
+  json_body_max_bytes: 1048576
+  read_requests_per_minute: 120
+  mutation_requests_per_minute: 30
+  auth_requests_per_minute: 10
+  trust_proxy_headers: false
+observability:
+  telemetry_enabled: false
+  cloud_tracing_enabled: false
+  provider_body_logging: false
+budget:
+  soft_limit_micros_sgd: 100000000
+  hard_limit_micros_sgd: 150000000
+~~~
 
-Expected: PASS with all settings/path tests passing, including ancestor/leaf symlink, special-file, wrong-owner, wrong-mode, parent-replacement, and device/inode replacement failures. The one trusted Darwin pytest-root alias is canonicalized by the fixture only. Every creation/revalidation uses a fresh full no-follow component walk; each live `OwnedDirectory` retains its exact descriptor-qualified `0700` inode until explicit close/context exit, and all FDs close on success and failure. Ruff/mypy exit 0.
+~~~dotenv
+# .env.example
+# TUNTUN_ADMIN__AUTH_REQUESTS_PER_MINUTE
+# TUNTUN_ADMIN__JSON_BODY_MAX_BYTES
+# TUNTUN_ADMIN__MUTATION_REQUESTS_PER_MINUTE
+# TUNTUN_ADMIN__READ_REQUESTS_PER_MINUTE
+# TUNTUN_ADMIN__SESSION_ABSOLUTE_SECONDS
+# TUNTUN_ADMIN__SESSION_IDLE_SECONDS
+# TUNTUN_ADMIN__TRUST_PROXY_HEADERS
+# TUNTUN_BUDGET__HARD_LIMIT_MICROS_SGD
+# TUNTUN_BUDGET__SOFT_LIMIT_MICROS_SGD
+# TUNTUN_CONVERSATION__ABSOLUTE_SESSION_LIMIT_MINUTES
+# TUNTUN_CONVERSATION__ACTIVE_LIMIT
+# TUNTUN_CONVERSATION__FOLLOW_UP_WINDOW_SECONDS
+# TUNTUN_CONVERSATION__IDLE_CLOSE_SECONDS
+# TUNTUN_HOUSEHOLD__TIMEZONE
+# TUNTUN_IDENTITY__CHILD_BIOMETRIC_HARD_EXPIRY_DAYS
+# TUNTUN_IDENTITY__CHILD_REENROLLMENT_REMINDER_DAYS
+# TUNTUN_MEMORY__MAX_ITEMS_PER_TURN
+# TUNTUN_NETWORK__ADMIN_HOST
+# TUNTUN_NETWORK__ADMIN_LAN_PORT
+# TUNTUN_NETWORK__ADMIN_PORT
+# TUNTUN_NETWORK__EDGE_GATEWAY_PORT
+# TUNTUN_OBSERVABILITY__CLOUD_TRACING_ENABLED
+# TUNTUN_OBSERVABILITY__PROVIDER_BODY_LOGGING
+# TUNTUN_OBSERVABILITY__TELEMETRY_ENABLED
+# TUNTUN_PRIVACY__AUDIT_DEFAULT_VIEW_DAYS
+# TUNTUN_PROVIDERS__CONNECT_TIMEOUT_MS
+# TUNTUN_PROVIDERS__CONTEXT_MAX_TOKENS
+# TUNTUN_PROVIDERS__MAX_ATTEMPTS
+# TUNTUN_PROVIDERS__POOL_TIMEOUT_MS
+# TUNTUN_PROVIDERS__PRIMARY_MODEL
+# TUNTUN_PROVIDERS__QWEN_ENABLED
+# TUNTUN_PROVIDERS__READ_TIMEOUT_MS
+# TUNTUN_PROVIDERS__WRITE_TIMEOUT_MS
+~~~
 
-- [ ] **Step 5: Commit exact Task 7 paths**
+Replace `.github/workflows/ci.yml` with the existing Task 2 workflow plus only
+the short per-run pytest base on the final check step:
 
-```bash
+~~~yaml
+# .github/workflows/ci.yml
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  contracts-python311:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with: {version: "0.8.13", enable-cache: true}
+      - run: uv python install 3.11
+      - run: uv build --package tuntun-contracts --wheel --out-dir dist-py311
+      - run: uv venv --python 3.11 .venv-contracts-py311
+      - run: >-
+          uv pip install --python .venv-contracts-py311/bin/python
+          dist-py311/*.whl "pytest>=8.4,<9"
+      - run: >-
+          .venv-contracts-py311/bin/python -m pytest
+          tests/contract/test_v1_types_and_ports.py
+          tests/contract/test_dependency_direction.py -q
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with: {version: "0.8.13", enable-cache: true}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with: {version: "10.15.0", run_install: false}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: {node-version: "22", cache: pnpm}
+      - run: uv sync --all-packages --locked
+      - run: pnpm install --frozen-lockfile
+      - run: make check
+        env:
+          PYTEST_ADDOPTS: >-
+            --basetemp=/tmp/t7-${{ github.run_id }}-${{ github.run_attempt }}
+~~~
+
+- [ ] **Step 6: Lock and run the local green/regression gate**
+
+Run:
+
+~~~bash
+uv lock
+uv sync --all-packages --locked
+uv run pytest tests/unit/config/test_settings.py tests/unit/config/test_paths.py tests/ci/test_workflow_policy.py::test_ci_check_uses_short_per_run_pytest_basetemp -q
+uv run ruff format --check apps/core/src/tuntun_core/config tests/unit/config
+uv run ruff check apps/core/src/tuntun_core/config tests/unit/config
+uv run mypy --python-version 3.12 apps/core/src/tuntun_core/config
+uv run python scripts/verify_private_data.py config/tuntun.example.yaml .env.example
+PYTEST_ADDOPTS="--basetemp=/tmp/t7-$$" make check
+git diff --check
+~~~
+
+Expected: the focused suite reports exactly 91 passed. Ruff format/check and
+strict Python-3.12 mypy report zero issues; the combined two-example scan
+reports private-data scan: PASS; and make check passes all predecessor and Task 7
+Python, security, contract, admin, build, schema, and repository-private-data
+gates. Its ordinary pytest count increases by exactly 91 from the accepted
+Task 6 baseline and no predecessor node disappears. No Python-3.11 core
+installation is attempted.
+
+- [ ] **Step 7: Commit exactly the repaired Task 7 closure**
+
+~~~bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/config/settings.py apps/core/src/tuntun_core/config/loader.py apps/core/src/tuntun_core/config/secure_paths.py apps/core/src/tuntun_core/config/paths.py config/tuntun.example.yaml .env.example tests/unit/config/test_settings.py tests/unit/config/test_paths.py tests/unit/config/conftest.py
+git add pyproject.toml apps/core/pyproject.toml uv.lock .github/workflows/ci.yml apps/core/src/tuntun_core/config/settings.py apps/core/src/tuntun_core/config/loader.py apps/core/src/tuntun_core/config/secure_paths.py apps/core/src/tuntun_core/config/paths.py config/tuntun.example.yaml .env.example tests/unit/config/test_settings.py tests/unit/config/test_paths.py tests/unit/config/conftest.py tests/ci/test_workflow_policy.py
 git diff --cached --name-only
+git diff --cached --check
 git diff --cached
 git commit -m "feat(core): add fail-closed settings and paths"
-```
+~~~
 
+git diff --cached --name-only must equal the 14-entry Files list exactly.
+Generated uv.lock is reviewed but never hand-edited. No Task 4-6 contract,
+fixture, schema, OpenAPI, or privacy-inventory path may be staged.
+
+- [ ] **Step 8: Require the committed dual-host acceptance matrix**
+
+Push the exact Task 7 commit through the Task 2 GitHub Actions workflow amended
+only with the short per-run pytest base. Require both check (ubuntu-24.04) and
+check (macos-15-intel) for the same commit SHA.
+
+Expected: both jobs pass uv sync --all-packages --locked and make check without
+xfail, emulation, or a skipped config/path case. The check step's short unique
+base keeps every AF_UNIX fixture below Darwin's path limit. Linux exercises the
+root-owned sticky /tmp ancestor; Intel macOS exercises the trusted temporary-
+directory alias to its /private/... target. A local run on one operating system is not evidence
+for the other, and Task 8 may not begin until both checks are green.
 ### Task 8: Implement secret providers and recursive log redaction
 
 **Master package:** 03
