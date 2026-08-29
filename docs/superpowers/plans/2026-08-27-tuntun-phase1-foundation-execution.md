@@ -11608,20 +11608,38 @@ git commit -m "feat(contracts): define versioned DTOs and ports"
 - Produces: exactly ten files under `packages/contracts/fixtures/v1`, in the sorted group/count partition `actions=23, audit=2, budget=11, events=7, identity=5, memory=14, policy=10, provider=9, reachy=7, speech=5` (93 examples total). Each file has exactly `canonical_examples`, `examples`, and `schema_version`; both example mappings have exactly that group's model names, and every canonical string is independently reparsed with `require_canonical=True`.
 - The exhaustive builder partition is exactly 51 validator/discriminator-sensitive semantic models and 42 schema-only models. The test owns an independent explicit 51-model semantic oracle and derives the public group registry from the Task 5 owning modules, so the production registry cannot certify itself. Any overlap, omission, extra model, or semantic misclassification fails during the first render, before parsing CLI mode or binding/creating the output path. Its independent repaired-Task-5 gate also checks all 19 concrete action DTOs against the complete resource-type map, every selected typed target, validated proposal/binding equality, reasoning/STT/TTS route correlation and TTS segment bounds, identity/auth/policy/time shapes, positive provider usage, camera action/purpose, memory version/source/reject semantics, and the exact create-only timer payload.
 - `FixtureFactory` is typed and deterministic: `preview()` starts at UUID 1, production starts at UUID 101, and the timestamp is fixed UTC. Its executable schema vocabulary is intentionally limited to the exact keywords, six JSON types, three formats, and ten patterns emitted by all 93 Task 5 validation schemas. The independent tests enumerate that closed surface, execute every claimed object/reference/const/enum/one-of/any-of/array/string/integer/boolean/null/format shape, and reject `allOf`, numeric schemas, type arrays, or any other unclaimed keyword, format, pattern, or open object. Enum, tuple, and binary values cross the ordinary strict JSON ingress boundary; no `model_construct`, unchecked update, raw enum object, raw tuple object, or bytes object is serialized directly.
-- Directory publication is one exact, receipt-journaled transaction. It renders the closed ten-file mapping twice before path touch; walks and retains only the no-follow parent directory FD; takes `flock(LOCK_EX)` on that FD; validates same-EUID safe Git-checkout modes while rejecting executable files and group/world-writable entries; and creates `.<output>.transaction/{intent.json,stage}`. Transaction-created directories/files are exactly `0700`/`0600`. A Darwin `renameatx_np(RENAME_SWAP)` or Linux `renameat2(RENAME_EXCHANGE)` is the irreversible update commit point; first publication uses the corresponding EXCL/NOREPLACE primitive. The exchanged retired Git tree keeps its exact recorded safe modes behind the transaction root's `0700` containment only until receipt-bound POST cleanup, because atomically exchanging names and modes is not a filesystem primitive. Unsupported platforms/filesystems fail closed without a fallback.
+- Directory publication is one exact, receipt-journaled transaction. It renders the closed ten-file mapping twice before path touch; walks and retains only the no-follow parent directory FD; takes `flock(LOCK_EX)` on that FD; validates same-EUID safe Git-checkout modes while rejecting executable files and group/world-writable entries; and creates `.<output>.transaction/{intent.json,stage}`. Before every `mkdir`, the bound creation parent must be owned by the effective UID, have no group/world write bits, and have no supported-platform discretionary ACL. An owner-read-only, exclusive, no-follow probe is created descriptor-relatively in that exact parent and immediately unlinked; its anonymous descriptor is then validated for exact type/owner/link-zero/mode/ACL and closed before the output path is touched. This proves the stable process umask and that filesystem's creation semantics preserve owner-read permission without relying on ambient `TMPDIR`. Darwin must expose inspectable `ACL_TYPE_EXTENDED` semantics. Linux is restricted to the explicit ext-family/XFS/Btrfs/tmpfs/overlayfs/F2FS magic allowlist, rejects POSIX and recognized alternative ACL attributes, and fails closed when filesystem/xattr semantics are unsupported. Every newly created directory is rebound without following links, normalized through its descriptor to `0700`, and rejected if it inherited an ACL. Transaction-created files are exactly `0600`. Cooperating same-EUID fixture writers are trusted to honor the retained parent-directory flock, while noncooperative same-EUID mutation and concurrent process-umask changes are outside this maintainer-only CLI's boundary. A Darwin `renameatx_np(RENAME_SWAP)` or Linux `renameat2(RENAME_EXCHANGE)` is the irreversible update commit point; first publication uses the corresponding EXCL/NOREPLACE primitive. The exchanged retired Git tree keeps its exact recorded safe modes behind the transaction root's `0700` containment only until receipt-bound POST cleanup, because atomically exchanging names and modes is not a filesystem primitive. Unsupported platforms/filesystems fail closed without a fallback.
 - The canonical intent records exact directory/entry device, inode, owner, mode, link, size, mtime, ctime, per-file SHA-256, and tree digest receipts. PRE recovery accepts only the exact baseline plus an exact/subset candidate stage and never renames or rewrites the baseline, preserving its modes. POST recovery accepts only the exact candidate plus an exact/subset retired baseline and never rolls the committed generation back. Early pre-intent recovery accepts only the reserved private structure whose retained identities and bytes/digests are an exact subset of the current double render; an intent temporary must be a byte prefix of the independently reconstructed canonical intent. Every ambiguous/tampered state is retained and fails closed; there is no blind rename, unlink, or reconstruction.
-- `BaseException` invokes the same state reconciliation while the exclusive parent lock is held and then re-raises. `--check` takes a shared parent-FD lock, is nonmutating, and fails on any pending recovery. `open_generated_directory_snapshot(...)` retains that shared parent lock and a bound output-directory FD for the snapshot lifetime, so all concurrent multi-file fixture readers see one generation and writers block. During updates of an existing output, atomic exchange guarantees raw readers never see the canonical directory name absent, but independent raw multi-file opens can straddle a commit and are explicitly not a consistency API.
+- After the exclusive parent lock is acquired, `BaseException` invokes the same state reconciliation while that lock is held and then re-raises; failed lock acquisition never reconciles or mutates pending state. `--check` takes a shared parent-FD lock, is nonmutating, and fails on any pending recovery. `open_generated_directory_snapshot(...)` retains that shared parent lock and a bound, ACL-free output-directory FD for the snapshot lifetime, so all concurrent multi-file fixture readers see one generation and writers block. Construction and close consume descriptor ownership exactly once, attempt every remaining unlock/close after a cleanup failure, preserve the primary error, and attach later cleanup failures as notes. During updates of an existing output, atomic exchange guarantees raw readers never see the canonical directory name absent, but independent raw multi-file opens can straddle a commit and are explicitly not a consistency API.
 - Produces privacy documents with the exact five threat-model headings and the exact closed ten-row data-flow table asserted below. Raw audio, conversation transcripts, and camera frames are explicitly not processed, persisted, egressed, or retained by Foundation.
 
 - [ ] **Step 1: Append the red atomic-directory publication and snapshot tests**
 
-Merge `fcntl`, `time`, and `Callable` into the existing sorted imports, then append the following block to Task 4's existing `tests/contract/test_contract_generators.py`; its existing imports, `ROOT`, and `_tree_snapshot` helper are reused. These are exactly 54 new pytest nodes. They cover a real fresh Git checkout plus safe/unsafe mode, owner, missing/extra inventory, symlink, hard-link, file/FIFO, and root-type cases; parent-FD locking with no lock file; exact private staging modes; true Darwin/Linux exchange and no-replace gates; PRE/POST state recovery; every construction, empty/partial file, intent, commit, entry-cleanup, and cleanup-complete `BaseException`/process-crash checkpoint; pending-check nonmutation; identity/digest tamper retention; writer/snapshot parent-name replacement; late output-name swap; both reader-before-writer and reader-at-PREPARED lock boundaries; and a raw subprocess reader proving there is no missing-name window.
+Replace the standard-library import segment with the exact current segment below, then append the historical 54-node block to Task 4's existing `tests/contract/test_contract_generators.py`; its `ROOT` and `_tree_snapshot` helper are reused. These are exactly 54 new pytest nodes. They cover a real fresh Git checkout plus safe/unsafe mode, owner, missing/extra inventory, symlink, hard-link, file/FIFO, and root-type cases; parent-FD locking with no lock file; exact private staging modes; true Darwin/Linux exchange and no-replace gates; PRE/POST state recovery; every construction, empty/partial file, intent, commit, entry-cleanup, and cleanup-complete `BaseException`/process-crash checkpoint; pending-check nonmutation; identity/digest tamper retention; writer/snapshot parent-name replacement; late output-name swap; both reader-before-writer and reader-at-PREPARED lock boundaries; and a raw subprocess reader proving there is no missing-name window.
+
+Execution hardening ruling (2026-08-30): retain those 54 planned nodes and append 19 focused regressions, producing 106 shared-generator nodes in total. The additional nodes prove that failed exclusive-lock acquisition is nonmutating; restrictive umasks are normalized while an owner-read-removing umask fails before output-path touch; every umask probe is bound to all four actual vetted creation parents; an ambient Linux `TMPDIR` default ACL cannot falsify that probe; Linux rejects native POSIX ACL parents, unsupported filesystem classes, uninspectable xattrs, and recognized non-POSIX ACL attributes; created-directory name swaps and unsafe replacements fail closed; group/world-writable and extended-ACL creation parents are rejected; a real Darwin inheritable ACL is rejected; the stable-umask/same-EUID trust boundary is declared; created-directory validation preserves its primary failure across close failure; and snapshot construction/context/close cleanup consumes descriptor ownership once, releases every remaining resource, and preserves primary failures.
 
 ```python
-# tests/contract/test_contract_generators.py — merge into existing imports
+# tests/contract/test_contract_generators.py — exact standard-library import segment
+from __future__ import annotations
+
+# The import split below deliberately bootstraps the uninstalled root namespace.
+# ruff: noqa: E402
+import ctypes
+import errno
 import fcntl
+import hashlib
+import json
+import os
+import stat
+import struct
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import suppress
+from pathlib import Path
+from typing import NoReturn, Protocol, cast
 ```
 
 ```python
@@ -12436,6 +12454,633 @@ def test_linux_native_exchange_noreplace_and_parent_flock_gate(tmp_path: Path) -
     assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
 ```
 
+The following repair block is the authoritative executable execution-hardening addition. Append it after the historical 54-node block above. Its function bodies are copied exactly from the current reviewed test file; this block supersedes the earlier prose-only treatment of those regressions.
+
+```python
+# append to tests/contract/test_contract_generators.py — authoritative repair block
+def test_snapshot_close_failure_still_releases_parent_lock_and_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    snapshot = contract_generator_common.open_generated_directory_snapshot(
+        output,
+        DIRECTORY_NAMES,
+    )
+    directory_fd = snapshot._directory.descriptor
+    parent_fd = snapshot._parent.descriptor
+    real_close = os.close
+    failed = False
+
+    def consume_directory_close_then_fail(descriptor: int) -> None:
+        nonlocal failed
+        if descriptor == directory_fd and not failed:
+            failed = True
+            real_close(descriptor)
+            raise OSError(errno.EIO, "synthetic snapshot close failure")
+        real_close(descriptor)
+
+    monkeypatch.setattr(os, "close", consume_directory_close_then_fail)
+    with pytest.raises(OSError, match="synthetic snapshot close failure") as close_error:
+        snapshot.close()
+    assert close_error.value.errno == errno.EIO
+    assert failed
+    with pytest.raises(OSError) as parent_error:
+        os.fstat(parent_fd)
+    assert parent_error.value.errno == errno.EBADF
+    with pytest.raises(OSError) as directory_error:
+        os.fstat(directory_fd)
+    assert directory_error.value.errno == errno.EBADF
+
+    replacement_fd = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    if replacement_fd != directory_fd:
+        os.dup2(replacement_fd, directory_fd)
+        real_close(replacement_fd)
+    snapshot.close()
+    os.fstat(directory_fd)
+    real_close(directory_fd)
+    snapshot.close()
+
+
+def test_snapshot_close_preserves_primary_error_across_parent_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    snapshot = contract_generator_common.open_generated_directory_snapshot(
+        output,
+        DIRECTORY_NAMES,
+    )
+    directory_fd = snapshot._directory.descriptor
+    parent_fd = snapshot._parent.descriptor
+    real_close = os.close
+    real_flock = fcntl.flock
+    failed_directory_close = False
+
+    def consume_directory_close_then_fail(descriptor: int) -> None:
+        nonlocal failed_directory_close
+        if descriptor == directory_fd and not failed_directory_close:
+            failed_directory_close = True
+            real_close(descriptor)
+            raise OSError(errno.EIO, "synthetic snapshot close failure")
+        real_close(descriptor)
+
+    def fail_parent_unlock(descriptor: int, operation: int) -> None:
+        if descriptor == parent_fd and operation == fcntl.LOCK_UN:
+            raise OSError(errno.EPERM, "synthetic parent unlock failure")
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(os, "close", consume_directory_close_then_fail)
+    monkeypatch.setattr(fcntl, "flock", fail_parent_unlock)
+    with pytest.raises(OSError, match="synthetic snapshot close failure") as close_error:
+        snapshot.close()
+    assert close_error.value.errno == errno.EIO
+    assert any("synthetic parent unlock failure" in note for note in close_error.value.__notes__)
+    with pytest.raises(OSError) as parent_error:
+        os.fstat(parent_fd)
+    assert parent_error.value.errno == errno.EBADF
+    with pytest.raises(OSError) as directory_error:
+        os.fstat(directory_fd)
+    assert directory_error.value.errno == errno.EBADF
+    snapshot.close()
+
+
+def test_snapshot_context_preserves_body_error_when_cleanup_also_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    snapshot = contract_generator_common.open_generated_directory_snapshot(
+        output,
+        DIRECTORY_NAMES,
+    )
+    directory_fd = snapshot._directory.descriptor
+    parent_fd = snapshot._parent.descriptor
+    real_close = os.close
+    failed = False
+
+    def consume_directory_close_then_fail(descriptor: int) -> None:
+        nonlocal failed
+        real_close(descriptor)
+        if descriptor == directory_fd and not failed:
+            failed = True
+            raise OSError(errno.EIO, "synthetic snapshot close failure")
+
+    monkeypatch.setattr(os, "close", consume_directory_close_then_fail)
+    with pytest.raises(ValueError, match="synthetic body failure") as body_error, snapshot:
+        raise ValueError("synthetic body failure")
+    assert any("synthetic snapshot close failure" in note for note in body_error.value.__notes__)
+    for descriptor in (directory_fd, parent_fd):
+        with pytest.raises(OSError) as closed_error:
+            os.fstat(descriptor)
+        assert closed_error.value.errno == errno.EBADF
+
+
+def test_snapshot_construction_preserves_primary_error_and_disposes_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    real_open = contract_generator_common._open_generated_directory
+    real_lock = contract_generator_common._lock_output_parent
+    real_close = os.close
+    directory_fd: int | None = None
+    parent_fd: int | None = None
+    failed = False
+
+    def capture_open(
+        bound_parent_fd: int,
+        name: str,
+        *,
+        private: bool,
+    ) -> contract_generator_common.GeneratedDirectoryHandle:
+        nonlocal directory_fd
+        handle = real_open(bound_parent_fd, name, private=private)
+        directory_fd = handle.descriptor
+        return handle
+
+    def capture_lock(
+        parent: contract_generator_common.OutputParent,
+        *,
+        exclusive: bool,
+    ) -> None:
+        nonlocal parent_fd
+        real_lock(parent, exclusive=exclusive)
+        parent_fd = parent.descriptor
+
+    def fail_snapshot(*args: object, **kwargs: object) -> NoReturn:
+        del args, kwargs
+        raise ValueError("synthetic snapshot construction failure")
+
+    def consume_directory_close_then_fail(descriptor: int) -> None:
+        nonlocal failed
+        real_close(descriptor)
+        if descriptor == directory_fd and not failed:
+            failed = True
+            raise OSError(errno.EIO, "synthetic directory cleanup failure")
+
+    monkeypatch.setattr(contract_generator_common, "_open_generated_directory", capture_open)
+    monkeypatch.setattr(contract_generator_common, "_lock_output_parent", capture_lock)
+    monkeypatch.setattr(contract_generator_common, "_snapshot_generated_directory", fail_snapshot)
+    monkeypatch.setattr(os, "close", consume_directory_close_then_fail)
+    with pytest.raises(ValueError, match="synthetic snapshot construction failure") as primary:
+        contract_generator_common.open_generated_directory_snapshot(output, DIRECTORY_NAMES)
+    assert any("synthetic directory cleanup failure" in note for note in primary.value.__notes__)
+    assert directory_fd is not None
+    assert parent_fd is not None
+    for descriptor in (directory_fd, parent_fd):
+        with pytest.raises(OSError) as closed_error:
+            os.fstat(descriptor)
+        assert closed_error.value.errno == errno.EBADF
+
+
+def test_failed_exclusive_lock_does_not_reconcile_pending_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    crashed = _crash_writer(output, "prepared")
+    assert crashed.returncode == 73
+    assert _transaction_path(output).is_dir()
+    before = _tree_snapshot(tmp_path)
+    real_flock = fcntl.flock
+
+    def fail_exclusive_lock(descriptor: int, operation: int) -> None:
+        if operation == fcntl.LOCK_EX:
+            raise OSError(errno.EIO, "synthetic exclusive lock failure")
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", fail_exclusive_lock)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+    assert _transaction_path(output).is_dir()
+
+
+def test_restrictive_umask_normalizes_new_output_parents(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "fresh/fixtures/v1"
+    previous_umask = os.umask(0o177)
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 0
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE((tmp_path / "fresh").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "fresh/fixtures").stat().st_mode) == 0o700
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in output.iterdir())
+    assert not _transaction_path(output).exists()
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
+
+
+def test_restrictive_umask_normalizes_transaction_and_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    inspected = False
+
+    def inspect_prepared_modes(name: str) -> None:
+        nonlocal inspected
+        if name != "prepared":
+            return
+        transaction = _transaction_path(output)
+        stage = transaction / "stage"
+        assert stat.S_IMODE(transaction.stat().st_mode) == 0o700
+        assert stat.S_IMODE(stage.stat().st_mode) == 0o700
+        assert stat.S_IMODE((transaction / "intent.json").stat().st_mode) == 0o600
+        assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in stage.iterdir())
+        inspected = True
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        inspect_prepared_modes,
+    )
+    previous_umask = os.umask(0o177)
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 0
+    finally:
+        os.umask(previous_umask)
+    assert inspected
+    assert not _transaction_path(output).exists()
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
+
+
+def test_owner_read_removing_umask_is_rejected_before_output_path_touch(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "missing/fixtures/v1"
+    previous_umask = os.umask(0o777)
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 1
+    finally:
+        os.umask(previous_umask)
+    try:
+        assert not output.parents[1].exists()
+    finally:
+        if output.parents[1].exists():
+            output.parents[1].chmod(0o700)
+            output.parents[1].rmdir()
+
+
+def test_private_directory_umask_probe_uses_each_bound_creation_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "fresh/fixtures/v1"
+    real_probe = contract_generator_common._require_supported_private_directory_umask
+    inspected: list[tuple[int, int]] = []
+
+    def inspect_bound_parent(parent_fd: int) -> None:
+        metadata = os.fstat(parent_fd)
+        assert stat.S_ISDIR(metadata.st_mode)
+        assert metadata.st_uid == os.geteuid()
+        assert not stat.S_IMODE(metadata.st_mode) & 0o022
+        inspected.append((metadata.st_dev, metadata.st_ino))
+        real_probe(parent_fd)
+
+    def reject_ambient_probe(*args: object, **kwargs: object) -> NoReturn:
+        del args, kwargs
+        raise AssertionError("ambient temporary directory must not prove output-parent umask")
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_require_supported_private_directory_umask",
+        inspect_bound_parent,
+    )
+    monkeypatch.setattr(
+        contract_generator_common,
+        "TemporaryFile",
+        reject_ambient_probe,
+        raising=False,
+    )
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert len(inspected) == 4
+    assert len(set(inspected)) == 4
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux default ACL regression")
+def test_linux_ambient_default_acl_cannot_mask_unsafe_output_parent_umask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient = tmp_path / "ambient"
+    output_parent = tmp_path / "output-parent"
+    ambient.mkdir(mode=0o700)
+    output_parent.mkdir(mode=0o700)
+    default_acl = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, 0xFFFFFFFF)
+        for tag, permissions in ((0x01, 0o7), (0x04, 0), (0x20, 0))
+    )
+    setter = getattr(os, "setxattr", None)
+    if not callable(setter):
+        pytest.skip("platform has no extended-attribute API")
+    set_extended_attribute = cast(Callable[[Path, bytes, bytes], None], setter)
+    try:
+        set_extended_attribute(ambient, b"system.posix_acl_default", default_acl)
+    except OSError as error:
+        pytest.skip(f"filesystem cannot establish a Linux default ACL: {error}")
+
+    validation_name = "acl-umask-validation"
+    validation_fd: int | None = None
+    ambient_fd = os.open(ambient, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    inherited_mode = 0
+    previous_umask = os.umask(0o777)
+    try:
+        validation_fd = os.open(
+            validation_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=ambient_fd,
+        )
+        inherited_mode = stat.S_IMODE(os.fstat(validation_fd).st_mode)
+    finally:
+        os.umask(previous_umask)
+        if validation_fd is not None:
+            os.close(validation_fd)
+        os.close(ambient_fd)
+        with suppress(FileNotFoundError):
+            (ambient / validation_name).unlink()
+    if not inherited_mode & stat.S_IRUSR:
+        pytest.skip("filesystem default ACL did not override the process umask")
+
+    output = output_parent / "missing/v1"
+    monkeypatch.setattr(
+        contract_generator_common, "gettempdir", lambda: str(ambient), raising=False
+    )
+    previous_umask = os.umask(0o777)
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 1
+    finally:
+        os.umask(previous_umask)
+        if output.parent.exists():
+            output.parent.chmod(0o700)
+            output.parent.rmdir()
+    assert not output.parent.exists()
+
+
+def test_linux_acl_policy_rejects_non_posix_and_unknown_filesystem_surfaces() -> None:
+    for magic in (0xEF53, 0x58465342, 0x9123683E, 0x01021994, 0x794C7630, 0xF2F52010):
+        contract_generator_common._require_supported_linux_acl_filesystem_magic(magic)
+    for magic in (0x6969, 0xFF534D42, 0x2FC12FC1, 0xDEADBEEF):
+        with pytest.raises(GeneratorError, match="unsupported Linux filesystem ACL semantics"):
+            contract_generator_common._require_supported_linux_acl_filesystem_magic(magic)
+
+    for attribute in (b"system.posix_acl_access", b"system.posix_acl_default"):
+        assert contract_generator_common._classify_linux_acl_attribute(attribute) == "posix"
+    assert contract_generator_common._classify_linux_acl_attribute(b"security.selinux") == "other"
+    for attribute in (
+        b"system.nfs4_acl",
+        b"system.cifs_acl",
+        b"system.richacl",
+        b"security.NTACL",
+        b"trusted.SGI_ACL_FILE",
+    ):
+        with pytest.raises(GeneratorError, match="unsupported Linux discretionary ACL"):
+            contract_generator_common._classify_linux_acl_attribute(attribute)
+
+    class UnsupportedXattrLister:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, descriptor: int, names: object, size: int) -> int:
+            del descriptor, names, size
+            ctypes.set_errno(errno.EOPNOTSUPP)
+            return -1
+
+    class UnsupportedXattrLibrary:
+        flistxattr = UnsupportedXattrLister()
+
+    with pytest.raises(GeneratorError, match="ACL inspection failed"):
+        contract_generator_common._linux_extended_attribute_names(
+            cast(ctypes.CDLL, UnsupportedXattrLibrary()),
+            42,
+        )
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux POSIX ACL regression")
+def test_linux_posix_acl_creation_parent_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "acl-parent"
+    parent.mkdir(mode=0o700)
+    default_acl = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, 0xFFFFFFFF)
+        for tag, permissions in ((0x01, 0o7), (0x04, 0), (0x20, 0))
+    )
+    setter = getattr(os, "setxattr", None)
+    if not callable(setter):
+        pytest.skip("platform has no extended-attribute API")
+    set_extended_attribute = cast(Callable[[Path, bytes, bytes], None], setter)
+    getter = getattr(os, "getxattr", None)
+    if not callable(getter):
+        pytest.skip("platform has no extended-attribute read API")
+    get_extended_attribute = cast(Callable[[Path, bytes], bytes], getter)
+    try:
+        set_extended_attribute(parent, b"system.posix_acl_default", default_acl)
+    except OSError as error:
+        pytest.skip(f"filesystem cannot establish a Linux default ACL: {error}")
+
+    output = parent / "v1"
+    before = _tree_snapshot(parent)
+    acl_before = get_extended_attribute(parent, b"system.posix_acl_default")
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(parent) == before
+    assert get_extended_attribute(parent, b"system.posix_acl_default") == acl_before
+
+
+def test_created_private_directory_name_swap_fails_without_touching_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "fresh/v1"
+    created = output.parent
+    displaced = tmp_path / "displaced"
+    real_fchmod = os.fchmod
+    swapped = False
+
+    def swap_during_normalization(descriptor: int, mode: int) -> None:
+        nonlocal swapped
+        if not swapped and created.exists():
+            named = created.stat(follow_symlinks=False)
+            opened = os.fstat(descriptor)
+            if (named.st_dev, named.st_ino) == (opened.st_dev, opened.st_ino):
+                created.rename(displaced)
+                created.mkdir(mode=0o700)
+                (created / "sentinel").write_bytes(b"replacement\n")
+                swapped = True
+        real_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(os, "fchmod", swap_during_normalization)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert swapped
+    assert (created / "sentinel").read_bytes() == b"replacement\n"
+    assert stat.S_IMODE(created.stat().st_mode) == 0o700
+    assert stat.S_IMODE(displaced.stat().st_mode) == 0o700
+    assert not output.exists()
+
+
+def test_created_private_directory_rejects_unsafe_replacement_before_first_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "fresh/v1"
+    created = output.parent
+    displaced = tmp_path / "displaced"
+    real_mkdir = os.mkdir
+    swapped = False
+
+    def swap_before_first_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal swapped
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if not swapped and path == "fresh":
+            created.rename(displaced)
+            real_mkdir(created, 0o700)
+            created.chmod(0o777)
+            (created / "sentinel").write_bytes(b"unsafe replacement\n")
+            swapped = True
+
+    monkeypatch.setattr(os, "mkdir", swap_before_first_stat)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert swapped
+    assert (created / "sentinel").read_bytes() == b"unsafe replacement\n"
+    assert stat.S_IMODE(created.stat().st_mode) == 0o777
+    assert displaced.is_dir()
+    assert not output.exists()
+
+
+def test_created_private_directory_preserves_validation_error_when_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    os.mkdir("created", mode=0o700, dir_fd=parent_fd)
+    real_open = os.open
+    real_close = os.close
+    created_fd: int | None = None
+
+    def capture_created_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal created_fd
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "created":
+            created_fd = descriptor
+        return descriptor
+
+    def fail_validation(descriptor: int) -> bool:
+        if descriptor == created_fd:
+            raise ValueError("synthetic created-directory validation failure")
+        return False
+
+    def consume_created_close_then_fail(descriptor: int) -> None:
+        real_close(descriptor)
+        if descriptor == created_fd:
+            raise OSError(errno.EIO, "synthetic created-directory close failure")
+
+    monkeypatch.setattr(os, "open", capture_created_open)
+    monkeypatch.setattr(contract_generator_common, "_directory_has_extended_acl", fail_validation)
+    monkeypatch.setattr(os, "close", consume_created_close_then_fail)
+    try:
+        with pytest.raises(
+            ValueError,
+            match="synthetic created-directory validation failure",
+        ) as primary:
+            contract_generator_common._open_created_private_directory(parent_fd, "created")
+        assert any(
+            "synthetic created-directory close failure" in note for note in primary.value.__notes__
+        )
+    finally:
+        real_close(parent_fd)
+
+
+def test_directory_creation_rejects_group_or_world_writable_parent_without_mutation(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o700)
+    parent.chmod(0o777)
+    output = parent / "v1"
+    before = _tree_snapshot(parent)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(parent) == before
+
+
+def test_directory_creation_rejects_acl_signaled_parent_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "acl-parent"
+    parent.mkdir(mode=0o700)
+    output = parent / "v1"
+    parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
+    before = _tree_snapshot(parent)
+
+    def has_extended_acl(descriptor: int) -> bool:
+        metadata = os.fstat(descriptor)
+        return (metadata.st_dev, metadata.st_ino) == parent_identity
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_directory_has_extended_acl",
+        has_extended_acl,
+        raising=False,
+    )
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(parent) == before
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL regression")
+def test_darwin_inherited_extended_acl_parent_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "acl-parent"
+    parent.mkdir(mode=0o700)
+    acl = "everyone allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit"
+    subprocess.run(["/bin/chmod", "+a", acl, str(parent)], check=True, capture_output=True)
+    output = parent / "v1"
+    before = _tree_snapshot(parent)
+    acl_before = subprocess.run(
+        ["/bin/ls", "-lde", str(parent)],
+        check=True,
+        capture_output=True,
+    ).stdout
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 1
+        assert _tree_snapshot(parent) == before
+        assert (
+            subprocess.run(
+                ["/bin/ls", "-lde", str(parent)],
+                check=True,
+                capture_output=True,
+            ).stdout
+            == acl_before
+        )
+    finally:
+        subprocess.run(["/bin/chmod", "-RN", str(parent)], check=True, capture_output=True)
+
+
+def test_directory_writer_declares_same_euid_and_stable_umask_trust_boundary() -> None:
+    contract = contract_generator_common.run_directory_generator.__doc__
+    assert contract is not None
+    assert "stable process umask" in contract
+    assert "Same-EUID local writers are trusted to honor the parent flock" in contract
+```
+
 - [ ] **Step 2: Prove the shared-directory tests are red for the missing API**
 
 Run: `uv run pytest tests/contract/test_contract_generators.py -q -x`
@@ -12444,10 +13089,12 @@ Expected: the completed Task 4's exact 33 nodes pass, then `test_generated_direc
 
 - [ ] **Step 3: Extend the sole Task 4 generator helper without changing its existing API**
 
-Merge the following imports into the existing sorted standard-library imports in `scripts/contract_generator_common.py`, then append the complete block below after `run_generator`. Do not alter or duplicate `run_generator`, `_bind_output_parent`, `_output_parent_is_current`, `_parse_mode`, `_write_all`, `GeneratorError`, or their existing single-artifact callers.
+Replace the standard-library import segment with the exact current segment below. Replace `_bind_output_parent` with the first authoritative executable listing after the historical block, then append the second authoritative executable listing exactly after `run_generator`. Do not alter or duplicate `run_generator`, `_output_parent_is_current`, `_parse_mode`, `_write_all`, `GeneratorError`, or their existing single-artifact callers.
 
 ```python
-# scripts/contract_generator_common.py — merge into the existing import block
+# scripts/contract_generator_common.py — exact standard-library import segment
+from __future__ import annotations
+
 import ctypes
 import errno
 import fcntl
@@ -12458,9 +13105,36 @@ import re
 import secrets
 import stat
 import sys
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory, gettempdir
+from typing import TYPE_CHECKING, Literal, TypeAlias
 ```
 
+Merge these exact Task 6-owned Linux ACL constants beside the existing Task 4 generator limits:
+
 ```python
+MAX_LINUX_XATTR_LIST_BYTES = 64 * 1024
+LINUX_POSIX_ACL_FILESYSTEM_MAGICS = frozenset(
+    {
+        0xEF53,  # ext2/ext3/ext4
+        0x58465342,  # XFS
+        0x9123683E,  # Btrfs
+        0x01021994,  # tmpfs
+        0x794C7630,  # overlayfs
+        0xF2F52010,  # F2FS
+    }
+)
+LINUX_POSIX_ACL_ATTRIBUTES = frozenset(
+    {b"system.posix_acl_access", b"system.posix_acl_default"}
+)
+```
+
+The following historical implementation listing is retained for design provenance only. It is non-executable and must not be applied; the authoritative source-matched listings immediately after it supersede the entire block.
+
+```text
 # append to scripts/contract_generator_common.py
 MAX_GENERATED_DIRECTORY_FILES = 32
 MAX_GENERATED_DIRECTORY_BYTES = MAX_GENERATED_BYTES * MAX_GENERATED_DIRECTORY_FILES
@@ -13794,11 +14468,1701 @@ def run_directory_generator(
         return 1
 ```
 
+Replace the existing Task 4 `_bind_output_parent` with this exact current function:
+
+```python
+def _bind_output_parent(
+    output_path: Path,
+    *,
+    create_missing: bool,
+) -> OutputParent:
+    parent = lexical_path(output_path).parent
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current_fd = os.open(os.path.sep, flags)
+    keep_descriptor = False
+    try:
+        for index, part in enumerate(parent.parts[1:]):
+            display = Path(os.path.sep).joinpath(*parent.parts[1 : index + 2])
+            try:
+                before = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                if not create_missing:
+                    raise AssuranceInputError(display, "missing-input") from None
+                _require_owner_controlled_creation_parent(current_fd)
+                _require_supported_private_directory_umask(current_fd)
+                os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                child_fd, opened = _open_created_private_directory(current_fd, part)
+            else:
+                if stat.S_ISLNK(before.st_mode):
+                    raise AssuranceInputError(display, "symlink-input")
+                if not stat.S_ISDIR(before.st_mode):
+                    raise AssuranceInputError(display, "not-directory")
+                child_fd = os.open(part, flags, dir_fd=current_fd)
+                opened = os.fstat(child_fd)
+                if before.st_dev != opened.st_dev or before.st_ino != opened.st_ino:
+                    os.close(child_fd)
+                    raise AssuranceInputError(display, "input-changed-during-scan")
+            os.close(current_fd)
+            current_fd = child_fd
+        validated = validate_root(parent)
+        opened = os.fstat(current_fd)
+        output_parent = OutputParent(
+            path=validated,
+            descriptor=current_fd,
+            device=opened.st_dev,
+            inode=opened.st_ino,
+        )
+        if not _output_parent_is_current(output_parent):
+            raise GeneratorError("output parent changed during generation")
+        keep_descriptor = True
+        return output_parent
+    finally:
+        if not keep_descriptor:
+            os.close(current_fd)
+```
+
+Append this exact current source tail after `run_generator`. It is the sole authoritative Task 6 implementation listing and supersedes the non-executable historical block above:
+
+```python
+MAX_GENERATED_DIRECTORY_FILES = 32
+MAX_GENERATED_DIRECTORY_BYTES = MAX_GENERATED_BYTES * MAX_GENERATED_DIRECTORY_FILES
+PRIVATE_DIRECTORY_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+INTENT_VERSION = 1
+INTENT_NAME = "intent.json"
+INTENT_TEMP_NAME = ".intent.tmp"
+STAGE_NAME = "stage"
+DARWIN_RENAME_SWAP = 0x00000002
+DARWIN_RENAME_EXCL = 0x00000004
+LINUX_RENAME_NOREPLACE = 1
+LINUX_RENAME_EXCHANGE = 2
+DirectoryRenderer: TypeAlias = Callable[[], Mapping[str, bytes]]  # noqa: UP040
+
+
+@dataclass(frozen=True)
+class GeneratedDirectoryEntry:
+    name: str
+    raw: bytes
+    sha256: str
+    mode: int
+    device: int
+    inode: int
+    owner: int
+    links: int
+    size: int
+    modified_ns: int
+    changed_ns: int
+
+
+@dataclass
+class GeneratedDirectoryHandle:
+    name: str
+    descriptor: int
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class GeneratedDirectoryReceipt:
+    device: int
+    inode: int
+    owner: int
+    mode: int
+    tree_sha256: str
+    entries: tuple[GeneratedDirectoryEntry, ...]
+
+
+@dataclass(frozen=True)
+class GeneratedDirectoryIntent:
+    output_name: str
+    expected_names: tuple[str, ...]
+    baseline: GeneratedDirectoryReceipt | None
+    candidate: GeneratedDirectoryReceipt
+
+
+@dataclass
+class GeneratedDirectorySnapshot:
+    """One lock-held, immutable view of a generated directory generation."""
+
+    _parent: OutputParent
+    _directory: GeneratedDirectoryHandle
+    _entries: tuple[GeneratedDirectoryEntry, ...]
+    _closed: bool = False
+    _directory_disposed: bool = False
+    _parent_disposed: bool = False
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        self._require_open()
+        return tuple(entry.name for entry in self._entries)
+
+    def read_bytes(self, name: str) -> bytes:
+        self._require_open()
+        for entry in self._entries:
+            if entry.name == name:
+                return entry.raw
+        raise KeyError(name)
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise GeneratorError("generated directory snapshot is closed")
+
+    def close(self) -> None:
+        if self._directory_disposed and self._parent_disposed:
+            return
+        self._closed = True
+        cleanup_errors: list[BaseException] = []
+        if not self._directory_disposed:
+            self._directory_disposed = True
+            try:
+                os.close(self._directory.descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if not self._parent_disposed:
+            try:
+                fcntl.flock(self._parent.descriptor, fcntl.LOCK_UN)
+            except BaseException as error:
+                cleanup_errors.append(error)
+            self._parent_disposed = True
+            try:
+                os.close(self._parent.descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            primary_error, *additional_errors = cleanup_errors
+            for cleanup_error in additional_errors:
+                primary_error.add_note(f"additional snapshot cleanup failure: {cleanup_error}")
+            raise primary_error
+
+    def __enter__(self) -> GeneratedDirectorySnapshot:
+        self._require_open()
+        return self
+
+    def __exit__(
+        self,
+        exception_type: object,
+        exception: object,
+        traceback: object,
+    ) -> None:
+        del exception_type, traceback
+        if isinstance(exception, BaseException):
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                exception.add_note(f"generated snapshot cleanup failure: {cleanup_error}")
+            return
+        self.close()
+
+
+def _closed_generated_names(names: Sequence[str]) -> tuple[str, ...]:
+    result = tuple(names)
+    if (
+        not result
+        or len(result) > MAX_GENERATED_DIRECTORY_FILES
+        or len(set(result)) != len(result)
+        or result != tuple(sorted(result))
+    ):
+        raise GeneratorError("generated directory names must be unique, sorted, and bounded")
+    for name in result:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,127}", name):
+            raise GeneratorError("generated directory contains an unsafe artifact name")
+        if Path(name).name != name or "\\" in name:
+            raise GeneratorError("generated directory artifact must be one basename")
+    return result
+
+
+def _validated_directory_render(
+    rendered: Mapping[str, bytes],
+    expected_names: tuple[str, ...],
+) -> dict[str, bytes]:
+    if tuple(sorted(rendered)) != expected_names:
+        raise GeneratorError("generated directory render inventory is not exact")
+    result: dict[str, bytes] = {}
+    total_bytes = 0
+    for name in expected_names:
+        value = rendered[name]
+        if type(value) is not bytes or not 1 <= len(value) <= MAX_GENERATED_BYTES:
+            raise GeneratorError("generated directory artifact byte limit exceeded")
+        total_bytes += len(value)
+        if total_bytes > MAX_GENERATED_DIRECTORY_BYTES:
+            raise GeneratorError("generated directory total byte limit exceeded")
+        result[name] = value
+    return result
+
+
+def _render_directory_twice(
+    renderer: DirectoryRenderer,
+    expected_names: tuple[str, ...],
+) -> dict[str, bytes]:
+    first = _validated_directory_render(renderer(), expected_names)
+    second = _validated_directory_render(renderer(), expected_names)
+    if first != second:
+        raise GeneratorError("nondeterministic generated directory render")
+    return first
+
+
+def _native_function(name: str) -> ctypes._CFuncPtr:  # type: ignore[name-defined]
+    function = getattr(ctypes.CDLL(None, use_errno=True), name, None)
+    if function is None:
+        raise GeneratorError(f"required atomic directory primitive is unavailable: {name}")
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    function.restype = ctypes.c_int
+    return function
+
+
+def _require_directory_transaction_platform() -> None:
+    if not hasattr(fcntl, "flock"):
+        raise GeneratorError("directory flock is unavailable")
+    if sys.platform == "darwin":
+        _native_function("renameatx_np")
+    elif sys.platform.startswith("linux"):
+        _native_function("renameat2")
+    else:
+        raise GeneratorError("atomic generated-directory publication is unsupported")
+
+
+def _require_supported_private_directory_umask(parent_fd: int) -> None:
+    """Probe mkdir permission semantics on the exact bound creation parent."""
+
+    flags = (
+        os.O_RDONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    probe_name = ""
+    for _ in range(8):
+        probe_name = f".tuntun-directory-mode-probe.{secrets.token_hex(16)}"
+        try:
+            descriptor = os.open(probe_name, flags, stat.S_IRUSR, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        break
+    if descriptor is None:
+        raise GeneratorError("could not reserve a private directory-mode probe")
+
+    primary_error: BaseException | None = None
+    try:
+        os.unlink(probe_name, dir_fd=parent_fd)
+    except BaseException as error:
+        primary_error = error
+
+    if primary_error is None:
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 0
+                or stat.S_IMODE(metadata.st_mode) != stat.S_IRUSR
+                or _directory_has_extended_acl(descriptor)
+            ):
+                raise GeneratorError(
+                    "process umask and creation-parent ACLs must preserve an owner-only "
+                    "readable probe"
+                )
+        except BaseException as error:
+            primary_error = error
+
+    cleanup_errors: list[BaseException] = []
+    try:
+        os.close(descriptor)
+    except BaseException as error:
+        cleanup_errors.append(error)
+
+    if primary_error is not None:
+        for cleanup_error in cleanup_errors:
+            primary_error.add_note(f"directory-mode probe cleanup failure: {cleanup_error}")
+        raise primary_error
+    if cleanup_errors:
+        cleanup_error, *additional_errors = cleanup_errors
+        for additional_error in additional_errors:
+            cleanup_error.add_note(
+                f"additional directory-mode probe cleanup failure: {additional_error}"
+            )
+        raise cleanup_error
+
+
+def _require_supported_linux_acl_filesystem_magic(magic: int) -> None:
+    if magic not in LINUX_POSIX_ACL_FILESYSTEM_MAGICS:
+        raise GeneratorError(f"unsupported Linux filesystem ACL semantics: 0x{magic:x}")
+
+
+def _classify_linux_acl_attribute(attribute: bytes) -> Literal["posix", "other"]:
+    if attribute in LINUX_POSIX_ACL_ATTRIBUTES:
+        return "posix"
+    normalized = attribute.lower()
+    if normalized.startswith((b"system.", b"security.", b"trusted.")) and b"acl" in normalized:
+        raise GeneratorError(
+            f"unsupported Linux discretionary ACL attribute: {attribute.decode('ascii', 'replace')}"
+        )
+    return "other"
+
+
+def _linux_filesystem_magic(library: ctypes.CDLL, descriptor: int) -> int:
+    filesystem_words = (ctypes.c_long * 32)()
+    inspector = library.fstatfs
+    inspector.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    inspector.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if inspector(descriptor, ctypes.byref(filesystem_words)) != 0:
+        error_number = ctypes.get_errno()
+        raise GeneratorError(
+            f"creation-parent filesystem inspection failed: {os.strerror(error_number)}"
+        )
+    word_bits = ctypes.sizeof(ctypes.c_long) * 8
+    return int(filesystem_words[0]) & ((1 << word_bits) - 1)
+
+
+def _linux_extended_attribute_names(
+    library: ctypes.CDLL,
+    descriptor: int,
+) -> tuple[bytes, ...]:
+    lister = library.flistxattr
+    lister.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_size_t]
+    lister.restype = ctypes.c_ssize_t
+    for _ in range(4):
+        ctypes.set_errno(0)
+        required = lister(descriptor, None, 0)
+        if required < 0:
+            error_number = ctypes.get_errno()
+            raise GeneratorError(
+                f"creation-parent ACL inspection failed: {os.strerror(error_number)}"
+            )
+        if required == 0:
+            return ()
+        if required > MAX_LINUX_XATTR_LIST_BYTES:
+            raise GeneratorError("creation-parent extended-attribute inventory is too large")
+        buffer = ctypes.create_string_buffer(required)
+        ctypes.set_errno(0)
+        actual = lister(descriptor, buffer, required)
+        if actual < 0:
+            error_number = ctypes.get_errno()
+            if error_number == errno.ERANGE:
+                continue
+            raise GeneratorError(
+                f"creation-parent ACL inspection failed: {os.strerror(error_number)}"
+            )
+        if actual == 0 or actual > required:
+            raise GeneratorError("creation-parent ACL inventory changed during inspection")
+        raw_names = buffer.raw[:actual]
+        if not raw_names.endswith(b"\0"):
+            raise GeneratorError("creation-parent ACL inventory is malformed")
+        names = tuple(raw_names[:-1].split(b"\0"))
+        if not names or any(not name for name in names):
+            raise GeneratorError("creation-parent ACL inventory is malformed")
+        return names
+    raise GeneratorError("creation-parent ACL inventory changed during inspection")
+
+
+def _directory_has_extended_acl(descriptor: int) -> bool:
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        getter = library.acl_get_fd_np
+        getter.argtypes = [ctypes.c_int, ctypes.c_int]
+        getter.restype = ctypes.c_void_p
+        ctypes.set_errno(0)
+        acl_pointer = getter(descriptor, 0x00000100)
+        if acl_pointer is None:
+            error_number = ctypes.get_errno()
+            if error_number == errno.ENOENT:
+                return False
+            raise GeneratorError(
+                f"creation-parent ACL inspection failed: {os.strerror(error_number)}"
+            )
+        freer = library.acl_free
+        freer.argtypes = [ctypes.c_void_p]
+        freer.restype = ctypes.c_int
+        if freer(acl_pointer) != 0:
+            error_number = ctypes.get_errno()
+            raise GeneratorError(f"creation-parent ACL release failed: {os.strerror(error_number)}")
+        return True
+    if sys.platform.startswith("linux"):
+        magic = _linux_filesystem_magic(library, descriptor)
+        _require_supported_linux_acl_filesystem_magic(magic)
+        for attribute in _linux_extended_attribute_names(library, descriptor):
+            if _classify_linux_acl_attribute(attribute) == "posix":
+                return True
+        return False
+    raise GeneratorError("directory ACL inspection is unsupported")
+
+
+def _require_owner_controlled_creation_parent(parent_fd: int) -> None:
+    metadata = os.fstat(parent_fd)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or _directory_has_extended_acl(parent_fd)
+    ):
+        raise GeneratorError(
+            "private directory creation parent must be owner-controlled, ACL-free, and not "
+            "shared-writable"
+        )
+
+
+def _native_rename(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+    *,
+    exchange: bool,
+) -> None:
+    if sys.platform == "darwin":
+        function = _native_function("renameatx_np")
+        flag = DARWIN_RENAME_SWAP if exchange else DARWIN_RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        function = _native_function("renameat2")
+        flag = LINUX_RENAME_EXCHANGE if exchange else LINUX_RENAME_NOREPLACE
+    else:
+        raise GeneratorError("atomic generated-directory publication is unsupported")
+    result = function(
+        source_parent_fd,
+        os.fsencode(source_name),
+        destination_parent_fd,
+        os.fsencode(destination_name),
+        flag,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        unsupported = {
+            errno.EINVAL,
+            errno.ENOSYS,
+            getattr(errno, "ENOTSUP", errno.EINVAL),
+            getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+        }
+        if error_number in unsupported:
+            raise GeneratorError("filesystem lacks required atomic directory semantics")
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def _atomic_exchange(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    _native_rename(
+        source_parent_fd,
+        source_name,
+        destination_parent_fd,
+        destination_name,
+        exchange=True,
+    )
+
+
+def _atomic_noreplace(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    _native_rename(
+        source_parent_fd,
+        source_name,
+        destination_parent_fd,
+        destination_name,
+        exchange=False,
+    )
+
+
+def _transaction_checkpoint(name: str) -> None:
+    """Deterministic failure-injection seam; production deliberately does nothing."""
+
+    del name
+
+
+def _lock_output_parent(parent: OutputParent, *, exclusive: bool) -> None:
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    try:
+        fcntl.flock(parent.descriptor, operation)
+    except OSError as error:
+        raise GeneratorError("generated output parent cannot be locked") from error
+    if not _output_parent_is_current(parent):
+        raise GeneratorError("generated output parent changed while locking")
+
+
+def _require_output_parent_current(parent: OutputParent) -> None:
+    if not _output_parent_is_current(parent):
+        raise GeneratorError("generated output parent changed during transaction")
+
+
+def _close_output_parent(parent: OutputParent) -> None:
+    try:
+        fcntl.flock(parent.descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(parent.descriptor)
+
+
+def _validate_directory_metadata(metadata: os.stat_result, *, private: bool) -> None:
+    mode = stat.S_IMODE(metadata.st_mode)
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        raise GeneratorError("generated directory has an unsafe type or owner")
+    if private:
+        if mode != PRIVATE_DIRECTORY_MODE:
+            raise GeneratorError("private generated directory mode is not 0700")
+        return
+    if mode & 0o7022 or not mode & stat.S_IXUSR:
+        raise GeneratorError("published generated directory mode is unsafe")
+
+
+def _validate_file_metadata(metadata: os.stat_result, *, private: bool) -> None:
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise GeneratorError("generated entry has an unsafe type, owner, or link count")
+    if private:
+        if mode != PRIVATE_FILE_MODE:
+            raise GeneratorError("private generated entry mode is not 0600")
+        return
+    if mode & 0o7111 or mode & 0o022 or not mode & stat.S_IRUSR:
+        raise GeneratorError("published generated entry mode is unsafe")
+
+
+def _descriptor_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _open_created_private_directory(
+    parent_fd: int,
+    name: str,
+) -> tuple[int, os.stat_result]:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or before.st_uid != os.geteuid()
+        or stat.S_IMODE(before.st_mode) & ~PRIVATE_DIRECTORY_MODE
+    ):
+        raise GeneratorError("new private directory has an unsafe type, owner, or mode")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=parent_fd,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            _descriptor_identity(before) != _descriptor_identity(opened)
+            or not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) & ~PRIVATE_DIRECTORY_MODE
+        ):
+            raise GeneratorError("new private directory changed during open")
+        os.fchmod(descriptor, PRIVATE_DIRECTORY_MODE)
+        normalized = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        _validate_directory_metadata(normalized, private=True)
+        _validate_directory_metadata(named, private=True)
+        if _directory_has_extended_acl(descriptor):
+            raise GeneratorError("new private directory inherited a discretionary ACL")
+        if not (
+            _descriptor_identity(before)
+            == _descriptor_identity(opened)
+            == _descriptor_identity(normalized)
+            == _descriptor_identity(named)
+        ):
+            raise GeneratorError("new private directory changed during normalization")
+    except BaseException as validation_error:
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup_error:
+            validation_error.add_note(
+                f"created-directory validation cleanup failure: {cleanup_error}"
+            )
+        raise
+    return descriptor, normalized
+
+
+def _open_generated_directory(
+    parent_fd: int,
+    name: str,
+    *,
+    private: bool,
+) -> GeneratedDirectoryHandle:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    _validate_directory_metadata(before, private=private)
+    descriptor = os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=parent_fd,
+    )
+    opened = os.fstat(descriptor)
+    try:
+        _validate_directory_metadata(opened, private=private)
+        if _directory_has_extended_acl(descriptor):
+            raise GeneratorError("generated directory has a discretionary ACL")
+        if _descriptor_identity(before) != _descriptor_identity(opened):
+            raise GeneratorError("generated directory changed during open")
+    except BaseException as validation_error:
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup_error:
+            validation_error.add_note(
+                f"generated-directory validation cleanup failure: {cleanup_error}"
+            )
+        raise
+    return GeneratedDirectoryHandle(
+        name=name,
+        descriptor=descriptor,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+    )
+
+
+def _open_optional_generated_directory(
+    parent_fd: int,
+    name: str,
+    *,
+    private: bool,
+) -> GeneratedDirectoryHandle | None:
+    try:
+        return _open_generated_directory(parent_fd, name, private=private)
+    except FileNotFoundError:
+        return None
+
+
+def _create_generated_directory(
+    parent_fd: int,
+    name: str,
+) -> GeneratedDirectoryHandle:
+    _require_owner_controlled_creation_parent(parent_fd)
+    _require_supported_private_directory_umask(parent_fd)
+    os.mkdir(name, mode=PRIVATE_DIRECTORY_MODE, dir_fd=parent_fd)
+    descriptor, opened = _open_created_private_directory(parent_fd, name)
+    return GeneratedDirectoryHandle(
+        name=name,
+        descriptor=descriptor,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+    )
+
+
+def _directory_is_named(
+    parent_fd: int,
+    name: str,
+    handle: GeneratedDirectoryHandle,
+) -> bool:
+    try:
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        opened = os.fstat(handle.descriptor)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(named.st_mode)
+        and _descriptor_identity(named) == (handle.device, handle.inode)
+        and _descriptor_identity(opened) == (handle.device, handle.inode)
+    )
+
+
+def _read_generated_entry(
+    handle: GeneratedDirectoryHandle,
+    name: str,
+    *,
+    private: bool,
+) -> GeneratedDirectoryEntry:
+    before = os.stat(name, dir_fd=handle.descriptor, follow_symlinks=False)
+    _validate_file_metadata(before, private=private)
+    descriptor = os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0),
+        dir_fd=handle.descriptor,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        _validate_file_metadata(opened, private=private)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_uid,
+            stat.S_IMODE(before.st_mode),
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        opened_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_uid,
+            stat.S_IMODE(opened.st_mode),
+            opened.st_nlink,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if before_identity != opened_identity or opened.st_size > MAX_GENERATED_BYTES:
+            raise GeneratorError("generated entry changed during open")
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                raise GeneratorError("generated entry was truncated")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise GeneratorError("generated entry grew during read")
+        final = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    named = os.stat(name, dir_fd=handle.descriptor, follow_symlinks=False)
+    identity = (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_uid,
+        stat.S_IMODE(opened.st_mode),
+        opened.st_nlink,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+    )
+    if identity != (
+        final.st_dev,
+        final.st_ino,
+        final.st_uid,
+        stat.S_IMODE(final.st_mode),
+        final.st_nlink,
+        final.st_size,
+        final.st_mtime_ns,
+        final.st_ctime_ns,
+    ) or identity != (
+        named.st_dev,
+        named.st_ino,
+        named.st_uid,
+        stat.S_IMODE(named.st_mode),
+        named.st_nlink,
+        named.st_size,
+        named.st_mtime_ns,
+        named.st_ctime_ns,
+    ):
+        raise GeneratorError("generated entry changed during read")
+    raw = b"".join(chunks)
+    return GeneratedDirectoryEntry(
+        name=name,
+        raw=raw,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        mode=stat.S_IMODE(opened.st_mode),
+        device=opened.st_dev,
+        inode=opened.st_ino,
+        owner=opened.st_uid,
+        links=opened.st_nlink,
+        size=opened.st_size,
+        modified_ns=opened.st_mtime_ns,
+        changed_ns=opened.st_ctime_ns,
+    )
+
+
+def _snapshot_generated_directory(
+    handle: GeneratedDirectoryHandle,
+    expected_names: tuple[str, ...],
+    *,
+    require_exact: bool,
+    private: bool,
+) -> tuple[GeneratedDirectoryEntry, ...]:
+    before = os.fstat(handle.descriptor)
+    _validate_directory_metadata(before, private=private)
+    if _descriptor_identity(before) != (handle.device, handle.inode):
+        raise GeneratorError("generated directory descriptor changed")
+    names = tuple(sorted(os.listdir(handle.descriptor)))
+    if len(names) > MAX_GENERATED_DIRECTORY_FILES or not set(names) <= set(expected_names):
+        raise GeneratorError("generated directory contains an unexpected entry")
+    if require_exact and names != expected_names:
+        raise GeneratorError("generated directory inventory is incomplete")
+    result = tuple(_read_generated_entry(handle, name, private=private) for name in names)
+    if tuple(sorted(os.listdir(handle.descriptor))) != names:
+        raise GeneratorError("generated directory changed during scan")
+    final = os.fstat(handle.descriptor)
+    _validate_directory_metadata(final, private=private)
+    if _descriptor_identity(final) != (handle.device, handle.inode):
+        raise GeneratorError("generated directory changed during scan")
+    if sum(entry.size for entry in result) > MAX_GENERATED_DIRECTORY_BYTES:
+        raise GeneratorError("generated directory total byte limit exceeded")
+    return result
+
+
+def _tree_digest(
+    directory_metadata: tuple[int, int, int, int],
+    entries: tuple[GeneratedDirectoryEntry, ...],
+) -> str:
+    document = {
+        "directory": list(directory_metadata),
+        "entries": [
+            {
+                "device": entry.device,
+                "changed_ns": entry.changed_ns,
+                "inode": entry.inode,
+                "links": entry.links,
+                "mode": entry.mode,
+                "modified_ns": entry.modified_ns,
+                "name": entry.name,
+                "owner": entry.owner,
+                "sha256": entry.sha256,
+                "size": entry.size,
+            }
+            for entry in entries
+        ],
+    }
+    raw = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _receipt_for(
+    handle: GeneratedDirectoryHandle,
+    entries: tuple[GeneratedDirectoryEntry, ...],
+) -> GeneratedDirectoryReceipt:
+    metadata = os.fstat(handle.descriptor)
+    directory_metadata = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        stat.S_IMODE(metadata.st_mode),
+    )
+    return GeneratedDirectoryReceipt(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        owner=metadata.st_uid,
+        mode=stat.S_IMODE(metadata.st_mode),
+        tree_sha256=_tree_digest(directory_metadata, entries),
+        entries=entries,
+    )
+
+
+def _entry_identity(entry: GeneratedDirectoryEntry) -> tuple[object, ...]:
+    return (
+        entry.name,
+        entry.sha256,
+        entry.mode,
+        entry.device,
+        entry.inode,
+        entry.owner,
+        entry.links,
+        entry.size,
+        entry.modified_ns,
+        entry.changed_ns,
+    )
+
+
+def _receipt_matches(
+    handle: GeneratedDirectoryHandle,
+    entries: tuple[GeneratedDirectoryEntry, ...],
+    receipt: GeneratedDirectoryReceipt,
+    *,
+    allow_subset: bool,
+) -> bool:
+    metadata = os.fstat(handle.descriptor)
+    if (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        stat.S_IMODE(metadata.st_mode),
+    ) != (receipt.device, receipt.inode, receipt.owner, receipt.mode):
+        return False
+    expected = {entry.name: entry for entry in receipt.entries}
+    if (allow_subset and not set(entry.name for entry in entries) <= set(expected)) or (
+        not allow_subset and tuple(entry.name for entry in entries) != tuple(expected)
+    ):
+        return False
+    if any(_entry_identity(entry) != _entry_identity(expected[entry.name]) for entry in entries):
+        return False
+    if allow_subset and len(entries) != len(receipt.entries):
+        return True
+    return receipt.tree_sha256 == _tree_digest(
+        (receipt.device, receipt.inode, receipt.owner, receipt.mode),
+        entries,
+    )
+
+
+def _write_generated_entry(
+    handle: GeneratedDirectoryHandle,
+    name: str,
+    raw: bytes,
+) -> None:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        PRIVATE_FILE_MODE,
+        dir_fd=handle.descriptor,
+    )
+    try:
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        _transaction_checkpoint(
+            "intent-file-opened" if name == INTENT_TEMP_NAME else "stage-file-opened"
+        )
+        _write_all(descriptor, raw)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _populate_generated_directory(
+    handle: GeneratedDirectoryHandle,
+    rendered: Mapping[str, bytes],
+) -> None:
+    for name in sorted(rendered):
+        _write_generated_entry(handle, name, rendered[name])
+        _transaction_checkpoint("stage-entry")
+    os.fsync(handle.descriptor)
+
+
+def _receipt_json(receipt: GeneratedDirectoryReceipt) -> dict[str, object]:
+    return {
+        "device": receipt.device,
+        "entries": [
+            {
+                "device": entry.device,
+                "changed_ns": entry.changed_ns,
+                "inode": entry.inode,
+                "links": entry.links,
+                "mode": entry.mode,
+                "modified_ns": entry.modified_ns,
+                "name": entry.name,
+                "owner": entry.owner,
+                "sha256": entry.sha256,
+                "size": entry.size,
+            }
+            for entry in receipt.entries
+        ],
+        "inode": receipt.inode,
+        "mode": receipt.mode,
+        "owner": receipt.owner,
+        "tree_sha256": receipt.tree_sha256,
+    }
+
+
+def _intent_bytes(intent: GeneratedDirectoryIntent) -> bytes:
+    document = {
+        "baseline": None if intent.baseline is None else _receipt_json(intent.baseline),
+        "candidate": _receipt_json(intent.candidate),
+        "expected_names": list(intent.expected_names),
+        "output_name": intent.output_name,
+        "version": INTENT_VERSION,
+    }
+    return (
+        json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+def _exact_mapping(value: object, keys: frozenset[str], label: str) -> dict[str, object]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != keys
+        or not all(isinstance(key, str) for key in value)
+    ):
+        raise GeneratorError(f"transaction {label} is malformed")
+    return value
+
+
+def _exact_int(value: object, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise GeneratorError(f"transaction {label} is malformed")
+    return value
+
+
+def _receipt_from_json(value: object) -> GeneratedDirectoryReceipt:
+    document = _exact_mapping(
+        value,
+        frozenset({"device", "entries", "inode", "mode", "owner", "tree_sha256"}),
+        "receipt",
+    )
+    raw_entries = document["entries"]
+    if not isinstance(raw_entries, list):
+        raise GeneratorError("transaction receipt entries are malformed")
+    entries: list[GeneratedDirectoryEntry] = []
+    for raw_entry in raw_entries:
+        entry = _exact_mapping(
+            raw_entry,
+            frozenset(
+                {
+                    "changed_ns",
+                    "device",
+                    "inode",
+                    "links",
+                    "mode",
+                    "modified_ns",
+                    "name",
+                    "owner",
+                    "sha256",
+                    "size",
+                }
+            ),
+            "entry receipt",
+        )
+        name = entry["name"]
+        digest = entry["sha256"]
+        if (
+            not isinstance(name, str)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise GeneratorError("transaction entry receipt is malformed")
+        entries.append(
+            GeneratedDirectoryEntry(
+                name=name,
+                raw=b"",
+                sha256=digest,
+                mode=_exact_int(entry["mode"], "entry mode"),
+                device=_exact_int(entry["device"], "entry device"),
+                inode=_exact_int(entry["inode"], "entry inode"),
+                owner=_exact_int(entry["owner"], "entry owner"),
+                links=_exact_int(entry["links"], "entry links"),
+                size=_exact_int(entry["size"], "entry size"),
+                modified_ns=_exact_int(entry["modified_ns"], "entry modified time"),
+                changed_ns=_exact_int(entry["changed_ns"], "entry changed time"),
+            )
+        )
+    names = tuple(item.name for item in entries)
+    if names != tuple(sorted(names)) or len(names) != len(set(names)):
+        raise GeneratorError("transaction receipt inventory is malformed")
+    tree_digest = document["tree_sha256"]
+    if not isinstance(tree_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", tree_digest):
+        raise GeneratorError("transaction tree digest is malformed")
+    return GeneratedDirectoryReceipt(
+        device=_exact_int(document["device"], "directory device"),
+        inode=_exact_int(document["inode"], "directory inode"),
+        owner=_exact_int(document["owner"], "directory owner"),
+        mode=_exact_int(document["mode"], "directory mode"),
+        tree_sha256=tree_digest,
+        entries=tuple(entries),
+    )
+
+
+def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GeneratorError("transaction intent contains a duplicate key")
+        result[key] = value
+    return result
+
+
+def _intent_from_bytes(raw: bytes) -> GeneratedDirectoryIntent:
+    try:
+        parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_json_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GeneratorError("transaction intent is not strict JSON") from error
+    document = _exact_mapping(
+        parsed,
+        frozenset({"baseline", "candidate", "expected_names", "output_name", "version"}),
+        "intent",
+    )
+    if document["version"] != INTENT_VERSION or not isinstance(document["output_name"], str):
+        raise GeneratorError("transaction intent version or output is malformed")
+    names_value = document["expected_names"]
+    if not isinstance(names_value, list) or not all(isinstance(name, str) for name in names_value):
+        raise GeneratorError("transaction intent names are malformed")
+    intent = GeneratedDirectoryIntent(
+        output_name=document["output_name"],
+        expected_names=_closed_generated_names(names_value),
+        baseline=(
+            None if document["baseline"] is None else _receipt_from_json(document["baseline"])
+        ),
+        candidate=_receipt_from_json(document["candidate"]),
+    )
+    if _intent_bytes(intent) != raw:
+        raise GeneratorError("transaction intent is not canonical")
+    return intent
+
+
+def _write_transaction_intent(
+    transaction: GeneratedDirectoryHandle,
+    intent: GeneratedDirectoryIntent,
+) -> None:
+    _write_generated_entry(transaction, INTENT_TEMP_NAME, _intent_bytes(intent))
+    os.fsync(transaction.descriptor)
+    _transaction_checkpoint("intent-temporary")
+    _atomic_noreplace(
+        transaction.descriptor,
+        INTENT_TEMP_NAME,
+        transaction.descriptor,
+        INTENT_NAME,
+    )
+    os.fsync(transaction.descriptor)
+
+
+def _rendered_entries_are_authorized_prefixes(
+    entries: tuple[GeneratedDirectoryEntry, ...],
+    rendered: Mapping[str, bytes],
+) -> bool:
+    return all(
+        entry.mode == PRIVATE_FILE_MODE
+        and rendered[entry.name].startswith(entry.raw)
+        and entry.sha256 == hashlib.sha256(entry.raw).hexdigest()
+        for entry in entries
+    )
+
+
+def _unlink_exact_entry(
+    parent_fd: int,
+    entry: GeneratedDirectoryEntry,
+) -> None:
+    current = os.stat(entry.name, dir_fd=parent_fd, follow_symlinks=False)
+    current_identity = (
+        current.st_dev,
+        current.st_ino,
+        current.st_uid,
+        stat.S_IMODE(current.st_mode),
+        current.st_nlink,
+        current.st_size,
+        current.st_mtime_ns,
+        current.st_ctime_ns,
+    )
+    expected_identity = (
+        entry.device,
+        entry.inode,
+        entry.owner,
+        entry.mode,
+        entry.links,
+        entry.size,
+        entry.modified_ns,
+        entry.changed_ns,
+    )
+    if current_identity != expected_identity:
+        raise GeneratorError("transaction entry changed before cleanup")
+    os.unlink(entry.name, dir_fd=parent_fd)
+
+
+def _remove_empty_directory(
+    parent_fd: int,
+    name: str,
+    handle: GeneratedDirectoryHandle,
+) -> None:
+    if os.listdir(handle.descriptor):
+        raise GeneratorError("transaction directory is not empty")
+    if not _directory_is_named(parent_fd, name, handle):
+        raise GeneratorError("transaction directory changed before cleanup")
+    os.rmdir(name, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+def _remove_receipted_directory(
+    parent_fd: int,
+    name: str,
+    handle: GeneratedDirectoryHandle,
+    receipt: GeneratedDirectoryReceipt,
+) -> None:
+    expected_names = tuple(entry.name for entry in receipt.entries)
+    private = receipt.mode == PRIVATE_DIRECTORY_MODE and all(
+        entry.mode == PRIVATE_FILE_MODE for entry in receipt.entries
+    )
+    entries = _snapshot_generated_directory(
+        handle,
+        expected_names,
+        require_exact=False,
+        private=private,
+    )
+    if not _receipt_matches(handle, entries, receipt, allow_subset=True):
+        raise GeneratorError("transaction cleanup receipt no longer matches")
+    for entry in entries:
+        _unlink_exact_entry(handle.descriptor, entry)
+        os.fsync(handle.descriptor)
+        _transaction_checkpoint("cleanup-entry")
+    _remove_empty_directory(parent_fd, name, handle)
+
+
+def _transaction_name(output_name: str) -> str:
+    return f".{output_name}.transaction"
+
+
+def _open_transaction(parent: OutputParent, output_name: str) -> GeneratedDirectoryHandle | None:
+    return _open_optional_generated_directory(
+        parent.descriptor,
+        _transaction_name(output_name),
+        private=True,
+    )
+
+
+def _open_output(
+    parent: OutputParent,
+    output_name: str,
+) -> GeneratedDirectoryHandle | None:
+    return _open_optional_generated_directory(parent.descriptor, output_name, private=False)
+
+
+def _public_receipt(
+    parent: OutputParent,
+    output_name: str,
+    expected_names: tuple[str, ...],
+) -> tuple[GeneratedDirectoryHandle, GeneratedDirectoryReceipt] | None:
+    handle = _open_output(parent, output_name)
+    if handle is None:
+        return None
+    try:
+        entries = _snapshot_generated_directory(
+            handle,
+            expected_names,
+            require_exact=True,
+            private=False,
+        )
+        if not _directory_is_named(parent.descriptor, output_name, handle):
+            raise GeneratorError("published generated directory changed during scan")
+        return handle, _receipt_for(handle, entries)
+    except Exception:
+        os.close(handle.descriptor)
+        raise
+
+
+def _remove_unjournaled_transaction(
+    parent: OutputParent,
+    transaction: GeneratedDirectoryHandle,
+    output_name: str,
+    expected_names: tuple[str, ...],
+    rendered: Mapping[str, bytes],
+) -> None:
+    root_names = tuple(sorted(os.listdir(transaction.descriptor)))
+    if not set(root_names) <= {INTENT_TEMP_NAME, STAGE_NAME}:
+        raise GeneratorError("unjournaled transaction inventory is ambiguous")
+    stage = _open_optional_generated_directory(
+        transaction.descriptor,
+        STAGE_NAME,
+        private=True,
+    )
+    entries: tuple[GeneratedDirectoryEntry, ...] = ()
+    temporary: GeneratedDirectoryEntry | None = None
+    try:
+        if stage is not None:
+            entries = _snapshot_generated_directory(
+                stage,
+                expected_names,
+                require_exact=INTENT_TEMP_NAME in root_names,
+                private=True,
+            )
+            if not _rendered_entries_are_authorized_prefixes(entries, rendered):
+                raise GeneratorError("unjournaled transaction candidate is ambiguous")
+        if INTENT_TEMP_NAME in root_names:
+            if stage is None:
+                raise GeneratorError("unjournaled intent has no exact candidate")
+            temporary = _read_generated_entry(
+                transaction,
+                INTENT_TEMP_NAME,
+                private=True,
+            )
+            baseline_pair = _public_receipt(parent, output_name, expected_names)
+            try:
+                baseline_receipt = None if baseline_pair is None else baseline_pair[1]
+                expected_intent = _intent_bytes(
+                    GeneratedDirectoryIntent(
+                        output_name=output_name,
+                        expected_names=expected_names,
+                        baseline=baseline_receipt,
+                        candidate=_receipt_for(stage, entries),
+                    )
+                )
+                if not expected_intent.startswith(temporary.raw):
+                    raise GeneratorError("unjournaled intent prefix is ambiguous")
+            finally:
+                if baseline_pair is not None:
+                    os.close(baseline_pair[0].descriptor)
+        if stage is not None:
+            for entry in entries:
+                _unlink_exact_entry(stage.descriptor, entry)
+            os.fsync(stage.descriptor)
+            _remove_empty_directory(transaction.descriptor, STAGE_NAME, stage)
+        if temporary is not None:
+            _unlink_exact_entry(transaction.descriptor, temporary)
+            os.fsync(transaction.descriptor)
+        _remove_empty_directory(
+            parent.descriptor,
+            transaction.name,
+            transaction,
+        )
+    finally:
+        if stage is not None:
+            os.close(stage.descriptor)
+
+
+def _read_transaction_intent(
+    transaction: GeneratedDirectoryHandle,
+) -> tuple[GeneratedDirectoryIntent | None, GeneratedDirectoryEntry | None]:
+    names = tuple(sorted(os.listdir(transaction.descriptor)))
+    if INTENT_NAME not in names:
+        return None, None
+    entry = _read_generated_entry(transaction, INTENT_NAME, private=True)
+    return _intent_from_bytes(entry.raw), entry
+
+
+def _reconcile_transaction_locked(
+    parent: OutputParent,
+    output_name: str,
+    expected_names: tuple[str, ...],
+    rendered: Mapping[str, bytes],
+) -> str:
+    transaction = _open_transaction(parent, output_name)
+    if transaction is None:
+        return "none"
+    output: GeneratedDirectoryHandle | None = None
+    stage: GeneratedDirectoryHandle | None = None
+    try:
+        intent, intent_entry = _read_transaction_intent(transaction)
+        if intent is None:
+            _remove_unjournaled_transaction(
+                parent,
+                transaction,
+                output_name,
+                expected_names,
+                rendered,
+            )
+            return "pre"
+        if intent.output_name != output_name or intent.expected_names != expected_names:
+            raise GeneratorError("transaction intent targets a different output")
+        root_names = tuple(sorted(os.listdir(transaction.descriptor)))
+        if not set(root_names) <= {INTENT_NAME, STAGE_NAME}:
+            raise GeneratorError("journaled transaction inventory is ambiguous")
+        output = _open_output(parent, output_name)
+        output_entries: tuple[GeneratedDirectoryEntry, ...] | None = None
+        if output is not None:
+            output_entries = _snapshot_generated_directory(
+                output,
+                expected_names,
+                require_exact=True,
+                private=False,
+            )
+            if not _directory_is_named(parent.descriptor, output_name, output):
+                raise GeneratorError("transaction output changed during recovery")
+        stage = _open_optional_generated_directory(
+            transaction.descriptor,
+            STAGE_NAME,
+            private=False,
+        )
+        stage_entries: tuple[GeneratedDirectoryEntry, ...] | None = None
+        if stage is not None:
+            expected_stage_names = tuple(
+                entry.name
+                for entry in (
+                    intent.candidate.entries
+                    if intent.baseline is None
+                    else (intent.candidate.entries + intent.baseline.entries)
+                )
+            )
+            expected_stage_names = tuple(sorted(set(expected_stage_names)))
+            stage_entries = _snapshot_generated_directory(
+                stage,
+                expected_stage_names,
+                require_exact=False,
+                private=False,
+            )
+
+        baseline_output = (intent.baseline is None and output is None) or (
+            intent.baseline is not None
+            and output is not None
+            and output_entries is not None
+            and _receipt_matches(output, output_entries, intent.baseline, allow_subset=False)
+        )
+        candidate_stage = stage is None or (
+            stage_entries is not None
+            and _receipt_matches(stage, stage_entries, intent.candidate, allow_subset=True)
+        )
+        candidate_output = (
+            output is not None
+            and output_entries is not None
+            and _receipt_matches(output, output_entries, intent.candidate, allow_subset=False)
+        )
+        baseline_stage = stage is None or (
+            intent.baseline is not None
+            and stage is not None
+            and stage_entries is not None
+            and _receipt_matches(stage, stage_entries, intent.baseline, allow_subset=True)
+        )
+        cleanup_receipt: GeneratedDirectoryReceipt | None
+        if baseline_output and candidate_stage:
+            state = "pre"
+            cleanup_receipt = intent.candidate
+        elif candidate_output and baseline_stage:
+            state = "post"
+            cleanup_receipt = intent.baseline
+        else:
+            raise GeneratorError("transaction state is ambiguous")
+
+        if stage is not None:
+            if cleanup_receipt is None:
+                raise GeneratorError("transaction stage has no cleanup authority")
+            _remove_receipted_directory(
+                transaction.descriptor,
+                STAGE_NAME,
+                stage,
+                cleanup_receipt,
+            )
+            os.close(stage.descriptor)
+            stage = None
+        if intent_entry is None:
+            raise GeneratorError("transaction intent identity is unavailable")
+        _unlink_exact_entry(transaction.descriptor, intent_entry)
+        os.fsync(transaction.descriptor)
+        _remove_empty_directory(
+            parent.descriptor,
+            _transaction_name(output_name),
+            transaction,
+        )
+        return state
+    finally:
+        if stage is not None:
+            os.close(stage.descriptor)
+        if output is not None:
+            os.close(output.descriptor)
+        os.close(transaction.descriptor)
+
+
+def _write_generated_directory(
+    output_directory: Path,
+    expected_names: tuple[str, ...],
+    rendered: Mapping[str, bytes],
+) -> None:
+    _require_directory_transaction_platform()
+    output = lexical_path(output_directory)
+    parent = _bind_output_parent(output, create_missing=True)
+    baseline_handle: GeneratedDirectoryHandle | None = None
+    transaction: GeneratedDirectoryHandle | None = None
+    stage: GeneratedDirectoryHandle | None = None
+    candidate_receipt: GeneratedDirectoryReceipt | None = None
+    exclusive_lock_acquired = False
+    try:
+        _require_owner_controlled_creation_parent(parent.descriptor)
+        _lock_output_parent(parent, exclusive=True)
+        exclusive_lock_acquired = True
+        _reconcile_transaction_locked(parent, output.name, expected_names, rendered)
+        baseline_pair = _public_receipt(parent, output.name, expected_names)
+        baseline_receipt: GeneratedDirectoryReceipt | None = None
+        if baseline_pair is not None:
+            baseline_handle, baseline_receipt = baseline_pair
+        transaction = _create_generated_directory(
+            parent.descriptor,
+            _transaction_name(output.name),
+        )
+        transaction.name = _transaction_name(output.name)
+        _transaction_checkpoint("transaction-created")
+        stage = _create_generated_directory(transaction.descriptor, STAGE_NAME)
+        _transaction_checkpoint("stage-created")
+        _populate_generated_directory(stage, rendered)
+        stage_entries = _snapshot_generated_directory(
+            stage,
+            expected_names,
+            require_exact=True,
+            private=True,
+        )
+        if any(entry.raw != rendered[entry.name] for entry in stage_entries):
+            raise GeneratorError("private generated directory verification failed")
+        candidate_receipt = _receipt_for(stage, stage_entries)
+        intent = GeneratedDirectoryIntent(
+            output_name=output.name,
+            expected_names=expected_names,
+            baseline=baseline_receipt,
+            candidate=candidate_receipt,
+        )
+        _write_transaction_intent(transaction, intent)
+        os.fsync(transaction.descriptor)
+        os.fsync(parent.descriptor)
+        _transaction_checkpoint("prepared")
+        current_baseline = _public_receipt(parent, output.name, expected_names)
+        try:
+            if baseline_receipt is None:
+                if current_baseline is not None:
+                    raise GeneratorError("absent output appeared before publication")
+            else:
+                if current_baseline is None or not _receipt_matches(
+                    current_baseline[0],
+                    _snapshot_generated_directory(
+                        current_baseline[0],
+                        expected_names,
+                        require_exact=True,
+                        private=False,
+                    ),
+                    baseline_receipt,
+                    allow_subset=False,
+                ):
+                    raise GeneratorError("published baseline changed before publication")
+        finally:
+            if current_baseline is not None:
+                os.close(current_baseline[0].descriptor)
+        if not _directory_is_named(transaction.descriptor, STAGE_NAME, stage):
+            raise GeneratorError("candidate stage changed before publication")
+        _require_output_parent_current(parent)
+        if baseline_receipt is None:
+            _atomic_noreplace(
+                transaction.descriptor,
+                STAGE_NAME,
+                parent.descriptor,
+                output.name,
+            )
+        else:
+            _atomic_exchange(
+                transaction.descriptor,
+                STAGE_NAME,
+                parent.descriptor,
+                output.name,
+            )
+        _transaction_checkpoint("committed")
+        os.fsync(transaction.descriptor)
+        os.fsync(parent.descriptor)
+        if (
+            _reconcile_transaction_locked(
+                parent,
+                output.name,
+                expected_names,
+                rendered,
+            )
+            != "post"
+        ):
+            raise GeneratorError("committed transaction did not reconcile as POST")
+        _transaction_checkpoint("cleanup-complete")
+        _require_output_parent_current(parent)
+        final = _public_receipt(parent, output.name, expected_names)
+        if final is None or candidate_receipt is None:
+            raise GeneratorError("published generated directory is missing")
+        try:
+            final_entries = _snapshot_generated_directory(
+                final[0],
+                expected_names,
+                require_exact=True,
+                private=False,
+            )
+            if not _receipt_matches(
+                final[0],
+                final_entries,
+                candidate_receipt,
+                allow_subset=False,
+            ):
+                raise GeneratorError("published generated directory changed after commit")
+            _require_output_parent_current(parent)
+        finally:
+            os.close(final[0].descriptor)
+    except BaseException as publication_error:
+        if exclusive_lock_acquired:
+            try:
+                _reconcile_transaction_locked(parent, output.name, expected_names, rendered)
+            except BaseException as recovery_error:
+                publication_error.add_note(f"transaction recovery retained state: {recovery_error}")
+        raise
+    finally:
+        for handle in (stage, transaction, baseline_handle):
+            if handle is not None:
+                with suppress(OSError):
+                    os.close(handle.descriptor)
+        if exclusive_lock_acquired:
+            _close_output_parent(parent)
+        else:
+            os.close(parent.descriptor)
+
+
+def open_generated_directory_snapshot(
+    output_directory: Path,
+    expected_names: Sequence[str],
+) -> GeneratedDirectorySnapshot:
+    _require_directory_transaction_platform()
+    names = _closed_generated_names(expected_names)
+    output = lexical_path(output_directory)
+    parent = _bind_output_parent(output, create_missing=False)
+    directory: GeneratedDirectoryHandle | None = None
+    parent_lock_acquired = False
+    try:
+        _lock_output_parent(parent, exclusive=False)
+        parent_lock_acquired = True
+        try:
+            os.stat(
+                _transaction_name(output.name),
+                dir_fd=parent.descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise GeneratorError("generated directory recovery is pending")
+        directory = _open_generated_directory(parent.descriptor, output.name, private=False)
+        entries = _snapshot_generated_directory(
+            directory,
+            names,
+            require_exact=True,
+            private=False,
+        )
+        if not _directory_is_named(parent.descriptor, output.name, directory):
+            raise GeneratorError("published generated directory changed during snapshot")
+        _require_output_parent_current(parent)
+        return GeneratedDirectorySnapshot(parent, directory, entries)
+    except BaseException as snapshot_error:
+        cleanup_errors: list[BaseException] = []
+        if directory is not None:
+            try:
+                os.close(directory.descriptor)
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        if parent_lock_acquired:
+            try:
+                fcntl.flock(parent.descriptor, fcntl.LOCK_UN)
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        try:
+            os.close(parent.descriptor)
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+        for recorded_cleanup_error in cleanup_errors:
+            snapshot_error.add_note(f"generated snapshot cleanup failure: {recorded_cleanup_error}")
+        raise
+
+
+def _check_generated_directory(
+    output_directory: Path,
+    expected_names: tuple[str, ...],
+    rendered: Mapping[str, bytes],
+) -> bool:
+    with open_generated_directory_snapshot(output_directory, expected_names) as snapshot:
+        return snapshot.names == expected_names and all(
+            snapshot.read_bytes(name) == rendered[name] for name in expected_names
+        )
+
+
+def run_directory_generator(
+    *,
+    output_directory: Path,
+    expected_names: Sequence[str],
+    renderer: DirectoryRenderer,
+    argv: Sequence[str] | None,
+) -> int:
+    """Run the maintainer-only fixture writer or its nonmutating check.
+
+    Write mode requires a stable process umask and owner-controlled creation
+    parents. Same-EUID local writers are trusted to honor the parent flock.
+    """
+
+    try:
+        names = _closed_generated_names(expected_names)
+        rendered = _render_directory_twice(renderer, names)
+        mode = _parse_mode(argv)
+        if mode == "check":
+            return 0 if _check_generated_directory(output_directory, names, rendered) else 1
+        _write_generated_directory(output_directory, names, rendered)
+        return 0
+    except Exception:
+        return 1
+```
+
 - [ ] **Step 4: Prove the shared helper green, including compatibility**
 
 Run: `uv run pytest tests/contract/test_contract_generators.py -q`
 
-Expected on either supported host: exactly `86 passed, 1 skipped`. The platform-native node for the current host passes and only the other host's node skips, proving Task 4's 33 original nodes remain green beside the 54-node atomic transaction/snapshot contract.
+Expected on macOS: exactly `103 passed, 3 skipped`; the Linux native, ambient-default-ACL, and POSIX-parent-ACL nodes skip. Expected on the ACL-capable Ubuntu hosted runner: exactly `104 passed, 2 skipped`; the two Darwin-only nodes skip. This proves Task 4's 33 original nodes remain green beside the 54-node atomic transaction/snapshot contract and all 19 execution-hardening regressions.
 
 - [ ] **Step 5: Add the complete fixture/privacy contract test**
 
@@ -15927,7 +18291,7 @@ Create the two exact privacy documents:
 ## Actors
 
 - The owner, family subject, and Guest.
-- A local attacker with filesystem access but no Keychain authorization.
+- A local attacker under a different EUID with filesystem access but no Keychain authorization.
 - A dependency, model, provider, or LAN peer that may be malicious.
 
 ## Trust boundaries
@@ -15942,11 +18306,14 @@ Create the two exact privacy documents:
 - Task 3 private-data and structural scans fail closed on unsafe paths and artifacts.
 - Strict contracts, explicit authorization receipts, manifest hashes and audit triggers constrain every boundary.
 - SQLCipher and Keychain ownership keep durable private data encrypted and secrets out of repository artifacts.
+- The maintainer-only fixture writer rejects group/world-writable creation parents (and therefore non-owner write ACLs), proves a stable process umask against each exact bound creation parent, and retains that parent descriptor and lock throughout publication.
+- On Darwin, the writer rejects `ACL_TYPE_EXTENDED` ACLs. On Linux, it permits only the explicit ext-family/XFS/Btrfs/tmpfs/overlayfs/F2FS filesystem set, rejects POSIX access/default ACLs and recognized alternative ACL attributes, and fails closed when filesystem or attribute semantics cannot be inspected; NFSv4, CIFS, rich-ACL, and other non-POSIX ACL filesystems are unsupported.
 
 ## Out of scope
 
 - Runtime features, provider integrations, robot behaviors, and persistence beyond the Foundation tasks.
 - Production incident response and household policy choices implemented by later phases.
+- Concurrent noncooperative same-EUID filesystem mutation or process-umask changes during one fixture-writer invocation; creation parents must have no non-owner write ACLs, and cooperating fixture writers must honor the retained parent-directory flock.
 ```
 
 `docs/privacy/data-flow-inventory.md`:
@@ -15996,7 +18363,7 @@ uv run python scripts/verify_private_data.py packages/contracts/fixtures/v1 docs
 git diff --check
 ```
 
-Expected on either supported host: both direct/package checks return 0 with no output; pytest reports exactly `116 passed, 1 skipped` (87 shared-generator nodes plus 30 fixture/privacy nodes); Ruff format/check and Python-3.11 mypy report zero issues; the private-data scan reports PASS; and a second render leaves the ten files byte-identical. Review the generated fixture diff before staging.
+Expected on macOS: both direct/package checks return 0 with no output; pytest reports exactly `133 passed, 3 skipped` (106 shared-generator nodes plus 30 fixture/privacy nodes; the three Linux-only nodes skip). Expected on the ACL-capable Ubuntu hosted runner: pytest reports exactly `134 passed, 2 skipped` (the two Darwin-only nodes skip). A Linux filesystem that cannot establish either native ACL regression may report an explicit additional platform skip, but the exact hosted Ubuntu gate requires ACL-capable storage. Ruff format/check and Python-3.11 mypy report zero issues; the private-data scan reports PASS; and a second render leaves the ten files byte-identical. Review the generated fixture diff before staging.
 
 The same commit must then pass the real native nodes without xfail or emulation in both exact Task 2 hosted jobs. Run the first selected command on `macos-15-intel` and the second on `ubuntu-24.04`, then run the complete two-file pytest command above on both:
 
@@ -16005,7 +18372,7 @@ uv run pytest tests/contract/test_contract_generators.py -q -k test_darwin_nativ
 uv run pytest tests/contract/test_contract_generators.py -q -k test_linux_native_exchange_noreplace_and_parent_flock_gate
 ```
 
-Each selected command reports exactly `1 passed, 86 deselected`; the complete two-file command reports exactly `116 passed, 1 skipped` on each runner. A local run on one platform is not evidence for the other platform.
+Each selected command reports exactly `1 passed, 105 deselected`. The complete two-file command reports exactly `133 passed, 3 skipped` on `macos-15-intel` and `134 passed, 2 skipped` on the ACL-capable `ubuntu-24.04` runner. A local run on one platform is not evidence for the other platform.
 
 ```bash
 git status --short
