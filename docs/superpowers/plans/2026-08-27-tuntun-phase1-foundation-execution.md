@@ -11582,294 +11582,4430 @@ git commit -m "feat(contracts): define versioned DTOs and ports"
 
 **Master package:** 02
 **Depends on:** Task 5.
-**Estimated effort:** 0.5 person-day.
+**Estimated effort:** 2.5 person-days.
 
 **Files:**
 - Create: `packages/contracts/fixtures/v1/actions.json`
+- Create: `packages/contracts/fixtures/v1/audit.json`
+- Create: `packages/contracts/fixtures/v1/budget.json`
 - Create: `packages/contracts/fixtures/v1/events.json`
-- Create: `packages/contracts/fixtures/v1/speech.json`
 - Create: `packages/contracts/fixtures/v1/identity.json`
 - Create: `packages/contracts/fixtures/v1/memory.json`
 - Create: `packages/contracts/fixtures/v1/policy.json`
 - Create: `packages/contracts/fixtures/v1/provider.json`
-- Create: `packages/contracts/fixtures/v1/budget.json`
-- Create: `packages/contracts/fixtures/v1/audit.json`
 - Create: `packages/contracts/fixtures/v1/reachy.json`
+- Create: `packages/contracts/fixtures/v1/speech.json`
+- Modify: `scripts/contract_generator_common.py`
 - Create: `scripts/contract_fixture_builders.py`
 - Create: `scripts/generate_contract_fixtures.py`
+- Modify/Test: `tests/contract/test_contract_generators.py`
 - Test: `tests/contract/test_v1_fixtures.py`
 - Create: `docs/privacy/threat-model.md`
 - Create: `docs/privacy/data-flow-inventory.md`
 
 **Interfaces:**
-- Consumes: every public Task 4–5 DTO and `canonical_bytes`.
-- Produces: one canonical valid object per public model under a top-level `schema_version: "1.0"`; byte-stable fixture round trips; initial Reachy/LAN/Mac/browser/provider/supply-chain trust-boundary inventory. Every memory create/replace, record, and approved-memory fixture carries one valid closed audience; delete proposals carry explicit `audience: null`; missing/unknown audiences fail validation.
+- Consumes: the exact Task 5 package surface of 93 registered `ContractModel` subclasses, `JSONValue`, `canonical_bytes`, `parse_contract_json`, and Task 4's sole `scripts/contract_generator_common.py` publication/check machinery. This task extends that shared module and its existing test file; it does not fork a second path walker or publisher, and the existing single-artifact `run_generator(...)` API remains source- and behavior-compatible.
+- Produces: exactly ten files under `packages/contracts/fixtures/v1`, in the sorted group/count partition `actions=23, audit=2, budget=11, events=7, identity=5, memory=14, policy=10, provider=9, reachy=7, speech=5` (93 examples total). Each file has exactly `canonical_examples`, `examples`, and `schema_version`; both example mappings have exactly that group's model names, and every canonical string is independently reparsed with `require_canonical=True`.
+- The exhaustive builder partition is exactly 51 validator/discriminator-sensitive semantic models and 42 schema-only models. The test owns an independent explicit 51-model semantic oracle and derives the public group registry from the Task 5 owning modules, so the production registry cannot certify itself. Any overlap, omission, extra model, or semantic misclassification fails during the first render, before parsing CLI mode or binding/creating the output path. Its independent repaired-Task-5 gate also checks all 19 concrete action DTOs against the complete resource-type map, every selected typed target, validated proposal/binding equality, reasoning/STT/TTS route correlation and TTS segment bounds, identity/auth/policy/time shapes, positive provider usage, camera action/purpose, memory version/source/reject semantics, and the exact create-only timer payload.
+- `FixtureFactory` is typed and deterministic: `preview()` starts at UUID 1, production starts at UUID 101, and the timestamp is fixed UTC. Its executable schema vocabulary is intentionally limited to the exact keywords, six JSON types, three formats, and ten patterns emitted by all 93 Task 5 validation schemas. The independent tests enumerate that closed surface, execute every claimed object/reference/const/enum/one-of/any-of/array/string/integer/boolean/null/format shape, and reject `allOf`, numeric schemas, type arrays, or any other unclaimed keyword, format, pattern, or open object. Enum, tuple, and binary values cross the ordinary strict JSON ingress boundary; no `model_construct`, unchecked update, raw enum object, raw tuple object, or bytes object is serialized directly.
+- Directory publication is one exact, receipt-journaled transaction. It renders the closed ten-file mapping twice before path touch; walks and retains only the no-follow parent directory FD; takes `flock(LOCK_EX)` on that FD; validates same-EUID safe Git-checkout modes while rejecting executable files and group/world-writable entries; and creates `.<output>.transaction/{intent.json,stage}`. Transaction-created directories/files are exactly `0700`/`0600`. A Darwin `renameatx_np(RENAME_SWAP)` or Linux `renameat2(RENAME_EXCHANGE)` is the irreversible update commit point; first publication uses the corresponding EXCL/NOREPLACE primitive. The exchanged retired Git tree keeps its exact recorded safe modes behind the transaction root's `0700` containment only until receipt-bound POST cleanup, because atomically exchanging names and modes is not a filesystem primitive. Unsupported platforms/filesystems fail closed without a fallback.
+- The canonical intent records exact directory/entry device, inode, owner, mode, link, size, mtime, ctime, per-file SHA-256, and tree digest receipts. PRE recovery accepts only the exact baseline plus an exact/subset candidate stage and never renames or rewrites the baseline, preserving its modes. POST recovery accepts only the exact candidate plus an exact/subset retired baseline and never rolls the committed generation back. Early pre-intent recovery accepts only the reserved private structure whose retained identities and bytes/digests are an exact subset of the current double render; an intent temporary must be a byte prefix of the independently reconstructed canonical intent. Every ambiguous/tampered state is retained and fails closed; there is no blind rename, unlink, or reconstruction.
+- `BaseException` invokes the same state reconciliation while the exclusive parent lock is held and then re-raises. `--check` takes a shared parent-FD lock, is nonmutating, and fails on any pending recovery. `open_generated_directory_snapshot(...)` retains that shared parent lock and a bound output-directory FD for the snapshot lifetime, so all concurrent multi-file fixture readers see one generation and writers block. During updates of an existing output, atomic exchange guarantees raw readers never see the canonical directory name absent, but independent raw multi-file opens can straddle a commit and are explicitly not a consistency API.
+- Produces privacy documents with the exact five threat-model headings and the exact closed ten-row data-flow table asserted below. Raw audio, conversation transcripts, and camera frames are explicitly not processed, persisted, egressed, or retained by Foundation.
 
-- [ ] **Step 1: Write the failing fixture round-trip test**
+- [ ] **Step 1: Append the red atomic-directory publication and snapshot tests**
+
+Merge `fcntl`, `time`, and `Callable` into the existing sorted imports, then append the following block to Task 4's existing `tests/contract/test_contract_generators.py`; its existing imports, `ROOT`, and `_tree_snapshot` helper are reused. These are exactly 54 new pytest nodes. They cover a real fresh Git checkout plus safe/unsafe mode, owner, missing/extra inventory, symlink, hard-link, file/FIFO, and root-type cases; parent-FD locking with no lock file; exact private staging modes; true Darwin/Linux exchange and no-replace gates; PRE/POST state recovery; every construction, empty/partial file, intent, commit, entry-cleanup, and cleanup-complete `BaseException`/process-crash checkpoint; pending-check nonmutation; identity/digest tamper retention; writer/snapshot parent-name replacement; late output-name swap; both reader-before-writer and reader-at-PREPARED lock boundaries; and a raw subprocess reader proving there is no missing-name window.
+
+```python
+# tests/contract/test_contract_generators.py — merge into existing imports
+import fcntl
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+```
+
+```python
+# append to tests/contract/test_contract_generators.py
+DIRECTORY_NAMES = ("a.json", "b.md")
+
+
+def _directory_render() -> dict[str, bytes]:
+    return {"a.json": b'{"generation":"current"}\n', "b.md": b"# Current\n"}
+
+
+def _alternate_directory_render() -> dict[str, bytes]:
+    return {"a.json": b'{"generation":"alternate"}\n', "b.md": b"# Alternate\n"}
+
+
+def _run_directory_generator(
+    output: Path,
+    arguments: Sequence[str],
+    renderer: Callable[[], Mapping[str, bytes]] = _directory_render,
+) -> int:
+    return contract_generator_common.run_directory_generator(
+        output_directory=output,
+        expected_names=DIRECTORY_NAMES,
+        renderer=renderer,
+        argv=arguments,
+    )
+
+
+def _transaction_path(output: Path) -> Path:
+    return output.parent / f".{output.name}.transaction"
+
+
+def _python_environment() -> dict[str, str]:
+    return {
+        **os.environ,
+        "PYTHONHASHSEED": "1",
+        "PYTHONPATH": os.pathsep.join((str(ROOT / "packages/contracts/src"), str(ROOT))),
+    }
+
+
+def _writer_source(output: Path, *, target: str | None, loops: int = 1) -> str:
+    checkpoint = (
+        "def checkpoint(name):\n"
+        f"    if name == {target!r}:\n"
+        "        os._exit(73)\n"
+        "common._transaction_checkpoint = checkpoint\n"
+        if target is not None
+        else ""
+    )
+    return (
+        "import os\n"
+        "from pathlib import Path\n"
+        "from scripts import contract_generator_common as common\n"
+        f"output = Path({str(output)!r})\n"
+        f"names = {DIRECTORY_NAMES!r}\n"
+        f"{checkpoint}"
+        f"for index in range({loops}):\n"
+        "    raw = str(index % 2).encode('ascii')\n"
+        "    def render(raw=raw):\n"
+        "        return {'a.json': b'{\"generation\":' + raw + b'}\\n', "
+        "'b.md': b'# ' + raw + b'\\n'}\n"
+        "    if common.run_directory_generator(output_directory=output, "
+        "expected_names=names, renderer=render, argv=['--write']) != 0:\n"
+        "        raise SystemExit(91)\n"
+    )
+
+
+def _crash_writer(output: Path, target: str) -> subprocess.CompletedProcess[bytes]:
+    source = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "from scripts import contract_generator_common as common\n"
+        f"output = Path({str(output)!r})\n"
+        f"rendered = {_directory_render()!r}\n"
+        "def render():\n"
+        "    return rendered\n"
+        "def checkpoint(name):\n"
+        f"    if name == {target!r}:\n"
+        "        os._exit(73)\n"
+        "common._transaction_checkpoint = checkpoint\n"
+        "raise SystemExit(common.run_directory_generator(output_directory=output, "
+        f"expected_names={DIRECTORY_NAMES!r}, renderer=render, argv=['--write']))\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", source],
+        cwd=ROOT,
+        env=_python_environment(),
+        check=False,
+        capture_output=True,
+    )
+
+
+def _wait_for_path(path: Path, process: subprocess.Popen[bytes]) -> None:
+    deadline = time.monotonic() + 10
+    while not path.exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert path.exists(), process.communicate(timeout=1)
+
+
+def test_generated_directory_write_check_snapshot_and_exact_inventory(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert tuple(sorted(path.name for path in output.iterdir())) == DIRECTORY_NAMES
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == _directory_render()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in output.iterdir())
+    assert not _transaction_path(output).exists()
+
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 0
+    assert _tree_snapshot(tmp_path) == before
+    with contract_generator_common.open_generated_directory_snapshot(
+        output,
+        DIRECTORY_NAMES,
+    ) as snapshot:
+        assert snapshot.names == DIRECTORY_NAMES
+        assert {name: snapshot.read_bytes(name) for name in snapshot.names} == _directory_render()
+    with pytest.raises(GeneratorError, match="closed"):
+        snapshot.read_bytes("a.json")
+
+
+def test_safe_git_checkout_modes_are_accepted_and_replaced(tmp_path: Path) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    output.chmod(0o755)
+    for path in output.iterdir():
+        path.chmod(0o644)
+    assert _run_directory_generator(output, ["--check"]) == 0
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == (
+        _alternate_directory_render()
+    )
+
+
+def test_fresh_git_checkout_modes_are_accepted(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    output = source / "fixtures/v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    commands = (
+        ("init", "-q"),
+        ("config", "user.email", "fixture@example.invalid"),
+        ("config", "user.name", "Fixture Test"),
+        ("add", "fixtures/v1"),
+        ("commit", "-qm", "fixture"),
+    )
+    for arguments in commands:
+        subprocess.run(
+            ["git", *arguments],
+            cwd=source,
+            check=True,
+            capture_output=True,
+        )
+    checkout = tmp_path / "checkout"
+    previous_umask = os.umask(0o022)
+    try:
+        subprocess.run(
+            ["git", "clone", "-q", str(source), str(checkout)],
+            check=True,
+            capture_output=True,
+        )
+    finally:
+        os.umask(previous_umask)
+    checked_output = checkout / "fixtures/v1"
+    assert stat.S_IMODE(checked_output.stat().st_mode) == 0o755
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o644 for path in checked_output.iterdir())
+    assert _run_directory_generator(checked_output, ["--check"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("target", "mode"),
+    (("file", 0o744), ("file", 0o662), ("directory", 0o777)),
+)
+def test_unsafe_published_modes_fail_closed_without_mutation(
+    target: str,
+    mode: int,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    (output / "a.json" if target == "file" else output).chmod(mode)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_wrong_owner_policy_fails_closed_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    before = _tree_snapshot(tmp_path)
+    real_euid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_euid + 1)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "hostile_kind",
+    ("extra", "missing", "symlink", "hardlink", "fifo"),
+)
+def test_generated_directory_rejects_hostile_entry_without_mutation(
+    hostile_kind: str,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    target = tmp_path / "outside"
+    target.write_bytes(b"outside\n")
+    hostile = output / ("extra" if hostile_kind == "extra" else "a.json")
+    if hostile_kind != "extra":
+        hostile.unlink()
+    if hostile_kind == "extra":
+        hostile.write_bytes(b"unexpected\n")
+    elif hostile_kind == "missing":
+        pass
+    elif hostile_kind == "symlink":
+        hostile.symlink_to(target)
+    elif hostile_kind == "hardlink":
+        os.link(target, hostile)
+    else:
+        os.mkfifo(hostile, mode=0o600)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+    assert target.read_bytes() == b"outside\n"
+
+
+def test_generated_directory_rejects_symlinked_output_without_mutation(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    output = tmp_path / "v1"
+    output.symlink_to(real, target_is_directory=True)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("root_kind", ("file", "fifo"))
+def test_generated_directory_rejects_nondirectory_output_without_mutation(
+    root_kind: str,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    if root_kind == "file":
+        output.write_bytes(b"not a directory\n")
+    else:
+        os.mkfifo(output, mode=0o600)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_generated_directory_rejects_nondeterminism_before_path_touch(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "missing" / "v1"
+    calls = 0
+
+    def render() -> dict[str, bytes]:
+        nonlocal calls
+        calls += 1
+        return {"a.json": f"{calls}\n".encode(), "b.md": b"same\n"}
+
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--write"], render) == 1
+    assert calls == 2
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_writer_parent_name_swap_cleans_bound_pre_state_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    output = parent / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    parent_before = _tree_snapshot(parent)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "sentinel").write_bytes(b"replacement\n")
+    replacement_before = _tree_snapshot(replacement)
+    old_parent = tmp_path / "old-parent"
+    swapped = False
+
+    def swap_at_prepared(name: str) -> None:
+        nonlocal swapped
+        if name == "prepared" and not swapped:
+            parent.rename(old_parent)
+            replacement.rename(parent)
+            swapped = True
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        swap_at_prepared,
+    )
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 1
+    assert swapped
+    assert _tree_snapshot(old_parent) == parent_before
+    assert _tree_snapshot(parent) == replacement_before
+
+
+def test_snapshot_parent_name_swap_is_nonmutating_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    output = parent / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    parent_before = _tree_snapshot(parent)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "sentinel").write_bytes(b"replacement\n")
+    replacement_before = _tree_snapshot(replacement)
+    old_parent = tmp_path / "old-parent"
+    real_snapshot = contract_generator_common._snapshot_generated_directory
+    swapped = False
+
+    def swap_after_snapshot(
+        handle: contract_generator_common.GeneratedDirectoryHandle,
+        expected_names: tuple[str, ...],
+        *,
+        require_exact: bool,
+        private: bool,
+    ) -> tuple[contract_generator_common.GeneratedDirectoryEntry, ...]:
+        nonlocal swapped
+        result = real_snapshot(
+            handle,
+            expected_names,
+            require_exact=require_exact,
+            private=private,
+        )
+        if not swapped:
+            parent.rename(old_parent)
+            replacement.rename(parent)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_snapshot_generated_directory",
+        swap_after_snapshot,
+    )
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert swapped
+    assert _tree_snapshot(old_parent) == parent_before
+    assert _tree_snapshot(parent) == replacement_before
+
+
+def test_parent_directory_fd_is_the_only_lock_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    real_flock = fcntl.flock
+    locked_modes: list[int] = []
+
+    def record_flock(descriptor: int, operation: int) -> None:
+        if operation != fcntl.LOCK_UN:
+            locked_modes.append(os.fstat(descriptor).st_mode)
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", record_flock)
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert _run_directory_generator(output, ["--check"]) == 0
+    assert locked_modes and all(stat.S_ISDIR(mode) for mode in locked_modes)
+    assert not any("lock" in path.name for path in tmp_path.rglob("*"))
+
+
+def test_private_transaction_modes_are_exact_at_prepared_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    inspected = False
+
+    def inspect_then_interrupt(name: str) -> None:
+        nonlocal inspected
+        if name != "prepared" or inspected:
+            return
+        transaction = _transaction_path(output)
+        assert stat.S_IMODE(transaction.stat().st_mode) == 0o700
+        assert stat.S_IMODE((transaction / "stage").stat().st_mode) == 0o700
+        assert stat.S_IMODE((transaction / "intent.json").stat().st_mode) == 0o600
+        assert all(
+            stat.S_IMODE(path.stat().st_mode) == 0o600 for path in (transaction / "stage").iterdir()
+        )
+        inspected = True
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        inspect_then_interrupt,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        _run_directory_generator(output, ["--write"])
+    assert inspected
+    assert not output.exists()
+    assert not _transaction_path(output).exists()
+
+
+def test_pre_recovery_preserves_exact_baseline_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    output.chmod(0o755)
+    for path in output.iterdir():
+        path.chmod(0o644)
+    before = _tree_snapshot(output)
+    raised = False
+
+    def interrupt_once(name: str) -> None:
+        nonlocal raised
+        if name == "prepared" and not raised:
+            raised = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        interrupt_once,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        _run_directory_generator(output, ["--write"], _alternate_directory_render)
+    assert _tree_snapshot(output) == before
+    assert not _transaction_path(output).exists()
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    (
+        "transaction-created",
+        "stage-created",
+        "stage-file-opened",
+        "stage-entry",
+        "intent-file-opened",
+        "intent-temporary",
+        "prepared",
+        "committed",
+        "cleanup-entry",
+        "cleanup-complete",
+    ),
+)
+def test_baseexception_reconciles_checkpoint_and_reraises(
+    checkpoint: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    baseline = {path.name: path.read_bytes() for path in output.iterdir()}
+    raised = False
+
+    def interrupt_once(name: str) -> None:
+        nonlocal raised
+        if name == checkpoint and not raised:
+            raised = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        interrupt_once,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        _run_directory_generator(output, ["--write"], _alternate_directory_render)
+    expected = (
+        baseline
+        if checkpoint
+        in {
+            "transaction-created",
+            "stage-created",
+            "stage-file-opened",
+            "stage-entry",
+            "intent-file-opened",
+            "intent-temporary",
+            "prepared",
+        }
+        else _alternate_directory_render()
+    )
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == expected
+    assert not _transaction_path(output).exists()
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    (
+        "transaction-created",
+        "stage-created",
+        "stage-file-opened",
+        "stage-entry",
+        "intent-file-opened",
+        "intent-temporary",
+        "prepared",
+        "committed",
+        "cleanup-entry",
+        "cleanup-complete",
+    ),
+)
+def test_process_crash_is_reconciled_by_next_write(
+    checkpoint: str,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    crashed = _crash_writer(output, checkpoint)
+    assert crashed.returncode == 73
+    assert _transaction_path(output).is_dir() is (checkpoint != "cleanup-complete")
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == _directory_render()
+    assert not _transaction_path(output).exists()
+
+
+def test_post_recovery_cleans_exchanged_safe_git_modes(tmp_path: Path) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    output.chmod(0o755)
+    for path in output.iterdir():
+        path.chmod(0o644)
+    assert _crash_writer(output, "committed").returncode == 73
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert not _transaction_path(output).exists()
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == _directory_render()
+
+
+def test_check_with_pending_recovery_is_nonmutating(tmp_path: Path) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert _crash_writer(output, "prepared").returncode == 73
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert not _transaction_path(output).exists()
+
+
+@pytest.mark.parametrize("tamper", ("intent", "stage", "intent-temporary"))
+def test_ambiguous_transaction_is_retained_without_rename_or_delete(
+    tamper: str,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    crash_point = "intent-temporary" if tamper == "intent-temporary" else "prepared"
+    assert _crash_writer(output, crash_point).returncode == 73
+    transaction = _transaction_path(output)
+    targets = {
+        "intent": "intent.json",
+        "intent-temporary": ".intent.tmp",
+        "stage": "stage/a.json",
+    }
+    target = transaction / targets[tamper]
+    target.write_bytes(b"tampered\n")
+    target.chmod(0o600)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_snapshot_reader_blocks_writer_and_sees_one_generation(tmp_path: Path) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    ready = tmp_path / "reader-ready"
+    release = tmp_path / "reader-release"
+    observed = tmp_path / "reader-observed"
+    reader_source = (
+        "import time\n"
+        "from pathlib import Path\n"
+        "from scripts.contract_generator_common import open_generated_directory_snapshot\n"
+        f"output = Path({str(output)!r})\n"
+        f"ready = Path({str(ready)!r})\n"
+        f"release = Path({str(release)!r})\n"
+        f"observed = Path({str(observed)!r})\n"
+        f"with open_generated_directory_snapshot(output, {DIRECTORY_NAMES!r}) as snapshot:\n"
+        "    ready.write_text('ready', encoding='utf-8')\n"
+        "    while not release.exists():\n"
+        "        time.sleep(0.01)\n"
+        "    observed.write_bytes(snapshot.read_bytes('a.json'))\n"
+    )
+    reader = subprocess.Popen(
+        [sys.executable, "-c", reader_source],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _wait_for_path(ready, reader)
+    writer_source = _writer_source(output, target=None).replace(
+        "str(index % 2).encode('ascii')",
+        "b'9'",
+    )
+    writer = subprocess.Popen(
+        [sys.executable, "-c", writer_source],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(0.1)
+    assert writer.poll() is None
+    release.write_text("release", encoding="utf-8")
+    assert reader.communicate(timeout=10) == (b"", b"")
+    assert reader.returncode == 0
+    assert writer.communicate(timeout=10) == (b"", b"")
+    assert writer.returncode == 0
+    assert observed.read_bytes() == _directory_render()["a.json"]
+    assert (output / "a.json").read_bytes() == b'{"generation":9}\n'
+
+
+def test_reader_started_at_prepared_boundary_blocks_then_sees_commit(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    prepared = tmp_path / "writer-prepared"
+    release = tmp_path / "writer-release"
+    observed = tmp_path / "reader-observed"
+    writer_source = (
+        "import time\n"
+        "from pathlib import Path\n"
+        "from scripts import contract_generator_common as common\n"
+        f"output = Path({str(output)!r})\n"
+        f"prepared = Path({str(prepared)!r})\n"
+        f"release = Path({str(release)!r})\n"
+        f"rendered = {_alternate_directory_render()!r}\n"
+        "def render():\n"
+        "    return rendered\n"
+        "def checkpoint(name):\n"
+        "    if name == 'prepared':\n"
+        "        prepared.write_text('prepared', encoding='utf-8')\n"
+        "        while not release.exists():\n"
+        "            time.sleep(0.01)\n"
+        "common._transaction_checkpoint = checkpoint\n"
+        "raise SystemExit(common.run_directory_generator(output_directory=output, "
+        f"expected_names={DIRECTORY_NAMES!r}, renderer=render, argv=['--write']))\n"
+    )
+    writer = subprocess.Popen(
+        [sys.executable, "-c", writer_source],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _wait_for_path(prepared, writer)
+    reader_source = (
+        "from pathlib import Path\n"
+        "from scripts.contract_generator_common import open_generated_directory_snapshot\n"
+        f"output = Path({str(output)!r})\n"
+        f"observed = Path({str(observed)!r})\n"
+        f"with open_generated_directory_snapshot(output, {DIRECTORY_NAMES!r}) as snapshot:\n"
+        "    observed.write_bytes(snapshot.read_bytes('a.json'))\n"
+    )
+    reader = subprocess.Popen(
+        [sys.executable, "-c", reader_source],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(0.1)
+    assert reader.poll() is None
+    assert not observed.exists()
+    release.write_text("release", encoding="utf-8")
+    assert writer.communicate(timeout=10) == (b"", b"")
+    assert writer.returncode == 0
+    assert reader.communicate(timeout=10) == (b"", b"")
+    assert reader.returncode == 0
+    assert observed.read_bytes() == _alternate_directory_render()["a.json"]
+
+
+def test_raw_reader_never_observes_missing_output_name_across_real_exchanges(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    writer = subprocess.Popen(
+        [sys.executable, "-c", _writer_source(output, target=None, loops=24)],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    observations = 0
+    missing = False
+    while writer.poll() is None:
+        try:
+            descriptor = os.open(
+                output,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+        except FileNotFoundError:
+            missing = True
+            break
+        else:
+            os.close(descriptor)
+            observations += 1
+    stdout, stderr = writer.communicate(timeout=10)
+    assert (writer.returncode, stdout, stderr) == (0, b"", b"")
+    assert observations > 0
+    assert not missing
+
+
+def test_late_output_swap_after_cleanup_retains_no_owned_private_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    displaced = tmp_path / "displaced"
+    swapped = False
+
+    def swap_after_cleanup(name: str) -> None:
+        nonlocal swapped
+        if name != "cleanup-complete" or swapped:
+            return
+        output.rename(displaced)
+        output.mkdir(mode=0o700)
+        (output / "attacker").write_bytes(b"attacker\n")
+        (output / "attacker").chmod(0o600)
+        swapped = True
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        swap_after_cleanup,
+    )
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 1
+    assert swapped
+    assert not _transaction_path(output).exists()
+    assert (output / "attacker").read_bytes() == b"attacker\n"
+    assert {path.name: path.read_bytes() for path in displaced.iterdir()} == (
+        _alternate_directory_render()
+    )
+
+
+def test_initial_publication_uses_noreplace_and_retains_ambiguous_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    real_noreplace = contract_generator_common._atomic_noreplace
+    injected = False
+
+    def race_noreplace(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal injected
+        if destination_name == output.name and not injected:
+            output.mkdir(mode=0o700)
+            (output / "attacker").write_bytes(b"attacker\n")
+            (output / "attacker").chmod(0o600)
+            injected = True
+        real_noreplace(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(contract_generator_common, "_atomic_noreplace", race_noreplace)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert injected
+    assert (output / "attacker").read_bytes() == b"attacker\n"
+    assert _transaction_path(output).is_dir()
+
+
+def test_unsupported_platform_fails_before_path_touch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "missing" / "v1"
+    before = _tree_snapshot(tmp_path)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin native gate")
+def test_darwin_native_swap_exclusive_and_parent_flock_gate(tmp_path: Path) -> None:
+    assert contract_generator_common._native_function("renameatx_np")
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux native gate")
+def test_linux_native_exchange_noreplace_and_parent_flock_gate(tmp_path: Path) -> None:
+    assert contract_generator_common._native_function("renameat2")
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
+```
+
+- [ ] **Step 2: Prove the shared-directory tests are red for the missing API**
+
+Run: `uv run pytest tests/contract/test_contract_generators.py -q -x`
+
+Expected: the completed Task 4's exact 33 nodes pass, then `test_generated_directory_write_check_snapshot_and_exact_inventory` fails with `AttributeError: module 'scripts.contract_generator_common' has no attribute 'run_directory_generator'`. Do not add a placeholder API to manufacture another RED.
+
+- [ ] **Step 3: Extend the sole Task 4 generator helper without changing its existing API**
+
+Merge the following imports into the existing sorted standard-library imports in `scripts/contract_generator_common.py`, then append the complete block below after `run_generator`. Do not alter or duplicate `run_generator`, `_bind_output_parent`, `_output_parent_is_current`, `_parse_mode`, `_write_all`, `GeneratorError`, or their existing single-artifact callers.
+
+```python
+# scripts/contract_generator_common.py — merge into the existing import block
+import ctypes
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import stat
+import sys
+```
+
+```python
+# append to scripts/contract_generator_common.py
+MAX_GENERATED_DIRECTORY_FILES = 32
+MAX_GENERATED_DIRECTORY_BYTES = MAX_GENERATED_BYTES * MAX_GENERATED_DIRECTORY_FILES
+PRIVATE_DIRECTORY_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+INTENT_VERSION = 1
+INTENT_NAME = "intent.json"
+INTENT_TEMP_NAME = ".intent.tmp"
+STAGE_NAME = "stage"
+DARWIN_RENAME_SWAP = 0x00000002
+DARWIN_RENAME_EXCL = 0x00000004
+LINUX_RENAME_NOREPLACE = 1
+LINUX_RENAME_EXCHANGE = 2
+DirectoryRenderer: TypeAlias = Callable[[], Mapping[str, bytes]]  # noqa: UP040
+
+
+@dataclass(frozen=True)
+class GeneratedDirectoryEntry:
+    name: str
+    raw: bytes
+    sha256: str
+    mode: int
+    device: int
+    inode: int
+    owner: int
+    links: int
+    size: int
+    modified_ns: int
+    changed_ns: int
+
+
+@dataclass
+class GeneratedDirectoryHandle:
+    name: str
+    descriptor: int
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class GeneratedDirectoryReceipt:
+    device: int
+    inode: int
+    owner: int
+    mode: int
+    tree_sha256: str
+    entries: tuple[GeneratedDirectoryEntry, ...]
+
+
+@dataclass(frozen=True)
+class GeneratedDirectoryIntent:
+    output_name: str
+    expected_names: tuple[str, ...]
+    baseline: GeneratedDirectoryReceipt | None
+    candidate: GeneratedDirectoryReceipt
+
+
+@dataclass
+class GeneratedDirectorySnapshot:
+    """One lock-held, immutable view of a generated directory generation."""
+
+    _parent: OutputParent
+    _directory: GeneratedDirectoryHandle
+    _entries: tuple[GeneratedDirectoryEntry, ...]
+    _closed: bool = False
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        self._require_open()
+        return tuple(entry.name for entry in self._entries)
+
+    def read_bytes(self, name: str) -> bytes:
+        self._require_open()
+        for entry in self._entries:
+            if entry.name == name:
+                return entry.raw
+        raise KeyError(name)
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise GeneratorError("generated directory snapshot is closed")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        os.close(self._directory.descriptor)
+        try:
+            fcntl.flock(self._parent.descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self._parent.descriptor)
+
+    def __enter__(self) -> GeneratedDirectorySnapshot:
+        self._require_open()
+        return self
+
+    def __exit__(
+        self,
+        exception_type: object,
+        exception: object,
+        traceback: object,
+    ) -> None:
+        del exception_type, exception, traceback
+        self.close()
+
+
+def _closed_generated_names(names: Sequence[str]) -> tuple[str, ...]:
+    result = tuple(names)
+    if (
+        not result
+        or len(result) > MAX_GENERATED_DIRECTORY_FILES
+        or len(set(result)) != len(result)
+        or result != tuple(sorted(result))
+    ):
+        raise GeneratorError("generated directory names must be unique, sorted, and bounded")
+    for name in result:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,127}", name):
+            raise GeneratorError("generated directory contains an unsafe artifact name")
+        if Path(name).name != name or "\\" in name:
+            raise GeneratorError("generated directory artifact must be one basename")
+    return result
+
+
+def _validated_directory_render(
+    rendered: Mapping[str, bytes],
+    expected_names: tuple[str, ...],
+) -> dict[str, bytes]:
+    if tuple(sorted(rendered)) != expected_names:
+        raise GeneratorError("generated directory render inventory is not exact")
+    result: dict[str, bytes] = {}
+    total_bytes = 0
+    for name in expected_names:
+        value = rendered[name]
+        if type(value) is not bytes or not 1 <= len(value) <= MAX_GENERATED_BYTES:
+            raise GeneratorError("generated directory artifact byte limit exceeded")
+        total_bytes += len(value)
+        if total_bytes > MAX_GENERATED_DIRECTORY_BYTES:
+            raise GeneratorError("generated directory total byte limit exceeded")
+        result[name] = value
+    return result
+
+
+def _render_directory_twice(
+    renderer: DirectoryRenderer,
+    expected_names: tuple[str, ...],
+) -> dict[str, bytes]:
+    first = _validated_directory_render(renderer(), expected_names)
+    second = _validated_directory_render(renderer(), expected_names)
+    if first != second:
+        raise GeneratorError("nondeterministic generated directory render")
+    return first
+
+
+def _native_function(name: str) -> ctypes._CFuncPtr:  # type: ignore[name-defined]
+    function = getattr(ctypes.CDLL(None, use_errno=True), name, None)
+    if function is None:
+        raise GeneratorError(f"required atomic directory primitive is unavailable: {name}")
+    function.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    function.restype = ctypes.c_int
+    return function
+
+
+def _require_directory_transaction_platform() -> None:
+    if not hasattr(fcntl, "flock"):
+        raise GeneratorError("directory flock is unavailable")
+    if sys.platform == "darwin":
+        _native_function("renameatx_np")
+    elif sys.platform.startswith("linux"):
+        _native_function("renameat2")
+    else:
+        raise GeneratorError("atomic generated-directory publication is unsupported")
+
+
+def _native_rename(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+    *,
+    exchange: bool,
+) -> None:
+    if sys.platform == "darwin":
+        function = _native_function("renameatx_np")
+        flag = DARWIN_RENAME_SWAP if exchange else DARWIN_RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        function = _native_function("renameat2")
+        flag = LINUX_RENAME_EXCHANGE if exchange else LINUX_RENAME_NOREPLACE
+    else:
+        raise GeneratorError("atomic generated-directory publication is unsupported")
+    result = function(
+        source_parent_fd,
+        os.fsencode(source_name),
+        destination_parent_fd,
+        os.fsencode(destination_name),
+        flag,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        unsupported = {
+            errno.EINVAL,
+            errno.ENOSYS,
+            getattr(errno, "ENOTSUP", errno.EINVAL),
+            getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+        }
+        if error_number in unsupported:
+            raise GeneratorError("filesystem lacks required atomic directory semantics")
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def _atomic_exchange(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    _native_rename(
+        source_parent_fd,
+        source_name,
+        destination_parent_fd,
+        destination_name,
+        exchange=True,
+    )
+
+
+def _atomic_noreplace(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    _native_rename(
+        source_parent_fd,
+        source_name,
+        destination_parent_fd,
+        destination_name,
+        exchange=False,
+    )
+
+
+def _transaction_checkpoint(name: str) -> None:
+    """Deterministic failure-injection seam; production deliberately does nothing."""
+
+    del name
+
+
+def _lock_output_parent(parent: OutputParent, *, exclusive: bool) -> None:
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    try:
+        fcntl.flock(parent.descriptor, operation)
+    except OSError as error:
+        raise GeneratorError("generated output parent cannot be locked") from error
+    if not _output_parent_is_current(parent):
+        raise GeneratorError("generated output parent changed while locking")
+
+
+def _require_output_parent_current(parent: OutputParent) -> None:
+    if not _output_parent_is_current(parent):
+        raise GeneratorError("generated output parent changed during transaction")
+
+
+def _close_output_parent(parent: OutputParent) -> None:
+    try:
+        fcntl.flock(parent.descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(parent.descriptor)
+
+
+def _validate_directory_metadata(metadata: os.stat_result, *, private: bool) -> None:
+    mode = stat.S_IMODE(metadata.st_mode)
+    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        raise GeneratorError("generated directory has an unsafe type or owner")
+    if private:
+        if mode != PRIVATE_DIRECTORY_MODE:
+            raise GeneratorError("private generated directory mode is not 0700")
+        return
+    if mode & 0o7022 or not mode & stat.S_IXUSR:
+        raise GeneratorError("published generated directory mode is unsafe")
+
+
+def _validate_file_metadata(metadata: os.stat_result, *, private: bool) -> None:
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.geteuid()
+    ):
+        raise GeneratorError("generated entry has an unsafe type, owner, or link count")
+    if private:
+        if mode != PRIVATE_FILE_MODE:
+            raise GeneratorError("private generated entry mode is not 0600")
+        return
+    if mode & 0o7111 or mode & 0o022 or not mode & stat.S_IRUSR:
+        raise GeneratorError("published generated entry mode is unsafe")
+
+
+def _descriptor_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _open_generated_directory(
+    parent_fd: int,
+    name: str,
+    *,
+    private: bool,
+) -> GeneratedDirectoryHandle:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    _validate_directory_metadata(before, private=private)
+    descriptor = os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=parent_fd,
+    )
+    opened = os.fstat(descriptor)
+    try:
+        _validate_directory_metadata(opened, private=private)
+        if _descriptor_identity(before) != _descriptor_identity(opened):
+            raise GeneratorError("generated directory changed during open")
+    except Exception:
+        os.close(descriptor)
+        raise
+    return GeneratedDirectoryHandle(
+        name=name,
+        descriptor=descriptor,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+    )
+
+
+def _open_optional_generated_directory(
+    parent_fd: int,
+    name: str,
+    *,
+    private: bool,
+) -> GeneratedDirectoryHandle | None:
+    try:
+        return _open_generated_directory(parent_fd, name, private=private)
+    except FileNotFoundError:
+        return None
+
+
+def _create_generated_directory(
+    parent_fd: int,
+    name: str,
+) -> GeneratedDirectoryHandle:
+    os.mkdir(name, mode=PRIVATE_DIRECTORY_MODE, dir_fd=parent_fd)
+    handle = _open_generated_directory(parent_fd, name, private=True)
+    os.fchmod(handle.descriptor, PRIVATE_DIRECTORY_MODE)
+    return handle
+
+
+def _directory_is_named(
+    parent_fd: int,
+    name: str,
+    handle: GeneratedDirectoryHandle,
+) -> bool:
+    try:
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        opened = os.fstat(handle.descriptor)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(named.st_mode)
+        and _descriptor_identity(named) == (handle.device, handle.inode)
+        and _descriptor_identity(opened) == (handle.device, handle.inode)
+    )
+
+
+def _read_generated_entry(
+    handle: GeneratedDirectoryHandle,
+    name: str,
+    *,
+    private: bool,
+) -> GeneratedDirectoryEntry:
+    before = os.stat(name, dir_fd=handle.descriptor, follow_symlinks=False)
+    _validate_file_metadata(before, private=private)
+    descriptor = os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0),
+        dir_fd=handle.descriptor,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        _validate_file_metadata(opened, private=private)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_uid,
+            stat.S_IMODE(before.st_mode),
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        opened_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_uid,
+            stat.S_IMODE(opened.st_mode),
+            opened.st_nlink,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if before_identity != opened_identity or opened.st_size > MAX_GENERATED_BYTES:
+            raise GeneratorError("generated entry changed during open")
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                raise GeneratorError("generated entry was truncated")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise GeneratorError("generated entry grew during read")
+        final = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    named = os.stat(name, dir_fd=handle.descriptor, follow_symlinks=False)
+    identity = (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_uid,
+        stat.S_IMODE(opened.st_mode),
+        opened.st_nlink,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+    )
+    if identity != (
+        final.st_dev,
+        final.st_ino,
+        final.st_uid,
+        stat.S_IMODE(final.st_mode),
+        final.st_nlink,
+        final.st_size,
+        final.st_mtime_ns,
+        final.st_ctime_ns,
+    ) or identity != (
+        named.st_dev,
+        named.st_ino,
+        named.st_uid,
+        stat.S_IMODE(named.st_mode),
+        named.st_nlink,
+        named.st_size,
+        named.st_mtime_ns,
+        named.st_ctime_ns,
+    ):
+        raise GeneratorError("generated entry changed during read")
+    raw = b"".join(chunks)
+    return GeneratedDirectoryEntry(
+        name=name,
+        raw=raw,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        mode=stat.S_IMODE(opened.st_mode),
+        device=opened.st_dev,
+        inode=opened.st_ino,
+        owner=opened.st_uid,
+        links=opened.st_nlink,
+        size=opened.st_size,
+        modified_ns=opened.st_mtime_ns,
+        changed_ns=opened.st_ctime_ns,
+    )
+
+
+def _snapshot_generated_directory(
+    handle: GeneratedDirectoryHandle,
+    expected_names: tuple[str, ...],
+    *,
+    require_exact: bool,
+    private: bool,
+) -> tuple[GeneratedDirectoryEntry, ...]:
+    before = os.fstat(handle.descriptor)
+    _validate_directory_metadata(before, private=private)
+    if _descriptor_identity(before) != (handle.device, handle.inode):
+        raise GeneratorError("generated directory descriptor changed")
+    names = tuple(sorted(os.listdir(handle.descriptor)))
+    if len(names) > MAX_GENERATED_DIRECTORY_FILES or not set(names) <= set(expected_names):
+        raise GeneratorError("generated directory contains an unexpected entry")
+    if require_exact and names != expected_names:
+        raise GeneratorError("generated directory inventory is incomplete")
+    result = tuple(_read_generated_entry(handle, name, private=private) for name in names)
+    if tuple(sorted(os.listdir(handle.descriptor))) != names:
+        raise GeneratorError("generated directory changed during scan")
+    final = os.fstat(handle.descriptor)
+    _validate_directory_metadata(final, private=private)
+    if _descriptor_identity(final) != (handle.device, handle.inode):
+        raise GeneratorError("generated directory changed during scan")
+    if sum(entry.size for entry in result) > MAX_GENERATED_DIRECTORY_BYTES:
+        raise GeneratorError("generated directory total byte limit exceeded")
+    return result
+
+
+def _tree_digest(
+    directory_metadata: tuple[int, int, int, int],
+    entries: tuple[GeneratedDirectoryEntry, ...],
+) -> str:
+    document = {
+        "directory": list(directory_metadata),
+        "entries": [
+            {
+                "device": entry.device,
+                "changed_ns": entry.changed_ns,
+                "inode": entry.inode,
+                "links": entry.links,
+                "mode": entry.mode,
+                "modified_ns": entry.modified_ns,
+                "name": entry.name,
+                "owner": entry.owner,
+                "sha256": entry.sha256,
+                "size": entry.size,
+            }
+            for entry in entries
+        ],
+    }
+    raw = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _receipt_for(
+    handle: GeneratedDirectoryHandle,
+    entries: tuple[GeneratedDirectoryEntry, ...],
+) -> GeneratedDirectoryReceipt:
+    metadata = os.fstat(handle.descriptor)
+    directory_metadata = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        stat.S_IMODE(metadata.st_mode),
+    )
+    return GeneratedDirectoryReceipt(
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        owner=metadata.st_uid,
+        mode=stat.S_IMODE(metadata.st_mode),
+        tree_sha256=_tree_digest(directory_metadata, entries),
+        entries=entries,
+    )
+
+
+def _entry_identity(entry: GeneratedDirectoryEntry) -> tuple[object, ...]:
+    return (
+        entry.name,
+        entry.sha256,
+        entry.mode,
+        entry.device,
+        entry.inode,
+        entry.owner,
+        entry.links,
+        entry.size,
+        entry.modified_ns,
+        entry.changed_ns,
+    )
+
+
+def _receipt_matches(
+    handle: GeneratedDirectoryHandle,
+    entries: tuple[GeneratedDirectoryEntry, ...],
+    receipt: GeneratedDirectoryReceipt,
+    *,
+    allow_subset: bool,
+) -> bool:
+    metadata = os.fstat(handle.descriptor)
+    if (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        stat.S_IMODE(metadata.st_mode),
+    ) != (receipt.device, receipt.inode, receipt.owner, receipt.mode):
+        return False
+    expected = {entry.name: entry for entry in receipt.entries}
+    if (allow_subset and not set(entry.name for entry in entries) <= set(expected)) or (
+        not allow_subset and tuple(entry.name for entry in entries) != tuple(expected)
+    ):
+        return False
+    if any(_entry_identity(entry) != _entry_identity(expected[entry.name]) for entry in entries):
+        return False
+    if allow_subset and len(entries) != len(receipt.entries):
+        return True
+    return receipt.tree_sha256 == _tree_digest(
+        (receipt.device, receipt.inode, receipt.owner, receipt.mode),
+        entries,
+    )
+
+
+def _write_generated_entry(
+    handle: GeneratedDirectoryHandle,
+    name: str,
+    raw: bytes,
+) -> None:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        PRIVATE_FILE_MODE,
+        dir_fd=handle.descriptor,
+    )
+    try:
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        _transaction_checkpoint(
+            "intent-file-opened" if name == INTENT_TEMP_NAME else "stage-file-opened"
+        )
+        _write_all(descriptor, raw)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _populate_generated_directory(
+    handle: GeneratedDirectoryHandle,
+    rendered: Mapping[str, bytes],
+) -> None:
+    for name in sorted(rendered):
+        _write_generated_entry(handle, name, rendered[name])
+        _transaction_checkpoint("stage-entry")
+    os.fsync(handle.descriptor)
+
+
+def _receipt_json(receipt: GeneratedDirectoryReceipt) -> dict[str, object]:
+    return {
+        "device": receipt.device,
+        "entries": [
+            {
+                "device": entry.device,
+                "changed_ns": entry.changed_ns,
+                "inode": entry.inode,
+                "links": entry.links,
+                "mode": entry.mode,
+                "modified_ns": entry.modified_ns,
+                "name": entry.name,
+                "owner": entry.owner,
+                "sha256": entry.sha256,
+                "size": entry.size,
+            }
+            for entry in receipt.entries
+        ],
+        "inode": receipt.inode,
+        "mode": receipt.mode,
+        "owner": receipt.owner,
+        "tree_sha256": receipt.tree_sha256,
+    }
+
+
+def _intent_bytes(intent: GeneratedDirectoryIntent) -> bytes:
+    document = {
+        "baseline": None if intent.baseline is None else _receipt_json(intent.baseline),
+        "candidate": _receipt_json(intent.candidate),
+        "expected_names": list(intent.expected_names),
+        "output_name": intent.output_name,
+        "version": INTENT_VERSION,
+    }
+    return (
+        json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
+def _exact_mapping(value: object, keys: frozenset[str], label: str) -> dict[str, object]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != keys
+        or not all(isinstance(key, str) for key in value)
+    ):
+        raise GeneratorError(f"transaction {label} is malformed")
+    return value
+
+
+def _exact_int(value: object, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise GeneratorError(f"transaction {label} is malformed")
+    return value
+
+
+def _receipt_from_json(value: object) -> GeneratedDirectoryReceipt:
+    document = _exact_mapping(
+        value,
+        frozenset({"device", "entries", "inode", "mode", "owner", "tree_sha256"}),
+        "receipt",
+    )
+    raw_entries = document["entries"]
+    if not isinstance(raw_entries, list):
+        raise GeneratorError("transaction receipt entries are malformed")
+    entries: list[GeneratedDirectoryEntry] = []
+    for raw_entry in raw_entries:
+        entry = _exact_mapping(
+            raw_entry,
+            frozenset(
+                {
+                    "changed_ns",
+                    "device",
+                    "inode",
+                    "links",
+                    "mode",
+                    "modified_ns",
+                    "name",
+                    "owner",
+                    "sha256",
+                    "size",
+                }
+            ),
+            "entry receipt",
+        )
+        name = entry["name"]
+        digest = entry["sha256"]
+        if (
+            not isinstance(name, str)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise GeneratorError("transaction entry receipt is malformed")
+        entries.append(
+            GeneratedDirectoryEntry(
+                name=name,
+                raw=b"",
+                sha256=digest,
+                mode=_exact_int(entry["mode"], "entry mode"),
+                device=_exact_int(entry["device"], "entry device"),
+                inode=_exact_int(entry["inode"], "entry inode"),
+                owner=_exact_int(entry["owner"], "entry owner"),
+                links=_exact_int(entry["links"], "entry links"),
+                size=_exact_int(entry["size"], "entry size"),
+                modified_ns=_exact_int(entry["modified_ns"], "entry modified time"),
+                changed_ns=_exact_int(entry["changed_ns"], "entry changed time"),
+            )
+        )
+    names = tuple(item.name for item in entries)
+    if names != tuple(sorted(names)) or len(names) != len(set(names)):
+        raise GeneratorError("transaction receipt inventory is malformed")
+    tree_digest = document["tree_sha256"]
+    if not isinstance(tree_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", tree_digest):
+        raise GeneratorError("transaction tree digest is malformed")
+    return GeneratedDirectoryReceipt(
+        device=_exact_int(document["device"], "directory device"),
+        inode=_exact_int(document["inode"], "directory inode"),
+        owner=_exact_int(document["owner"], "directory owner"),
+        mode=_exact_int(document["mode"], "directory mode"),
+        tree_sha256=tree_digest,
+        entries=tuple(entries),
+    )
+
+
+def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GeneratorError("transaction intent contains a duplicate key")
+        result[key] = value
+    return result
+
+
+def _intent_from_bytes(raw: bytes) -> GeneratedDirectoryIntent:
+    try:
+        parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_json_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GeneratorError("transaction intent is not strict JSON") from error
+    document = _exact_mapping(
+        parsed,
+        frozenset({"baseline", "candidate", "expected_names", "output_name", "version"}),
+        "intent",
+    )
+    if document["version"] != INTENT_VERSION or not isinstance(document["output_name"], str):
+        raise GeneratorError("transaction intent version or output is malformed")
+    names_value = document["expected_names"]
+    if not isinstance(names_value, list) or not all(isinstance(name, str) for name in names_value):
+        raise GeneratorError("transaction intent names are malformed")
+    intent = GeneratedDirectoryIntent(
+        output_name=document["output_name"],
+        expected_names=_closed_generated_names(names_value),
+        baseline=(
+            None if document["baseline"] is None else _receipt_from_json(document["baseline"])
+        ),
+        candidate=_receipt_from_json(document["candidate"]),
+    )
+    if _intent_bytes(intent) != raw:
+        raise GeneratorError("transaction intent is not canonical")
+    return intent
+
+
+def _write_transaction_intent(
+    transaction: GeneratedDirectoryHandle,
+    intent: GeneratedDirectoryIntent,
+) -> None:
+    _write_generated_entry(transaction, INTENT_TEMP_NAME, _intent_bytes(intent))
+    os.fsync(transaction.descriptor)
+    _transaction_checkpoint("intent-temporary")
+    _atomic_noreplace(
+        transaction.descriptor,
+        INTENT_TEMP_NAME,
+        transaction.descriptor,
+        INTENT_NAME,
+    )
+    os.fsync(transaction.descriptor)
+
+
+def _rendered_entries_are_authorized_prefixes(
+    entries: tuple[GeneratedDirectoryEntry, ...],
+    rendered: Mapping[str, bytes],
+) -> bool:
+    return all(
+        entry.mode == PRIVATE_FILE_MODE
+        and rendered[entry.name].startswith(entry.raw)
+        and entry.sha256 == hashlib.sha256(entry.raw).hexdigest()
+        for entry in entries
+    )
+
+
+def _unlink_exact_entry(
+    parent_fd: int,
+    entry: GeneratedDirectoryEntry,
+) -> None:
+    current = os.stat(entry.name, dir_fd=parent_fd, follow_symlinks=False)
+    current_identity = (
+        current.st_dev,
+        current.st_ino,
+        current.st_uid,
+        stat.S_IMODE(current.st_mode),
+        current.st_nlink,
+        current.st_size,
+        current.st_mtime_ns,
+        current.st_ctime_ns,
+    )
+    expected_identity = (
+        entry.device,
+        entry.inode,
+        entry.owner,
+        entry.mode,
+        entry.links,
+        entry.size,
+        entry.modified_ns,
+        entry.changed_ns,
+    )
+    if current_identity != expected_identity:
+        raise GeneratorError("transaction entry changed before cleanup")
+    os.unlink(entry.name, dir_fd=parent_fd)
+
+
+def _remove_empty_directory(
+    parent_fd: int,
+    name: str,
+    handle: GeneratedDirectoryHandle,
+) -> None:
+    if os.listdir(handle.descriptor):
+        raise GeneratorError("transaction directory is not empty")
+    if not _directory_is_named(parent_fd, name, handle):
+        raise GeneratorError("transaction directory changed before cleanup")
+    os.rmdir(name, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+def _remove_receipted_directory(
+    parent_fd: int,
+    name: str,
+    handle: GeneratedDirectoryHandle,
+    receipt: GeneratedDirectoryReceipt,
+) -> None:
+    expected_names = tuple(entry.name for entry in receipt.entries)
+    private = receipt.mode == PRIVATE_DIRECTORY_MODE and all(
+        entry.mode == PRIVATE_FILE_MODE for entry in receipt.entries
+    )
+    entries = _snapshot_generated_directory(
+        handle,
+        expected_names,
+        require_exact=False,
+        private=private,
+    )
+    if not _receipt_matches(handle, entries, receipt, allow_subset=True):
+        raise GeneratorError("transaction cleanup receipt no longer matches")
+    for entry in entries:
+        _unlink_exact_entry(handle.descriptor, entry)
+        os.fsync(handle.descriptor)
+        _transaction_checkpoint("cleanup-entry")
+    _remove_empty_directory(parent_fd, name, handle)
+
+
+def _transaction_name(output_name: str) -> str:
+    return f".{output_name}.transaction"
+
+
+def _open_transaction(parent: OutputParent, output_name: str) -> GeneratedDirectoryHandle | None:
+    return _open_optional_generated_directory(
+        parent.descriptor,
+        _transaction_name(output_name),
+        private=True,
+    )
+
+
+def _open_output(
+    parent: OutputParent,
+    output_name: str,
+) -> GeneratedDirectoryHandle | None:
+    return _open_optional_generated_directory(parent.descriptor, output_name, private=False)
+
+
+def _public_receipt(
+    parent: OutputParent,
+    output_name: str,
+    expected_names: tuple[str, ...],
+) -> tuple[GeneratedDirectoryHandle, GeneratedDirectoryReceipt] | None:
+    handle = _open_output(parent, output_name)
+    if handle is None:
+        return None
+    try:
+        entries = _snapshot_generated_directory(
+            handle,
+            expected_names,
+            require_exact=True,
+            private=False,
+        )
+        if not _directory_is_named(parent.descriptor, output_name, handle):
+            raise GeneratorError("published generated directory changed during scan")
+        return handle, _receipt_for(handle, entries)
+    except Exception:
+        os.close(handle.descriptor)
+        raise
+
+
+def _remove_unjournaled_transaction(
+    parent: OutputParent,
+    transaction: GeneratedDirectoryHandle,
+    output_name: str,
+    expected_names: tuple[str, ...],
+    rendered: Mapping[str, bytes],
+) -> None:
+    root_names = tuple(sorted(os.listdir(transaction.descriptor)))
+    if not set(root_names) <= {INTENT_TEMP_NAME, STAGE_NAME}:
+        raise GeneratorError("unjournaled transaction inventory is ambiguous")
+    stage = _open_optional_generated_directory(
+        transaction.descriptor,
+        STAGE_NAME,
+        private=True,
+    )
+    entries: tuple[GeneratedDirectoryEntry, ...] = ()
+    temporary: GeneratedDirectoryEntry | None = None
+    try:
+        if stage is not None:
+            entries = _snapshot_generated_directory(
+                stage,
+                expected_names,
+                require_exact=INTENT_TEMP_NAME in root_names,
+                private=True,
+            )
+            if not _rendered_entries_are_authorized_prefixes(entries, rendered):
+                raise GeneratorError("unjournaled transaction candidate is ambiguous")
+        if INTENT_TEMP_NAME in root_names:
+            if stage is None:
+                raise GeneratorError("unjournaled intent has no exact candidate")
+            temporary = _read_generated_entry(
+                transaction,
+                INTENT_TEMP_NAME,
+                private=True,
+            )
+            baseline_pair = _public_receipt(parent, output_name, expected_names)
+            try:
+                baseline_receipt = None if baseline_pair is None else baseline_pair[1]
+                expected_intent = _intent_bytes(
+                    GeneratedDirectoryIntent(
+                        output_name=output_name,
+                        expected_names=expected_names,
+                        baseline=baseline_receipt,
+                        candidate=_receipt_for(stage, entries),
+                    )
+                )
+                if not expected_intent.startswith(temporary.raw):
+                    raise GeneratorError("unjournaled intent prefix is ambiguous")
+            finally:
+                if baseline_pair is not None:
+                    os.close(baseline_pair[0].descriptor)
+        if stage is not None:
+            for entry in entries:
+                _unlink_exact_entry(stage.descriptor, entry)
+            os.fsync(stage.descriptor)
+            _remove_empty_directory(transaction.descriptor, STAGE_NAME, stage)
+        if temporary is not None:
+            _unlink_exact_entry(transaction.descriptor, temporary)
+            os.fsync(transaction.descriptor)
+        _remove_empty_directory(
+            parent.descriptor,
+            transaction.name,
+            transaction,
+        )
+    finally:
+        if stage is not None:
+            os.close(stage.descriptor)
+
+
+def _read_transaction_intent(
+    transaction: GeneratedDirectoryHandle,
+) -> tuple[GeneratedDirectoryIntent | None, GeneratedDirectoryEntry | None]:
+    names = tuple(sorted(os.listdir(transaction.descriptor)))
+    if INTENT_NAME not in names:
+        return None, None
+    entry = _read_generated_entry(transaction, INTENT_NAME, private=True)
+    return _intent_from_bytes(entry.raw), entry
+
+
+def _reconcile_transaction_locked(
+    parent: OutputParent,
+    output_name: str,
+    expected_names: tuple[str, ...],
+    rendered: Mapping[str, bytes],
+) -> str:
+    transaction = _open_transaction(parent, output_name)
+    if transaction is None:
+        return "none"
+    output: GeneratedDirectoryHandle | None = None
+    stage: GeneratedDirectoryHandle | None = None
+    try:
+        intent, intent_entry = _read_transaction_intent(transaction)
+        if intent is None:
+            _remove_unjournaled_transaction(
+                parent,
+                transaction,
+                output_name,
+                expected_names,
+                rendered,
+            )
+            return "pre"
+        if intent.output_name != output_name or intent.expected_names != expected_names:
+            raise GeneratorError("transaction intent targets a different output")
+        root_names = tuple(sorted(os.listdir(transaction.descriptor)))
+        if not set(root_names) <= {INTENT_NAME, STAGE_NAME}:
+            raise GeneratorError("journaled transaction inventory is ambiguous")
+        output = _open_output(parent, output_name)
+        output_entries: tuple[GeneratedDirectoryEntry, ...] | None = None
+        if output is not None:
+            output_entries = _snapshot_generated_directory(
+                output,
+                expected_names,
+                require_exact=True,
+                private=False,
+            )
+            if not _directory_is_named(parent.descriptor, output_name, output):
+                raise GeneratorError("transaction output changed during recovery")
+        stage = _open_optional_generated_directory(
+            transaction.descriptor,
+            STAGE_NAME,
+            private=False,
+        )
+        stage_entries: tuple[GeneratedDirectoryEntry, ...] | None = None
+        if stage is not None:
+            expected_stage_names = tuple(
+                entry.name
+                for entry in (
+                    intent.candidate.entries
+                    if intent.baseline is None
+                    else (intent.candidate.entries + intent.baseline.entries)
+                )
+            )
+            expected_stage_names = tuple(sorted(set(expected_stage_names)))
+            stage_entries = _snapshot_generated_directory(
+                stage,
+                expected_stage_names,
+                require_exact=False,
+                private=False,
+            )
+
+        baseline_output = (intent.baseline is None and output is None) or (
+            intent.baseline is not None
+            and output is not None
+            and output_entries is not None
+            and _receipt_matches(output, output_entries, intent.baseline, allow_subset=False)
+        )
+        candidate_stage = stage is None or (
+            stage_entries is not None
+            and _receipt_matches(stage, stage_entries, intent.candidate, allow_subset=True)
+        )
+        candidate_output = (
+            output is not None
+            and output_entries is not None
+            and _receipt_matches(output, output_entries, intent.candidate, allow_subset=False)
+        )
+        baseline_stage = stage is None or (
+            intent.baseline is not None
+            and stage is not None
+            and stage_entries is not None
+            and _receipt_matches(stage, stage_entries, intent.baseline, allow_subset=True)
+        )
+        cleanup_receipt: GeneratedDirectoryReceipt | None
+        if baseline_output and candidate_stage:
+            state = "pre"
+            cleanup_receipt = intent.candidate
+        elif candidate_output and baseline_stage:
+            state = "post"
+            cleanup_receipt = intent.baseline
+        else:
+            raise GeneratorError("transaction state is ambiguous")
+
+        if stage is not None:
+            if cleanup_receipt is None:
+                raise GeneratorError("transaction stage has no cleanup authority")
+            _remove_receipted_directory(
+                transaction.descriptor,
+                STAGE_NAME,
+                stage,
+                cleanup_receipt,
+            )
+            os.close(stage.descriptor)
+            stage = None
+        if intent_entry is None:
+            raise GeneratorError("transaction intent identity is unavailable")
+        _unlink_exact_entry(transaction.descriptor, intent_entry)
+        os.fsync(transaction.descriptor)
+        _remove_empty_directory(
+            parent.descriptor,
+            _transaction_name(output_name),
+            transaction,
+        )
+        return state
+    finally:
+        if stage is not None:
+            os.close(stage.descriptor)
+        if output is not None:
+            os.close(output.descriptor)
+        os.close(transaction.descriptor)
+
+
+def _write_generated_directory(
+    output_directory: Path,
+    expected_names: tuple[str, ...],
+    rendered: Mapping[str, bytes],
+) -> None:
+    _require_directory_transaction_platform()
+    output = lexical_path(output_directory)
+    parent = _bind_output_parent(output, create_missing=True)
+    baseline_handle: GeneratedDirectoryHandle | None = None
+    transaction: GeneratedDirectoryHandle | None = None
+    stage: GeneratedDirectoryHandle | None = None
+    candidate_receipt: GeneratedDirectoryReceipt | None = None
+    try:
+        _lock_output_parent(parent, exclusive=True)
+        _reconcile_transaction_locked(parent, output.name, expected_names, rendered)
+        baseline_pair = _public_receipt(parent, output.name, expected_names)
+        baseline_receipt: GeneratedDirectoryReceipt | None = None
+        if baseline_pair is not None:
+            baseline_handle, baseline_receipt = baseline_pair
+        transaction = _create_generated_directory(
+            parent.descriptor,
+            _transaction_name(output.name),
+        )
+        transaction.name = _transaction_name(output.name)
+        _transaction_checkpoint("transaction-created")
+        stage = _create_generated_directory(transaction.descriptor, STAGE_NAME)
+        _transaction_checkpoint("stage-created")
+        _populate_generated_directory(stage, rendered)
+        stage_entries = _snapshot_generated_directory(
+            stage,
+            expected_names,
+            require_exact=True,
+            private=True,
+        )
+        if any(entry.raw != rendered[entry.name] for entry in stage_entries):
+            raise GeneratorError("private generated directory verification failed")
+        candidate_receipt = _receipt_for(stage, stage_entries)
+        intent = GeneratedDirectoryIntent(
+            output_name=output.name,
+            expected_names=expected_names,
+            baseline=baseline_receipt,
+            candidate=candidate_receipt,
+        )
+        _write_transaction_intent(transaction, intent)
+        os.fsync(transaction.descriptor)
+        os.fsync(parent.descriptor)
+        _transaction_checkpoint("prepared")
+        current_baseline = _public_receipt(parent, output.name, expected_names)
+        try:
+            if baseline_receipt is None:
+                if current_baseline is not None:
+                    raise GeneratorError("absent output appeared before publication")
+            else:
+                if current_baseline is None or not _receipt_matches(
+                    current_baseline[0],
+                    _snapshot_generated_directory(
+                        current_baseline[0],
+                        expected_names,
+                        require_exact=True,
+                        private=False,
+                    ),
+                    baseline_receipt,
+                    allow_subset=False,
+                ):
+                    raise GeneratorError("published baseline changed before publication")
+        finally:
+            if current_baseline is not None:
+                os.close(current_baseline[0].descriptor)
+        if not _directory_is_named(transaction.descriptor, STAGE_NAME, stage):
+            raise GeneratorError("candidate stage changed before publication")
+        _require_output_parent_current(parent)
+        if baseline_receipt is None:
+            _atomic_noreplace(
+                transaction.descriptor,
+                STAGE_NAME,
+                parent.descriptor,
+                output.name,
+            )
+        else:
+            _atomic_exchange(
+                transaction.descriptor,
+                STAGE_NAME,
+                parent.descriptor,
+                output.name,
+            )
+        _transaction_checkpoint("committed")
+        os.fsync(transaction.descriptor)
+        os.fsync(parent.descriptor)
+        if (
+            _reconcile_transaction_locked(
+                parent,
+                output.name,
+                expected_names,
+                rendered,
+            )
+            != "post"
+        ):
+            raise GeneratorError("committed transaction did not reconcile as POST")
+        _transaction_checkpoint("cleanup-complete")
+        _require_output_parent_current(parent)
+        final = _public_receipt(parent, output.name, expected_names)
+        if final is None or candidate_receipt is None:
+            raise GeneratorError("published generated directory is missing")
+        try:
+            final_entries = _snapshot_generated_directory(
+                final[0],
+                expected_names,
+                require_exact=True,
+                private=False,
+            )
+            if not _receipt_matches(
+                final[0],
+                final_entries,
+                candidate_receipt,
+                allow_subset=False,
+            ):
+                raise GeneratorError("published generated directory changed after commit")
+            _require_output_parent_current(parent)
+        finally:
+            os.close(final[0].descriptor)
+    except BaseException as publication_error:
+        try:
+            _reconcile_transaction_locked(parent, output.name, expected_names, rendered)
+        except BaseException as recovery_error:
+            publication_error.add_note(f"transaction recovery retained state: {recovery_error}")
+        raise
+    finally:
+        for handle in (stage, transaction, baseline_handle):
+            if handle is not None:
+                with suppress(OSError):
+                    os.close(handle.descriptor)
+        _close_output_parent(parent)
+
+
+def open_generated_directory_snapshot(
+    output_directory: Path,
+    expected_names: Sequence[str],
+) -> GeneratedDirectorySnapshot:
+    _require_directory_transaction_platform()
+    names = _closed_generated_names(expected_names)
+    output = lexical_path(output_directory)
+    parent = _bind_output_parent(output, create_missing=False)
+    directory: GeneratedDirectoryHandle | None = None
+    try:
+        _lock_output_parent(parent, exclusive=False)
+        try:
+            os.stat(
+                _transaction_name(output.name),
+                dir_fd=parent.descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise GeneratorError("generated directory recovery is pending")
+        directory = _open_generated_directory(parent.descriptor, output.name, private=False)
+        entries = _snapshot_generated_directory(
+            directory,
+            names,
+            require_exact=True,
+            private=False,
+        )
+        if not _directory_is_named(parent.descriptor, output.name, directory):
+            raise GeneratorError("published generated directory changed during snapshot")
+        _require_output_parent_current(parent)
+        return GeneratedDirectorySnapshot(parent, directory, entries)
+    except BaseException:
+        if directory is not None:
+            os.close(directory.descriptor)
+        _close_output_parent(parent)
+        raise
+
+
+def _check_generated_directory(
+    output_directory: Path,
+    expected_names: tuple[str, ...],
+    rendered: Mapping[str, bytes],
+) -> bool:
+    with open_generated_directory_snapshot(output_directory, expected_names) as snapshot:
+        return snapshot.names == expected_names and all(
+            snapshot.read_bytes(name) == rendered[name] for name in expected_names
+        )
+
+
+def run_directory_generator(
+    *,
+    output_directory: Path,
+    expected_names: Sequence[str],
+    renderer: DirectoryRenderer,
+    argv: Sequence[str] | None,
+) -> int:
+    try:
+        names = _closed_generated_names(expected_names)
+        rendered = _render_directory_twice(renderer, names)
+        mode = _parse_mode(argv)
+        if mode == "check":
+            return 0 if _check_generated_directory(output_directory, names, rendered) else 1
+        _write_generated_directory(output_directory, names, rendered)
+        return 0
+    except Exception:
+        return 1
+```
+
+- [ ] **Step 4: Prove the shared helper green, including compatibility**
+
+Run: `uv run pytest tests/contract/test_contract_generators.py -q`
+
+Expected on either supported host: exactly `86 passed, 1 skipped`. The platform-native node for the current host passes and only the other host's node skips, proving Task 4's 33 original nodes remain green beside the 54-node atomic transaction/snapshot contract.
+
+- [ ] **Step 5: Add the complete fixture/privacy contract test**
 
 ```python
 # tests/contract/test_v1_fixtures.py
+from __future__ import annotations
+
 import json
+import os
+import subprocess
+import sys
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from types import ModuleType
+from typing import cast
 
 import pytest
-
-from scripts.contract_fixture_builders import BUILDERS, FixtureFactory, semantic_specs
 from tuntun_contracts import (
-    actions, audit, budget, events, identity, memory, policy, ports, provider, reachy, speech,
+    actions,
+    audit,
+    budget,
+    events,
+    identity,
+    memory,
+    policy,
+    ports,
+    provider,
+    reachy,
+    speech,
 )
 from tuntun_contracts.base import (
-    Commitment, ContractModel, canonical_bytes, parse_contract_json,
+    Commitment,
+    ContractModel,
+    ContractParseError,
+    canonical_bytes,
+    parse_contract_json,
     registered_contract_models,
 )
-from tuntun_contracts.events import EventEnvelope
 
-FIXTURE_ROOT = Path("packages/contracts/fixtures/v1")
-MODULES = {
-    "actions": (actions,), "events": (events, ports), "speech": (speech,),
-    "identity": (identity,), "memory": (memory,), "policy": (policy,),
-    "provider": (provider,), "budget": (budget,), "audit": (audit,),
+from scripts import contract_fixture_builders, generate_contract_fixtures
+from scripts.contract_fixture_builders import (
+    BUILDERS,
+    REQUIRED_SEMANTIC_MODELS,
+    SCHEMA_ONLY_MODELS,
+    FixtureFactory,
+    fixture_registry,
+    semantic_specs,
+)
+from scripts.contract_generator_common import open_generated_directory_snapshot
+
+ROOT = Path(__file__).resolve().parents[2]
+FIXTURE_ROOT = ROOT / "packages/contracts/fixtures/v1"
+EXPECTED_GROUP_MODULES: Mapping[str, tuple[ModuleType, ...]] = {
+    "actions": (actions,),
+    "audit": (audit,),
+    "budget": (budget,),
+    "events": (events, ports),
+    "identity": (identity,),
+    "memory": (memory,),
+    "policy": (policy,),
+    "provider": (provider,),
     "reachy": (reachy,),
+    "speech": (speech,),
 }
+EXPECTED_GROUP_COUNTS = {
+    "actions": 23,
+    "audit": 2,
+    "budget": 11,
+    "events": 7,
+    "identity": 5,
+    "memory": 14,
+    "policy": 10,
+    "provider": 9,
+    "reachy": 7,
+    "speech": 5,
+}
+EXPECTED_SEMANTIC_MODELS = frozenset(
+    {
+        Commitment,
+        events.EventEnvelope,
+        events.SignedEventEnvelope,
+        speech.AuthorizedTranscriptionRequest,
+        speech.AuthorizedSynthesisRequest,
+        identity.IdentityEvidence,
+        identity.IdentityRequest,
+        identity.IdentityDecision,
+        memory.EpisodicContent,
+        memory.MemoryProposalDraft,
+        memory.MemoryProposal,
+        memory.MemoryRecord,
+        memory.MemoryQuery,
+        memory.ApprovedMemory,
+        memory.DecideMemoryProposal,
+        actions.TimerCreateActionDraft,
+        actions.TimerTargetActionDraft,
+        actions.SafetyActionDraft,
+        actions.PrivacyReductionActionDraft,
+        actions.ComponentStatusActionDraft,
+        actions.DiagnosticActionDraft,
+        actions.MemoryActionDraft,
+        actions.ProfileActionDraft,
+        actions.ConsentActionDraft,
+        actions.IdentityActionDraft,
+        actions.ProviderActionDraft,
+        actions.CredentialActionDraft,
+        actions.AuditActionDraft,
+        actions.BackupActionDraft,
+        actions.SearchActionDraft,
+        actions.SecurityFindingActionDraft,
+        actions.ReleaseP1R0ActionDraft,
+        actions.LatencyDeviationActionDraft,
+        actions.FamilyStageReviewActionDraft,
+        actions.ValidatedActionProposal,
+        policy.PolicyRequest,
+        policy.PolicyDecision,
+        policy.AuthenticationRequest,
+        policy.AuthenticationChallenge,
+        policy.AuthGrant,
+        policy.AuthContext,
+        policy.AdminSessionPrincipal,
+        policy.TimerIntent,
+        provider.SanitizedProviderRequest,
+        provider.RedactionReceipt,
+        budget.BudgetReservationRequest,
+        budget.BudgetReservation,
+        budget.ProviderUsageReceiptV1,
+        budget.BudgetReconciliationRequest,
+        reachy.ReachyCommand,
+        reachy.CameraWindowGrant,
+    }
+)
+EXPECTED_PRIVACY_HEADINGS = (
+    "## Assets",
+    "## Actors",
+    "## Trust boundaries",
+    "## Foundation mitigations",
+    "## Out of scope",
+)
+EXPECTED_INVENTORY_ROWS = {
+    "Configuration",
+    "Secrets",
+    "Event receipts",
+    "Audit receipts",
+    "Provider price and budget metadata",
+    "Model metadata",
+    "Synthetic contract fixtures",
+    "Raw audio",
+    "Conversation transcripts",
+    "Camera frames",
+}
+
+
+def _mapping(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    assert all(isinstance(key, str) for key in value)
+    return cast(dict[str, object], value)
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise AssertionError(f"duplicate fixture JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _fixture_documents(
+    *names: str,
+) -> dict[str, tuple[bytes, dict[str, object]]]:
+    result: dict[str, tuple[bytes, dict[str, object]]] = {}
+    with open_generated_directory_snapshot(
+        FIXTURE_ROOT,
+        generate_contract_fixtures.FIXTURE_FILENAMES,
+    ) as snapshot:
+        for name in names:
+            raw = snapshot.read_bytes(f"{name}.json")
+            assert 1 <= len(raw) <= 4 * 1024 * 1024
+            parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_pairs)
+            result[name] = (raw, _mapping(parsed))
+    return result
+
+
+def _fixture_document(name: str) -> tuple[bytes, dict[str, object]]:
+    return _fixture_documents(name)[name]
+
+
+def _walk_schema_nodes(value: object) -> Iterator[dict[str, object]]:
+    node = _mapping(value)
+    yield node
+    for mapping_name in ("$defs", "properties"):
+        children = node.get(mapping_name)
+        if children is not None:
+            for child in _mapping(children).values():
+                yield from _walk_schema_nodes(child)
+    items = node.get("items")
+    if items is not None:
+        yield from _walk_schema_nodes(items)
+    for union_name in ("anyOf", "oneOf"):
+        alternatives = node.get(union_name)
+        if alternatives is not None:
+            assert isinstance(alternatives, list)
+            for alternative in alternatives:
+                yield from _walk_schema_nodes(alternative)
+
+
+def _independent_fixture_registry() -> dict[str, dict[str, type[ContractModel]]]:
+    result: dict[str, dict[str, type[ContractModel]]] = {}
+    for group, owning_modules in EXPECTED_GROUP_MODULES.items():
+        models: dict[str, type[ContractModel]] = {}
+        for module in owning_modules:
+            for name, value in vars(module).items():
+                if (
+                    isinstance(value, type)
+                    and issubclass(value, ContractModel)
+                    and value is not ContractModel
+                    and value.__module__ == module.__name__
+                ):
+                    models[name] = value
+        result[group] = dict(sorted(models.items()))
+    result["events"]["Commitment"] = Commitment
+    result["events"] = dict(sorted(result["events"].items()))
+    return dict(sorted(result.items()))
+
+
+def test_fixture_registry_matches_the_independent_93_model_oracle() -> None:
+    preview = FixtureFactory.preview()
+    assert preview.uuid_json() == "00000000-0000-0000-0000-000000000001"
+    assert preview.time_json() == "2026-08-27T00:00:00+00:00"
+    expected = _independent_fixture_registry()
+    expected_models = {model_type for models in expected.values() for model_type in models.values()}
+    assert {name: len(models) for name, models in expected.items()} == EXPECTED_GROUP_COUNTS
+    assert len(expected_models) == 93
+    assert expected_models == set(registered_contract_models())
+    assert fixture_registry() == expected
+    assert set(BUILDERS) == expected_models
+
+
+def test_semantic_partition_matches_an_independent_exact_oracle() -> None:
+    assert len(EXPECTED_SEMANTIC_MODELS) == 51
+    assert len(SCHEMA_ONLY_MODELS) == 42
+    assert set(semantic_specs()) == set(EXPECTED_SEMANTIC_MODELS)
+    assert set(REQUIRED_SEMANTIC_MODELS) == set(EXPECTED_SEMANTIC_MODELS)
+    assert not (set(REQUIRED_SEMANTIC_MODELS) & set(SCHEMA_ONLY_MODELS))
+    assert set(REQUIRED_SEMANTIC_MODELS) | set(SCHEMA_ONLY_MODELS) == set(BUILDERS)
+
+
+def test_repaired_task5_correlations_are_explicit_and_valid() -> None:
+    specs = semantic_specs()
+    expected_fields: dict[type[ContractModel], frozenset[str]] = {
+        speech.AuthorizedTranscriptionRequest: frozenset(
+            {"request_id", "turn_id", "audio_commitment", "language_hints", "route"}
+        ),
+        speech.AuthorizedSynthesisRequest: frozenset(
+            {
+                "request_id",
+                "turn_id",
+                "text_commitment",
+                "segment_index",
+                "segment_count",
+                "route",
+            }
+        ),
+        identity.IdentityEvidence: frozenset({"observed_at", "expires_at"}),
+        identity.IdentityDecision: frozenset({"status", "subject_id"}),
+        policy.PolicyDecision: frozenset({"effect", "required_assurance"}),
+        policy.AuthenticationRequest: frozenset({"subject_id", "binding"}),
+        policy.AuthenticationChallenge: frozenset({"subject_id", "binding"}),
+        policy.AuthGrant: frozenset(
+            {
+                "subject_id",
+                "binding",
+                "assurance",
+                "assurance_source",
+                "issued_at",
+                "expires_at",
+            }
+        ),
+        policy.AuthContext: frozenset(
+            {"grant_id", "subject_id", "binding", "assurance", "assurance_source"}
+        ),
+        policy.AdminSessionPrincipal: frozenset(
+            {"authenticated_at", "idle_expires_at", "absolute_expires_at"}
+        ),
+        policy.TimerIntent: frozenset({"operation", "duration_seconds", "label_commitment"}),
+        provider.SanitizedProviderRequest: frozenset({"request_id", "provider", "model", "route"}),
+        actions.ValidatedActionProposal: frozenset({"draft", "binding"}),
+        budget.ProviderUsageReceiptV1: frozenset({"category", "billable_usage"}),
+        reachy.CameraWindowGrant: frozenset(
+            {
+                "subject_id",
+                "action_name",
+                "purpose",
+                "max_frames",
+                "max_frame_bytes",
+                "max_total_bytes",
+                "max_frames_per_second",
+                "issued_at",
+                "expires_at",
+            }
+        ),
+        memory.MemoryProposalDraft: frozenset(
+            {
+                "operation",
+                "content",
+                "audience",
+                "target_memory_id",
+                "expected_version",
+                "source_receipt_ids",
+            }
+        ),
+        memory.MemoryRecord: frozenset({"version", "content", "audience"}),
+        memory.ApprovedMemory: frozenset({"content", "audience", "source_receipt_ids"}),
+        memory.DecideMemoryProposal: frozenset({"decision", "edited_content"}),
+    }
+    assert {model_type: specs[model_type].fields for model_type in expected_fields} == (
+        expected_fields
+    )
+
+    factory = FixtureFactory.preview()
+    action_types: tuple[type[ContractModel], ...] = (
+        actions.TimerCreateActionDraft,
+        actions.TimerTargetActionDraft,
+        actions.SafetyActionDraft,
+        actions.PrivacyReductionActionDraft,
+        actions.ComponentStatusActionDraft,
+        actions.DiagnosticActionDraft,
+        actions.MemoryActionDraft,
+        actions.ProfileActionDraft,
+        actions.ConsentActionDraft,
+        actions.IdentityActionDraft,
+        actions.ProviderActionDraft,
+        actions.CredentialActionDraft,
+        actions.AuditActionDraft,
+        actions.BackupActionDraft,
+        actions.SearchActionDraft,
+        actions.SecurityFindingActionDraft,
+        actions.ReleaseP1R0ActionDraft,
+        actions.LatencyDeviationActionDraft,
+        actions.FamilyStageReviewActionDraft,
+    )
+    for model_type in action_types:
+        payload = factory.build(model_type).model_dump(mode="json")
+        action_name = payload["action_name"]
+        resource_type = payload["resource_type"]
+        assert isinstance(action_name, str) and isinstance(resource_type, str)
+        assert actions.ACTION_RESOURCE_TYPE_BY_NAME[action_name] == resource_type
+
+    memory_action = factory.build(actions.MemoryActionDraft)
+    profile_action = factory.build(actions.ProfileActionDraft)
+    consent_action = factory.build(actions.ConsentActionDraft)
+    identity_action = factory.build(actions.IdentityActionDraft)
+    credential_action = factory.build(actions.CredentialActionDraft)
+    backup_action = factory.build(actions.BackupActionDraft)
+    search_action = factory.build(actions.SearchActionDraft)
+    latency_action = factory.build(actions.LatencyDeviationActionDraft)
+    assert memory_action.memory_proposal is not None
+    assert memory_action.resource_id == memory_action.memory_proposal.proposal_id
+    assert profile_action.resource_id == profile_action.subject_id
+    assert consent_action.resource_id == consent_action.subject_id
+    assert identity_action.resource_id == identity_action.subject_id
+    assert credential_action.resource_id == credential_action.credential_id
+    assert backup_action.resource_id == backup_action.backup_id
+    assert search_action.resource_id == search_action.subject_id
+    assert latency_action.resource_id == latency_action.run_id
+
+    validated = factory.build(actions.ValidatedActionProposal)
+    assert validated.binding.proposal_id == validated.draft.proposal_id
+    assert validated.binding.idempotency_key == validated.draft.idempotency_key
+    assert validated.binding.action_name == validated.draft.action_name
+    assert validated.binding.resource_type == validated.draft.resource_type
+    assert validated.binding.resource_id == validated.draft.resource_id
+    assert validated.binding.parameter_commitment == validated.draft.parameters_commitment
+    stt = factory.build(speech.AuthorizedTranscriptionRequest)
+    tts = factory.build(speech.AuthorizedSynthesisRequest)
+    request = factory.build(provider.SanitizedProviderRequest)
+    assert (stt.request_id, stt.turn_id, stt.audio_commitment) == (
+        stt.route.request_id,
+        stt.route.turn_id,
+        stt.route.request_commitment,
+    )
+    assert stt.route.purpose == "cloud_stt"
+    assert (tts.request_id, tts.turn_id, tts.text_commitment) == (
+        tts.route.request_id,
+        tts.route.turn_id,
+        tts.route.request_commitment,
+    )
+    assert tts.route.purpose == "cloud_tts" and tts.segment_index < tts.segment_count
+    assert (request.request_id, request.provider.value, request.model) == (
+        request.route.request_id,
+        request.route.provider,
+        request.route.model,
+    )
+    assert request.route.purpose == "cloud_reasoning"
+
+    evidence = factory.build(identity.IdentityEvidence)
+    decision = factory.build(identity.IdentityDecision)
+    policy_decision = factory.build(policy.PolicyDecision)
+    auth_request = factory.build(policy.AuthenticationRequest)
+    challenge = factory.build(policy.AuthenticationChallenge)
+    grant = factory.build(policy.AuthGrant)
+    context = factory.build(policy.AuthContext)
+    admin = factory.build(policy.AdminSessionPrincipal)
+    timer = factory.build(policy.TimerIntent)
+    assert evidence.observed_at <= evidence.expires_at
+    assert (decision.status.value == "verified") == (decision.subject_id is not None)
+    assert policy_decision.effect.value == "allow"
+    assert policy_decision.required_assurance is None
+    assert auth_request.subject_id == auth_request.binding.subject_id
+    assert challenge.subject_id == challenge.binding.subject_id
+    assert grant.subject_id == grant.binding.subject_id and grant.issued_at < grant.expires_at
+    assert context.subject_id == context.binding.subject_id
+    assert context.grant_id is None and context.assurance_source == "guest"
+    assert admin.authenticated_at < admin.idle_expires_at <= admin.absolute_expires_at
+    assert timer.operation == "create"
+    assert timer.duration_seconds is not None and timer.label_commitment is not None
+
+    usage = factory.build(budget.ProviderUsageReceiptV1)
+    camera = factory.build(reachy.CameraWindowGrant)
+    proposal_draft = factory.build(memory.MemoryProposalDraft)
+    memory_record = factory.build(memory.MemoryRecord)
+    approved = factory.build(memory.ApprovedMemory)
+    rejected = factory.build(memory.DecideMemoryProposal)
+    assert budget.usage_total(usage.billable_usage) > 0
+    assert (camera.action_name, camera.purpose) == (
+        "identity.enroll",
+        "explicit_enrollment",
+    )
+    assert memory_record.version == 1
+    assert len(proposal_draft.source_receipt_ids) == len(set(proposal_draft.source_receipt_ids))
+    assert len(approved.source_receipt_ids) == len(set(approved.source_receipt_ids))
+    assert rejected.decision == "reject" and rejected.edited_content is None
+
+
+def test_semantic_misclassification_fails_before_output_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    semantic_model = next(iter(EXPECTED_SEMANTIC_MODELS))
+    monkeypatch.setattr(
+        contract_fixture_builders,
+        "SCHEMA_ONLY_MODELS",
+        frozenset({*SCHEMA_ONLY_MODELS, semantic_model}),
+    )
+    output = tmp_path / "fixtures"
+    monkeypatch.setattr(generate_contract_fixtures, "OUTPUT_DIRECTORY", output)
+    assert generate_contract_fixtures.main(["--write"]) == 1
+    assert not output.exists()
+
+
+def test_all_93_schemas_use_the_exact_supported_keyword_and_format_matrix() -> None:
+    keywords: set[str] = set()
+    schema_types: set[str] = set()
+    formats: set[str] = set()
+    patterns: set[str] = set()
+    for model_type in registered_contract_models():
+        schema = model_type.model_json_schema(
+            mode="validation",
+            ref_template="#/$defs/{model}",
+        )
+        contract_fixture_builders._validate_schema_vocabulary(
+            _mapping(schema),
+            label=model_type.__name__,
+        )
+        for node in _walk_schema_nodes(schema):
+            keywords.update(node)
+            if isinstance(value := node.get("type"), str):
+                schema_types.add(value)
+            if isinstance(value := node.get("format"), str):
+                formats.add(value)
+            if isinstance(value := node.get("pattern"), str):
+                patterns.add(value)
+    assert keywords == set(contract_fixture_builders.SUPPORTED_SCHEMA_KEYWORDS)
+    assert schema_types == set(contract_fixture_builders.SUPPORTED_SCHEMA_TYPES)
+    assert formats == set(contract_fixture_builders.SUPPORTED_SCHEMA_FORMATS)
+    assert patterns == set(contract_fixture_builders._PATTERN_VALUES)
+
+
+def test_schema_builder_executes_every_claimed_shape_and_format() -> None:
+    factory = FixtureFactory.preview()
+
+    def value(schema: dict[str, object], root: dict[str, object] | None = None) -> object:
+        actual_root = schema if root is None else root
+        contract_fixture_builders._validate_schema_vocabulary(actual_root, label="matrix")
+        return factory._schema_value(schema, actual_root)
+
+    assert value({"const": "fixed"}) == "fixed"
+    assert value({"enum": [None, "first"]}) == "first"
+    assert value({"anyOf": [{"type": "null"}, {"type": "string"}]}) == "x"
+    assert value({"oneOf": [{"type": "boolean"}, {"type": "integer"}]}) is False
+    assert value(
+        {
+            "additionalProperties": False,
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "type": "object",
+        }
+    ) == {"name": "x"}
+    assert value(
+        {
+            "items": {"type": "boolean"},
+            "maxItems": 2,
+            "minItems": 1,
+            "type": "array",
+        }
+    ) == [False]
+    assert value({"maxLength": 2, "minLength": 2, "type": "string"}) == "xx"
+    assert value({"default": "ignored", "title": "Text", "type": "string"}) == "x"
+    for pattern, witness in contract_fixture_builders._PATTERN_VALUES.items():
+        assert value({"pattern": pattern, "type": "string"}) == witness
+    assert value({"format": "uuid", "type": "string"}) == ("00000000-0000-0000-0000-000000000001")
+    assert value({"format": "date-time", "type": "string"}) == ("2026-08-27T00:00:00+00:00")
+    assert value({"format": "binary", "minLength": 2, "type": "string"}) == "xx"
+    assert value({"maximum": 3, "minimum": 2, "type": "integer"}) == 2
+    assert value({"type": "boolean"}) is False
+    assert value({"type": "null"}) is None
+    root: dict[str, object] = {
+        "$defs": {"Alias": {"type": "string"}},
+        "$ref": "#/$defs/Alias",
+    }
+    assert value(root, root) == "x"
+    discriminated: dict[str, object] = {
+        "$defs": {"Choice": {"const": "choice"}},
+        "discriminator": {
+            "mapping": {"choice": "#/$defs/Choice"},
+            "propertyName": "kind",
+        },
+        "oneOf": [{"$ref": "#/$defs/Choice"}],
+    }
+    assert value(discriminated, discriminated) == "choice"
+
+
+@pytest.mark.parametrize(
+    "schema",
+    (
+        {"examples": ["x"], "type": "string"},
+        {"type": "number"},
+        {"type": ["string", "null"]},
+        {"format": "email", "type": "string"},
+        {"pattern": "^unclaimed$", "type": "string"},
+        {"additionalProperties": True, "properties": {}, "type": "object"},
+        {"allOf": [{"type": "string"}]},
+        {"discriminator": {"propertyName": "kind"}, "oneOf": [{"type": "string"}]},
+        {"properties": {}, "required": ["missing"], "type": "object"},
+    ),
+)
+def test_schema_builder_rejects_every_unclaimed_shape(schema: dict[str, object]) -> None:
+    with pytest.raises(contract_fixture_builders.FixtureBuildError):
+        contract_fixture_builders._validate_schema_vocabulary(schema, label="rejected")
+
+
+@pytest.mark.parametrize("name", tuple(EXPECTED_GROUP_MODULES))
+def test_fixture_file_is_closed_complete_and_byte_deterministic(name: str) -> None:
+    raw, document = _fixture_document(name)
+    assert set(document) == {"canonical_examples", "examples", "schema_version"}
+    assert document["schema_version"] == "1.0"
+    examples = _mapping(document["examples"])
+    canonical_examples = _mapping(document["canonical_examples"])
+    models = _independent_fixture_registry()[name]
+    assert set(examples) == set(canonical_examples) == set(models)
+    assert raw == generate_contract_fixtures.render()[f"{name}.json"]
+    for model_name, model_type in models.items():
+        example_raw = json.dumps(
+            examples[model_name],
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        model = parse_contract_json(
+            model_type,
+            example_raw,
+            max_bytes=1_048_576,
+            require_canonical=False,
+        )
+        canonical = canonical_examples[model_name]
+        assert isinstance(canonical, str)
+        assert canonical_bytes(model).decode("utf-8") == canonical
+        assert (
+            canonical_bytes(
+                parse_contract_json(
+                    model_type,
+                    canonical.encode("utf-8"),
+                    max_bytes=1_048_576,
+                    require_canonical=True,
+                )
+            ).decode("utf-8")
+            == canonical
+        )
+
+
+def test_binary_speech_fixture_uses_strict_json_ingress() -> None:
+    _, document = _fixture_document("speech")
+    example = _mapping(_mapping(document["examples"])["SpeechChunk"])
+    model = parse_contract_json(
+        speech.SpeechChunk,
+        json.dumps(example, separators=(",", ":")).encode("utf-8"),
+        max_bytes=1_048_576,
+        require_canonical=False,
+    )
+    assert model.pcm == b""
+
+
+def test_memory_create_replace_delete_and_durable_audiences_are_closed() -> None:
+    documents = _fixture_documents("memory", "actions")
+    _, memory_document = documents["memory"]
+    _, actions_document = documents["actions"]
+    memory_examples = _mapping(memory_document["examples"])
+    action_examples = _mapping(actions_document["examples"])
+    delete = _mapping(memory_examples["MemoryProposalDraft"])
+    create = _mapping(_mapping(memory_examples["MemoryProposal"])["draft"])
+    replace = _mapping(_mapping(action_examples["MemoryActionDraft"])["memory_proposal"])
+    assert (create["operation"], create["audience"]) == (
+        "create",
+        "subject_private",
+    )
+    assert (replace["operation"], replace["audience"]) == (
+        "replace",
+        "subject_private",
+    )
+    assert (delete["operation"], delete["audience"]) == ("delete", None)
+    for model_name in ("MemoryRecord", "ApprovedMemory"):
+        assert _mapping(memory_examples[model_name])["audience"] == "subject_private"
+
+
+def test_missing_or_unknown_memory_audience_fails_validation() -> None:
+    _, document = _fixture_document("memory")
+    examples = _mapping(document["examples"])
+    approved = _mapping(examples["ApprovedMemory"])
+    missing = dict(approved)
+    missing.pop("audience")
+    unknown = {**approved, "audience": "unknown"}
+    for payload in (missing, unknown):
+        with pytest.raises(ContractParseError):
+            parse_contract_json(
+                memory.ApprovedMemory,
+                json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+                max_bytes=1_048_576,
+                require_canonical=False,
+            )
+
+
+def test_privacy_documents_have_the_exact_required_structure_and_closed_rows() -> None:
+    threat = (ROOT / "docs/privacy/threat-model.md").read_text(encoding="utf-8")
+    headings = tuple(line for line in threat.splitlines() if line.startswith("## "))
+    assert headings == EXPECTED_PRIVACY_HEADINGS
+    for required in (
+        "SQLCipher database and Keychain roots",
+        "owner, family subject, and Guest",
+        "Reachy ↔ LAN ↔ Mac",
+        "browser ↔ owner API",
+        "Mac ↔ provider",
+        "build ↔ dependency and model sources",
+        "Task 3 private-data and structural scans",
+        "manifest hashes and audit triggers",
+    ):
+        assert required in threat
+
+    inventory = (ROOT / "docs/privacy/data-flow-inventory.md").read_text(encoding="utf-8")
+    table_lines = [line for line in inventory.splitlines() if line.startswith("|")]
+    assert len(table_lines) == 12
+    assert table_lines[0] == (
+        "| Data class | Source | Purpose | Processor | Durable location | Egress | "
+        "Retention/deletion | Key |"
+    )
+    assert table_lines[1] == "| --- | --- | --- | --- | --- | --- | --- | --- |"
+    rows = {
+        columns[0]: columns
+        for line in table_lines[2:]
+        if len(columns := [item.strip() for item in line.strip("|").split("|")]) == 8
+    }
+    assert len(rows) == 10
+    assert set(rows) == EXPECTED_INVENTORY_ROWS
+    for name in ("Raw audio", "Conversation transcripts", "Camera frames"):
+        columns = rows[name]
+        assert columns[3] == "not processed by foundation"
+        assert columns[4] == "none"
+        assert columns[5] == "none"
+        assert columns[6] == "not retained"
+
+
+def test_fixture_generator_direct_and_package_check_modes_match() -> None:
+    commands = (
+        [sys.executable, "scripts/generate_contract_fixtures.py", "--check"],
+        [sys.executable, "-m", "scripts.generate_contract_fixtures", "--check"],
+    )
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            env={**os.environ, "PYTHONHASHSEED": "1"},
+            check=False,
+            capture_output=True,
+        )
+        assert completed.returncode == 0
+        assert completed.stdout == completed.stderr == b""
+```
+
+- [ ] **Step 6: Prove the fixture contract is red for its first missing owner**
+
+Run: `uv run pytest tests/contract/test_v1_fixtures.py -q -x`
+
+Expected: collection ERROR at `from scripts import contract_fixture_builders, generate_contract_fixtures` with `ImportError: cannot import name 'contract_fixture_builders' from 'scripts'`. Task 5 is complete, so all `tuntun_contracts` imports above it succeed. This is the truthful first RED.
+
+- [ ] **Step 7: Implement the exhaustive typed builders and dual-mode generator**
+
+```python
+# scripts/contract_fixture_builders.py
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from types import ModuleType
+from typing import Literal, TypeAlias, TypeVar, cast
+from uuid import UUID
+
+from tuntun_contracts import (
+    actions,
+    audit,
+    budget,
+    events,
+    identity,
+    memory,
+    policy,
+    ports,
+    provider,
+    reachy,
+    speech,
+)
+from tuntun_contracts.base import (
+    Commitment,
+    ContractModel,
+    JSONValue,
+    canonical_bytes,
+    parse_contract_json,
+    registered_contract_models,
+)
+
+ContractT = TypeVar("ContractT", bound=ContractModel)
+FixtureBuilder: TypeAlias = Callable[["FixtureFactory"], ContractModel]  # noqa: UP040
+SemanticValues: TypeAlias = Callable[["FixtureFactory"], dict[str, JSONValue]]  # noqa: UP040
+MAX_SCHEMA_ITEMS = 32
+SUPPORTED_SCHEMA_KEYWORDS = frozenset(
+    {
+        "$defs",
+        "$ref",
+        "additionalProperties",
+        "anyOf",
+        "const",
+        "default",
+        "discriminator",
+        "enum",
+        "format",
+        "items",
+        "maxItems",
+        "maxLength",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minimum",
+        "oneOf",
+        "pattern",
+        "properties",
+        "required",
+        "title",
+        "type",
+    }
+)
+SUPPORTED_SCHEMA_TYPES = frozenset({"array", "boolean", "integer", "null", "object", "string"})
+SUPPORTED_SCHEMA_FORMATS = frozenset({"binary", "date-time", "uuid"})
+
+FIXTURE_GROUP_MODULES: Mapping[str, tuple[ModuleType, ...]] = {
+    "actions": (actions,),
+    "audit": (audit,),
+    "budget": (budget,),
+    "events": (events, ports),
+    "identity": (identity,),
+    "memory": (memory,),
+    "policy": (policy,),
+    "provider": (provider,),
+    "reachy": (reachy,),
+    "speech": (speech,),
+}
+
+
+class FixtureBuildError(RuntimeError):
+    """A fixture cannot be proved deterministic, complete, and valid."""
+
+
+@dataclass(frozen=True)
+class SemanticSpec:
+    fields: frozenset[str]
+    values: SemanticValues
+
+
+def _model_json(model: ContractModel) -> dict[str, JSONValue]:
+    return cast(dict[str, JSONValue], model.model_dump(mode="json"))
 
 
 def fixture_registry() -> dict[str, dict[str, type[ContractModel]]]:
     result: dict[str, dict[str, type[ContractModel]]] = {}
-    for group, owning_modules in MODULES.items():
-        result[group] = {
-            name: value
-            for module in owning_modules
-            for name, value in vars(module).items()
-            if isinstance(value, type)
-            and issubclass(value, ContractModel)
-            and value is not ContractModel
-            and value.__module__ == module.__name__
-        }
+    seen: set[type[ContractModel]] = set()
+    for group, owning_modules in FIXTURE_GROUP_MODULES.items():
+        models: dict[str, type[ContractModel]] = {}
+        for module in owning_modules:
+            for name, value in vars(module).items():
+                if (
+                    isinstance(value, type)
+                    and issubclass(value, ContractModel)
+                    and value is not ContractModel
+                    and value.__module__ == module.__name__
+                ):
+                    model_type = value
+                    if name in models or model_type in seen:
+                        raise FixtureBuildError("duplicate fixture model ownership")
+                    models[name] = model_type
+                    seen.add(model_type)
+        result[group] = dict(sorted(models.items()))
+    if Commitment in seen or "Commitment" in result["events"]:
+        raise FixtureBuildError("Commitment fixture ownership is ambiguous")
     result["events"]["Commitment"] = Commitment
-    return result
+    result["events"] = dict(sorted(result["events"].items()))
+    seen.add(Commitment)
+    if seen != set(registered_contract_models()):
+        raise FixtureBuildError("fixture registry differs from the public registry")
+    return dict(sorted(result.items()))
 
 
-MODEL_REGISTRY = fixture_registry()
+_PATTERN_VALUES: Mapping[str, str] = {
+    r"^[0-9]{4}-(?:0[1-9]|1[0-2])$": "2026-08",
+    r"^[0-9a-f]{40,64}$": "0" * 40,
+    r"^[0-9a-f]{64}$": "0" * 64,
+    r"^[A-Za-z0-9+/]{43}=$": "A" * 43 + "=",
+    r"^[A-Za-z0-9+/]{86}==$": "A" * 86 + "==",
+    r"^[A-Za-z0-9_.:-]+$": "fixture-v1",
+    r"^[a-z][a-z0-9_-]{0,63}$": "fixture",
+    r"^[a-z][a-z0-9_]{0,63}$": "fixture",
+    r"^[a-z][a-z0-9_.-]{1,127}$": "fixture.item",
+    r"^ed25519:[a-z0-9][a-z0-9._-]{0,63}:v[1-9][0-9]{0,8}$": ("ed25519:fixture:v1"),
+}
 
 
-def test_fixture_registry_is_the_complete_public_contract_registry() -> None:
-    fixture_models = {
-        model for models in MODEL_REGISTRY.values() for model in models.values()
-    }
-    assert fixture_models == set(registered_contract_models()) | {Commitment}
-    assert set(BUILDERS) == fixture_models
-    assert set(semantic_specs(FixtureFactory.preview())) <= fixture_models
+def _schema_mapping(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise FixtureBuildError(f"{label} must be a string-keyed schema object")
+    return cast(dict[str, object], value)
 
 
-@pytest.mark.parametrize("name", ["actions","events","speech","identity","memory","policy","provider","budget","audit","reachy"])
-def test_fixture_file_exists_and_is_version_one(name: str) -> None:
-    payload = json.loads((FIXTURE_ROOT / f"{name}.json").read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "1.0"
-    assert set(payload["examples"]) == set(MODEL_REGISTRY[name])
-    for model_name, model_type in MODEL_REGISTRY[name].items():
-        model = parse_contract_json(
-            model_type,json.dumps(payload["examples"][model_name],separators=(",",":")).encode("utf-8"),
-            max_bytes=1_048_576,require_canonical=False,
+def _validate_schema_vocabulary(schema: dict[str, object], *, label: str) -> None:
+    unknown = set(schema) - SUPPORTED_SCHEMA_KEYWORDS
+    if unknown:
+        raise FixtureBuildError(f"{label} uses unsupported schema keywords")
+    schema_type = schema.get("type")
+    if schema_type is not None and (
+        not isinstance(schema_type, str) or schema_type not in SUPPORTED_SCHEMA_TYPES
+    ):
+        raise FixtureBuildError(f"{label} uses an unsupported schema type")
+    title = schema.get("title")
+    if title is not None and not isinstance(title, str):
+        raise FixtureBuildError(f"{label} title is malformed")
+    reference = schema.get("$ref")
+    if reference is not None and (
+        not isinstance(reference, str) or not reference.startswith("#/$defs/")
+    ):
+        raise FixtureBuildError(f"{label} reference is unsupported")
+    string_format = schema.get("format")
+    if string_format is not None and string_format not in SUPPORTED_SCHEMA_FORMATS:
+        raise FixtureBuildError(f"{label} format is unsupported")
+    pattern = schema.get("pattern")
+    if pattern is not None and pattern not in _PATTERN_VALUES:
+        raise FixtureBuildError(f"{label} pattern is unsupported")
+    additional = schema.get("additionalProperties")
+    if additional is not None and additional is not False:
+        raise FixtureBuildError(f"{label} must be a closed object schema")
+    for bound_name in (
+        "maxItems",
+        "maxLength",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minimum",
+    ):
+        bound = schema.get(bound_name)
+        if bound is not None and type(bound) is not int:
+            raise FixtureBuildError(f"{label} {bound_name} is malformed")
+    enum = schema.get("enum")
+    if enum is not None and (not isinstance(enum, list) or not enum):
+        raise FixtureBuildError(f"{label} enum is malformed")
+    for mapping_name in ("$defs", "properties"):
+        mapping_value = schema.get(mapping_name)
+        if mapping_value is None:
+            continue
+        mapping = _schema_mapping(mapping_value, f"{label}/{mapping_name}")
+        for name, child in mapping.items():
+            _validate_schema_vocabulary(
+                _schema_mapping(child, f"{label}/{mapping_name}/{name}"),
+                label=f"{label}/{mapping_name}/{name}",
+            )
+    properties = _schema_mapping(schema.get("properties", {}), f"{label}/properties")
+    required = schema.get("required")
+    if required is not None and (
+        not isinstance(required, list)
+        or not all(isinstance(name, str) for name in required)
+        or len(required) != len(set(required))
+        or not set(required) <= set(properties)
+    ):
+        raise FixtureBuildError(f"{label} required fields are malformed")
+    items = schema.get("items")
+    if items is not None:
+        _validate_schema_vocabulary(
+            _schema_mapping(items, f"{label}/items"),
+            label=f"{label}/items",
         )
-        assert canonical_bytes(model).decode("utf-8") == payload["canonical_examples"][model_name]
+    for union_name in ("anyOf", "oneOf"):
+        alternatives = schema.get(union_name)
+        if alternatives is None:
+            continue
+        if not isinstance(alternatives, list) or not alternatives:
+            raise FixtureBuildError(f"{label} {union_name} is malformed")
+        for index, alternative in enumerate(alternatives):
+            child_label = f"{label}/{union_name}/{index}"
+            _validate_schema_vocabulary(
+                _schema_mapping(alternative, child_label),
+                label=child_label,
+            )
+    discriminator = schema.get("discriminator")
+    if discriminator is not None:
+        closed = _schema_mapping(discriminator, f"{label}/discriminator")
+        if set(closed) != {"mapping", "propertyName"}:
+            raise FixtureBuildError(f"{label} discriminator is malformed")
+        property_name = closed["propertyName"]
+        mapping = _schema_mapping(closed["mapping"], f"{label}/discriminator/mapping")
+        if (
+            not isinstance(property_name, str)
+            or not mapping
+            or not all(
+                isinstance(value, str) and value.startswith("#/$defs/")
+                for value in mapping.values()
+            )
+        ):
+            raise FixtureBuildError(f"{label} discriminator is malformed")
 
 
-def test_event_fixture_round_trips_to_identical_canonical_bytes() -> None:
-    payload = json.loads((FIXTURE_ROOT / "events.json").read_text(encoding="utf-8"))
-    model = parse_contract_json(
-        EventEnvelope,json.dumps(payload["examples"]["EventEnvelope"],separators=(",",":")).encode("utf-8"),
-        max_bytes=1_048_576,require_canonical=False,
-    )
-    assert canonical_bytes(model).decode("utf-8") == payload["canonical_examples"]["EventEnvelope"]
-```
+class FixtureFactory:
+    def __init__(self, *, first_uuid: int) -> None:
+        if not 1 <= first_uuid < 2**128:
+            raise ValueError("first_uuid must fit one nonzero UUID")
+        self._next_uuid = first_uuid
 
-- [ ] **Step 2: Run the red fixture tests**
+    @classmethod
+    def preview(cls) -> FixtureFactory:
+        return cls(first_uuid=1)
 
-Run: `uv run pytest tests/contract/test_v1_fixtures.py -q`
+    def uuid(self) -> UUID:
+        if self._next_uuid >= 2**128:
+            raise FixtureBuildError("fixture UUID range exhausted")
+        value = UUID(int=self._next_uuid)
+        self._next_uuid += 1
+        return value
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'scripts.contract_fixture_builders'`; after that builder registry exists but before fixture generation, the failure advances to `FileNotFoundError: packages/contracts/fixtures/v1/events.json`.
+    def uuid_json(self) -> str:
+        return str(self.uuid())
 
-- [ ] **Step 3: Add deterministic fixtures and privacy documents**
+    def time(self, *, offset_microseconds: int = 0) -> datetime:
+        return datetime(2026, 8, 27, tzinfo=UTC) + timedelta(microseconds=offset_microseconds)
 
-`scripts/contract_fixture_builders.py` owns one exhaustive builder registry. Schema-derived fields may use a deterministic schema builder, but every field participating in a field/model validator, discriminator correlation, or nested semantically constrained union is supplied by an explicit `SemanticSpec`; those fields are never guessed from JSON Schema.
+    def time_json(self, *, offset_microseconds: int = 0) -> str:
+        return self.time(offset_microseconds=offset_microseconds).isoformat()
 
-```python
-# core of scripts/contract_fixture_builders.py
-@dataclass(frozen=True)
-class SemanticSpec:
-    fields: frozenset[str]
-    values: Callable[["FixtureFactory"], dict[str, object]]
+    def _registered_by_schema_name(self) -> dict[str, type[ContractModel]]:
+        result: dict[str, type[ContractModel]] = {}
+        for model_type in registered_contract_models():
+            if model_type.__name__ in result:
+                raise FixtureBuildError("contract schema names are not unique")
+            result[model_type.__name__] = model_type
+        return result
+
+    def _schema_value(
+        self,
+        schema: dict[str, object],
+        root: dict[str, object],
+    ) -> JSONValue:
+        reference = schema.get("$ref")
+        if reference is not None:
+            if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+                raise FixtureBuildError("fixture schema reference is unsupported")
+            name = reference.removeprefix("#/$defs/")
+            registered = self._registered_by_schema_name().get(name)
+            if registered is not None:
+                return _model_json(self.build(registered))
+            definitions = _schema_mapping(root.get("$defs", {}), "$defs")
+            if name not in definitions:
+                raise FixtureBuildError("fixture schema reference does not resolve")
+            return self._schema_value(
+                _schema_mapping(definitions[name], f"$defs/{name}"),
+                root,
+            )
+
+        if "const" in schema:
+            return cast(JSONValue, schema["const"])
+        enum = schema.get("enum")
+        if enum is not None:
+            if not isinstance(enum, list) or not enum:
+                raise FixtureBuildError("fixture enum is empty or malformed")
+            non_null = [value for value in enum if value is not None]
+            return cast(JSONValue, non_null[0] if non_null else None)
+
+        for union_key in ("oneOf", "anyOf"):
+            alternatives = schema.get(union_key)
+            if alternatives is not None:
+                if not isinstance(alternatives, list) or not alternatives:
+                    raise FixtureBuildError("fixture union is empty or malformed")
+                ordered = [
+                    alternative
+                    for alternative in alternatives
+                    if not (isinstance(alternative, dict) and alternative.get("type") == "null")
+                ] or alternatives
+                failures: list[FixtureBuildError] = []
+                for alternative in ordered:
+                    try:
+                        return self._schema_value(
+                            _schema_mapping(alternative, union_key),
+                            root,
+                        )
+                    except FixtureBuildError as error:
+                        failures.append(error)
+                raise FixtureBuildError("no fixture union branch is supported") from failures[-1]
+
+        schema_type = schema.get("type")
+        if schema_type == "object":
+            properties = _schema_mapping(schema.get("properties", {}), "properties")
+            required = schema.get("required", [])
+            if not isinstance(required, list) or not all(
+                isinstance(name, str) for name in required
+            ):
+                raise FixtureBuildError("fixture required-field list is malformed")
+            return {
+                name: self._schema_value(
+                    _schema_mapping(properties[name], f"property {name}"),
+                    root,
+                )
+                for name in required
+            }
+        if schema_type == "array":
+            item_schema = _schema_mapping(schema.get("items", {}), "array items")
+            minimum = schema.get("minItems", 0)
+            maximum = schema.get("maxItems", MAX_SCHEMA_ITEMS)
+            if (
+                type(minimum) is not int
+                or type(maximum) is not int
+                or minimum < 0
+                or maximum < minimum
+                or maximum > MAX_SCHEMA_ITEMS
+            ):
+                raise FixtureBuildError("fixture array bounds are invalid")
+            return [self._schema_value(item_schema, root) for _ in range(minimum)]
+        if schema_type == "string":
+            minimum = schema.get("minLength", 0)
+            maximum = schema.get("maxLength", 4096)
+            if (
+                type(minimum) is not int
+                or type(maximum) is not int
+                or minimum < 0
+                or maximum < minimum
+                or maximum > 65_536
+            ):
+                raise FixtureBuildError("fixture string bounds are invalid")
+            string_format = schema.get("format")
+            if string_format == "uuid":
+                return self.uuid_json()
+            if string_format == "date-time":
+                return self.time_json()
+            if string_format == "binary":
+                return "x" * minimum
+            if string_format is not None:
+                raise FixtureBuildError("fixture string format is unsupported")
+            pattern = schema.get("pattern")
+            if pattern is not None:
+                if not isinstance(pattern, str) or pattern not in _PATTERN_VALUES:
+                    raise FixtureBuildError("fixture string pattern is unsupported")
+                value = _PATTERN_VALUES[pattern]
+                if not minimum <= len(value) <= maximum:
+                    raise FixtureBuildError("fixture pattern value violates length bounds")
+                return value
+            length = max(1, minimum)
+            if length > maximum:
+                raise FixtureBuildError("fixture string cannot satisfy its bounds")
+            return "x" * length
+        if schema_type == "integer":
+            minimum = schema.get("minimum", 0)
+            if type(minimum) is not int:
+                raise FixtureBuildError("fixture integer minimum is invalid")
+            maximum = schema.get("maximum")
+            if maximum is not None and (type(maximum) is not int or minimum > maximum):
+                raise FixtureBuildError("fixture integer bounds are invalid")
+            return minimum
+        if schema_type == "boolean":
+            return False
+        if schema_type == "null":
+            return None
+        raise FixtureBuildError("fixture schema shape is unsupported")
+
+    def schema_payload(self, model_type: type[ContractModel]) -> dict[str, JSONValue]:
+        if model_type not in BUILDERS:
+            raise FixtureBuildError("fixture model is not registered")
+        schema = _schema_mapping(
+            model_type.model_json_schema(
+                mode="validation",
+                ref_template="#/$defs/{model}",
+            ),
+            model_type.__name__,
+        )
+        _validate_schema_vocabulary(schema, label=model_type.__name__)
+        payload = self._schema_value(schema, schema)
+        if not isinstance(payload, dict):
+            raise FixtureBuildError("contract model schema did not produce an object")
+        return payload
+
+    def validate_payload(
+        self,
+        model_type: type[ContractT],
+        payload: Mapping[str, JSONValue],
+    ) -> ContractT:
+        raw = json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return parse_contract_json(
+            model_type,
+            raw,
+            max_bytes=1_048_576,
+            require_canonical=False,
+        )
+
+    def memory_proposal_draft(
+        self,
+        operation: str,
+        *,
+        subject_id: str | None = None,
+    ) -> memory.MemoryProposalDraft:
+        if operation not in {"create", "replace", "delete"}:
+            raise ValueError("unsupported memory proposal operation")
+        payload = self.schema_payload(memory.MemoryProposalDraft)
+        payload.update(
+            {
+                "operation": operation,
+                "subject_id": subject_id or self.uuid_json(),
+                "source_receipt_ids": [self.uuid_json()],
+            }
+        )
+        if operation == "delete":
+            payload.update(
+                {
+                    "content": None,
+                    "audience": None,
+                    "target_memory_id": self.uuid_json(),
+                    "expected_version": 1,
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "content": _model_json(self.build(memory.PreferenceContent)),
+                    "audience": "subject_private",
+                    "target_memory_id": (None if operation == "create" else self.uuid_json()),
+                    "expected_version": None if operation == "create" else 1,
+                }
+            )
+        return self.validate_payload(memory.MemoryProposalDraft, payload)
+
+    def validated_semantic(self, model_type: type[ContractT]) -> ContractT:
+        spec = semantic_specs()[model_type]
+        values = spec.values(self)
+        if not spec.fields <= set(values):
+            raise FixtureBuildError("semantic fixture omitted a correlated field")
+        unknown = set(values) - set(model_type.model_fields)
+        if unknown:
+            raise FixtureBuildError("semantic fixture supplied an unknown field")
+        payload = self.schema_payload(model_type)
+        payload.update(values)
+        return self.validate_payload(model_type, payload)
+
+    def validated_schema_only(self, model_type: type[ContractT]) -> ContractT:
+        if model_type not in SCHEMA_ONLY_MODELS:
+            raise FixtureBuildError("semantic model reached schema-only generation")
+        return self.validate_payload(model_type, self.schema_payload(model_type))
+
+    def build(self, model_type: type[ContractT]) -> ContractT:
+        try:
+            builder = BUILDERS[model_type]
+        except KeyError as error:
+            raise FixtureBuildError("fixture model is not classified") from error
+        model = builder(self)
+        if type(model) is not model_type:
+            raise FixtureBuildError("fixture builder returned the wrong model type")
+        reparsed = parse_contract_json(
+            model_type,
+            canonical_bytes(model),
+            max_bytes=1_048_576,
+            require_canonical=True,
+        )
+        return reparsed
 
 
-def action_base(factory, action_name, resource_type, resource_id=None):
+def action_base(
+    factory: FixtureFactory,
+    action_name: str,
+    resource_type: str,
+    resource_id: str | None = None,
+) -> dict[str, JSONValue]:
     return {
         "action_name": action_name,
         "resource_type": resource_type,
-        "resource_id": resource_id if resource_id is not None else factory.uuid(),
+        "resource_id": resource_id or factory.uuid_json(),
     }
 
 
-def semantic_specs(factory: "FixtureFactory") -> dict[type[ContractModel], SemanticSpec]:
-    timer_id=factory.uuid(); subject_id=factory.uuid()
+def _timer_target_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    timer_id = factory.uuid_json()
     return {
-        Commitment: SemanticSpec(frozenset({"algorithm","key_id","value_b64"}),lambda f:{"algorithm":"HMAC-SHA-256","key_id":"fixture-v1","value_b64":"A"*43+"="}),
-        events.EventEnvelope: SemanticSpec(frozenset({"event_type","payload"}),lambda f:{"event_type":"speech.wake_detected","payload":f.build(events.WakeDetectedPayload)}),
-        speech.AuthorizedTranscriptionRequest: SemanticSpec(frozenset({"language_hints"}),lambda f:{"language_hints":("en","hi")}),
-        identity.IdentityRequest: SemanticSpec(frozenset({"evidence"}),lambda f:{"evidence":()}),
-        memory.EpisodicContent: SemanticSpec(frozenset({"participant_ids"}),lambda f:{"participant_ids":()}),
-        memory.MemoryProposalDraft: SemanticSpec(frozenset({"operation","content","audience","target_memory_id","expected_version"}),lambda f:{"operation":"delete","content":None,"audience":None,"target_memory_id":f.uuid(),"expected_version":1}),
-        memory.MemoryProposal: SemanticSpec(frozenset({"draft"}),lambda f:{"draft":f.build(memory.MemoryProposalDraft)}),
-        memory.MemoryQuery: SemanticSpec(frozenset({"kinds"}),lambda f:{"kinds":("working",)}),
-        memory.ApprovedMemory: SemanticSpec(frozenset({"source_receipt_ids"}),lambda f:{"source_receipt_ids":(f.uuid(),)}),
-        actions.TimerCreateActionDraft: SemanticSpec(frozenset({"action_name","resource_type","resource_id"}),lambda f:action_base(f,"timer.create","timer")),
-        actions.TimerTargetActionDraft: SemanticSpec(frozenset({"action_name","resource_type","resource_id","timer_id"}),lambda f:{**action_base(f,"timer.cancel","timer",timer_id),"timer_id":timer_id}),
-        actions.SafetyActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:{**action_base(f,"privacy.on","privacy"),"reason_code":"fixture"}),
-        actions.PrivacyReductionActionDraft: SemanticSpec(frozenset({"action_name","resource_type","typed_confirmation"}),lambda f:{**action_base(f,"privacy.off","privacy"),"typed_confirmation":"TURN OFF PRIVACY"}),
-        actions.ComponentStatusActionDraft: SemanticSpec(frozenset({"action_name","resource_type","component"}),lambda f:{**action_base(f,"system.status","system"),"component":"system"}),
-        actions.DiagnosticActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:{**action_base(f,"reachy.gesture_test","reachy"),"registered_asset_id":"fixture.asset"}),
-        actions.MemoryActionDraft: SemanticSpec(frozenset({"action_name","resource_type","resource_id","subject_id","proposal_id_ref","memory_id","expected_version","decision","edited_content","memory_proposal","export_format"}),lambda f:{**action_base(f,"memory.delete","memory"),"subject_id":f.uuid(),"proposal_id_ref":None,"memory_id":f.uuid(),"expected_version":1,"decision":None,"edited_content":None,"memory_proposal":None,"export_format":None}),
-        actions.ProfileActionDraft: SemanticSpec(frozenset({"action_name","resource_type","subject_id","profile_class","target_profile_class","display_label","guardian_id","persona_traits","clear_persona_traits","expected_version","guardian_generation"}),lambda f:{**action_base(f,"profile.revoke","profile",subject_id),"subject_id":subject_id,"profile_class":None,"target_profile_class":None,"display_label":None,"guardian_id":None,"persona_traits":None,"clear_persona_traits":False,"expected_version":1,"guardian_generation":None}),
-        actions.ConsentActionDraft: SemanticSpec(frozenset({"action_name","resource_type","subject_id","expected_latest_receipt_id","guardian_generation"}),lambda f:{**action_base(f,"consent.grant","consent",subject_id),"subject_id":subject_id,"purpose":"personalization","expected_latest_receipt_id":None,"guardian_generation":None}),
-        actions.IdentityActionDraft: SemanticSpec(frozenset({"action_name","resource_type","resource_id","subject_id","modality","enrollment_id","expected_profile_version","expected_consent_receipt_id","reenrollment_days"}),lambda f:{**action_base(f,"identity.enroll","identity",subject_id),"subject_id":subject_id,"modality":"face","enrollment_id":None,"expected_profile_version":1,"expected_consent_receipt_id":f.uuid(),"reenrollment_days":180}),
-        actions.ProviderActionDraft: SemanticSpec(frozenset({"action_name","resource_type","provider","enabled","review_record_id","hard_limit_micros_sgd","access_mode","expected_provider_version","expected_budget_version","expected_access_version"}),lambda f:{**action_base(f,"provider.review","provider"),"provider":"openai","enabled":None,"review_record_id":None,"hard_limit_micros_sgd":None,"access_mode":None,"expected_provider_version":1,"expected_budget_version":None,"expected_access_version":None}),
-        actions.CredentialActionDraft: SemanticSpec(frozenset({"action_name","resource_type","credential_id","capability","ceremony_id","expected_version"}),lambda f:{**action_base(f,"credential.recovery.rotate","credential"),"credential_id":None,"capability":None,"ceremony_id":None,"expected_version":1}),
-        actions.AuditActionDraft: SemanticSpec(frozenset({"action_name","resource_type","from_ordinal"}),lambda f:{**action_base(f,"audit.verify","audit"),"from_ordinal":1}),
-        actions.BackupActionDraft: SemanticSpec(frozenset({"action_name","resource_type","backup_id","recipient_key_id","manifest_sha256"}),lambda f:{**action_base(f,"backup.recovery_key.create","backup"),"backup_id":None,"recipient_key_id":"fixture-key","manifest_sha256":None}),
-        actions.SearchActionDraft: SemanticSpec(frozenset({"action_name","resource_type","subject_id","mode","expected_web_consent_receipt_id","provider_review_version","pricing_version","privacy_generation","feature_generation","activation_issued_at","activation_expires_at","max_passes","max_sources","max_duration_seconds","no_memory","no_authenticated_sites","no_files","no_tools"}),lambda f:{**action_base(f,"search.profile_mode.change","search",subject_id),"subject_id":subject_id,"expected_profile_version":1,"mode":"no_web","expected_web_consent_receipt_id":None,"provider_review_version":None,"pricing_version":None,"privacy_generation":None,"feature_generation":None,"activation_issued_at":None,"activation_expires_at":None,"max_passes":None,"max_sources":None,"max_duration_seconds":None,"no_memory":None,"no_authenticated_sites":None,"no_files":None,"no_tools":None}),
-        actions.SecurityFindingActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:action_base(f,"security.finding.suppress","security")),
-        actions.ReleaseP1R0ActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:action_base(f,"release.p1r0","release")),
-        actions.LatencyDeviationActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:action_base(f,"release.latency.accept","release")),
-        actions.FamilyStageReviewActionDraft: SemanticSpec(frozenset({"action_name","resource_type"}),lambda f:action_base(f,"release.family_stage.review","release")),
-        actions.ValidatedActionProposal: SemanticSpec(frozenset({"draft"}),lambda f:{"draft":f.build(actions.TimerCreateActionDraft)}),
-        policy.PolicyRequest: SemanticSpec(frozenset({"action"}),lambda f:{"action":f.build(actions.TimerCreateActionDraft)}),
-        policy.AuthGrant: SemanticSpec(frozenset({"assurance","assurance_source"}),lambda f:{"assurance":"confirmed","assurance_source":"explicit_confirmation"}),
-        policy.AuthContext: SemanticSpec(frozenset({"grant_id","assurance","assurance_source"}),lambda f:{"grant_id":None,"assurance":"guest","assurance_source":"guest"}),
-        provider.RedactionReceipt: SemanticSpec(frozenset({"removed_categories"}),lambda f:{"removed_categories":()}),
-        budget.BudgetReservationRequest: SemanticSpec(frozenset({"category","usage_ceiling","month_key"}),lambda f:{"category":"llm","usage_ceiling":{"category":"llm","input_tokens":1,"output_tokens":0},"month_key":"2026-08"}),
-        budget.BudgetReservation: SemanticSpec(frozenset({"outcome","amount_micros_sgd","pricing_commitment"}),lambda f:{"outcome":"allow","amount_micros_sgd":1,"pricing_commitment":f.build(Commitment)}),
-        budget.ProviderUsageReceiptV1: SemanticSpec(frozenset({"category","billable_usage"}),lambda f:{"category":"llm","billable_usage":{"category":"llm","input_tokens":1,"output_tokens":0}}),
-        budget.BudgetReconciliationRequest: SemanticSpec(frozenset({"proofs"}),lambda f:{"proofs":()}),
-        reachy.ReachyCommand: SemanticSpec(frozenset({"kind","state","media_stream_id","gesture_id"}),lambda f:{"kind":"state","state":"idle","media_stream_id":None,"gesture_id":None}),
-        reachy.CameraWindowGrant: SemanticSpec(frozenset({"subject_id","action_name","purpose","max_frames","max_frame_bytes","max_total_bytes","max_frames_per_second","issued_at","expires_at"}),lambda f:{"subject_id":f.uuid(),"action_name":"identity.enroll","purpose":"explicit_enrollment","max_frames":2,"max_frame_bytes":1024,"max_total_bytes":2048,"max_frames_per_second":1,"issued_at":f.time(),"expires_at":f.time(offset_microseconds=5_000_000)}),
+        **action_base(factory, "timer.cancel", "timer", timer_id),
+        "timer_id": timer_id,
     }
-```
 
-`FixtureFactory` owns a deterministic UUID counter and `time(*, offset_microseconds: int = 0)`, which returns the fixed UTC fixture epoch plus the requested `timedelta`; it never reads the clock, random source, environment, or model schema. The schema-only classification is equally explicit, so a newly registered model cannot silently fall into generic generation:
 
-```python
-SCHEMA_ONLY_MODELS=frozenset({
-    events.WakeDetectedPayload,events.StopRequestedPayload,events.SignedEventEnvelope,
-    ports.TurnInput,ports.TurnOutput,
-    speech.AudioFormat,speech.TranscriptResult,speech.AuthorizedSynthesisRequest,
-    speech.SpeechChunk,
-    identity.IdentityEvidence,identity.IdentityDecision,identity.PersonaTraits,
-    identity.PersonaProjection,
-    memory.WorkingContent,memory.SemanticContent,memory.PreferenceContent,
-    memory.ProceduralContent,memory.RelationalContent,memory.PolicyContent,
-    memory.MemoryRecord,memory.ProposalContext,memory.DecideMemoryProposal,
-    actions.ActionDraftBase,actions.ActionBinding,actions.ActionReceipt,
-    policy.PolicyDecision,policy.AuthenticationRequest,policy.AuthenticationChallenge,
-    policy.AuthenticationResponse,policy.CurrentOwnerAuthority,
-    policy.AdminSessionPrincipal,policy.TimerIntent,
-    provider.RouteAuthorization,provider.RouteAuthorizationRequest,
-    provider.RouteConsumption,provider.ProviderResponseReceipt,
-    provider.SanitizedProviderMessage,provider.SanitizedToolReference,
-    provider.SanitizedProviderRequest,provider.ProviderResponse,
-    budget.LlmUsageUnits,budget.SttUsageUnits,budget.TtsUsageUnits,
-    budget.WebSearchUsageUnits,budget.BudgetSettlementRequest,
-    budget.BudgetSettlement,budget.TransportProof,
-    audit.AuditDraft,audit.AuditReceipt,
-    reachy.ReachyReceipt,reachy.ReachyHealth,reachy.SafetyReceipt,
-    reachy.StopAllReceiptBundleV1,reachy.StopSignal,
-})
-```
+def _memory_proposal_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    return {"draft": _model_json(factory.memory_proposal_draft("create"))}
 
-`FixtureFactory.schema_payload(model_type)` is limited to those models. It follows `const`, `enum`, required fields, non-null union branches, `minItems`, numeric minima, UUID/date-time formats, and the closed regex cases used by these contracts. When `$ref` or a union branch names another registered `ContractModel`, it calls `self.build(referenced_model)` and embeds that normally validated result instead of recursively guessing the nested semantic model. It increments UUIDs for every item so schema-level uniqueness is deterministic. `FixtureFactory.build` is exactly:
 
-```python
-def build(self, model_type: type[ContractModel]) -> ContractModel:
-    builder = BUILDERS[model_type]
-    model = builder(self)
-    if type(model) is not model_type:
-        raise TypeError(f"fixture builder returned wrong type for {model_type.__name__}")
-    # Exercise the ordinary hostile-ingress validation path again; no
-    # model_construct, model_copy(update=...), or skipped validation is allowed.
-    return parse_contract_json(
-        model_type, canonical_bytes(model), max_bytes=1_048_576,
-        require_canonical=True,
+def _memory_action_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    subject_id = factory.uuid_json()
+    proposal = factory.memory_proposal_draft("replace", subject_id=subject_id)
+    return {
+        **action_base(factory, "memory.propose", "memory", str(proposal.proposal_id)),
+        "subject_id": subject_id,
+        "proposal_id_ref": None,
+        "memory_id": None,
+        "expected_version": None,
+        "decision": None,
+        "edited_content": None,
+        "memory_proposal": _model_json(proposal),
+        "export_format": None,
+    }
+
+
+def _credential_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    credential_id = factory.uuid_json()
+    return {
+        **action_base(
+            factory,
+            "credential.passkey.revoke",
+            "credential",
+            credential_id,
+        ),
+        "credential_id": credential_id,
+        "capability": None,
+        "ceremony_id": None,
+        "expected_version": 1,
+    }
+
+
+def _backup_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    backup_id = factory.uuid_json()
+    return {
+        **action_base(factory, "backup.restore", "backup", backup_id),
+        "backup_id": backup_id,
+        "recipient_key_id": None,
+        "manifest_sha256": "0" * 64,
+    }
+
+
+def _profile_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    subject_id = factory.uuid_json()
+    return {
+        **action_base(factory, "profile.revoke", "profile", subject_id),
+        "subject_id": subject_id,
+        "profile_class": None,
+        "target_profile_class": None,
+        "display_label": None,
+        "guardian_id": None,
+        "persona_traits": None,
+        "clear_persona_traits": False,
+        "expected_version": 1,
+        "guardian_generation": None,
+    }
+
+
+def _consent_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    subject_id = factory.uuid_json()
+    return {
+        **action_base(factory, "consent.grant", "consent", subject_id),
+        "subject_id": subject_id,
+        "purpose": "personalization",
+        "expected_latest_receipt_id": None,
+        "guardian_generation": None,
+    }
+
+
+def _identity_action_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    subject_id = factory.uuid_json()
+    return {
+        **action_base(factory, "identity.enroll", "identity", subject_id),
+        "subject_id": subject_id,
+        "modality": "face",
+        "enrollment_id": None,
+        "expected_profile_version": 1,
+        "expected_consent_receipt_id": factory.uuid_json(),
+        "reenrollment_days": 180,
+    }
+
+
+def _search_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    subject_id = factory.uuid_json()
+    return {
+        **action_base(factory, "search.profile_mode.change", "search", subject_id),
+        "subject_id": subject_id,
+        "expected_profile_version": 1,
+        "mode": "no_web",
+        "expected_web_consent_receipt_id": None,
+        "provider_review_version": None,
+        "pricing_version": None,
+        "privacy_generation": None,
+        "feature_generation": None,
+        "activation_issued_at": None,
+        "activation_expires_at": None,
+        "max_passes": None,
+        "max_sources": None,
+        "max_duration_seconds": None,
+        "no_memory": None,
+        "no_authenticated_sites": None,
+        "no_files": None,
+        "no_tools": None,
+    }
+
+
+def _route(
+    factory: FixtureFactory,
+    *,
+    purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"],
+    provider_name: Literal["openai", "qwen"] = "openai",
+    model: str = "fixture-model",
+) -> provider.RouteAuthorization:
+    payload = factory.schema_payload(provider.RouteAuthorization)
+    payload.update(
+        {
+            "purpose": purpose,
+            "provider": provider_name,
+            "model": model,
+        }
     )
+    return factory.validate_payload(provider.RouteAuthorization, payload)
 
 
-SEMANTIC_BUILDERS = {
-    model: (lambda current: lambda factory: factory.validated_semantic(current))(model)
-    for model in semantic_specs(FixtureFactory.preview()).keys()
+def _transcription_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    route = _route(factory, purpose="cloud_stt", model="fixture-stt")
+    return {
+        "request_id": str(route.request_id),
+        "turn_id": str(route.turn_id),
+        "audio_commitment": _model_json(route.request_commitment),
+        "language_hints": ["en", "hi"],
+        "route": _model_json(route),
+    }
+
+
+def _synthesis_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    route = _route(factory, purpose="cloud_tts", model="fixture-tts")
+    return {
+        "request_id": str(route.request_id),
+        "turn_id": str(route.turn_id),
+        "text_commitment": _model_json(route.request_commitment),
+        "segment_index": 0,
+        "segment_count": 1,
+        "route": _model_json(route),
+    }
+
+
+def _provider_request_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    route = _route(factory, purpose="cloud_reasoning")
+    return {
+        "request_id": str(route.request_id),
+        "provider": route.provider,
+        "model": route.model,
+        "route": _model_json(route),
+    }
+
+
+def _binding(
+    factory: FixtureFactory,
+    *,
+    subject_id: str | None,
+    draft: actions.ActionProposalDraft | None = None,
+) -> actions.ActionBinding:
+    payload = factory.schema_payload(actions.ActionBinding)
+    payload["subject_id"] = subject_id
+    if draft is not None:
+        payload.update(
+            {
+                "proposal_id": str(draft.proposal_id),
+                "idempotency_key": str(draft.idempotency_key),
+                "action_name": draft.action_name,
+                "resource_type": draft.resource_type,
+                "resource_id": None if draft.resource_id is None else str(draft.resource_id),
+                "parameter_commitment": _model_json(draft.parameters_commitment),
+            }
+        )
+    return factory.validate_payload(actions.ActionBinding, payload)
+
+
+def _validated_action_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    draft = factory.build(actions.TimerCreateActionDraft)
+    binding = _binding(factory, subject_id=factory.uuid_json(), draft=draft)
+    return {"draft": _model_json(draft), "binding": _model_json(binding)}
+
+
+def _authentication_request_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    subject_id = factory.uuid_json()
+    return {
+        "subject_id": subject_id,
+        "binding": _model_json(_binding(factory, subject_id=subject_id)),
+    }
+
+
+def _authentication_challenge_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    return _authentication_request_values(factory)
+
+
+def _auth_grant_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    subject_id = factory.uuid_json()
+    return {
+        "subject_id": subject_id,
+        "binding": _model_json(_binding(factory, subject_id=subject_id)),
+        "assurance": "confirmed",
+        "assurance_source": "explicit_confirmation",
+        "issued_at": factory.time_json(),
+        "expires_at": factory.time_json(offset_microseconds=1),
+    }
+
+
+def _auth_context_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    return {
+        "grant_id": None,
+        "subject_id": None,
+        "binding": _model_json(_binding(factory, subject_id=None)),
+        "assurance": "guest",
+        "assurance_source": "guest",
+    }
+
+
+def _latency_values(factory: FixtureFactory) -> dict[str, JSONValue]:
+    run_id = factory.uuid_json()
+    return {
+        **action_base(factory, "release.latency.accept", "soak_run", run_id),
+        "run_id": run_id,
+    }
+
+
+def semantic_specs() -> dict[type[ContractModel], SemanticSpec]:
+    return {
+        Commitment: SemanticSpec(
+            frozenset({"algorithm", "key_id", "value_b64"}),
+            lambda _factory: {
+                "algorithm": "HMAC-SHA-256",
+                "key_id": "fixture-v1",
+                "value_b64": "A" * 43 + "=",
+            },
+        ),
+        events.EventEnvelope: SemanticSpec(
+            frozenset({"event_type", "payload"}),
+            lambda factory: {
+                "event_type": "speech.wake_detected",
+                "payload": _model_json(factory.build(events.WakeDetectedPayload)),
+            },
+        ),
+        events.SignedEventEnvelope: SemanticSpec(
+            frozenset({"envelope", "signing_key_id", "signature_b64"}),
+            lambda factory: {
+                "envelope": _model_json(factory.build(events.EventEnvelope)),
+                "signing_key_id": "ed25519:fixture:v1",
+                "signature_b64": "A" * 86 + "==",
+            },
+        ),
+        speech.AuthorizedTranscriptionRequest: SemanticSpec(
+            frozenset({"request_id", "turn_id", "audio_commitment", "language_hints", "route"}),
+            _transcription_values,
+        ),
+        speech.AuthorizedSynthesisRequest: SemanticSpec(
+            frozenset(
+                {
+                    "request_id",
+                    "turn_id",
+                    "text_commitment",
+                    "segment_index",
+                    "segment_count",
+                    "route",
+                }
+            ),
+            _synthesis_values,
+        ),
+        identity.IdentityEvidence: SemanticSpec(
+            frozenset({"observed_at", "expires_at"}),
+            lambda factory: {
+                "observed_at": factory.time_json(),
+                "expires_at": factory.time_json(),
+            },
+        ),
+        identity.IdentityRequest: SemanticSpec(
+            frozenset({"evidence"}),
+            lambda _factory: {"evidence": []},
+        ),
+        identity.IdentityDecision: SemanticSpec(
+            frozenset({"status", "subject_id"}),
+            lambda factory: {"status": "verified", "subject_id": factory.uuid_json()},
+        ),
+        memory.EpisodicContent: SemanticSpec(
+            frozenset({"participant_ids"}),
+            lambda _factory: {"participant_ids": []},
+        ),
+        memory.MemoryProposalDraft: SemanticSpec(
+            frozenset(
+                {
+                    "operation",
+                    "content",
+                    "audience",
+                    "target_memory_id",
+                    "expected_version",
+                    "source_receipt_ids",
+                }
+            ),
+            lambda factory: _model_json(factory.memory_proposal_draft("delete")),
+        ),
+        memory.MemoryProposal: SemanticSpec(
+            frozenset({"draft"}),
+            _memory_proposal_values,
+        ),
+        memory.MemoryRecord: SemanticSpec(
+            frozenset({"version", "content", "audience"}),
+            lambda factory: {
+                "version": 1,
+                "content": _model_json(factory.build(memory.PreferenceContent)),
+                "audience": "subject_private",
+            },
+        ),
+        memory.MemoryQuery: SemanticSpec(
+            frozenset({"kinds"}),
+            lambda _factory: {"kinds": ["working"]},
+        ),
+        memory.ApprovedMemory: SemanticSpec(
+            frozenset({"content", "audience", "source_receipt_ids"}),
+            lambda factory: {
+                "content": _model_json(factory.build(memory.PreferenceContent)),
+                "audience": "subject_private",
+                "source_receipt_ids": [factory.uuid_json()],
+            },
+        ),
+        memory.DecideMemoryProposal: SemanticSpec(
+            frozenset({"decision", "edited_content"}),
+            lambda _factory: {"decision": "reject", "edited_content": None},
+        ),
+        actions.TimerCreateActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type", "resource_id"}),
+            lambda factory: action_base(factory, "timer.create", "timer"),
+        ),
+        actions.TimerTargetActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type", "resource_id", "timer_id"}),
+            _timer_target_values,
+        ),
+        actions.SafetyActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type"}),
+            lambda factory: {
+                **action_base(factory, "privacy.on", "privacy"),
+                "reason_code": "fixture",
+            },
+        ),
+        actions.PrivacyReductionActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type", "typed_confirmation"}),
+            lambda factory: {
+                **action_base(factory, "privacy.off", "privacy"),
+                "typed_confirmation": "TURN OFF PRIVACY",
+            },
+        ),
+        actions.ComponentStatusActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type", "component"}),
+            lambda factory: {
+                **action_base(factory, "system.status", "system"),
+                "component": "system",
+            },
+        ),
+        actions.DiagnosticActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type"}),
+            lambda factory: {
+                **action_base(factory, "reachy.gesture_test", "reachy"),
+                "registered_asset_id": "fixture.asset",
+            },
+        ),
+        actions.MemoryActionDraft: SemanticSpec(
+            frozenset(
+                {
+                    "action_name",
+                    "resource_type",
+                    "resource_id",
+                    "subject_id",
+                    "proposal_id_ref",
+                    "memory_id",
+                    "expected_version",
+                    "decision",
+                    "edited_content",
+                    "memory_proposal",
+                    "export_format",
+                }
+            ),
+            _memory_action_values,
+        ),
+        actions.ProfileActionDraft: SemanticSpec(
+            frozenset(
+                {
+                    "action_name",
+                    "resource_type",
+                    "resource_id",
+                    "subject_id",
+                    "profile_class",
+                    "target_profile_class",
+                    "display_label",
+                    "guardian_id",
+                    "persona_traits",
+                    "clear_persona_traits",
+                    "expected_version",
+                    "guardian_generation",
+                }
+            ),
+            _profile_values,
+        ),
+        actions.ConsentActionDraft: SemanticSpec(
+            frozenset(
+                {
+                    "action_name",
+                    "resource_type",
+                    "resource_id",
+                    "subject_id",
+                    "expected_latest_receipt_id",
+                    "guardian_generation",
+                }
+            ),
+            _consent_values,
+        ),
+        actions.IdentityActionDraft: SemanticSpec(
+            frozenset(
+                {
+                    "action_name",
+                    "resource_type",
+                    "resource_id",
+                    "subject_id",
+                    "modality",
+                    "enrollment_id",
+                    "expected_profile_version",
+                    "expected_consent_receipt_id",
+                    "reenrollment_days",
+                }
+            ),
+            _identity_action_values,
+        ),
+        actions.ProviderActionDraft: SemanticSpec(
+            frozenset(
+                {
+                    "action_name",
+                    "resource_type",
+                    "provider",
+                    "enabled",
+                    "review_record_id",
+                    "hard_limit_micros_sgd",
+                    "access_mode",
+                    "expected_provider_version",
+                    "expected_budget_version",
+                    "expected_access_version",
+                }
+            ),
+            lambda factory: {
+                **action_base(factory, "provider.review", "provider"),
+                "provider": "openai",
+                "enabled": None,
+                "review_record_id": None,
+                "hard_limit_micros_sgd": None,
+                "access_mode": None,
+                "expected_provider_version": 1,
+                "expected_budget_version": None,
+                "expected_access_version": None,
+            },
+        ),
+        actions.CredentialActionDraft: SemanticSpec(
+            frozenset(
+                {
+                    "action_name",
+                    "resource_type",
+                    "resource_id",
+                    "credential_id",
+                    "capability",
+                    "ceremony_id",
+                    "expected_version",
+                }
+            ),
+            _credential_values,
+        ),
+        actions.AuditActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type", "from_ordinal"}),
+            lambda factory: {
+                **action_base(factory, "audit.verify", "audit"),
+                "from_ordinal": 1,
+            },
+        ),
+        actions.BackupActionDraft: SemanticSpec(
+            frozenset(
+                {
+                    "action_name",
+                    "resource_type",
+                    "resource_id",
+                    "backup_id",
+                    "recipient_key_id",
+                    "manifest_sha256",
+                }
+            ),
+            _backup_values,
+        ),
+        actions.SearchActionDraft: SemanticSpec(
+            frozenset(
+                {
+                    "action_name",
+                    "resource_type",
+                    "resource_id",
+                    "subject_id",
+                    "mode",
+                    "expected_web_consent_receipt_id",
+                    "provider_review_version",
+                    "pricing_version",
+                    "privacy_generation",
+                    "feature_generation",
+                    "activation_issued_at",
+                    "activation_expires_at",
+                    "max_passes",
+                    "max_sources",
+                    "max_duration_seconds",
+                    "no_memory",
+                    "no_authenticated_sites",
+                    "no_files",
+                    "no_tools",
+                }
+            ),
+            _search_values,
+        ),
+        actions.SecurityFindingActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type"}),
+            lambda factory: action_base(
+                factory,
+                "security.finding.suppress",
+                "security_finding",
+            ),
+        ),
+        actions.ReleaseP1R0ActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type"}),
+            lambda factory: action_base(factory, "release.p1r0", "release_candidate"),
+        ),
+        actions.LatencyDeviationActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type", "resource_id", "run_id"}),
+            _latency_values,
+        ),
+        actions.FamilyStageReviewActionDraft: SemanticSpec(
+            frozenset({"action_name", "resource_type"}),
+            lambda factory: action_base(
+                factory,
+                "release.family_stage.review",
+                "family_stage",
+            ),
+        ),
+        actions.ValidatedActionProposal: SemanticSpec(
+            frozenset({"draft", "binding"}),
+            _validated_action_values,
+        ),
+        policy.PolicyRequest: SemanticSpec(
+            frozenset({"action"}),
+            lambda factory: {"action": _model_json(factory.build(actions.TimerCreateActionDraft))},
+        ),
+        policy.PolicyDecision: SemanticSpec(
+            frozenset({"effect", "required_assurance"}),
+            lambda _factory: {"effect": "allow", "required_assurance": None},
+        ),
+        policy.AuthenticationRequest: SemanticSpec(
+            frozenset({"subject_id", "binding"}),
+            _authentication_request_values,
+        ),
+        policy.AuthenticationChallenge: SemanticSpec(
+            frozenset({"subject_id", "binding"}),
+            _authentication_challenge_values,
+        ),
+        policy.AuthGrant: SemanticSpec(
+            frozenset(
+                {
+                    "subject_id",
+                    "binding",
+                    "assurance",
+                    "assurance_source",
+                    "issued_at",
+                    "expires_at",
+                }
+            ),
+            _auth_grant_values,
+        ),
+        policy.AuthContext: SemanticSpec(
+            frozenset({"grant_id", "subject_id", "binding", "assurance", "assurance_source"}),
+            _auth_context_values,
+        ),
+        policy.AdminSessionPrincipal: SemanticSpec(
+            frozenset({"authenticated_at", "idle_expires_at", "absolute_expires_at"}),
+            lambda factory: {
+                "authenticated_at": factory.time_json(),
+                "idle_expires_at": factory.time_json(offset_microseconds=1),
+                "absolute_expires_at": factory.time_json(offset_microseconds=2),
+            },
+        ),
+        policy.TimerIntent: SemanticSpec(
+            frozenset({"operation", "duration_seconds", "label_commitment"}),
+            lambda factory: {
+                "operation": "create",
+                "duration_seconds": 1,
+                "label_commitment": _model_json(factory.build(Commitment)),
+            },
+        ),
+        provider.SanitizedProviderRequest: SemanticSpec(
+            frozenset({"request_id", "provider", "model", "route"}),
+            _provider_request_values,
+        ),
+        provider.RedactionReceipt: SemanticSpec(
+            frozenset({"removed_categories"}),
+            lambda _factory: {"removed_categories": []},
+        ),
+        budget.BudgetReservationRequest: SemanticSpec(
+            frozenset({"category", "usage_ceiling", "month_key"}),
+            lambda _factory: {
+                "category": "llm",
+                "usage_ceiling": {
+                    "category": "llm",
+                    "input_tokens": 1,
+                    "output_tokens": 0,
+                },
+                "month_key": "2026-08",
+            },
+        ),
+        budget.BudgetReservation: SemanticSpec(
+            frozenset({"outcome", "amount_micros_sgd", "pricing_commitment"}),
+            lambda factory: {
+                "outcome": "allow",
+                "amount_micros_sgd": 1,
+                "pricing_commitment": _model_json(factory.build(Commitment)),
+            },
+        ),
+        budget.ProviderUsageReceiptV1: SemanticSpec(
+            frozenset({"category", "billable_usage"}),
+            lambda _factory: {
+                "category": "llm",
+                "billable_usage": {
+                    "category": "llm",
+                    "input_tokens": 1,
+                    "output_tokens": 0,
+                },
+            },
+        ),
+        budget.BudgetReconciliationRequest: SemanticSpec(
+            frozenset({"proofs"}),
+            lambda _factory: {"proofs": []},
+        ),
+        reachy.ReachyCommand: SemanticSpec(
+            frozenset({"kind", "state", "media_stream_id", "gesture_id"}),
+            lambda _factory: {
+                "kind": "state",
+                "state": "idle",
+                "media_stream_id": None,
+                "gesture_id": None,
+            },
+        ),
+        reachy.CameraWindowGrant: SemanticSpec(
+            frozenset(
+                {
+                    "subject_id",
+                    "action_name",
+                    "purpose",
+                    "max_frames",
+                    "max_frame_bytes",
+                    "max_total_bytes",
+                    "max_frames_per_second",
+                    "issued_at",
+                    "expires_at",
+                }
+            ),
+            lambda factory: {
+                "subject_id": factory.uuid_json(),
+                "action_name": "identity.enroll",
+                "purpose": "explicit_enrollment",
+                "max_frames": 2,
+                "max_frame_bytes": 1024,
+                "max_total_bytes": 2048,
+                "max_frames_per_second": 1,
+                "issued_at": factory.time_json(),
+                "expires_at": factory.time_json(offset_microseconds=5_000_000),
+            },
+        ),
+    }
+
+
+REQUIRED_SEMANTIC_MODELS: frozenset[type[ContractModel]] = frozenset(semantic_specs())
+SCHEMA_ONLY_MODELS: frozenset[type[ContractModel]] = frozenset(
+    {
+        events.WakeDetectedPayload,
+        events.StopRequestedPayload,
+        ports.TurnInput,
+        ports.TurnOutput,
+        speech.AudioFormat,
+        speech.TranscriptResult,
+        speech.SpeechChunk,
+        identity.PersonaTraits,
+        identity.PersonaProjection,
+        memory.WorkingContent,
+        memory.SemanticContent,
+        memory.PreferenceContent,
+        memory.ProceduralContent,
+        memory.RelationalContent,
+        memory.PolicyContent,
+        memory.ProposalContext,
+        actions.ActionDraftBase,
+        actions.ActionBinding,
+        actions.ActionReceipt,
+        policy.AuthenticationResponse,
+        policy.CurrentOwnerAuthority,
+        provider.RouteAuthorization,
+        provider.RouteAuthorizationRequest,
+        provider.RouteConsumption,
+        provider.ProviderResponseReceipt,
+        provider.SanitizedProviderMessage,
+        provider.SanitizedToolReference,
+        provider.ProviderResponse,
+        budget.LlmUsageUnits,
+        budget.SttUsageUnits,
+        budget.TtsUsageUnits,
+        budget.WebSearchUsageUnits,
+        budget.BudgetSettlementRequest,
+        budget.BudgetSettlement,
+        budget.TransportProof,
+        audit.AuditDraft,
+        audit.AuditReceipt,
+        reachy.ReachyReceipt,
+        reachy.ReachyHealth,
+        reachy.SafetyReceipt,
+        reachy.StopAllReceiptBundleV1,
+        reachy.StopSignal,
+    }
+)
+
+
+def _semantic_builder(model_type: type[ContractModel]) -> FixtureBuilder:
+    def build_semantic(factory: FixtureFactory) -> ContractModel:
+        return factory.validated_semantic(model_type)
+
+    return build_semantic
+
+
+def _schema_builder(model_type: type[ContractModel]) -> FixtureBuilder:
+    def build_schema_only(factory: FixtureFactory) -> ContractModel:
+        return factory.validated_schema_only(model_type)
+
+    return build_schema_only
+
+
+SEMANTIC_BUILDERS: dict[type[ContractModel], FixtureBuilder] = {
+    model_type: _semantic_builder(model_type) for model_type in REQUIRED_SEMANTIC_MODELS
 }
-SCHEMA_ONLY_BUILDERS = {
-    model: (lambda current: lambda factory: factory.validated_schema_only(current))(model)
-    for model in SCHEMA_ONLY_MODELS
+SCHEMA_ONLY_BUILDERS: dict[type[ContractModel], FixtureBuilder] = {
+    model_type: _schema_builder(model_type) for model_type in SCHEMA_ONLY_MODELS
 }
 BUILDERS = SEMANTIC_BUILDERS | SCHEMA_ONLY_BUILDERS
-PUBLIC_MODELS = {
-    model for models in fixture_registry().values() for model in models.values()
-}
-assert not (set(SEMANTIC_BUILDERS) & set(SCHEMA_ONLY_BUILDERS))
-assert set(BUILDERS) == PUBLIC_MODELS
+
+
+def validate_builder_partition() -> None:
+    semantic = set(semantic_specs())
+    if semantic != set(REQUIRED_SEMANTIC_MODELS):
+        raise FixtureBuildError("semantic fixture classification drifted")
+    if semantic & set(SCHEMA_ONLY_MODELS):
+        raise FixtureBuildError("semantic and schema-only fixtures overlap")
+    public = {
+        model_type for models in fixture_registry().values() for model_type in models.values()
+    }
+    if set(BUILDERS) != public:
+        raise FixtureBuildError("fixture builders do not cover the public registry")
+
+
+validate_builder_partition()
 ```
 
-`validated_semantic` renders the schema-derived independent fields, requires `spec.fields <= set(spec.values(self))`, rejects every supplied key that is not a real model field, replaces the supplied explicit values, and calls `model_type.model_validate(payload)`. Extra supplied real fields are allowed only to make a complete explicit variant easier to review; an omitted correlated field is not. Thus a new public model, an unclassified model, a semantic model accidentally placed in the schema-only set, an omitted correlated field, or an unknown override fails before any fixture file is written. `tests/contract/test_v1_fixtures.py` imports `BUILDERS` and adds `assert set(BUILDERS) == fixture_models`; it also asserts `set(semantic_specs(FixtureFactory.preview())) == set(SEMANTIC_BUILDERS)`.
+The generator below is the only fixture writer. Its `TYPE_CHECKING`/package/direct split makes both `python scripts/generate_contract_fixtures.py ...` and `python -m scripts.generate_contract_fixtures ...` use the same implementation.
 
 ```python
 # scripts/generate_contract_fixtures.py
-import json
-from pathlib import Path
+from __future__ import annotations
 
-from scripts.contract_fixture_builders import BUILDERS, FixtureFactory, fixture_registry
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
+
 from tuntun_contracts.base import canonical_bytes
 
+if TYPE_CHECKING:
+    from scripts.contract_fixture_builders import (
+        BUILDERS,
+        FixtureFactory,
+        fixture_registry,
+        validate_builder_partition,
+    )
+    from scripts.contract_generator_common import run_directory_generator
+elif __package__:
+    from .contract_fixture_builders import (
+        BUILDERS,
+        FixtureFactory,
+        fixture_registry,
+        validate_builder_partition,
+    )
+    from .contract_generator_common import run_directory_generator
+else:
+    from contract_fixture_builders import (
+        BUILDERS,
+        FixtureFactory,
+        fixture_registry,
+        validate_builder_partition,
+    )
+    from contract_generator_common import run_directory_generator
 
-def main() -> None:
-    root=Path("packages/contracts/fixtures/v1")
-    root.mkdir(parents=True,exist_ok=True)
-    factory=FixtureFactory(first_uuid=101)
-    registry=fixture_registry()
-    assert set(BUILDERS)=={
-        model for models in registry.values() for model in models.values()
-    }
-    for group,models in registry.items():
-        examples={}; canonical={}
-        for name,model_type in sorted(models.items()):
-            model=factory.build(model_type)
-            examples[name]=model.model_dump(mode="json")
-            canonical[name]=canonical_bytes(model).decode("utf-8")
-        output={"schema_version":"1.0","examples":examples,"canonical_examples":canonical}
-        (root/f"{group}.json").write_text(
-            json.dumps(output,indent=2,sort_keys=True,ensure_ascii=False)+"\n",
-            encoding="utf-8",
+OUTPUT_DIRECTORY: Final = Path("packages/contracts/fixtures/v1")
+FIXTURE_FILENAMES: Final = (
+    "actions.json",
+    "audit.json",
+    "budget.json",
+    "events.json",
+    "identity.json",
+    "memory.json",
+    "policy.json",
+    "provider.json",
+    "reachy.json",
+    "speech.json",
+)
+
+
+def _render_document(document: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(
+            document,
+            allow_nan=False,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
         )
+        + "\n"
+    ).encode("utf-8")
 
 
-if __name__=="__main__": main()
+def render() -> dict[str, bytes]:
+    validate_builder_partition()
+    registry = fixture_registry()
+    if tuple(f"{group}.json" for group in registry) != FIXTURE_FILENAMES:
+        raise RuntimeError("fixture group inventory differs from output filenames")
+    public_models = {model_type for models in registry.values() for model_type in models.values()}
+    if set(BUILDERS) != public_models:
+        raise RuntimeError("fixture builder inventory is incomplete")
+
+    factory = FixtureFactory(first_uuid=101)
+    rendered: dict[str, bytes] = {}
+    for group, models in registry.items():
+        examples: dict[str, object] = {}
+        canonical_examples: dict[str, str] = {}
+        for name, model_type in models.items():
+            model = factory.build(model_type)
+            examples[name] = model.model_dump(mode="json")
+            canonical_examples[name] = canonical_bytes(model).decode("utf-8")
+        rendered[f"{group}.json"] = _render_document(
+            {
+                "canonical_examples": canonical_examples,
+                "examples": examples,
+                "schema_version": "1.0",
+            }
+        )
+    return rendered
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    return run_directory_generator(
+        output_directory=OUTPUT_DIRECTORY,
+        expected_names=FIXTURE_FILENAMES,
+        renderer=render,
+        argv=argv,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 ```
 
-The generator assigns fixed UUIDs beginning at `00000000-0000-0000-0000-000000000101`, uses only synthetic closed strings and the fixed timestamp, normally validates every object before serialization, and writes canonical oracles. Review the generated diff once, then retain the builder registry, generator, and fixtures; CI reruns the generator and fails if `git diff --exit-code packages/contracts/fixtures/v1` is non-empty. No fixture contains audio, a conversation transcript, names, addresses, credentials, or provider prose.
+Create the two exact privacy documents:
 
-Write `docs/privacy/threat-model.md` with assets (database/key roots, audit authenticity, contracts/model manifest, availability), actors (owner, family subject, Guest, LAN attacker, malicious model output, compromised dependency), trust boundaries (Reachy↔LAN↔Mac, browser↔API, Mac↔provider, build↔dependency/model sources), and foundation mitigations mapped to Task 3 scanning, strict contracts, Keychain, SQLCipher, AEAD, manifest hashes, and audit triggers. Write `docs/privacy/data-flow-inventory.md` as a table with columns `Data class | Source | Purpose | Processor | Durable location | Egress | Retention/deletion | Key`; include configuration, secrets, event receipts, audit receipts, provider-price/budget metadata, model metadata, and synthetic fixtures. Mark raw audio/transcripts/frames as “not processed by foundation; durable location none.”
+`docs/privacy/threat-model.md`:
 
-- [ ] **Step 4: Run the green fixture/privacy gate**
+```markdown
+# Foundation Privacy Threat Model
 
-Run: `uv run python scripts/generate_contract_fixtures.py && uv run pytest tests/contract/test_v1_fixtures.py -q && uv run python scripts/generate_contract_fixtures.py && git diff --exit-code packages/contracts/fixtures/v1 && uv run ruff check scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py tests/contract/test_v1_fixtures.py && uv run mypy scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py && uv run python scripts/verify_private_data.py packages/contracts/fixtures/v1 docs/privacy`
+## Assets
 
-Expected: PASS with 12 fixture/registry tests, `set(BUILDERS)` exactly equal to the complete public registry, every semantic class owned by an explicit `SemanticSpec`, two byte-identical generations, zero Ruff/mypy errors, and `private-data scan: PASS`.
+- SQLCipher database and Keychain roots.
+- Consent, budget, provider, memory, identity, action, and audit receipts.
+- Synthetic contract fixtures and their deterministic generator.
 
-- [ ] **Step 5: Commit exact Task 6 paths**
+## Actors
+
+- The owner, family subject, and Guest.
+- A local attacker with filesystem access but no Keychain authorization.
+- A dependency, model, provider, or LAN peer that may be malicious.
+
+## Trust boundaries
+
+- Reachy ↔ LAN ↔ Mac.
+- browser ↔ owner API.
+- Mac ↔ provider.
+- build ↔ dependency and model sources.
+
+## Foundation mitigations
+
+- Task 3 private-data and structural scans fail closed on unsafe paths and artifacts.
+- Strict contracts, explicit authorization receipts, manifest hashes and audit triggers constrain every boundary.
+- SQLCipher and Keychain ownership keep durable private data encrypted and secrets out of repository artifacts.
+
+## Out of scope
+
+- Runtime features, provider integrations, robot behaviors, and persistence beyond the Foundation tasks.
+- Production incident response and household policy choices implemented by later phases.
+```
+
+`docs/privacy/data-flow-inventory.md`:
+
+```markdown
+# Foundation Data-Flow Inventory
+
+| Data class | Source | Purpose | Processor | Durable location | Egress | Retention/deletion | Key |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Configuration | owner | local settings | core | protected config file | none | owner deletion | none |
+| Secrets | owner and platform | authentication and encryption | Keychain | Keychain only | none | explicit revocation | Keychain access control |
+| Event receipts | core | replay and state transitions | core | SQLCipher | none | household policy | database key |
+| Audit receipts | core | accountability | core | SQLCipher | none | household policy | database key |
+| Provider price and budget metadata | manifest and provider | budget authorization | core | SQLCipher | authorized provider metadata only | household policy | database key |
+| Model metadata | signed manifest | local model governance | core | repository manifest and local registry | approved model source | manifest replacement | manifest hash |
+| Synthetic contract fixtures | deterministic generator | compatibility verification | build and tests | repository | source repository | versioned with contracts | none |
+| Raw audio | Reachy microphone | not owned by foundation | not processed by foundation | none | none | not retained | none |
+| Conversation transcripts | later-phase speech service | not owned by foundation | not processed by foundation | none | none | not retained | none |
+| Camera frames | Reachy camera | not owned by foundation | not processed by foundation | none | none | not retained | none |
+```
+
+- [ ] **Step 8: Advance through the missing-artifact RED, then publish the exact fixtures**
+
+Run: `uv run pytest tests/contract/test_v1_fixtures.py -q -x`
+
+Expected: the registry, exact 51/42 partition, repaired-Task-5 correlation gate, fail-before-write misclassification, exact 93-schema surface, supported-shape matrix, and nine unclaimed-shape rejection nodes pass (15 nodes); the next node fails with `FileNotFoundError` for `packages/contracts/fixtures/v1/actions.json`. That proves the test is not self-generating its oracle.
+
+Run: `uv run python scripts/generate_contract_fixtures.py --write && uv run pytest tests/contract/test_v1_fixtures.py -q`
+
+Expected: PASS with exactly 30 nodes. The write creates exactly the ten declared fixture files, no private sibling remains, every generated byte sequence equals the generator's fresh render, and multi-file assertions consume one shared-lock snapshot.
+
+- [ ] **Step 9: Run the complete Task 6 gate and commit only its exact paths**
+
+Run:
+
+```bash
+uv run python scripts/generate_contract_fixtures.py --write
+uv run python scripts/generate_contract_fixtures.py --check
+uv run python -m scripts.generate_contract_fixtures --check
+uv run pytest tests/contract/test_contract_generators.py tests/contract/test_v1_fixtures.py -q
+uv run ruff format --check scripts/contract_generator_common.py scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py tests/contract/test_contract_generators.py tests/contract/test_v1_fixtures.py
+uv run ruff check scripts/contract_generator_common.py scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py tests/contract/test_contract_generators.py tests/contract/test_v1_fixtures.py
+MYPYPATH=packages/contracts/src:. uv run mypy --python-version 3.11 scripts/contract_generator_common.py scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py tests/contract/test_contract_generators.py tests/contract/test_v1_fixtures.py
+uv run python scripts/verify_private_data.py packages/contracts/fixtures/v1 docs/privacy
+git diff --check
+```
+
+Expected on either supported host: both direct/package checks return 0 with no output; pytest reports exactly `116 passed, 1 skipped` (87 shared-generator nodes plus 30 fixture/privacy nodes); Ruff format/check and Python-3.11 mypy report zero issues; the private-data scan reports PASS; and a second render leaves the ten files byte-identical. Review the generated fixture diff before staging.
+
+The same commit must then pass the real native nodes without xfail or emulation in both exact Task 2 hosted jobs. Run the first selected command on `macos-15-intel` and the second on `ubuntu-24.04`, then run the complete two-file pytest command above on both:
+
+```bash
+uv run pytest tests/contract/test_contract_generators.py -q -k test_darwin_native_swap_exclusive_and_parent_flock_gate
+uv run pytest tests/contract/test_contract_generators.py -q -k test_linux_native_exchange_noreplace_and_parent_flock_gate
+```
+
+Each selected command reports exactly `1 passed, 86 deselected`; the complete two-file command reports exactly `116 passed, 1 skipped` on each runner. A local run on one platform is not evidence for the other platform.
 
 ```bash
 git status --short
-git add packages/contracts/fixtures/v1/actions.json packages/contracts/fixtures/v1/events.json packages/contracts/fixtures/v1/speech.json packages/contracts/fixtures/v1/identity.json packages/contracts/fixtures/v1/memory.json packages/contracts/fixtures/v1/policy.json packages/contracts/fixtures/v1/provider.json packages/contracts/fixtures/v1/budget.json packages/contracts/fixtures/v1/audit.json packages/contracts/fixtures/v1/reachy.json scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py tests/contract/test_v1_fixtures.py docs/privacy/threat-model.md docs/privacy/data-flow-inventory.md
+git add packages/contracts/fixtures/v1/actions.json packages/contracts/fixtures/v1/audit.json packages/contracts/fixtures/v1/budget.json packages/contracts/fixtures/v1/events.json packages/contracts/fixtures/v1/identity.json packages/contracts/fixtures/v1/memory.json packages/contracts/fixtures/v1/policy.json packages/contracts/fixtures/v1/provider.json packages/contracts/fixtures/v1/reachy.json packages/contracts/fixtures/v1/speech.json scripts/contract_generator_common.py scripts/contract_fixture_builders.py scripts/generate_contract_fixtures.py tests/contract/test_contract_generators.py tests/contract/test_v1_fixtures.py docs/privacy/threat-model.md docs/privacy/data-flow-inventory.md
 git diff --cached --name-only
+git diff --cached --check
 git diff --cached
 git commit -m "test(contracts): freeze version-one fixtures and privacy inventory"
 ```
+
+`git diff --cached --name-only` must equal the 17-entry **Files** list exactly: ten generated fixture files, two shared/new generator files plus the fixture builder, two tests, and two privacy documents. No reconstructed Task 5 file or undeclared artifact may be staged.
 
 ### Task 7: Implement strict settings and owner-only filesystem paths
 
