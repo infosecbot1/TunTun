@@ -1,0 +1,175 @@
+{
+  "canonical_examples": {
+    "AdminSessionPrincipal": "{\"absolute_expires_at\":\"2026-08-27T00:00:00.000002Z\",\"access_mode\":\"loopback\",\"admin_session_id\":\"00000000-0000-0000-0000-000000000166\",\"authenticated_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-000000000167\",\"idle_expires_at\":\"2026-08-27T00:00:00.000001Z\",\"owner_generation\":1,\"profile_version\":1,\"session_version\":1,\"subject_id\":\"00000000-0000-0000-0000-000000000168\"}",
+    "AuthContext": "{\"assurance\":\"guest\",\"assurance_source\":\"guest\",\"binding\":{\"action_name\":\"x\",\"household_id\":\"00000000-0000-0000-0000-000000000169\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000016c\",\"parameter_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"policy_version\":\"x\",\"proposal_id\":\"00000000-0000-0000-0000-00000000016a\",\"resource_id\":\"00000000-0000-0000-0000-00000000016d\",\"resource_type\":\"x\",\"session_id\":\"00000000-0000-0000-0000-00000000016e\",\"subject_id\":null,\"turn_id\":\"00000000-0000-0000-0000-00000000016b\"},\"consumed_at\":\"2026-08-27T00:00:00.000000Z\",\"grant_id\":null,\"subject_id\":null}",
+    "AuthGrant": "{\"assurance\":\"confirmed\",\"assurance_source\":\"explicit_confirmation\",\"binding\":{\"action_name\":\"x\",\"household_id\":\"00000000-0000-0000-0000-00000000017a\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000017d\",\"parameter_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"policy_version\":\"x\",\"proposal_id\":\"00000000-0000-0000-0000-00000000017b\",\"resource_id\":\"00000000-0000-0000-0000-00000000017e\",\"resource_type\":\"x\",\"session_id\":\"00000000-0000-0000-0000-00000000017f\",\"subject_id\":\"00000000-0000-0000-0000-000000000179\",\"turn_id\":\"00000000-0000-0000-0000-00000000017c\"},\"expires_at\":\"2026-08-27T00:00:00.000001Z\",\"grant_id\":\"00000000-0000-0000-0000-000000000181\",\"issued_at\":\"2026-08-27T00:00:00.000000Z\",\"subject_id\":\"00000000-0000-0000-0000-000000000179\"}",
+    "AuthenticationChallenge": "{\"binding\":{\"action_name\":\"x\",\"household_id\":\"00000000-0000-0000-0000-00000000018b\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000018e\",\"parameter_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"policy_version\":\"x\",\"proposal_id\":\"00000000-0000-0000-0000-00000000018c\",\"resource_id\":\"00000000-0000-0000-0000-00000000018f\",\"resource_type\":\"x\",\"session_id\":\"00000000-0000-0000-0000-000000000190\",\"subject_id\":\"00000000-0000-0000-0000-00000000018a\",\"turn_id\":\"00000000-0000-0000-0000-00000000018d\"},\"challenge_id\":\"00000000-0000-0000-0000-000000000192\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"factor\":\"confirmation\",\"subject_id\":\"00000000-0000-0000-0000-00000000018a\"}",
+    "AuthenticationRequest": "{\"binding\":{\"action_name\":\"x\",\"household_id\":\"00000000-0000-0000-0000-00000000019c\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000019f\",\"parameter_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"policy_version\":\"x\",\"proposal_id\":\"00000000-0000-0000-0000-00000000019d\",\"resource_id\":\"00000000-0000-0000-0000-0000000001a0\",\"resource_type\":\"x\",\"session_id\":\"00000000-0000-0000-0000-0000000001a1\",\"subject_id\":\"00000000-0000-0000-0000-00000000019b\",\"turn_id\":\"00000000-0000-0000-0000-00000000019e\"},\"requested_assurance\":\"guest\",\"subject_id\":\"00000000-0000-0000-0000-00000000019b\"}",
+    "AuthenticationResponse": "{\"challenge_id\":\"00000000-0000-0000-0000-0000000001ab\",\"occurred_at\":\"2026-08-27T00:00:00.000000Z\",\"response\":\"x\"}",
+    "CurrentOwnerAuthority": "{\"household_id\":\"00000000-0000-0000-0000-0000000001ac\",\"observed_at\":\"2026-08-27T00:00:00.000000Z\",\"owner_generation\":1,\"profile_version\":1,\"subject_id\":\"00000000-0000-0000-0000-0000000001ad\"}",
+    "PolicyDecision": "{\"effect\":\"allow\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"policy_version\":\"x\",\"reason_code\":\"x\",\"required_assurance\":null}",
+    "PolicyRequest": "{\"action\":{\"action_name\":\"timer.create\",\"duration_seconds\":1,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000001b1\",\"label\":\"x\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000001af\",\"resource_id\":\"00000000-0000-0000-0000-0000000001ae\",\"resource_type\":\"timer\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0},\"assurance\":\"guest\",\"household_id\":\"00000000-0000-0000-0000-0000000001b2\",\"requested_risk\":\"personalization\",\"subject_id\":\"00000000-0000-0000-0000-0000000001b3\"}",
+    "TimerIntent": "{\"duration_seconds\":1,\"idempotency_key\":\"00000000-0000-0000-0000-0000000001b9\",\"label_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"operation\":\"create\",\"timer_id\":\"00000000-0000-0000-0000-0000000001b8\"}"
+  },
+  "examples": {
+    "AdminSessionPrincipal": {
+      "absolute_expires_at": "2026-08-27T00:00:00.000002Z",
+      "access_mode": "loopback",
+      "admin_session_id": "00000000-0000-0000-0000-000000000166",
+      "authenticated_at": "2026-08-27T00:00:00Z",
+      "household_id": "00000000-0000-0000-0000-000000000167",
+      "idle_expires_at": "2026-08-27T00:00:00.000001Z",
+      "owner_generation": 1,
+      "profile_version": 1,
+      "session_version": 1,
+      "subject_id": "00000000-0000-0000-0000-000000000168"
+    },
+    "AuthContext": {
+      "assurance": "guest",
+      "assurance_source": "guest",
+      "binding": {
+        "action_name": "x",
+        "household_id": "00000000-0000-0000-0000-000000000169",
+        "idempotency_key": "00000000-0000-0000-0000-00000000016c",
+        "parameter_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "policy_version": "x",
+        "proposal_id": "00000000-0000-0000-0000-00000000016a",
+        "resource_id": "00000000-0000-0000-0000-00000000016d",
+        "resource_type": "x",
+        "session_id": "00000000-0000-0000-0000-00000000016e",
+        "subject_id": null,
+        "turn_id": "00000000-0000-0000-0000-00000000016b"
+      },
+      "consumed_at": "2026-08-27T00:00:00Z",
+      "grant_id": null,
+      "subject_id": null
+    },
+    "AuthGrant": {
+      "assurance": "confirmed",
+      "assurance_source": "explicit_confirmation",
+      "binding": {
+        "action_name": "x",
+        "household_id": "00000000-0000-0000-0000-00000000017a",
+        "idempotency_key": "00000000-0000-0000-0000-00000000017d",
+        "parameter_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "policy_version": "x",
+        "proposal_id": "00000000-0000-0000-0000-00000000017b",
+        "resource_id": "00000000-0000-0000-0000-00000000017e",
+        "resource_type": "x",
+        "session_id": "00000000-0000-0000-0000-00000000017f",
+        "subject_id": "00000000-0000-0000-0000-000000000179",
+        "turn_id": "00000000-0000-0000-0000-00000000017c"
+      },
+      "expires_at": "2026-08-27T00:00:00.000001Z",
+      "grant_id": "00000000-0000-0000-0000-000000000181",
+      "issued_at": "2026-08-27T00:00:00Z",
+      "subject_id": "00000000-0000-0000-0000-000000000179"
+    },
+    "AuthenticationChallenge": {
+      "binding": {
+        "action_name": "x",
+        "household_id": "00000000-0000-0000-0000-00000000018b",
+        "idempotency_key": "00000000-0000-0000-0000-00000000018e",
+        "parameter_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "policy_version": "x",
+        "proposal_id": "00000000-0000-0000-0000-00000000018c",
+        "resource_id": "00000000-0000-0000-0000-00000000018f",
+        "resource_type": "x",
+        "session_id": "00000000-0000-0000-0000-000000000190",
+        "subject_id": "00000000-0000-0000-0000-00000000018a",
+        "turn_id": "00000000-0000-0000-0000-00000000018d"
+      },
+      "challenge_id": "00000000-0000-0000-0000-000000000192",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "factor": "confirmation",
+      "subject_id": "00000000-0000-0000-0000-00000000018a"
+    },
+    "AuthenticationRequest": {
+      "binding": {
+        "action_name": "x",
+        "household_id": "00000000-0000-0000-0000-00000000019c",
+        "idempotency_key": "00000000-0000-0000-0000-00000000019f",
+        "parameter_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "policy_version": "x",
+        "proposal_id": "00000000-0000-0000-0000-00000000019d",
+        "resource_id": "00000000-0000-0000-0000-0000000001a0",
+        "resource_type": "x",
+        "session_id": "00000000-0000-0000-0000-0000000001a1",
+        "subject_id": "00000000-0000-0000-0000-00000000019b",
+        "turn_id": "00000000-0000-0000-0000-00000000019e"
+      },
+      "requested_assurance": "guest",
+      "subject_id": "00000000-0000-0000-0000-00000000019b"
+    },
+    "AuthenticationResponse": {
+      "challenge_id": "00000000-0000-0000-0000-0000000001ab",
+      "occurred_at": "2026-08-27T00:00:00Z",
+      "response": "x"
+    },
+    "CurrentOwnerAuthority": {
+      "household_id": "00000000-0000-0000-0000-0000000001ac",
+      "observed_at": "2026-08-27T00:00:00Z",
+      "owner_generation": 1,
+      "profile_version": 1,
+      "subject_id": "00000000-0000-0000-0000-0000000001ad"
+    },
+    "PolicyDecision": {
+      "effect": "allow",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "policy_version": "x",
+      "reason_code": "x",
+      "required_assurance": null
+    },
+    "PolicyRequest": {
+      "action": {
+        "action_name": "timer.create",
+        "duration_seconds": 1,
+        "expires_at": "2026-08-27T00:00:00Z",
+        "idempotency_key": "00000000-0000-0000-0000-0000000001b1",
+        "label": "x",
+        "parameters_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "proposal_id": "00000000-0000-0000-0000-0000000001af",
+        "resource_id": "00000000-0000-0000-0000-0000000001ae",
+        "resource_type": "timer",
+        "schema_version": "1.0",
+        "uncertainty_micros": 0
+      },
+      "assurance": "guest",
+      "household_id": "00000000-0000-0000-0000-0000000001b2",
+      "requested_risk": "personalization",
+      "subject_id": "00000000-0000-0000-0000-0000000001b3"
+    },
+    "TimerIntent": {
+      "duration_seconds": 1,
+      "idempotency_key": "00000000-0000-0000-0000-0000000001b9",
+      "label_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "operation": "create",
+      "timer_id": "00000000-0000-0000-0000-0000000001b8"
+    }
+  },
+  "schema_version": "1.0"
+}

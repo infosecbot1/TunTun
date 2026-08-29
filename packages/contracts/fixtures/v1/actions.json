@@ -1,0 +1,521 @@
+{
+  "canonical_examples": {
+    "ActionBinding": "{\"action_name\":\"x\",\"household_id\":\"00000000-0000-0000-0000-000000000065\",\"idempotency_key\":\"00000000-0000-0000-0000-000000000068\",\"parameter_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"policy_version\":\"x\",\"proposal_id\":\"00000000-0000-0000-0000-000000000066\",\"resource_id\":\"00000000-0000-0000-0000-000000000069\",\"resource_type\":\"x\",\"session_id\":\"00000000-0000-0000-0000-00000000006a\",\"subject_id\":\"00000000-0000-0000-0000-00000000006b\",\"turn_id\":\"00000000-0000-0000-0000-000000000067\"}",
+    "ActionDraftBase": "{\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000006e\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-00000000006c\",\"resource_id\":\"00000000-0000-0000-0000-00000000006d\",\"resource_type\":\"fixture\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "ActionReceipt": "{\"action_name\":\"x\",\"household_id\":\"00000000-0000-0000-0000-000000000071\",\"idempotency_key\":\"00000000-0000-0000-0000-000000000073\",\"occurred_at\":\"2026-08-27T00:00:00.000000Z\",\"outcome\":\"executed\",\"proposal_id\":\"00000000-0000-0000-0000-000000000070\",\"reason_code\":\"x\",\"receipt_id\":\"00000000-0000-0000-0000-00000000006f\",\"resource_id\":\"00000000-0000-0000-0000-000000000072\",\"resource_scope\":\"x\"}",
+    "AuditActionDraft": "{\"action_name\":\"audit.verify\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"from_ordinal\":1,\"idempotency_key\":\"00000000-0000-0000-0000-000000000077\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-000000000075\",\"resource_id\":\"00000000-0000-0000-0000-000000000074\",\"resource_type\":\"audit\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "BackupActionDraft": "{\"action_name\":\"backup.restore\",\"backup_id\":\"00000000-0000-0000-0000-000000000078\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000007b\",\"manifest_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-000000000079\",\"recipient_key_id\":null,\"resource_id\":\"00000000-0000-0000-0000-000000000078\",\"resource_type\":\"backup\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "ComponentStatusActionDraft": "{\"action_name\":\"system.status\",\"component\":\"system\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000007f\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-00000000007d\",\"resource_id\":\"00000000-0000-0000-0000-00000000007c\",\"resource_type\":\"system\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "ConsentActionDraft": "{\"action_name\":\"consent.grant\",\"disclosure_version\":\"x\",\"expected_latest_receipt_id\":null,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"guardian_generation\":null,\"idempotency_key\":\"00000000-0000-0000-0000-000000000083\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"policy_version\":\"x\",\"proposal_id\":\"00000000-0000-0000-0000-000000000081\",\"purpose\":\"personalization\",\"resource_id\":\"00000000-0000-0000-0000-000000000080\",\"resource_type\":\"consent\",\"schema_version\":\"1.0\",\"subject_id\":\"00000000-0000-0000-0000-000000000080\",\"uncertainty_micros\":0}",
+    "CredentialActionDraft": "{\"action_name\":\"credential.passkey.revoke\",\"capability\":null,\"ceremony_id\":null,\"credential_id\":\"00000000-0000-0000-0000-000000000086\",\"expected_version\":1,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-000000000089\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-000000000087\",\"resource_id\":\"00000000-0000-0000-0000-000000000086\",\"resource_type\":\"credential\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "DiagnosticActionDraft": "{\"action_name\":\"reachy.gesture_test\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000008d\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-00000000008b\",\"registered_asset_id\":\"fixture.asset\",\"resource_id\":\"00000000-0000-0000-0000-00000000008a\",\"resource_type\":\"reachy\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "FamilyStageReviewActionDraft": "{\"action_name\":\"release.family_stage.review\",\"candidate_commit\":\"0000000000000000000000000000000000000000\",\"candidate_version\":\"x\",\"decision\":\"proceed\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-000000000091\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-00000000008f\",\"resource_id\":\"00000000-0000-0000-0000-00000000008e\",\"resource_type\":\"family_stage\",\"reviewed_stage_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "IdentityActionDraft": "{\"action_name\":\"identity.enroll\",\"enrollment_id\":null,\"expected_consent_receipt_id\":\"00000000-0000-0000-0000-000000000093\",\"expected_profile_version\":1,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-000000000096\",\"modality\":\"face\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-000000000094\",\"reenrollment_days\":180,\"resource_id\":\"00000000-0000-0000-0000-000000000092\",\"resource_type\":\"identity\",\"schema_version\":\"1.0\",\"subject_id\":\"00000000-0000-0000-0000-000000000092\",\"uncertainty_micros\":0}",
+    "LatencyDeviationActionDraft": "{\"action_name\":\"release.latency.accept\",\"candidate_commit\":\"0000000000000000000000000000000000000000\",\"candidate_version\":\"x\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000009b\",\"limit_ms\":1,\"metric\":\"first_audio_p95_ms\",\"observed_ms\":0,\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-000000000099\",\"release_notes_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"resource_id\":\"00000000-0000-0000-0000-000000000098\",\"resource_type\":\"soak_run\",\"run_id\":\"00000000-0000-0000-0000-000000000098\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "MemoryActionDraft": "{\"action_name\":\"memory.propose\",\"decision\":null,\"edited_content\":null,\"expected_version\":null,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"export_format\":null,\"idempotency_key\":\"00000000-0000-0000-0000-0000000000aa\",\"memory_id\":null,\"memory_proposal\":{\"audience\":\"subject_private\",\"claim_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"confidence_micros\":0,\"content\":{\"category\":\"x\",\"key\":\"x\",\"kind\":\"preference\",\"strength_micros\":0,\"value\":\"x\"},\"expected_version\":1,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-00000000009f\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000000a3\",\"operation\":\"replace\",\"proposal_id\":\"00000000-0000-0000-0000-00000000009e\",\"reason\":\"x\",\"schema_version\":\"1.0\",\"sensitivity\":\"public\",\"session_id\":\"00000000-0000-0000-0000-0000000000a1\",\"source_receipt_ids\":[\"00000000-0000-0000-0000-0000000000a6\"],\"subject_id\":\"00000000-0000-0000-0000-00000000009d\",\"target_memory_id\":\"00000000-0000-0000-0000-0000000000a7\",\"turn_id\":\"00000000-0000-0000-0000-0000000000a2\"},\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000000a8\",\"proposal_id_ref\":null,\"resource_id\":\"00000000-0000-0000-0000-00000000009e\",\"resource_type\":\"memory\",\"schema_version\":\"1.0\",\"subject_id\":\"00000000-0000-0000-0000-00000000009d\",\"uncertainty_micros\":0}",
+    "PrivacyReductionActionDraft": "{\"action_name\":\"privacy.off\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000000af\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000000ad\",\"resource_id\":\"00000000-0000-0000-0000-0000000000ac\",\"resource_type\":\"privacy\",\"schema_version\":\"1.0\",\"typed_confirmation\":\"TURN OFF PRIVACY\",\"uncertainty_micros\":0}",
+    "ProfileActionDraft": "{\"action_name\":\"profile.revoke\",\"clear_persona_traits\":false,\"display_label\":null,\"expected_version\":1,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"guardian_generation\":null,\"guardian_id\":null,\"idempotency_key\":\"00000000-0000-0000-0000-0000000000b3\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"persona_traits\":null,\"profile_class\":null,\"proposal_id\":\"00000000-0000-0000-0000-0000000000b1\",\"resource_id\":\"00000000-0000-0000-0000-0000000000b0\",\"resource_type\":\"profile\",\"schema_version\":\"1.0\",\"subject_id\":\"00000000-0000-0000-0000-0000000000b0\",\"target_profile_class\":null,\"uncertainty_micros\":0}",
+    "ProviderActionDraft": "{\"access_mode\":null,\"action_name\":\"provider.review\",\"enabled\":null,\"expected_access_version\":null,\"expected_budget_version\":null,\"expected_provider_version\":1,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"hard_limit_micros_sgd\":null,\"idempotency_key\":\"00000000-0000-0000-0000-0000000000b8\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000000b6\",\"provider\":\"openai\",\"resource_id\":\"00000000-0000-0000-0000-0000000000b5\",\"resource_type\":\"provider\",\"review_record_id\":null,\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "ReleaseP1R0ActionDraft": "{\"action_name\":\"release.p1r0\",\"candidate_commit\":\"0000000000000000000000000000000000000000\",\"candidate_version\":\"x\",\"evidence_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000000bc\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000000ba\",\"resource_id\":\"00000000-0000-0000-0000-0000000000b9\",\"resource_type\":\"release_candidate\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "SafetyActionDraft": "{\"action_name\":\"privacy.on\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000000c0\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000000be\",\"reason_code\":\"fixture\",\"resource_id\":\"00000000-0000-0000-0000-0000000000bd\",\"resource_type\":\"privacy\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "SearchActionDraft": "{\"action_name\":\"search.profile_mode.change\",\"activation_expires_at\":null,\"activation_issued_at\":null,\"expected_profile_version\":1,\"expected_web_consent_receipt_id\":null,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"feature_generation\":null,\"idempotency_key\":\"00000000-0000-0000-0000-0000000000c4\",\"max_duration_seconds\":null,\"max_passes\":null,\"max_sources\":null,\"mode\":\"no_web\",\"no_authenticated_sites\":null,\"no_files\":null,\"no_memory\":null,\"no_tools\":null,\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"pricing_version\":null,\"privacy_generation\":null,\"proposal_id\":\"00000000-0000-0000-0000-0000000000c2\",\"provider_review_version\":null,\"resource_id\":\"00000000-0000-0000-0000-0000000000c1\",\"resource_type\":\"search\",\"schema_version\":\"1.0\",\"subject_id\":\"00000000-0000-0000-0000-0000000000c1\",\"uncertainty_micros\":0}",
+    "SecurityFindingActionDraft": "{\"action_name\":\"security.finding.suppress\",\"candidate_commit\":\"0000000000000000000000000000000000000000\",\"candidate_version\":\"x\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"finding_code\":\"x\",\"finding_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"finding_id\":\"x\",\"finding_severity\":\"critical\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000000c9\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000000c7\",\"resource_id\":\"00000000-0000-0000-0000-0000000000c6\",\"resource_type\":\"security_finding\",\"schema_version\":\"1.0\",\"suppression_expires_at\":\"2026-08-27T00:00:00.000000Z\",\"uncertainty_micros\":0}",
+    "TimerCreateActionDraft": "{\"action_name\":\"timer.create\",\"duration_seconds\":1,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000000cd\",\"label\":\"x\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000000cb\",\"resource_id\":\"00000000-0000-0000-0000-0000000000ca\",\"resource_type\":\"timer\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0}",
+    "TimerTargetActionDraft": "{\"action_name\":\"timer.cancel\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000000d1\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000000cf\",\"resource_id\":\"00000000-0000-0000-0000-0000000000ce\",\"resource_type\":\"timer\",\"schema_version\":\"1.0\",\"timer_id\":\"00000000-0000-0000-0000-0000000000ce\",\"uncertainty_micros\":0}",
+    "ValidatedActionProposal": "{\"binding\":{\"action_name\":\"timer.create\",\"household_id\":\"00000000-0000-0000-0000-0000000000d8\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000000d6\",\"parameter_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"policy_version\":\"x\",\"proposal_id\":\"00000000-0000-0000-0000-0000000000d4\",\"resource_id\":\"00000000-0000-0000-0000-0000000000d3\",\"resource_type\":\"timer\",\"session_id\":\"00000000-0000-0000-0000-0000000000dd\",\"subject_id\":\"00000000-0000-0000-0000-0000000000d7\",\"turn_id\":\"00000000-0000-0000-0000-0000000000da\"},\"draft\":{\"action_name\":\"timer.create\",\"duration_seconds\":1,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"idempotency_key\":\"00000000-0000-0000-0000-0000000000d6\",\"label\":\"x\",\"parameters_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"proposal_id\":\"00000000-0000-0000-0000-0000000000d4\",\"resource_id\":\"00000000-0000-0000-0000-0000000000d3\",\"resource_type\":\"timer\",\"schema_version\":\"1.0\",\"uncertainty_micros\":0},\"required_assurance\":\"guest\",\"resource_scope\":\"x\"}"
+  },
+  "examples": {
+    "ActionBinding": {
+      "action_name": "x",
+      "household_id": "00000000-0000-0000-0000-000000000065",
+      "idempotency_key": "00000000-0000-0000-0000-000000000068",
+      "parameter_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "policy_version": "x",
+      "proposal_id": "00000000-0000-0000-0000-000000000066",
+      "resource_id": "00000000-0000-0000-0000-000000000069",
+      "resource_type": "x",
+      "session_id": "00000000-0000-0000-0000-00000000006a",
+      "subject_id": "00000000-0000-0000-0000-00000000006b",
+      "turn_id": "00000000-0000-0000-0000-000000000067"
+    },
+    "ActionDraftBase": {
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-00000000006e",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-00000000006c",
+      "resource_id": "00000000-0000-0000-0000-00000000006d",
+      "resource_type": "fixture",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "ActionReceipt": {
+      "action_name": "x",
+      "household_id": "00000000-0000-0000-0000-000000000071",
+      "idempotency_key": "00000000-0000-0000-0000-000000000073",
+      "occurred_at": "2026-08-27T00:00:00Z",
+      "outcome": "executed",
+      "proposal_id": "00000000-0000-0000-0000-000000000070",
+      "reason_code": "x",
+      "receipt_id": "00000000-0000-0000-0000-00000000006f",
+      "resource_id": "00000000-0000-0000-0000-000000000072",
+      "resource_scope": "x"
+    },
+    "AuditActionDraft": {
+      "action_name": "audit.verify",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "from_ordinal": 1,
+      "idempotency_key": "00000000-0000-0000-0000-000000000077",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-000000000075",
+      "resource_id": "00000000-0000-0000-0000-000000000074",
+      "resource_type": "audit",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "BackupActionDraft": {
+      "action_name": "backup.restore",
+      "backup_id": "00000000-0000-0000-0000-000000000078",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-00000000007b",
+      "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-000000000079",
+      "recipient_key_id": null,
+      "resource_id": "00000000-0000-0000-0000-000000000078",
+      "resource_type": "backup",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "ComponentStatusActionDraft": {
+      "action_name": "system.status",
+      "component": "system",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-00000000007f",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-00000000007d",
+      "resource_id": "00000000-0000-0000-0000-00000000007c",
+      "resource_type": "system",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "ConsentActionDraft": {
+      "action_name": "consent.grant",
+      "disclosure_version": "x",
+      "expected_latest_receipt_id": null,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "guardian_generation": null,
+      "idempotency_key": "00000000-0000-0000-0000-000000000083",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "policy_version": "x",
+      "proposal_id": "00000000-0000-0000-0000-000000000081",
+      "purpose": "personalization",
+      "resource_id": "00000000-0000-0000-0000-000000000080",
+      "resource_type": "consent",
+      "schema_version": "1.0",
+      "subject_id": "00000000-0000-0000-0000-000000000080",
+      "uncertainty_micros": 0
+    },
+    "CredentialActionDraft": {
+      "action_name": "credential.passkey.revoke",
+      "capability": null,
+      "ceremony_id": null,
+      "credential_id": "00000000-0000-0000-0000-000000000086",
+      "expected_version": 1,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-000000000089",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-000000000087",
+      "resource_id": "00000000-0000-0000-0000-000000000086",
+      "resource_type": "credential",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "DiagnosticActionDraft": {
+      "action_name": "reachy.gesture_test",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-00000000008d",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-00000000008b",
+      "registered_asset_id": "fixture.asset",
+      "resource_id": "00000000-0000-0000-0000-00000000008a",
+      "resource_type": "reachy",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "FamilyStageReviewActionDraft": {
+      "action_name": "release.family_stage.review",
+      "candidate_commit": "0000000000000000000000000000000000000000",
+      "candidate_version": "x",
+      "decision": "proceed",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-000000000091",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-00000000008f",
+      "resource_id": "00000000-0000-0000-0000-00000000008e",
+      "resource_type": "family_stage",
+      "reviewed_stage_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "IdentityActionDraft": {
+      "action_name": "identity.enroll",
+      "enrollment_id": null,
+      "expected_consent_receipt_id": "00000000-0000-0000-0000-000000000093",
+      "expected_profile_version": 1,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-000000000096",
+      "modality": "face",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-000000000094",
+      "reenrollment_days": 180,
+      "resource_id": "00000000-0000-0000-0000-000000000092",
+      "resource_type": "identity",
+      "schema_version": "1.0",
+      "subject_id": "00000000-0000-0000-0000-000000000092",
+      "uncertainty_micros": 0
+    },
+    "LatencyDeviationActionDraft": {
+      "action_name": "release.latency.accept",
+      "candidate_commit": "0000000000000000000000000000000000000000",
+      "candidate_version": "x",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-00000000009b",
+      "limit_ms": 1,
+      "metric": "first_audio_p95_ms",
+      "observed_ms": 0,
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-000000000099",
+      "release_notes_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "resource_id": "00000000-0000-0000-0000-000000000098",
+      "resource_type": "soak_run",
+      "run_id": "00000000-0000-0000-0000-000000000098",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "MemoryActionDraft": {
+      "action_name": "memory.propose",
+      "decision": null,
+      "edited_content": null,
+      "expected_version": null,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "export_format": null,
+      "idempotency_key": "00000000-0000-0000-0000-0000000000aa",
+      "memory_id": null,
+      "memory_proposal": {
+        "audience": "subject_private",
+        "claim_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "confidence_micros": 0,
+        "content": {
+          "category": "x",
+          "key": "x",
+          "kind": "preference",
+          "strength_micros": 0,
+          "value": "x"
+        },
+        "expected_version": 1,
+        "expires_at": "2026-08-27T00:00:00Z",
+        "household_id": "00000000-0000-0000-0000-00000000009f",
+        "idempotency_key": "00000000-0000-0000-0000-0000000000a3",
+        "operation": "replace",
+        "proposal_id": "00000000-0000-0000-0000-00000000009e",
+        "reason": "x",
+        "schema_version": "1.0",
+        "sensitivity": "public",
+        "session_id": "00000000-0000-0000-0000-0000000000a1",
+        "source_receipt_ids": [
+          "00000000-0000-0000-0000-0000000000a6"
+        ],
+        "subject_id": "00000000-0000-0000-0000-00000000009d",
+        "target_memory_id": "00000000-0000-0000-0000-0000000000a7",
+        "turn_id": "00000000-0000-0000-0000-0000000000a2"
+      },
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-0000000000a8",
+      "proposal_id_ref": null,
+      "resource_id": "00000000-0000-0000-0000-00000000009e",
+      "resource_type": "memory",
+      "schema_version": "1.0",
+      "subject_id": "00000000-0000-0000-0000-00000000009d",
+      "uncertainty_micros": 0
+    },
+    "PrivacyReductionActionDraft": {
+      "action_name": "privacy.off",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-0000000000af",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-0000000000ad",
+      "resource_id": "00000000-0000-0000-0000-0000000000ac",
+      "resource_type": "privacy",
+      "schema_version": "1.0",
+      "typed_confirmation": "TURN OFF PRIVACY",
+      "uncertainty_micros": 0
+    },
+    "ProfileActionDraft": {
+      "action_name": "profile.revoke",
+      "clear_persona_traits": false,
+      "display_label": null,
+      "expected_version": 1,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "guardian_generation": null,
+      "guardian_id": null,
+      "idempotency_key": "00000000-0000-0000-0000-0000000000b3",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "persona_traits": null,
+      "profile_class": null,
+      "proposal_id": "00000000-0000-0000-0000-0000000000b1",
+      "resource_id": "00000000-0000-0000-0000-0000000000b0",
+      "resource_type": "profile",
+      "schema_version": "1.0",
+      "subject_id": "00000000-0000-0000-0000-0000000000b0",
+      "target_profile_class": null,
+      "uncertainty_micros": 0
+    },
+    "ProviderActionDraft": {
+      "access_mode": null,
+      "action_name": "provider.review",
+      "enabled": null,
+      "expected_access_version": null,
+      "expected_budget_version": null,
+      "expected_provider_version": 1,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "hard_limit_micros_sgd": null,
+      "idempotency_key": "00000000-0000-0000-0000-0000000000b8",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-0000000000b6",
+      "provider": "openai",
+      "resource_id": "00000000-0000-0000-0000-0000000000b5",
+      "resource_type": "provider",
+      "review_record_id": null,
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "ReleaseP1R0ActionDraft": {
+      "action_name": "release.p1r0",
+      "candidate_commit": "0000000000000000000000000000000000000000",
+      "candidate_version": "x",
+      "evidence_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-0000000000bc",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-0000000000ba",
+      "resource_id": "00000000-0000-0000-0000-0000000000b9",
+      "resource_type": "release_candidate",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "SafetyActionDraft": {
+      "action_name": "privacy.on",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-0000000000c0",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-0000000000be",
+      "reason_code": "fixture",
+      "resource_id": "00000000-0000-0000-0000-0000000000bd",
+      "resource_type": "privacy",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "SearchActionDraft": {
+      "action_name": "search.profile_mode.change",
+      "activation_expires_at": null,
+      "activation_issued_at": null,
+      "expected_profile_version": 1,
+      "expected_web_consent_receipt_id": null,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "feature_generation": null,
+      "idempotency_key": "00000000-0000-0000-0000-0000000000c4",
+      "max_duration_seconds": null,
+      "max_passes": null,
+      "max_sources": null,
+      "mode": "no_web",
+      "no_authenticated_sites": null,
+      "no_files": null,
+      "no_memory": null,
+      "no_tools": null,
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "pricing_version": null,
+      "privacy_generation": null,
+      "proposal_id": "00000000-0000-0000-0000-0000000000c2",
+      "provider_review_version": null,
+      "resource_id": "00000000-0000-0000-0000-0000000000c1",
+      "resource_type": "search",
+      "schema_version": "1.0",
+      "subject_id": "00000000-0000-0000-0000-0000000000c1",
+      "uncertainty_micros": 0
+    },
+    "SecurityFindingActionDraft": {
+      "action_name": "security.finding.suppress",
+      "candidate_commit": "0000000000000000000000000000000000000000",
+      "candidate_version": "x",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "finding_code": "x",
+      "finding_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "finding_id": "x",
+      "finding_severity": "critical",
+      "idempotency_key": "00000000-0000-0000-0000-0000000000c9",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-0000000000c7",
+      "resource_id": "00000000-0000-0000-0000-0000000000c6",
+      "resource_type": "security_finding",
+      "schema_version": "1.0",
+      "suppression_expires_at": "2026-08-27T00:00:00Z",
+      "uncertainty_micros": 0
+    },
+    "TimerCreateActionDraft": {
+      "action_name": "timer.create",
+      "duration_seconds": 1,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-0000000000cd",
+      "label": "x",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-0000000000cb",
+      "resource_id": "00000000-0000-0000-0000-0000000000ca",
+      "resource_type": "timer",
+      "schema_version": "1.0",
+      "uncertainty_micros": 0
+    },
+    "TimerTargetActionDraft": {
+      "action_name": "timer.cancel",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "idempotency_key": "00000000-0000-0000-0000-0000000000d1",
+      "parameters_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "proposal_id": "00000000-0000-0000-0000-0000000000cf",
+      "resource_id": "00000000-0000-0000-0000-0000000000ce",
+      "resource_type": "timer",
+      "schema_version": "1.0",
+      "timer_id": "00000000-0000-0000-0000-0000000000ce",
+      "uncertainty_micros": 0
+    },
+    "ValidatedActionProposal": {
+      "binding": {
+        "action_name": "timer.create",
+        "household_id": "00000000-0000-0000-0000-0000000000d8",
+        "idempotency_key": "00000000-0000-0000-0000-0000000000d6",
+        "parameter_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "policy_version": "x",
+        "proposal_id": "00000000-0000-0000-0000-0000000000d4",
+        "resource_id": "00000000-0000-0000-0000-0000000000d3",
+        "resource_type": "timer",
+        "session_id": "00000000-0000-0000-0000-0000000000dd",
+        "subject_id": "00000000-0000-0000-0000-0000000000d7",
+        "turn_id": "00000000-0000-0000-0000-0000000000da"
+      },
+      "draft": {
+        "action_name": "timer.create",
+        "duration_seconds": 1,
+        "expires_at": "2026-08-27T00:00:00Z",
+        "idempotency_key": "00000000-0000-0000-0000-0000000000d6",
+        "label": "x",
+        "parameters_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "proposal_id": "00000000-0000-0000-0000-0000000000d4",
+        "resource_id": "00000000-0000-0000-0000-0000000000d3",
+        "resource_type": "timer",
+        "schema_version": "1.0",
+        "uncertainty_micros": 0
+      },
+      "required_assurance": "guest",
+      "resource_scope": "x"
+    }
+  },
+  "schema_version": "1.0"
+}

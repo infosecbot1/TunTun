@@ -2,13 +2,15 @@ from __future__ import annotations
 
 # The import split below deliberately bootstraps the uninstalled root namespace.
 # ruff: noqa: E402
+import fcntl
 import hashlib
 import json
 import os
 import stat
 import subprocess
 import sys
-from collections.abc import Iterator, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -712,3 +714,813 @@ def test_task3_race_signal_fails_check_closed_without_generator_mutation(
     monkeypatch.setattr(contract_generator_common, "read_regular_file", race_read)
     assert generator.main(["--check"]) == 1
     assert _tree_snapshot(parent) == before
+
+
+DIRECTORY_NAMES = ("a.json", "b.md")
+
+
+def _directory_render() -> dict[str, bytes]:
+    return {"a.json": b'{"generation":"current"}\n', "b.md": b"# Current\n"}
+
+
+def _alternate_directory_render() -> dict[str, bytes]:
+    return {"a.json": b'{"generation":"alternate"}\n', "b.md": b"# Alternate\n"}
+
+
+def _run_directory_generator(
+    output: Path,
+    arguments: Sequence[str],
+    renderer: Callable[[], Mapping[str, bytes]] = _directory_render,
+) -> int:
+    return contract_generator_common.run_directory_generator(
+        output_directory=output,
+        expected_names=DIRECTORY_NAMES,
+        renderer=renderer,
+        argv=arguments,
+    )
+
+
+def _transaction_path(output: Path) -> Path:
+    return output.parent / f".{output.name}.transaction"
+
+
+def _python_environment() -> dict[str, str]:
+    return {
+        **os.environ,
+        "PYTHONHASHSEED": "1",
+        "PYTHONPATH": os.pathsep.join((str(ROOT / "packages/contracts/src"), str(ROOT))),
+    }
+
+
+def _writer_source(output: Path, *, target: str | None, loops: int = 1) -> str:
+    checkpoint = (
+        "def checkpoint(name):\n"
+        f"    if name == {target!r}:\n"
+        "        os._exit(73)\n"
+        "common._transaction_checkpoint = checkpoint\n"
+        if target is not None
+        else ""
+    )
+    return (
+        "import os\n"
+        "from pathlib import Path\n"
+        "from scripts import contract_generator_common as common\n"
+        f"output = Path({str(output)!r})\n"
+        f"names = {DIRECTORY_NAMES!r}\n"
+        f"{checkpoint}"
+        f"for index in range({loops}):\n"
+        "    raw = str(index % 2).encode('ascii')\n"
+        "    def render(raw=raw):\n"
+        "        return {'a.json': b'{\"generation\":' + raw + b'}\\n', "
+        "'b.md': b'# ' + raw + b'\\n'}\n"
+        "    if common.run_directory_generator(output_directory=output, "
+        "expected_names=names, renderer=render, argv=['--write']) != 0:\n"
+        "        raise SystemExit(91)\n"
+    )
+
+
+def _crash_writer(output: Path, target: str) -> subprocess.CompletedProcess[bytes]:
+    source = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "from scripts import contract_generator_common as common\n"
+        f"output = Path({str(output)!r})\n"
+        f"rendered = {_directory_render()!r}\n"
+        "def render():\n"
+        "    return rendered\n"
+        "def checkpoint(name):\n"
+        f"    if name == {target!r}:\n"
+        "        os._exit(73)\n"
+        "common._transaction_checkpoint = checkpoint\n"
+        "raise SystemExit(common.run_directory_generator(output_directory=output, "
+        f"expected_names={DIRECTORY_NAMES!r}, renderer=render, argv=['--write']))\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", source],
+        cwd=ROOT,
+        env=_python_environment(),
+        check=False,
+        capture_output=True,
+    )
+
+
+def _wait_for_path(path: Path, process: subprocess.Popen[bytes]) -> None:
+    deadline = time.monotonic() + 10
+    while not path.exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert path.exists(), process.communicate(timeout=1)
+
+
+def test_generated_directory_write_check_snapshot_and_exact_inventory(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert tuple(sorted(path.name for path in output.iterdir())) == DIRECTORY_NAMES
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == _directory_render()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in output.iterdir())
+    assert not _transaction_path(output).exists()
+
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 0
+    assert _tree_snapshot(tmp_path) == before
+    with contract_generator_common.open_generated_directory_snapshot(
+        output,
+        DIRECTORY_NAMES,
+    ) as snapshot:
+        assert snapshot.names == DIRECTORY_NAMES
+        assert {name: snapshot.read_bytes(name) for name in snapshot.names} == _directory_render()
+    with pytest.raises(GeneratorError, match="closed"):
+        snapshot.read_bytes("a.json")
+
+
+def test_safe_git_checkout_modes_are_accepted_and_replaced(tmp_path: Path) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    output.chmod(0o755)
+    for path in output.iterdir():
+        path.chmod(0o644)
+    assert _run_directory_generator(output, ["--check"]) == 0
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == (
+        _alternate_directory_render()
+    )
+
+
+def test_fresh_git_checkout_modes_are_accepted(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    output = source / "fixtures/v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    commands = (
+        ("init", "-q"),
+        ("config", "user.email", "fixture@example.invalid"),
+        ("config", "user.name", "Fixture Test"),
+        ("add", "fixtures/v1"),
+        ("commit", "-qm", "fixture"),
+    )
+    for arguments in commands:
+        subprocess.run(
+            ["git", *arguments],
+            cwd=source,
+            check=True,
+            capture_output=True,
+        )
+    checkout = tmp_path / "checkout"
+    previous_umask = os.umask(0o022)
+    try:
+        subprocess.run(
+            ["git", "clone", "-q", str(source), str(checkout)],
+            check=True,
+            capture_output=True,
+        )
+    finally:
+        os.umask(previous_umask)
+    checked_output = checkout / "fixtures/v1"
+    assert stat.S_IMODE(checked_output.stat().st_mode) == 0o755
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o644 for path in checked_output.iterdir())
+    assert _run_directory_generator(checked_output, ["--check"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("target", "mode"),
+    (("file", 0o744), ("file", 0o662), ("directory", 0o777)),
+)
+def test_unsafe_published_modes_fail_closed_without_mutation(
+    target: str,
+    mode: int,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    (output / "a.json" if target == "file" else output).chmod(mode)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_wrong_owner_policy_fails_closed_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    before = _tree_snapshot(tmp_path)
+    real_euid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_euid + 1)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "hostile_kind",
+    ("extra", "missing", "symlink", "hardlink", "fifo"),
+)
+def test_generated_directory_rejects_hostile_entry_without_mutation(
+    hostile_kind: str,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    target = tmp_path / "outside"
+    target.write_bytes(b"outside\n")
+    hostile = output / ("extra" if hostile_kind == "extra" else "a.json")
+    if hostile_kind != "extra":
+        hostile.unlink()
+    if hostile_kind == "extra":
+        hostile.write_bytes(b"unexpected\n")
+    elif hostile_kind == "missing":
+        pass
+    elif hostile_kind == "symlink":
+        hostile.symlink_to(target)
+    elif hostile_kind == "hardlink":
+        os.link(target, hostile)
+    else:
+        os.mkfifo(hostile, mode=0o600)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+    assert target.read_bytes() == b"outside\n"
+
+
+def test_generated_directory_rejects_symlinked_output_without_mutation(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    output = tmp_path / "v1"
+    output.symlink_to(real, target_is_directory=True)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("root_kind", ("file", "fifo"))
+def test_generated_directory_rejects_nondirectory_output_without_mutation(
+    root_kind: str,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    if root_kind == "file":
+        output.write_bytes(b"not a directory\n")
+    else:
+        os.mkfifo(output, mode=0o600)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_generated_directory_rejects_nondeterminism_before_path_touch(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "missing" / "v1"
+    calls = 0
+
+    def render() -> dict[str, bytes]:
+        nonlocal calls
+        calls += 1
+        return {"a.json": f"{calls}\n".encode(), "b.md": b"same\n"}
+
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--write"], render) == 1
+    assert calls == 2
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_writer_parent_name_swap_cleans_bound_pre_state_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    output = parent / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    parent_before = _tree_snapshot(parent)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "sentinel").write_bytes(b"replacement\n")
+    replacement_before = _tree_snapshot(replacement)
+    old_parent = tmp_path / "old-parent"
+    swapped = False
+
+    def swap_at_prepared(name: str) -> None:
+        nonlocal swapped
+        if name == "prepared" and not swapped:
+            parent.rename(old_parent)
+            replacement.rename(parent)
+            swapped = True
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        swap_at_prepared,
+    )
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 1
+    assert swapped
+    assert _tree_snapshot(old_parent) == parent_before
+    assert _tree_snapshot(parent) == replacement_before
+
+
+def test_snapshot_parent_name_swap_is_nonmutating_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    output = parent / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    parent_before = _tree_snapshot(parent)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "sentinel").write_bytes(b"replacement\n")
+    replacement_before = _tree_snapshot(replacement)
+    old_parent = tmp_path / "old-parent"
+    real_snapshot = contract_generator_common._snapshot_generated_directory
+    swapped = False
+
+    def swap_after_snapshot(
+        handle: contract_generator_common.GeneratedDirectoryHandle,
+        expected_names: tuple[str, ...],
+        *,
+        require_exact: bool,
+        private: bool,
+    ) -> tuple[contract_generator_common.GeneratedDirectoryEntry, ...]:
+        nonlocal swapped
+        result = real_snapshot(
+            handle,
+            expected_names,
+            require_exact=require_exact,
+            private=private,
+        )
+        if not swapped:
+            parent.rename(old_parent)
+            replacement.rename(parent)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_snapshot_generated_directory",
+        swap_after_snapshot,
+    )
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert swapped
+    assert _tree_snapshot(old_parent) == parent_before
+    assert _tree_snapshot(parent) == replacement_before
+
+
+def test_parent_directory_fd_is_the_only_lock_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    real_flock = fcntl.flock
+    locked_modes: list[int] = []
+
+    def record_flock(descriptor: int, operation: int) -> None:
+        if operation != fcntl.LOCK_UN:
+            locked_modes.append(os.fstat(descriptor).st_mode)
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", record_flock)
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert _run_directory_generator(output, ["--check"]) == 0
+    assert locked_modes and all(stat.S_ISDIR(mode) for mode in locked_modes)
+    assert not any("lock" in path.name for path in tmp_path.rglob("*"))
+
+
+def test_private_transaction_modes_are_exact_at_prepared_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    inspected = False
+
+    def inspect_then_interrupt(name: str) -> None:
+        nonlocal inspected
+        if name != "prepared" or inspected:
+            return
+        transaction = _transaction_path(output)
+        assert stat.S_IMODE(transaction.stat().st_mode) == 0o700
+        assert stat.S_IMODE((transaction / "stage").stat().st_mode) == 0o700
+        assert stat.S_IMODE((transaction / "intent.json").stat().st_mode) == 0o600
+        assert all(
+            stat.S_IMODE(path.stat().st_mode) == 0o600 for path in (transaction / "stage").iterdir()
+        )
+        inspected = True
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        inspect_then_interrupt,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        _run_directory_generator(output, ["--write"])
+    assert inspected
+    assert not output.exists()
+    assert not _transaction_path(output).exists()
+
+
+def test_pre_recovery_preserves_exact_baseline_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    output.chmod(0o755)
+    for path in output.iterdir():
+        path.chmod(0o644)
+    before = _tree_snapshot(output)
+    raised = False
+
+    def interrupt_once(name: str) -> None:
+        nonlocal raised
+        if name == "prepared" and not raised:
+            raised = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        interrupt_once,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        _run_directory_generator(output, ["--write"], _alternate_directory_render)
+    assert _tree_snapshot(output) == before
+    assert not _transaction_path(output).exists()
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    (
+        "transaction-created",
+        "stage-created",
+        "stage-file-opened",
+        "stage-entry",
+        "intent-file-opened",
+        "intent-temporary",
+        "prepared",
+        "committed",
+        "cleanup-entry",
+        "cleanup-complete",
+    ),
+)
+def test_baseexception_reconciles_checkpoint_and_reraises(
+    checkpoint: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    baseline = {path.name: path.read_bytes() for path in output.iterdir()}
+    raised = False
+
+    def interrupt_once(name: str) -> None:
+        nonlocal raised
+        if name == checkpoint and not raised:
+            raised = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        interrupt_once,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        _run_directory_generator(output, ["--write"], _alternate_directory_render)
+    expected = (
+        baseline
+        if checkpoint
+        in {
+            "transaction-created",
+            "stage-created",
+            "stage-file-opened",
+            "stage-entry",
+            "intent-file-opened",
+            "intent-temporary",
+            "prepared",
+        }
+        else _alternate_directory_render()
+    )
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == expected
+    assert not _transaction_path(output).exists()
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    (
+        "transaction-created",
+        "stage-created",
+        "stage-file-opened",
+        "stage-entry",
+        "intent-file-opened",
+        "intent-temporary",
+        "prepared",
+        "committed",
+        "cleanup-entry",
+        "cleanup-complete",
+    ),
+)
+def test_process_crash_is_reconciled_by_next_write(
+    checkpoint: str,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    crashed = _crash_writer(output, checkpoint)
+    assert crashed.returncode == 73
+    assert _transaction_path(output).is_dir() is (checkpoint != "cleanup-complete")
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == _directory_render()
+    assert not _transaction_path(output).exists()
+
+
+def test_post_recovery_cleans_exchanged_safe_git_modes(tmp_path: Path) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    output.chmod(0o755)
+    for path in output.iterdir():
+        path.chmod(0o644)
+    assert _crash_writer(output, "committed").returncode == 73
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert not _transaction_path(output).exists()
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == _directory_render()
+
+
+def test_check_with_pending_recovery_is_nonmutating(tmp_path: Path) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert _crash_writer(output, "prepared").returncode == 73
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert not _transaction_path(output).exists()
+
+
+@pytest.mark.parametrize("tamper", ("intent", "stage", "intent-temporary"))
+def test_ambiguous_transaction_is_retained_without_rename_or_delete(
+    tamper: str,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    crash_point = "intent-temporary" if tamper == "intent-temporary" else "prepared"
+    assert _crash_writer(output, crash_point).returncode == 73
+    transaction = _transaction_path(output)
+    targets = {
+        "intent": "intent.json",
+        "intent-temporary": ".intent.tmp",
+        "stage": "stage/a.json",
+    }
+    target = transaction / targets[tamper]
+    target.write_bytes(b"tampered\n")
+    target.chmod(0o600)
+    before = _tree_snapshot(tmp_path)
+    assert _run_directory_generator(output, ["--check"]) == 1
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_snapshot_reader_blocks_writer_and_sees_one_generation(tmp_path: Path) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    ready = tmp_path / "reader-ready"
+    release = tmp_path / "reader-release"
+    observed = tmp_path / "reader-observed"
+    reader_source = (
+        "import time\n"
+        "from pathlib import Path\n"
+        "from scripts.contract_generator_common import open_generated_directory_snapshot\n"
+        f"output = Path({str(output)!r})\n"
+        f"ready = Path({str(ready)!r})\n"
+        f"release = Path({str(release)!r})\n"
+        f"observed = Path({str(observed)!r})\n"
+        f"with open_generated_directory_snapshot(output, {DIRECTORY_NAMES!r}) as snapshot:\n"
+        "    ready.write_text('ready', encoding='utf-8')\n"
+        "    while not release.exists():\n"
+        "        time.sleep(0.01)\n"
+        "    observed.write_bytes(snapshot.read_bytes('a.json'))\n"
+    )
+    reader = subprocess.Popen(
+        [sys.executable, "-c", reader_source],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _wait_for_path(ready, reader)
+    writer_source = _writer_source(output, target=None).replace(
+        "str(index % 2).encode('ascii')",
+        "b'9'",
+    )
+    writer = subprocess.Popen(
+        [sys.executable, "-c", writer_source],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(0.1)
+    assert writer.poll() is None
+    release.write_text("release", encoding="utf-8")
+    assert reader.communicate(timeout=10) == (b"", b"")
+    assert reader.returncode == 0
+    assert writer.communicate(timeout=10) == (b"", b"")
+    assert writer.returncode == 0
+    assert observed.read_bytes() == _directory_render()["a.json"]
+    assert (output / "a.json").read_bytes() == b'{"generation":9}\n'
+
+
+def test_reader_started_at_prepared_boundary_blocks_then_sees_commit(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    prepared = tmp_path / "writer-prepared"
+    release = tmp_path / "writer-release"
+    observed = tmp_path / "reader-observed"
+    writer_source = (
+        "import time\n"
+        "from pathlib import Path\n"
+        "from scripts import contract_generator_common as common\n"
+        f"output = Path({str(output)!r})\n"
+        f"prepared = Path({str(prepared)!r})\n"
+        f"release = Path({str(release)!r})\n"
+        f"rendered = {_alternate_directory_render()!r}\n"
+        "def render():\n"
+        "    return rendered\n"
+        "def checkpoint(name):\n"
+        "    if name == 'prepared':\n"
+        "        prepared.write_text('prepared', encoding='utf-8')\n"
+        "        while not release.exists():\n"
+        "            time.sleep(0.01)\n"
+        "common._transaction_checkpoint = checkpoint\n"
+        "raise SystemExit(common.run_directory_generator(output_directory=output, "
+        f"expected_names={DIRECTORY_NAMES!r}, renderer=render, argv=['--write']))\n"
+    )
+    writer = subprocess.Popen(
+        [sys.executable, "-c", writer_source],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _wait_for_path(prepared, writer)
+    reader_source = (
+        "from pathlib import Path\n"
+        "from scripts.contract_generator_common import open_generated_directory_snapshot\n"
+        f"output = Path({str(output)!r})\n"
+        f"observed = Path({str(observed)!r})\n"
+        f"with open_generated_directory_snapshot(output, {DIRECTORY_NAMES!r}) as snapshot:\n"
+        "    observed.write_bytes(snapshot.read_bytes('a.json'))\n"
+    )
+    reader = subprocess.Popen(
+        [sys.executable, "-c", reader_source],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(0.1)
+    assert reader.poll() is None
+    assert not observed.exists()
+    release.write_text("release", encoding="utf-8")
+    assert writer.communicate(timeout=10) == (b"", b"")
+    assert writer.returncode == 0
+    assert reader.communicate(timeout=10) == (b"", b"")
+    assert reader.returncode == 0
+    assert observed.read_bytes() == _alternate_directory_render()["a.json"]
+
+
+def test_raw_reader_never_observes_missing_output_name_across_real_exchanges(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    writer = subprocess.Popen(
+        [sys.executable, "-c", _writer_source(output, target=None, loops=24)],
+        cwd=ROOT,
+        env=_python_environment(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    observations = 0
+    missing = False
+    while writer.poll() is None:
+        try:
+            descriptor = os.open(
+                output,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+        except FileNotFoundError:
+            missing = True
+            break
+        else:
+            os.close(descriptor)
+            observations += 1
+    stdout, stderr = writer.communicate(timeout=10)
+    assert (writer.returncode, stdout, stderr) == (0, b"", b"")
+    assert observations > 0
+    assert not missing
+
+
+def test_late_output_swap_after_cleanup_retains_no_owned_private_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    displaced = tmp_path / "displaced"
+    swapped = False
+
+    def swap_after_cleanup(name: str) -> None:
+        nonlocal swapped
+        if name != "cleanup-complete" or swapped:
+            return
+        output.rename(displaced)
+        output.mkdir(mode=0o700)
+        (output / "attacker").write_bytes(b"attacker\n")
+        (output / "attacker").chmod(0o600)
+        swapped = True
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        swap_after_cleanup,
+    )
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 1
+    assert swapped
+    assert not _transaction_path(output).exists()
+    assert (output / "attacker").read_bytes() == b"attacker\n"
+    assert {path.name: path.read_bytes() for path in displaced.iterdir()} == (
+        _alternate_directory_render()
+    )
+
+
+def test_initial_publication_uses_noreplace_and_retains_ambiguous_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    real_noreplace = contract_generator_common._atomic_noreplace
+    injected = False
+
+    def race_noreplace(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+    ) -> None:
+        nonlocal injected
+        if destination_name == output.name and not injected:
+            output.mkdir(mode=0o700)
+            (output / "attacker").write_bytes(b"attacker\n")
+            (output / "attacker").chmod(0o600)
+            injected = True
+        real_noreplace(
+            source_parent_fd,
+            source_name,
+            destination_parent_fd,
+            destination_name,
+        )
+
+    monkeypatch.setattr(contract_generator_common, "_atomic_noreplace", race_noreplace)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert injected
+    assert (output / "attacker").read_bytes() == b"attacker\n"
+    assert _transaction_path(output).is_dir()
+
+
+def test_unsupported_platform_fails_before_path_touch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "missing" / "v1"
+    before = _tree_snapshot(tmp_path)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin native gate")
+def test_darwin_native_swap_exclusive_and_parent_flock_gate(tmp_path: Path) -> None:
+    assert contract_generator_common._native_function("renameatx_np")
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux native gate")
+def test_linux_native_exchange_noreplace_and_parent_flock_gate(tmp_path: Path) -> None:
+    assert contract_generator_common._native_function("renameat2")
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0

@@ -1,0 +1,116 @@
+{
+  "canonical_examples": {
+    "BudgetReconciliationRequest": "{\"proofs\":[],\"turn_id\":\"00000000-0000-0000-0000-0000000000ed\"}",
+    "BudgetReservation": "{\"amount_micros_sgd\":1,\"attempt_id\":\"00000000-0000-0000-0000-0000000000f0\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"outcome\":\"allow\",\"pricing_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-0000000000ef\",\"reservation_id\":\"00000000-0000-0000-0000-0000000000ee\"}",
+    "BudgetReservationRequest": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000000f4\",\"category\":\"llm\",\"household_id\":\"00000000-0000-0000-0000-0000000000f1\",\"model\":\"x\",\"month_key\":\"2026-08\",\"provider\":\"openai\",\"request_id\":\"00000000-0000-0000-0000-0000000000f3\",\"turn_id\":\"00000000-0000-0000-0000-0000000000f2\",\"usage_ceiling\":{\"category\":\"llm\",\"input_tokens\":1,\"output_tokens\":0}}",
+    "BudgetSettlement": "{\"charged_micros_sgd\":0,\"cloud_egress_frozen\":false,\"conservative_estimate_used\":false,\"estimate_overrun\":false,\"reservation_id\":\"00000000-0000-0000-0000-0000000000f5\"}",
+    "BudgetSettlementRequest": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000000f7\",\"reservation_id\":\"00000000-0000-0000-0000-0000000000f6\"}",
+    "LlmUsageUnits": "{\"category\":\"llm\",\"input_tokens\":0,\"output_tokens\":0}",
+    "ProviderUsageReceiptV1": "{\"accounting_basis\":\"provider_reported_exact\",\"attempt_id\":\"00000000-0000-0000-0000-0000000000fc\",\"authorization_id\":\"00000000-0000-0000-0000-0000000000fd\",\"billable_usage\":{\"category\":\"llm\",\"input_tokens\":1,\"output_tokens\":0},\"category\":\"llm\",\"model\":\"x\",\"observed_at\":\"2026-08-27T00:00:00.000000Z\",\"provider\":\"openai\",\"provider_call_id\":\"00000000-0000-0000-0000-0000000000f9\",\"provider_response_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"receipt_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"receipt_id\":\"00000000-0000-0000-0000-0000000000f8\",\"request_id\":\"00000000-0000-0000-0000-0000000000fb\",\"reservation_id\":\"00000000-0000-0000-0000-0000000000fa\",\"schema_version\":\"tuntun.provider-usage-receipt.v1\"}",
+    "SttUsageUnits": "{\"audio_millis\":0,\"category\":\"stt\"}",
+    "TransportProof": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000000ff\",\"disposition\":\"never_sent\",\"evidence_code\":\"x\",\"observed_at\":\"2026-08-27T00:00:00.000000Z\",\"reservation_id\":\"00000000-0000-0000-0000-0000000000fe\"}",
+    "TtsUsageUnits": "{\"category\":\"tts\",\"characters\":0}",
+    "WebSearchUsageUnits": "{\"category\":\"web_search\",\"input_tokens\":0,\"output_tokens\":0,\"web_search_calls\":0}"
+  },
+  "examples": {
+    "BudgetReconciliationRequest": {
+      "proofs": [],
+      "turn_id": "00000000-0000-0000-0000-0000000000ed"
+    },
+    "BudgetReservation": {
+      "amount_micros_sgd": 1,
+      "attempt_id": "00000000-0000-0000-0000-0000000000f0",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "outcome": "allow",
+      "pricing_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "request_id": "00000000-0000-0000-0000-0000000000ef",
+      "reservation_id": "00000000-0000-0000-0000-0000000000ee"
+    },
+    "BudgetReservationRequest": {
+      "attempt_id": "00000000-0000-0000-0000-0000000000f4",
+      "category": "llm",
+      "household_id": "00000000-0000-0000-0000-0000000000f1",
+      "model": "x",
+      "month_key": "2026-08",
+      "provider": "openai",
+      "request_id": "00000000-0000-0000-0000-0000000000f3",
+      "turn_id": "00000000-0000-0000-0000-0000000000f2",
+      "usage_ceiling": {
+        "category": "llm",
+        "input_tokens": 1,
+        "output_tokens": 0
+      }
+    },
+    "BudgetSettlement": {
+      "charged_micros_sgd": 0,
+      "cloud_egress_frozen": false,
+      "conservative_estimate_used": false,
+      "estimate_overrun": false,
+      "reservation_id": "00000000-0000-0000-0000-0000000000f5"
+    },
+    "BudgetSettlementRequest": {
+      "attempt_id": "00000000-0000-0000-0000-0000000000f7",
+      "reservation_id": "00000000-0000-0000-0000-0000000000f6"
+    },
+    "LlmUsageUnits": {
+      "category": "llm",
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "ProviderUsageReceiptV1": {
+      "accounting_basis": "provider_reported_exact",
+      "attempt_id": "00000000-0000-0000-0000-0000000000fc",
+      "authorization_id": "00000000-0000-0000-0000-0000000000fd",
+      "billable_usage": {
+        "category": "llm",
+        "input_tokens": 1,
+        "output_tokens": 0
+      },
+      "category": "llm",
+      "model": "x",
+      "observed_at": "2026-08-27T00:00:00Z",
+      "provider": "openai",
+      "provider_call_id": "00000000-0000-0000-0000-0000000000f9",
+      "provider_response_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "receipt_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "receipt_id": "00000000-0000-0000-0000-0000000000f8",
+      "request_id": "00000000-0000-0000-0000-0000000000fb",
+      "reservation_id": "00000000-0000-0000-0000-0000000000fa",
+      "schema_version": "tuntun.provider-usage-receipt.v1"
+    },
+    "SttUsageUnits": {
+      "audio_millis": 0,
+      "category": "stt"
+    },
+    "TransportProof": {
+      "attempt_id": "00000000-0000-0000-0000-0000000000ff",
+      "disposition": "never_sent",
+      "evidence_code": "x",
+      "observed_at": "2026-08-27T00:00:00Z",
+      "reservation_id": "00000000-0000-0000-0000-0000000000fe"
+    },
+    "TtsUsageUnits": {
+      "category": "tts",
+      "characters": 0
+    },
+    "WebSearchUsageUnits": {
+      "category": "web_search",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "web_search_calls": 0
+    }
+  },
+  "schema_version": "1.0"
+}

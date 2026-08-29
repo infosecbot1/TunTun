@@ -1,0 +1,46 @@
+{
+  "canonical_examples": {
+    "IdentityDecision": "{\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"reason_code\":\"x\",\"status\":\"verified\",\"subject_id\":\"00000000-0000-0000-0000-00000000011e\"}",
+    "IdentityEvidence": "{\"confidence_micros\":0,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"liveness_accepted\":false,\"modality\":\"face\",\"model_version\":\"x\",\"observed_at\":\"2026-08-27T00:00:00.000000Z\",\"quality_micros\":0,\"subject_id\":\"00000000-0000-0000-0000-000000000120\"}",
+    "IdentityRequest": "{\"evidence\":[],\"household_id\":\"00000000-0000-0000-0000-000000000121\",\"session_id\":\"00000000-0000-0000-0000-000000000122\"}",
+    "PersonaProjection": "{\"context\":\"general\",\"depth\":\"brief\",\"learning_level\":\"none\",\"role\":\"owner\",\"tone\":\"neutral\"}",
+    "PersonaTraits": "{\"context\":\"general\",\"depth\":\"brief\",\"learning_level\":\"none\",\"tone\":\"neutral\"}"
+  },
+  "examples": {
+    "IdentityDecision": {
+      "expires_at": "2026-08-27T00:00:00Z",
+      "reason_code": "x",
+      "status": "verified",
+      "subject_id": "00000000-0000-0000-0000-00000000011e"
+    },
+    "IdentityEvidence": {
+      "confidence_micros": 0,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "liveness_accepted": false,
+      "modality": "face",
+      "model_version": "x",
+      "observed_at": "2026-08-27T00:00:00Z",
+      "quality_micros": 0,
+      "subject_id": "00000000-0000-0000-0000-000000000120"
+    },
+    "IdentityRequest": {
+      "evidence": [],
+      "household_id": "00000000-0000-0000-0000-000000000121",
+      "session_id": "00000000-0000-0000-0000-000000000122"
+    },
+    "PersonaProjection": {
+      "context": "general",
+      "depth": "brief",
+      "learning_level": "none",
+      "role": "owner",
+      "tone": "neutral"
+    },
+    "PersonaTraits": {
+      "context": "general",
+      "depth": "brief",
+      "learning_level": "none",
+      "tone": "neutral"
+    }
+  },
+  "schema_version": "1.0"
+}

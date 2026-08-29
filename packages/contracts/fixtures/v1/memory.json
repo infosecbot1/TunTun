@@ -1,0 +1,183 @@
+{
+  "canonical_examples": {
+    "ApprovedMemory": "{\"approved_proposal_id\":\"00000000-0000-0000-0000-000000000127\",\"audience\":\"subject_private\",\"content\":{\"category\":\"x\",\"key\":\"x\",\"kind\":\"preference\",\"strength_micros\":0,\"value\":\"x\"},\"household_id\":\"00000000-0000-0000-0000-000000000125\",\"memory_id\":\"00000000-0000-0000-0000-000000000124\",\"sensitivity\":\"public\",\"source_receipt_ids\":[\"00000000-0000-0000-0000-000000000123\"],\"subject_id\":\"00000000-0000-0000-0000-000000000126\",\"valid_until\":\"2026-08-27T00:00:00.000000Z\"}",
+    "DecideMemoryProposal": "{\"decision\":\"reject\",\"edited_content\":null,\"expected_version\":1,\"proposal_id\":\"00000000-0000-0000-0000-000000000129\"}",
+    "EpisodicContent": "{\"event_summary\":\"x\",\"kind\":\"episodic\",\"occurred_at\":\"2026-08-27T00:00:00.000000Z\",\"participant_ids\":[]}",
+    "MemoryProposal": "{\"draft\":{\"audience\":\"subject_private\",\"claim_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"confidence_micros\":0,\"content\":{\"category\":\"x\",\"key\":\"x\",\"kind\":\"preference\",\"strength_micros\":0,\"value\":\"x\"},\"expected_version\":null,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-00000000012b\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000012f\",\"operation\":\"create\",\"proposal_id\":\"00000000-0000-0000-0000-00000000012a\",\"reason\":\"x\",\"schema_version\":\"1.0\",\"sensitivity\":\"public\",\"session_id\":\"00000000-0000-0000-0000-00000000012d\",\"source_receipt_ids\":[\"00000000-0000-0000-0000-000000000133\"],\"subject_id\":\"00000000-0000-0000-0000-000000000132\",\"target_memory_id\":null,\"turn_id\":\"00000000-0000-0000-0000-00000000012e\"},\"status\":\"pending\"}",
+    "MemoryProposalDraft": "{\"audience\":null,\"claim_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"confidence_micros\":0,\"content\":null,\"expected_version\":1,\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-000000000148\",\"idempotency_key\":\"00000000-0000-0000-0000-00000000014c\",\"operation\":\"delete\",\"proposal_id\":\"00000000-0000-0000-0000-000000000147\",\"reason\":\"x\",\"schema_version\":\"1.0\",\"sensitivity\":\"public\",\"session_id\":\"00000000-0000-0000-0000-00000000014a\",\"source_receipt_ids\":[\"00000000-0000-0000-0000-000000000150\"],\"subject_id\":\"00000000-0000-0000-0000-00000000014f\",\"target_memory_id\":\"00000000-0000-0000-0000-000000000151\",\"turn_id\":\"00000000-0000-0000-0000-00000000014b\"}",
+    "MemoryQuery": "{\"household_id\":\"00000000-0000-0000-0000-00000000015a\",\"kinds\":[\"working\"],\"limit\":6,\"maximum_sensitivity\":\"public\",\"subject_id\":\"00000000-0000-0000-0000-00000000015b\"}",
+    "MemoryRecord": "{\"audience\":\"subject_private\",\"content\":{\"category\":\"x\",\"key\":\"x\",\"kind\":\"preference\",\"strength_micros\":0,\"value\":\"x\"},\"household_id\":\"00000000-0000-0000-0000-00000000015d\",\"memory_id\":\"00000000-0000-0000-0000-00000000015c\",\"sensitivity\":\"public\",\"subject_id\":\"00000000-0000-0000-0000-00000000015e\",\"valid_until\":\"2026-08-27T00:00:00.000000Z\",\"version\":1}",
+    "PolicyContent": "{\"key\":\"x\",\"kind\":\"policy\",\"value\":\"x\"}",
+    "PreferenceContent": "{\"category\":\"x\",\"key\":\"x\",\"kind\":\"preference\",\"strength_micros\":0,\"value\":\"x\"}",
+    "ProceduralContent": "{\"kind\":\"procedural\",\"name\":\"x\",\"steps\":[\"x\"],\"tool_label\":null}",
+    "ProposalContext": "{\"actor_subject_id\":\"00000000-0000-0000-0000-000000000163\",\"household_id\":\"00000000-0000-0000-0000-00000000015f\",\"session_id\":\"00000000-0000-0000-0000-000000000161\",\"subject_id\":\"00000000-0000-0000-0000-000000000160\",\"turn_id\":\"00000000-0000-0000-0000-000000000162\"}",
+    "RelationalContent": "{\"kind\":\"relational\",\"note\":null,\"object_subject_id\":\"00000000-0000-0000-0000-000000000165\",\"relation\":\"x\",\"subject_id\":\"00000000-0000-0000-0000-000000000164\"}",
+    "SemanticContent": "{\"kind\":\"semantic\",\"object\":\"x\",\"predicate\":\"x\",\"subject\":\"x\"}",
+    "WorkingContent": "{\"kind\":\"working\",\"state_summary\":\"x\",\"unresolved_intents\":[]}"
+  },
+  "examples": {
+    "ApprovedMemory": {
+      "approved_proposal_id": "00000000-0000-0000-0000-000000000127",
+      "audience": "subject_private",
+      "content": {
+        "category": "x",
+        "key": "x",
+        "kind": "preference",
+        "strength_micros": 0,
+        "value": "x"
+      },
+      "household_id": "00000000-0000-0000-0000-000000000125",
+      "memory_id": "00000000-0000-0000-0000-000000000124",
+      "sensitivity": "public",
+      "source_receipt_ids": [
+        "00000000-0000-0000-0000-000000000123"
+      ],
+      "subject_id": "00000000-0000-0000-0000-000000000126",
+      "valid_until": "2026-08-27T00:00:00Z"
+    },
+    "DecideMemoryProposal": {
+      "decision": "reject",
+      "edited_content": null,
+      "expected_version": 1,
+      "proposal_id": "00000000-0000-0000-0000-000000000129"
+    },
+    "EpisodicContent": {
+      "event_summary": "x",
+      "kind": "episodic",
+      "occurred_at": "2026-08-27T00:00:00Z",
+      "participant_ids": []
+    },
+    "MemoryProposal": {
+      "draft": {
+        "audience": "subject_private",
+        "claim_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "confidence_micros": 0,
+        "content": {
+          "category": "x",
+          "key": "x",
+          "kind": "preference",
+          "strength_micros": 0,
+          "value": "x"
+        },
+        "expected_version": null,
+        "expires_at": "2026-08-27T00:00:00Z",
+        "household_id": "00000000-0000-0000-0000-00000000012b",
+        "idempotency_key": "00000000-0000-0000-0000-00000000012f",
+        "operation": "create",
+        "proposal_id": "00000000-0000-0000-0000-00000000012a",
+        "reason": "x",
+        "schema_version": "1.0",
+        "sensitivity": "public",
+        "session_id": "00000000-0000-0000-0000-00000000012d",
+        "source_receipt_ids": [
+          "00000000-0000-0000-0000-000000000133"
+        ],
+        "subject_id": "00000000-0000-0000-0000-000000000132",
+        "target_memory_id": null,
+        "turn_id": "00000000-0000-0000-0000-00000000012e"
+      },
+      "status": "pending"
+    },
+    "MemoryProposalDraft": {
+      "audience": null,
+      "claim_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "confidence_micros": 0,
+      "content": null,
+      "expected_version": 1,
+      "expires_at": "2026-08-27T00:00:00Z",
+      "household_id": "00000000-0000-0000-0000-000000000148",
+      "idempotency_key": "00000000-0000-0000-0000-00000000014c",
+      "operation": "delete",
+      "proposal_id": "00000000-0000-0000-0000-000000000147",
+      "reason": "x",
+      "schema_version": "1.0",
+      "sensitivity": "public",
+      "session_id": "00000000-0000-0000-0000-00000000014a",
+      "source_receipt_ids": [
+        "00000000-0000-0000-0000-000000000150"
+      ],
+      "subject_id": "00000000-0000-0000-0000-00000000014f",
+      "target_memory_id": "00000000-0000-0000-0000-000000000151",
+      "turn_id": "00000000-0000-0000-0000-00000000014b"
+    },
+    "MemoryQuery": {
+      "household_id": "00000000-0000-0000-0000-00000000015a",
+      "kinds": [
+        "working"
+      ],
+      "limit": 6,
+      "maximum_sensitivity": "public",
+      "subject_id": "00000000-0000-0000-0000-00000000015b"
+    },
+    "MemoryRecord": {
+      "audience": "subject_private",
+      "content": {
+        "category": "x",
+        "key": "x",
+        "kind": "preference",
+        "strength_micros": 0,
+        "value": "x"
+      },
+      "household_id": "00000000-0000-0000-0000-00000000015d",
+      "memory_id": "00000000-0000-0000-0000-00000000015c",
+      "sensitivity": "public",
+      "subject_id": "00000000-0000-0000-0000-00000000015e",
+      "valid_until": "2026-08-27T00:00:00Z",
+      "version": 1
+    },
+    "PolicyContent": {
+      "key": "x",
+      "kind": "policy",
+      "value": "x"
+    },
+    "PreferenceContent": {
+      "category": "x",
+      "key": "x",
+      "kind": "preference",
+      "strength_micros": 0,
+      "value": "x"
+    },
+    "ProceduralContent": {
+      "kind": "procedural",
+      "name": "x",
+      "steps": [
+        "x"
+      ],
+      "tool_label": null
+    },
+    "ProposalContext": {
+      "actor_subject_id": "00000000-0000-0000-0000-000000000163",
+      "household_id": "00000000-0000-0000-0000-00000000015f",
+      "session_id": "00000000-0000-0000-0000-000000000161",
+      "subject_id": "00000000-0000-0000-0000-000000000160",
+      "turn_id": "00000000-0000-0000-0000-000000000162"
+    },
+    "RelationalContent": {
+      "kind": "relational",
+      "note": null,
+      "object_subject_id": "00000000-0000-0000-0000-000000000165",
+      "relation": "x",
+      "subject_id": "00000000-0000-0000-0000-000000000164"
+    },
+    "SemanticContent": {
+      "kind": "semantic",
+      "object": "x",
+      "predicate": "x",
+      "subject": "x"
+    },
+    "WorkingContent": {
+      "kind": "working",
+      "state_summary": "x",
+      "unresolved_intents": []
+    }
+  },
+  "schema_version": "1.0"
+}
