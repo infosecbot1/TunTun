@@ -246,8 +246,6 @@ class SharedAssuranceHarness:
             "--phase",
             "3",
         ]
-        if surface in {"direct_request", "replay"}:
-            argv.append("--direct-and-replay")
         return FeatureCase(tuple(argv))
 
     def _create_feature_workspace(self, root: Path) -> None:

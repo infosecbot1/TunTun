@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         finish,
         incomplete,
         lexical_path,
+        preflight_python_source,
         walk_regular_files,
     )
 elif __package__:
@@ -32,6 +33,7 @@ elif __package__:
         finish,
         incomplete,
         lexical_path,
+        preflight_python_source,
         walk_regular_files,
     )
 else:
@@ -45,6 +47,7 @@ else:
         finish,
         incomplete,
         lexical_path,
+        preflight_python_source,
         walk_regular_files,
     )
 
@@ -134,6 +137,10 @@ def _parse_node(path: Path, raw: bytes) -> MigrationNode:
     except UnicodeDecodeError as error:
         raise AssuranceInputError(path, "invalid-utf8") from error
     try:
+        preflight_python_source(text)
+    except ValueError as error:
+        raise AssuranceInputError(path, str(error)) from error
+    try:
         module = ast.parse(text, filename=str(path))
     except (SyntaxError, RecursionError) as error:
         raise AssuranceInputError(path, "migration-parse-failed") from error
@@ -179,6 +186,7 @@ def graph_findings(
     forbid_forks: bool,
     forbid_merges: bool,
     forbid_orphans: bool,
+    strict: bool = False,
 ) -> tuple[AssuranceFinding, ...]:
     grouped = inventory.by_revision()
     findings: list[AssuranceFinding] = []
@@ -205,6 +213,67 @@ def graph_findings(
                         parent,
                     )
                 )
+    if strict:
+        roots = sorted(node.revision for node in unique.values() if not node.down_revisions)
+        heads = sorted(revision for revision in unique if child_counts[revision] == 0)
+        if len(roots) != 1:
+            findings.append(
+                AssuranceFinding(inventory.root, "migration-root-count", str(len(roots)))
+            )
+        if len(heads) != 1:
+            findings.append(
+                AssuranceFinding(inventory.root, "migration-head-count", str(len(heads)))
+            )
+
+        finished: set[str] = set()
+        for start in sorted(unique):
+            if start in finished:
+                continue
+            path: list[str] = []
+            positions: dict[str, int] = {}
+            current = start
+            while current in unique and current not in finished and current not in positions:
+                positions[current] = len(path)
+                path.append(current)
+                parents = unique[current].down_revisions
+                if len(parents) != 1:
+                    current = ""
+                    break
+                current = parents[0]
+            if current in positions:
+                cycle = path[positions[current] :]
+                findings.append(
+                    AssuranceFinding(
+                        unique[cycle[0]].path,
+                        "migration-cycle",
+                        ",".join(cycle),
+                    )
+                )
+            finished.update(path)
+
+        reachable: set[str] = set()
+        if len(roots) == 1:
+            children: dict[str, list[str]] = defaultdict(list)
+            for node in unique.values():
+                for parent in node.down_revisions:
+                    if parent in unique:
+                        children[parent].append(node.revision)
+            pending = [roots[0]]
+            while pending:
+                revision = pending.pop()
+                if revision in reachable:
+                    continue
+                reachable.add(revision)
+                pending.extend(children[revision])
+        disconnected = sorted(set(unique) - reachable)
+        if disconnected:
+            findings.append(
+                AssuranceFinding(
+                    inventory.root,
+                    "migration-disconnected",
+                    ",".join(disconnected),
+                )
+            )
     return tuple(findings)
 
 
@@ -246,6 +315,7 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
             forbid_forks=arguments.forbid_branch_merge_orphan,
             forbid_merges=arguments.forbid_branch_merge_orphan,
             forbid_orphans=True,
+            strict=arguments.forbid_branch_merge_orphan,
         )
     )
     grouped_numeric: dict[str, list[MigrationNode]] = defaultdict(list)

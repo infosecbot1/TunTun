@@ -23,8 +23,9 @@ if TYPE_CHECKING:
         incomplete,
         lexical_path,
         parse_json_object,
-        read_json_object,
-        read_regular_file,
+        read_frozen_regular_file,
+        revalidate_frozen_inventory,
+        revalidate_frozen_regular_file,
         walk_regular_files,
     )
 elif __package__:
@@ -44,8 +45,9 @@ elif __package__:
         incomplete,
         lexical_path,
         parse_json_object,
-        read_json_object,
-        read_regular_file,
+        read_frozen_regular_file,
+        revalidate_frozen_inventory,
+        revalidate_frozen_regular_file,
         walk_regular_files,
     )
 else:
@@ -65,8 +67,9 @@ else:
         incomplete,
         lexical_path,
         parse_json_object,
-        read_json_object,
-        read_regular_file,
+        read_frozen_regular_file,
+        revalidate_frozen_inventory,
+        revalidate_frozen_regular_file,
         walk_regular_files,
     )
 
@@ -112,15 +115,11 @@ def _selectors(arguments: argparse.Namespace) -> tuple[str, ...] | None:
     direct = arguments.direct_and_replay
     valid = False
     selected: tuple[str, ...] | None = None
-    if (
-        manifest is not None
-        and (feature is not None) != (features is not None)
-        and phase is None
-        or manifest is None
-        and (feature is not None) != (features is not None)
-        and phase is not None
-    ):
-        valid = not all_absent
+    one_feature_selector = (feature is not None) != (features is not None)
+    manifest_mode = manifest is not None and one_feature_selector and phase is None
+    phase_mode = manifest is None and one_feature_selector and phase is not None
+    if (manifest_mode or phase_mode) and not all_absent and not direct:
+        valid = True
         selected = (feature,) if feature is not None else tuple(features)
     elif (
         all_absent
@@ -167,8 +166,27 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
                 (root,), max_files=MAX_WALK_FILES, max_total_bytes=MAX_WALK_TOTAL_BYTES
             )
         )
-        files = {item.path: item.raw for item in frozen}
-        manifest = read_json_object(manifest_path, max_bytes=MAX_REGULAR_FILE_BYTES)
+        captured = {item.path: item for item in frozen}
+        supplemental = []
+        total_bytes = sum(item.size for item in frozen)
+        required_paths = (
+            manifest_path,
+            *(root / relative for relative in REQUIRED_SURFACES),
+            root / ".assurance" / "direct_replay.json",
+        )
+        for path in required_paths:
+            if path in captured:
+                continue
+            if len(captured) >= MAX_WALK_FILES:
+                raise AssuranceInputError(path, "file-count-limit")
+            item = read_frozen_regular_file(path, max_bytes=MAX_REGULAR_FILE_BYTES)
+            total_bytes += item.size
+            if total_bytes > MAX_WALK_TOTAL_BYTES:
+                raise AssuranceInputError(path, "total-byte-limit")
+            captured[path] = item
+            supplemental.append(item)
+        files = {path: item.raw for path, item in captured.items()}
+        manifest = _json(manifest_path, files[manifest_path])
         features = manifest.get("features")
         surfaces = manifest.get("surfaces")
         if not isinstance(features, Mapping) or not isinstance(surfaces, list):
@@ -211,12 +229,7 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
                 (AssuranceFinding(manifest_path, "surface-path-invalid", relative_value),),
             )
         path = root / relative
-        raw = files.get(path)
-        if raw is None:
-            try:
-                raw = read_regular_file(path, max_bytes=MAX_REGULAR_FILE_BYTES)
-            except AssuranceInputError as error:
-                return incomplete(TOOL, error)
+        raw = files[path]
         if path.suffix == ".json":
             try:
                 _json(path, raw)
@@ -227,12 +240,7 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
             if feature.encode("utf-8").lower() in lowered:
                 findings.append(AssuranceFinding(path, "feature-registered", feature))
     direct_path = root / ".assurance" / "direct_replay.json"
-    raw = files.get(direct_path)
-    if raw is None:
-        try:
-            raw = read_regular_file(direct_path, max_bytes=MAX_REGULAR_FILE_BYTES)
-        except AssuranceInputError as error:
-            return incomplete(TOOL, error)
+    raw = files[direct_path]
     try:
         probes = _json(direct_path, raw)
     except AssuranceInputError as error:
@@ -248,6 +256,17 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
             )
         if record.get("result") != result or record.get("side_effects") is not False:
             findings.append(AssuranceFinding(direct_path, "feature-reachable", name))
+    try:
+        revalidate_frozen_inventory(
+            (root,),
+            frozen,
+            max_files=MAX_WALK_FILES,
+            max_total_bytes=MAX_WALK_TOTAL_BYTES,
+        )
+        for item in supplemental:
+            revalidate_frozen_regular_file(item)
+    except AssuranceInputError as error:
+        return incomplete(TOOL, error)
     return AssuranceResult(TOOL, True, tuple(findings))
 
 

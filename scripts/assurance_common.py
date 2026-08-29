@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import io
 import json
 import os
 import stat
+import tokenize
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +21,8 @@ MAX_JSON_DEPTH = 64
 MAX_JSON_CONTAINERS = 100_000
 MAX_JSON_TOKENS = 1_000_000
 READ_CHUNK_BYTES = 64 * 1024
+MAX_PYTHON_TOKENS = 200_000
+MAX_PYTHON_DELIMITER_DEPTH = 128
 
 
 @dataclass(frozen=True, order=True)
@@ -108,6 +112,35 @@ class ClosedArgumentParser(argparse.ArgumentParser):
             return super().parse_args(args, namespace)
         except (argparse.ArgumentError, argparse.ArgumentTypeError) as error:
             raise ValueError(str(error)) from error
+
+
+def preflight_python_source(
+    text: str,
+    *,
+    max_tokens: int = MAX_PYTHON_TOKENS,
+    max_depth: int = MAX_PYTHON_DELIMITER_DEPTH,
+) -> None:
+    tokens = 0
+    delimiters: list[str] = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    try:
+        for item in tokenize.generate_tokens(io.StringIO(text).readline):
+            tokens += 1
+            if tokens > max_tokens:
+                raise ValueError("ast-token-limit")
+            if item.type != tokenize.OP:
+                continue
+            if item.string in {"(", "[", "{"}:
+                delimiters.append(item.string)
+                if len(delimiters) > max_depth:
+                    raise ValueError("ast-depth-limit")
+            elif item.string in pairs:
+                if not delimiters or delimiters.pop() != pairs[item.string]:
+                    raise ValueError("python-tokenize-failed")
+    except (IndentationError, SyntaxError, tokenize.TokenError) as error:
+        raise ValueError("python-tokenize-failed") from error
+    if delimiters:
+        raise ValueError("python-tokenize-failed")
 
 
 def finish(result: AssuranceResult) -> int:
@@ -283,13 +316,19 @@ def _source_scanner_module() -> Any:
     return importlib.import_module(module_name)
 
 
-def _read_frozen_regular_file(path: Path, *, max_bytes: int) -> FrozenRegularFile:
+def read_frozen_regular_file(path: Path, *, max_bytes: int) -> FrozenRegularFile:
     lexical = lexical_path(path)
     parent_fd, _ = _open_directory(lexical.parent)
     try:
         return _read_named_file(parent_fd, lexical.name, lexical, max_bytes=max_bytes)
     finally:
         os.close(parent_fd)
+
+
+def revalidate_frozen_regular_file(expected: FrozenRegularFile) -> None:
+    current = read_frozen_regular_file(expected.path, max_bytes=MAX_REGULAR_FILE_BYTES)
+    if current != expected:
+        _raise(expected.path, "input-changed-during-scan")
 
 
 def _git_source_regular_files(
@@ -332,7 +371,7 @@ def _git_source_regular_files(
             if expected is None:
                 continue
             path = repository.path / Path(relative.as_posix())
-            frozen = _read_frozen_regular_file(path, max_bytes=MAX_REGULAR_FILE_BYTES)
+            frozen = read_frozen_regular_file(path, max_bytes=MAX_REGULAR_FILE_BYTES)
             actual = (
                 frozen.device,
                 frozen.inode,
@@ -599,6 +638,23 @@ def walk_regular_files(
                 _raise(root, "input-changed-during-scan")
         finally:
             os.close(descriptor)
+
+
+def revalidate_frozen_inventory(
+    roots: Sequence[Path],
+    expected: Sequence[FrozenRegularFile],
+    *,
+    max_files: int,
+    max_total_bytes: int,
+) -> None:
+    current = tuple(walk_regular_files(roots, max_files=max_files, max_total_bytes=max_total_bytes))
+    expected_by_path = {item.path: item for item in expected}
+    current_by_path = {item.path: item for item in current}
+    if expected_by_path.keys() != current_by_path.keys():
+        _raise(lexical_path(roots[0]), "source-inventory-drift")
+    for path in sorted(expected_by_path):
+        if current_by_path[path] != expected_by_path[path]:
+            _raise(path, "input-changed-during-scan")
 
 
 def incomplete(tool: str, error: AssuranceInputError) -> AssuranceResult:

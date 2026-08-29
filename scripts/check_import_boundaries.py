@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from assurance_common import (
-        MAX_REGULAR_FILE_BYTES,
         MAX_WALK_FILES,
         MAX_WALK_TOTAL_BYTES,
         AssuranceFinding,
@@ -20,12 +19,12 @@ if TYPE_CHECKING:
         finish,
         incomplete,
         lexical_path,
-        read_regular_file,
+        preflight_python_source,
+        revalidate_frozen_inventory,
         walk_regular_files,
     )
 elif __package__:
     from .assurance_common import (
-        MAX_REGULAR_FILE_BYTES,
         MAX_WALK_FILES,
         MAX_WALK_TOTAL_BYTES,
         AssuranceFinding,
@@ -35,12 +34,12 @@ elif __package__:
         finish,
         incomplete,
         lexical_path,
-        read_regular_file,
+        preflight_python_source,
+        revalidate_frozen_inventory,
         walk_regular_files,
     )
 else:
     from assurance_common import (
-        MAX_REGULAR_FILE_BYTES,
         MAX_WALK_FILES,
         MAX_WALK_TOTAL_BYTES,
         AssuranceFinding,
@@ -50,7 +49,8 @@ else:
         finish,
         incomplete,
         lexical_path,
-        read_regular_file,
+        preflight_python_source,
+        revalidate_frozen_inventory,
         walk_regular_files,
     )
 
@@ -225,7 +225,7 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         source_roots: list[Path] = []
         dependencies: set[str] = set()
         for pyproject in pyprojects:
-            raw = read_regular_file(pyproject, max_bytes=MAX_REGULAR_FILE_BYTES)
+            raw = raw_by_path[pyproject]
             try:
                 document = tomllib.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
@@ -273,8 +273,15 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
         raw = raw_by_path[path]
         try:
             text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return AssuranceResult(TOOL, False, (AssuranceFinding(path, "module-parse-failed"),))
+        try:
+            preflight_python_source(text)
+        except ValueError as error:
+            return AssuranceResult(TOOL, False, (AssuranceFinding(path, str(error)),))
+        try:
             syntax = ast.parse(text, filename=str(path))
-        except (UnicodeDecodeError, SyntaxError, RecursionError):
+        except (SyntaxError, RecursionError):
             return AssuranceResult(TOOL, False, (AssuranceFinding(path, "module-parse-failed"),))
         if sum(1 for _ in ast.walk(syntax)) > MAX_AST_NODES:
             return AssuranceResult(TOOL, False, (AssuranceFinding(path, "ast-node-limit"),))
@@ -315,6 +322,15 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
                 and private_target
             ):
                 findings.append(AssuranceFinding(path, "cross-domain-private-import", target))
+    try:
+        revalidate_frozen_inventory(
+            (root,),
+            frozen,
+            max_files=MAX_WALK_FILES,
+            max_total_bytes=MAX_WALK_TOTAL_BYTES,
+        )
+    except AssuranceInputError as error:
+        return incomplete(TOOL, error)
     return AssuranceResult(TOOL, True, tuple(findings))
 
 

@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from assurance_common import (
-        MAX_REGULAR_FILE_BYTES,
+        MAX_JSON_CONTAINERS,
+        MAX_JSON_DEPTH,
+        MAX_JSON_TOKENS,
         MAX_WALK_FILES,
         MAX_WALK_TOTAL_BYTES,
         AssuranceFinding,
@@ -18,13 +20,16 @@ if TYPE_CHECKING:
         finish,
         incomplete,
         lexical_path,
-        read_json_object,
+        parse_json_object,
+        revalidate_frozen_inventory,
         walk_regular_files,
     )
     from verify_private_data import scan as scan_private_data
 elif __package__:
     from .assurance_common import (
-        MAX_REGULAR_FILE_BYTES,
+        MAX_JSON_CONTAINERS,
+        MAX_JSON_DEPTH,
+        MAX_JSON_TOKENS,
         MAX_WALK_FILES,
         MAX_WALK_TOTAL_BYTES,
         AssuranceFinding,
@@ -35,13 +40,16 @@ elif __package__:
         finish,
         incomplete,
         lexical_path,
-        read_json_object,
+        parse_json_object,
+        revalidate_frozen_inventory,
         walk_regular_files,
     )
     from .verify_private_data import scan as scan_private_data
 else:
     from assurance_common import (
-        MAX_REGULAR_FILE_BYTES,
+        MAX_JSON_CONTAINERS,
+        MAX_JSON_DEPTH,
+        MAX_JSON_TOKENS,
         MAX_WALK_FILES,
         MAX_WALK_TOTAL_BYTES,
         AssuranceFinding,
@@ -52,7 +60,8 @@ else:
         finish,
         incomplete,
         lexical_path,
-        read_json_object,
+        parse_json_object,
+        revalidate_frozen_inventory,
         walk_regular_files,
     )
     from verify_private_data import scan as scan_private_data
@@ -90,8 +99,20 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
                 (root,), max_files=MAX_WALK_FILES, max_total_bytes=MAX_WALK_TOTAL_BYTES
             )
         )
+        by_relative = {str(item.path.relative_to(root)): item for item in frozen}
         manifest_path = root / "manifest.json"
-        manifest = read_json_object(manifest_path, max_bytes=MAX_REGULAR_FILE_BYTES)
+        manifest_item = by_relative.get("manifest.json")
+        if manifest_item is None:
+            raise AssuranceInputError(manifest_path, "missing-input")
+        try:
+            manifest = parse_json_object(
+                manifest_item.raw,
+                max_depth=MAX_JSON_DEPTH,
+                max_containers=MAX_JSON_CONTAINERS,
+                max_tokens=MAX_JSON_TOKENS,
+            )
+        except ValueError as error:
+            raise AssuranceInputError(manifest_path, str(error)) from error
         cipher = manifest.get("cipher")
         if (
             manifest.get("format") != "tuntun-authenticated-backup-v1"
@@ -112,7 +133,6 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
             TOOL, False, (AssuranceFinding(Path("."), "invalid-arguments", str(error)),)
         )
 
-    by_relative = {str(item.path.relative_to(root)): item for item in frozen}
     findings: list[AssuranceFinding] = []
     for relative in declared:
         assert isinstance(relative, str)
@@ -153,6 +173,15 @@ def evaluate(argv: Sequence[str] | None = None) -> AssuranceResult:
                 return AssuranceResult(
                     TOOL, False, (AssuranceFinding(item.path, "corrupt-archive"),)
                 )
+    try:
+        revalidate_frozen_inventory(
+            (root,),
+            frozen,
+            max_files=MAX_WALK_FILES,
+            max_total_bytes=MAX_WALK_TOTAL_BYTES,
+        )
+    except AssuranceInputError as error:
+        return incomplete(TOOL, error)
     return AssuranceResult(TOOL, True, tuple(findings))
 
 

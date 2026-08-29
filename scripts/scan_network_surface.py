@@ -243,10 +243,13 @@ def _linux_socket_records(raw: bytes, generation: int) -> tuple[SocketRecord, ..
         if protocol not in {"tcp", "udp"}:
             raise ProbeError("socket-row-invalid")
         address, port = _split_endpoint(fields[4])
-        pid_match = re.search(r"pid=(\d+)", line)
-        if pid_match is None:
+        pid_matches = re.findall(r"\bpid=(\d+)\b", line)
+        if not pid_matches:
             raise ProbeError("socket-pid-missing")
-        sockets.append(SocketRecord(protocol, address, port, int(pid_match.group(1)), generation))
+        pids = tuple(int(pid) for pid in pid_matches)
+        if len(set(pids)) != len(pids):
+            raise ProbeError("socket-row-invalid")
+        sockets.extend(SocketRecord(protocol, address, port, pid, generation) for pid in pids)
     return tuple(sockets)
 
 
@@ -258,28 +261,53 @@ def _darwin_socket_records(raw: bytes, generation: int) -> tuple[SocketRecord, .
     sockets: list[SocketRecord] = []
     pid: int | None = None
     protocol: str | None = None
+    endpoint: str | None = None
     listening = False
+    record_active = False
+
+    def finish_record() -> None:
+        nonlocal protocol, endpoint, listening, record_active
+        if not record_active:
+            return
+        if pid is None or protocol not in {"tcp", "udp"} or endpoint is None:
+            raise ProbeError("socket-owner-missing")
+        if protocol == "udp" and endpoint == "*:*":
+            protocol = None
+            endpoint = None
+            listening = False
+            record_active = False
+            return
+        if protocol == "tcp" and not listening:
+            raise ProbeError("socket-owner-missing")
+        address, port = _split_endpoint(endpoint.split("->", 1)[0])
+        sockets.append(SocketRecord(protocol, address, port, pid, generation))
+        protocol = None
+        endpoint = None
+        listening = False
+        record_active = False
+
     for line in lines:
         if not line:
             continue
         field, value = line[0], line[1:]
         if field == "p":
+            finish_record()
             if not value.isdecimal():
                 raise ProbeError("process-row-invalid")
             pid = int(value)
-            protocol = None
-            listening = False
+        elif field == "f":
+            finish_record()
+            record_active = True
         elif field == "P":
+            record_active = True
             protocol = value.lower()
-            listening = protocol == "udp"
         elif field == "T" and value == "ST=LISTEN":
+            record_active = True
             listening = True
         elif field == "n":
-            endpoint = value.split("->", 1)[0]
-            if pid is None or protocol not in {"tcp", "udp"} or not listening:
-                raise ProbeError("socket-owner-missing")
-            address, port = _split_endpoint(endpoint)
-            sockets.append(SocketRecord(protocol, address, port, pid, generation))
+            record_active = True
+            endpoint = value
+    finish_record()
     return tuple(sockets)
 
 
@@ -408,28 +436,41 @@ def _listeners(snapshot: InventorySnapshot) -> tuple[ListenerRecord, ...]:
     processes: dict[int, list[ProcessRecord]] = defaultdict(list)
     for row in snapshot.processes:
         processes[row.pid].append(row)
-    listeners = []
+    grouped: dict[tuple[str, str, int], list[SocketRecord]] = defaultdict(list)
     seen: set[tuple[str, str, int, int]] = set()
     for socket in snapshot.sockets:
-        owners = processes.get(socket.pid, [])
-        if len(owners) != 1:
-            raise AssuranceInputError(Path("<network>"), "socket-owner-ambiguous", str(socket.pid))
         identity = (socket.protocol, socket.address, socket.port, socket.pid)
         if identity in seen:
             raise AssuranceInputError(Path("<network>"), "socket-row-duplicate")
         seen.add(identity)
-        owner = owners[0]
+        grouped[(socket.protocol, socket.address, socket.port)].append(socket)
+    listeners = []
+    for (protocol, address, port), sockets in grouped.items():
+        owner_rows: list[ProcessRecord] = []
+        for socket in sockets:
+            owners = processes.get(socket.pid, [])
+            if len(owners) != 1:
+                raise AssuranceInputError(
+                    Path("<network>"), "socket-owner-ambiguous", str(socket.pid)
+                )
+            owner_rows.append(owners[0])
+        service_owners = {owner.service_owner for owner in owner_rows if owner.service_owner}
+        if len(service_owners) != 1 or len(service_owners) != len(
+            {owner.service_owner for owner in owner_rows}
+        ):
+            raise AssuranceInputError(Path("<network>"), "socket-owner-ambiguous")
+        owner = min(owner_rows, key=lambda row: row.pid)
         listeners.append(
             ListenerRecord(
-                socket.protocol,
-                socket.address,
-                socket.port,
-                socket.pid,
+                protocol,
+                address,
+                port,
+                owner.pid,
                 owner.executable,
                 owner.service_owner,
             )
         )
-    return tuple(listeners)
+    return tuple(sorted(listeners, key=lambda row: (row.protocol, row.address, row.port, row.pid)))
 
 
 def _is_wildcard(address: str) -> bool:

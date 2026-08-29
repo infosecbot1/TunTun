@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import importlib
 import io
 import re
 import stat
+import struct
 import tarfile
 import zipfile
 import zlib
@@ -92,20 +92,6 @@ ARCHIVE_CHUNK_BYTES = 64 * 1024
 MAX_BROWSER_ARCHIVE_DEPTH = 3
 
 
-class BrotliStream(Protocol):
-    def process(self, data: bytes) -> bytes: ...
-
-    def is_finished(self) -> bool: ...
-
-
-class BrotliFactory(Protocol):
-    def __call__(self) -> BrotliStream: ...
-
-
-class BrotliModule(Protocol):
-    Decompressor: BrotliFactory
-
-
 @dataclass
 class ArchiveBudget:
     members: int = 0
@@ -157,25 +143,10 @@ def _bounded_gzip(path: Path, raw: bytes) -> bytes:
     return bytes(output)
 
 
-def _bounded_brotli(path: Path, raw: bytes) -> bytes:
-    try:
-        brotli = cast(BrotliModule, importlib.import_module("brotli"))
-        decoder = brotli.Decompressor()
-    except (ImportError, AttributeError, TypeError) as error:
-        raise AssuranceInputError(path, "browser-decoder-unavailable") from error
-    output = bytearray()
-    try:
-        for offset in range(0, len(raw), 1024):
-            output.extend(decoder.process(raw[offset : offset + 1024]))
-            if len(output) > MAX_REGULAR_FILE_BYTES:
-                raise AssuranceInputError(path, "expanded-byte-limit")
-        if not decoder.is_finished():
-            raise AssuranceInputError(path, "corrupt-browser-compression")
-    except AssuranceInputError:
-        raise
-    except Exception as error:
-        raise AssuranceInputError(path, "corrupt-browser-compression") from error
-    return bytes(output)
+def _bounded_brotli(path: Path, _raw: bytes) -> bytes:
+    raise AssuranceInputError(
+        path, "browser-decoder-unavailable", "bounded-isolated-worker-unavailable"
+    )
 
 
 def _decoded(path: Path, raw: bytes) -> bytes:
@@ -238,6 +209,57 @@ def _canonical_member(raw: str, path: Path) -> str:
     return candidate.as_posix()
 
 
+def _zip_preflight(path: Path, raw: bytes) -> None:
+    minimum_eocd = 22
+    search_start = max(0, len(raw) - (65_535 + minimum_eocd))
+    cursor = len(raw)
+    eocd = -1
+    while cursor > search_start:
+        candidate = raw.rfind(b"PK\x05\x06", search_start, cursor)
+        if candidate < 0:
+            break
+        if candidate + minimum_eocd <= len(raw):
+            comment_size = struct.unpack_from("<H", raw, candidate + 20)[0]
+            if candidate + minimum_eocd + comment_size == len(raw):
+                eocd = candidate
+                break
+        cursor = candidate
+    if eocd < 0:
+        raise AssuranceInputError(path, "corrupt-browser-archive")
+    disk, directory_disk, disk_count, count = struct.unpack_from("<HHHH", raw, eocd + 4)
+    directory_size, directory_offset = struct.unpack_from("<II", raw, eocd + 12)
+    if (
+        any(value == 0xFFFF for value in (disk, directory_disk, disk_count, count))
+        or directory_size == 0xFFFFFFFF
+        or directory_offset == 0xFFFFFFFF
+    ):
+        raise AssuranceInputError(path, "browser-archive-unsupported")
+    if disk != 0 or directory_disk != 0 or disk_count != count:
+        raise AssuranceInputError(path, "browser-archive-unsupported")
+    if count > MAX_WALK_FILES:
+        raise AssuranceInputError(path, "browser-archive-member-limit")
+    if directory_size > MAX_REGULAR_FILE_BYTES:
+        raise AssuranceInputError(path, "browser-archive-central-directory-limit")
+    directory_end = directory_offset + directory_size
+    if directory_offset > eocd or directory_end != eocd:
+        raise AssuranceInputError(path, "corrupt-browser-archive")
+    position = directory_offset
+    actual_count = 0
+    while position < directory_end:
+        if position + 46 > directory_end or raw[position : position + 4] != b"PK\x01\x02":
+            raise AssuranceInputError(path, "corrupt-browser-archive")
+        name_size, extra_size, comment_size = struct.unpack_from("<HHH", raw, position + 28)
+        record_size = 46 + name_size + extra_size + comment_size
+        if position + record_size > directory_end:
+            raise AssuranceInputError(path, "corrupt-browser-archive")
+        actual_count += 1
+        if actual_count > MAX_WALK_FILES:
+            raise AssuranceInputError(path, "browser-archive-member-limit")
+        position += record_size
+    if actual_count != count:
+        raise AssuranceInputError(path, "corrupt-browser-archive")
+
+
 def _read_member(
     source: object,
     *,
@@ -292,6 +314,7 @@ def _archive_payloads(
     payloads: list[tuple[Path, bytes]] = [(path, raw)]
     try:
         if kind == "zip":
+            _zip_preflight(path, raw)
             with zipfile.ZipFile(io.BytesIO(raw)) as archive:
                 seen: set[str] = set()
                 for zip_member in archive.infolist():
@@ -365,6 +388,8 @@ def _archive_payloads(
                     )
     except AssuranceInputError:
         raise
+    except (zipfile.LargeZipFile, NotImplementedError, tarfile.CompressionError) as error:
+        raise AssuranceInputError(path, "browser-archive-unsupported") from error
     except (EOFError, OSError, RuntimeError, tarfile.TarError, zipfile.BadZipFile) as error:
         raise AssuranceInputError(path, "corrupt-browser-archive") from error
     return tuple(payloads)

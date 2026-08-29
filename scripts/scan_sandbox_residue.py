@@ -119,16 +119,22 @@ def _process_handles(root: Path, scanner_handle: tuple[int, int]) -> tuple[str, 
                         raise AssuranceInputError(root, "handle-inventory-limit")
                     try:
                         target = Path(os.readlink(descriptor_path))
-                    except (OSError, UnicodeError):
+                    except FileNotFoundError:
                         continue
+                    except (OSError, UnicodeError) as error:
+                        raise AssuranceInputError(
+                            root, "handle-inventory-incomplete", str(error)
+                        ) from error
                     if (int(process.name), int(descriptor_path.name)) == scanner_handle:
                         continue
                     if target == root or root in target.parents:
                         handles.append(f"{process.name}:{descriptor_path.name}")
-            except PermissionError:
-                raise AssuranceInputError(root, "handle-inventory-incomplete") from None
             except FileNotFoundError:
                 continue
+            except OSError as error:
+                raise AssuranceInputError(
+                    root, "handle-inventory-incomplete", str(error)
+                ) from error
         return tuple(handles)
     raise AssuranceInputError(root, "handle-inventory-unavailable")
 
