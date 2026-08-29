@@ -11,7 +11,7 @@
 ## Global Constraints
 
 1. The normative specification is `docs/superpowers/specs/2026-08-27-tuntun-phase1-anchor-design.md`; changing a locked decision requires a specification update and ADR before implementation.
-2. The repository runner and Mac core are exactly Python 3.12. The pure-Python `tuntun-edge` and `tuntun-contracts` distributions declare `>=3.11,<3.13`, avoid 3.12-only syntax, and are installed only for the exact delivered Reachy interpreter/version/ABI/platform combination accepted by the later hardware gate; every other combination blocks packaging. `sqlcipher3==0.6.2` is the Mac-core storage compatibility candidate: its path/WAL behavior must pass the exact Ubuntu and hosted Intel-macOS CI jobs, and it is accepted only after the real target Intel Mac encrypted probe passes.
+2. The repository runner and Mac core are exactly Python 3.12. The pure-Python `tuntun-edge` and `tuntun-contracts` distributions declare `>=3.11,<3.13`, avoid 3.12-only syntax, and are installed only for the exact delivered Reachy interpreter/version/ABI/platform combination accepted by the later hardware gate; every other combination blocks packaging. `sqlcipher3==0.6.2` is the Mac-core storage compatibility candidate: its path/WAL behavior, metadata-only multi-connection guard, and subprocess lock regression must pass the exact Ubuntu and hosted Intel-macOS CI jobs, and it is accepted only after the real target Intel Mac encrypted probe passes.
 3. No real family name, audio, transcript, image, embedding, credential, memory, provider response, database, backup, key, certificate, local username, hostname, IP, MAC address, or serial number may enter source control, test reports, CI artifacts, or public issues.
 4. All Pydantic trust-boundary models are frozen, reject unknown fields, use aware UTC timestamps, bounded text/bytes, random UUIDs, integer confidence/money, and explicit schema version `1.0`.
 5. RFC 8785/JCS canonical bytes normalize Unicode to NFC and serialize UTC timestamps with exactly six fractional digits. Private or low-entropy values use purpose-separated HMAC-SHA-256 commitments, never bare hashes.
@@ -6585,7 +6585,8 @@ git commit -m "feat(models): add governed registry and explicit installer"
 
 **Interfaces:**
 - Consumes: a 32-byte database key and Task 7 `ensure_private_directory`, `open_owned_directory`, and their fresh no-follow component walk. Task 11's `_OPEN_LOCK` serializes qualification/connect windows inside this process only; it is not represented as cross-process protection.
-- Produces: `qualified_database_identity(path: Path) -> tuple[int, int]`; `open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection`; concrete subclass `QualifiedSQLCipherConnection.revalidate_storage_path()` and `.guarded_file_descriptors()`; `probe_storage(path: Path, key: bytes) -> StorageProbe`; CLI `tuntunctl storage probe --path PATH --json`. The adapter descriptor-qualifies or descriptor-relative `O_EXCL`-creates the main file beneath a retained verified parent, asks SQLCipher to reopen the normal symlink-free absolute pathname with exact `READWRITE|FULLMUTEX|PRIVATECACHE|SQLITE_OPEN_NOFOLLOW` flags (no `CREATE`, URI, or custom VFS), and brackets connect/key/WAL setup with fresh parent and database inode revalidation. It qualifies pre-existing and newly materialized sibling WAL/SHM entries, then retains the parent, main-file, and sidecar FDs in the connection guard until `close()` or finalization. Every main/sidecar entry is a regular, single-link, exact-`0600`, effective-user-owned inode on the parent's device. No chmod/touch follows a caller pathname; only a newly created held FD may receive `fchmod(0600)`.
+- Produces: immutable `FileIdentity(device, inode, owner, mode, links)` values; `qualified_database_identity(path: Path) -> tuple[int, int]`; `open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection`; concrete subclass `QualifiedSQLCipherConnection.revalidate_storage_path()`, `.guarded_parent_descriptor()`, and `.storage_identities()`; metadata-only process registry `_ACTIVE_DATABASES` keyed by the one canonical symlink-free absolute database path; `probe_storage(path: Path, key: bytes) -> StorageProbe`; CLI `tuntunctl storage probe --path PATH --json`. The adapter retains only the freshly no-follow-walked parent-directory FD. It uses descriptor-relative no-follow `stat` metadata for an existing main file and pre-existing/materialized WAL/SHM, and SQLCipher alone owns every lock-bearing main/WAL/SHM descriptor while any connection may be active or initializing. An absent main may be descriptor-relative `O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`-created only while the canonical path has zero active and zero initializing reservations; that transient FD is validated, `fchmod(0600)`-normalized, and closed before `sqlcipher3.connect`. The normal pathname reopen retains exact `READWRITE|FULLMUTEX|PRIVATECACHE|SQLITE_OPEN_NOFOLLOW` flags with no `CREATE`, URI, or custom VFS.
+- `_OPEN_LOCK` covers metadata qualification, reservation, connect, initialization, publish, and failure rollback. The registry value records the immutable main device/inode and active/initializing counts plus a failed-close count; it never owns a main or sidecar FD. A second connection compares the registered main identity and performs no adapter main/WAL/SHM open or close. Successful explicit close is ordered exactly as SQLCipher/base close, registry release, then parent-directory close. If SQLCipher close raises, the lease and parent remain attached for explicit retry/process abort, the registry blocks a new return, and cleanup is not reported as successful. Every failure after connect closes SQLCipher first, then rolls back the initializing reservation, then closes the parent; a close failure preserves all three. If `sqlcipher3.connect` itself raises, constructor/deallocator completion precedes reservation rollback and parent close.
 - This is deliberately not an exact descriptor handoff: `sqlcipher3==0.6.2` exposes neither a main-file FD nor Python VFS registration. A hostile same-EUID/root process can perform an ABA swap that restores the checked names between bracket checks, and a process able to read this process's memory can obtain the key. The contract is strong against other users, symlinks, stale/unsafe entries, and one-way/non-ABA replacement; exact binding against a malicious same-EUID process requires a funded native VFS or different driver and blocks this adapter rather than permitting a stronger claim.
 
 - [ ] **Step 1: Pin dependencies and write the red encryption tests**
@@ -6601,6 +6602,9 @@ import os
 import socket
 import sqlite3
 import stat
+import subprocess
+import sys
+from threading import Event,Thread
 import pytest
 from sqlcipher3 import dbapi2 as sqlcipher3
 from tuntun_core.adapters.sqlcipher import connection as connection_module
@@ -6620,6 +6624,82 @@ def _database_path(tmp_path:Path,name:str="foundation.db") -> Path:
 
 def _regular(path:Path,data:bytes=b"") -> None:
     path.write_bytes(data); path.chmod(0o600)
+
+def _exclusive_empty_main(path:Path) -> None:
+    flags=os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_CLOEXEC|os.O_NOFOLLOW
+    fd=os.open(path,flags,0o600)
+    try:
+        os.fchmod(fd,0o600); opened=os.fstat(fd)
+        assert stat.S_ISREG(opened.st_mode) and stat.S_IMODE(opened.st_mode)==0o600
+    finally: os.close(fd)
+    assert os.stat(path,follow_symlinks=False).st_size==0
+    for suffix in ("-wal","-shm"):
+        with pytest.raises(FileNotFoundError):
+            os.stat(os.fspath(path)+suffix,follow_symlinks=False)
+
+def _identity(path:Path) -> tuple[int,int]:
+    value=os.stat(path,follow_symlinks=False)
+    return value.st_dev,value.st_ino
+
+LOCK_CONTENDER=r'''\
+import os,sys
+from sqlcipher3 import dbapi2 as sqlcipher3
+SQLITE_OPEN_NOFOLLOW=0x01000000
+flags=(sqlcipher3.SQLITE_OPEN_READWRITE|sqlcipher3.SQLITE_OPEN_FULLMUTEX|
+       sqlcipher3.SQLITE_OPEN_PRIVATECACHE|SQLITE_OPEN_NOFOLLOW)
+db=sqlcipher3.connect(sys.argv[1],isolation_level=None,flags=flags)
+db.execute(f"PRAGMA key = \"x'{sys.argv[2]}'\"")
+db.execute("PRAGMA busy_timeout=250")
+try:
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("INSERT INTO lock_probe VALUES (2)")
+    db.execute("COMMIT")
+except sqlcipher3.OperationalError:
+    db.close(); raise SystemExit(75)
+db.close()
+'''
+
+OPEN_LIFECYCLE_PROBE=r'''\
+import sys
+from pathlib import Path
+from tuntun_core.adapters.sqlcipher import connection as module
+path=Path(sys.argv[1]); key=bytes.fromhex(sys.argv[2]); checkpoint=sys.argv[3]
+if checkpoint!="success":
+    def injected(name):
+        if name==checkpoint: raise RuntimeError(f"injected {name}")
+    module._initialization_checkpoint=injected
+try:
+    db=module.open_sqlcipher(path,key)
+except RuntimeError as error:
+    if checkpoint=="success": raise
+    if str(error)!=f"injected {checkpoint}": raise
+    if module._registry_snapshot(path) is not None: raise SystemExit(21)
+else:
+    if checkpoint!="success": raise SystemExit(22)
+    db.close()
+    if module._registry_snapshot(path) is not None: raise SystemExit(23)
+'''
+
+def _contend(path:Path,expected_returncode:int) -> None:
+    result=subprocess.run(
+        [sys.executable,"-c",LOCK_CONTENDER,os.fspath(path),KEY.hex()],
+        check=False,capture_output=True,text=True,timeout=10,
+    )
+    assert result.returncode==expected_returncode,(result.stdout,result.stderr)
+
+@pytest.mark.parametrize("checkpoint",(
+    "success","key_validation","keyed_read","wal_activation",
+    "sidecar_metadata","integrity",
+))
+def test_open_and_cleanup_lock_ownership_never_deadlocks(
+    tmp_path:Path,checkpoint:str,
+) -> None:
+    path=_database_path(tmp_path,f"lifecycle-{checkpoint}.db")
+    result=subprocess.run(
+        [sys.executable,"-c",OPEN_LIFECYCLE_PROBE,os.fspath(path),KEY.hex(),checkpoint],
+        check=False,capture_output=True,text=True,timeout=15,
+    )
+    assert result.returncode==0,(result.stdout,result.stderr)
 
 @pytest.mark.parametrize("path",(Path("."),Path("private")/".."/"database.db",Path("bad\x00name.db")))
 def test_database_path_rejects_dot_dotdot_and_nul(path:Path) -> None:
@@ -6725,7 +6805,7 @@ def test_one_way_replacement_during_connect_fails_and_closes(
     original_connect=connection_module.sqlcipher3.connect
     original_open=connection_module._open_qualified_database
     def recording_open(value):
-        guard=original_open(value); captured.extend(guard.file_descriptors()); return guard
+        guard=original_open(value); captured.append(guard.parent.fd); return guard
     def replacing_connect(*args,**kwargs):
         if replacement=="database":
             path.rename(parent/"qualified-original.db"); _regular(path)
@@ -6740,6 +6820,7 @@ def test_one_way_replacement_during_connect_fails_and_closes(
     assert captured
     for fd in captured:
         with pytest.raises(OSError): os.fstat(fd)
+    assert connection_module._registry_snapshot(path) is None
 
 @pytest.mark.parametrize("suffix",("-wal","-shm"))
 @pytest.mark.parametrize("mutation",(
@@ -6749,7 +6830,7 @@ def test_one_way_replacement_during_connect_fails_and_closes(
 def test_preexisting_sidecars_are_qualified_before_sqlite_touches_them(
     tmp_path:Path,monkeypatch:pytest.MonkeyPatch,suffix:str,mutation:str,
 ) -> None:
-    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY); db.close()
+    path=_database_path(tmp_path); _exclusive_empty_main(path)
     sidecar=Path(os.fspath(path)+suffix); cleanup=None
     if mutation=="symlink":
         target=sidecar.with_name(sidecar.name+"-target"); _regular(target); sidecar.symlink_to(target)
@@ -6768,37 +6849,210 @@ def test_preexisting_sidecars_are_qualified_before_sqlite_touches_them(
             original=connection_module._reported_device
             monkeypatch.setattr(connection_module,"_reported_device",lambda name,value: value.st_dev+1 if name==sidecar.name else original(name,value))
     try:
+        created=os.stat(sidecar,follow_symlinks=False)
+        assert {
+            "symlink":stat.S_ISLNK,"fifo":stat.S_ISFIFO,"socket":stat.S_ISSOCK,
+            "directory":stat.S_ISDIR,
+        }.get(mutation,stat.S_ISREG)(created.st_mode)
+        if mutation.startswith("mode_"):
+            assert stat.S_IMODE(created.st_mode)==int(mutation.removeprefix("mode_"),8)
+        if mutation=="hard_link": assert created.st_nlink==2
         with pytest.raises(PermissionError,match="unsafe database path"):
             open_sqlcipher(path,KEY)
+        assert connection_module._registry_snapshot(path) is None
     finally:
         if cleanup is not None: cleanup.close()
 
-def test_materialized_sidecars_and_guard_descriptors_live_until_close(tmp_path:Path) -> None:
+def test_creation_only_fd_closes_before_reservation_and_sqlcipher_connect(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
+) -> None:
+    path=_database_path(tmp_path); events=[]
+    original_close=connection_module.os.close
+    original_connect=connection_module.sqlcipher3.connect
+    def recording_close(fd):
+        opened=os.fstat(fd)
+        try: named=os.stat(path,follow_symlinks=False)
+        except FileNotFoundError: named=None
+        if named is not None and (opened.st_dev,opened.st_ino)==(named.st_dev,named.st_ino):
+            state=connection_module._ACTIVE_DATABASES.get(path)
+            events.append(("creation-close",None if state is None else (state.active,state.initializing)))
+        return original_close(fd)
+    def recording_connect(*args,**kwargs):
+        state=connection_module._ACTIVE_DATABASES[path]
+        events.append(("connect",(state.active,state.initializing)))
+        return original_connect(*args,**kwargs)
+    monkeypatch.setattr(connection_module.os,"close",recording_close)
+    monkeypatch.setattr(connection_module.sqlcipher3,"connect",recording_connect)
+    db=open_sqlcipher(path,KEY); db.close()
+    assert [name for name,_ in events[:2]]==["creation-close","connect"]
+    assert events[0][1] is None
+    assert events[1][1]==(0,1)
+
+def test_materialized_sidecars_are_metadata_identities_and_only_parent_fd_is_retained(
+    tmp_path:Path,
+) -> None:
     path=_database_path(tmp_path); db=open_sqlcipher(path,KEY)
-    descriptors=db.guarded_file_descriptors()
-    assert len(descriptors)==4
-    assert all(os.fstat(fd).st_uid==os.geteuid() for fd in descriptors)
+    parent_fd=db.guarded_parent_descriptor(); opened_parent=os.fstat(parent_fd)
+    assert stat.S_ISDIR(opened_parent.st_mode)
+    main_identity,sidecar_identities=db.storage_identities()
+    assert (main_identity.device,main_identity.inode)==_identity(path)
+    assert {suffix for suffix,_ in sidecar_identities}=={"-wal","-shm"}
     for suffix in ("-wal","-shm"):
-        value=os.lstat(os.fspath(path)+suffix)
+        value=os.stat(os.fspath(path)+suffix,follow_symlinks=False)
         assert stat.S_ISREG(value.st_mode) and stat.S_IMODE(value.st_mode)==0o600
         assert value.st_uid==os.geteuid() and value.st_nlink==1
         assert value.st_dev==os.lstat(path.parent).st_dev
     db.close()
-    for fd in descriptors:
-        with pytest.raises(OSError): os.fstat(fd)
+    with pytest.raises(OSError): os.fstat(parent_fd)
+    assert connection_module._registry_snapshot(path) is None
 
-def test_initialization_failure_closes_every_guard_descriptor(
+def test_second_connection_never_adapter_opens_or_closes_main_or_sidecars(
     tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
 ) -> None:
-    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY); db.close(); captured=[]
-    original=connection_module._open_qualified_database
-    def recording_guard(value):
-        guard=original(value); captured.extend(guard.file_descriptors()); return guard
-    monkeypatch.setattr(connection_module,"_open_qualified_database",recording_guard)
-    with pytest.raises(sqlcipher3.DatabaseError): open_sqlcipher(path,WRONG)
-    assert captured
-    for fd in captured:
-        with pytest.raises(OSError): os.fstat(fd)
+    path=_database_path(tmp_path); first=open_sqlcipher(path,KEY)
+    protected={_identity(path),*(_identity(Path(os.fspath(path)+suffix)) for suffix in ("-wal","-shm"))}
+    events=[]; original_open=connection_module.os.open; original_close=connection_module.os.close
+    def recording_open(*args,**kwargs):
+        fd=original_open(*args,**kwargs); events.append(("open",_identity_from_fd(fd))); return fd
+    def recording_close(fd):
+        events.append(("close",_identity_from_fd(fd))); return original_close(fd)
+    def _identity_from_fd(fd):
+        value=os.fstat(fd); return value.st_dev,value.st_ino
+    monkeypatch.setattr(connection_module.os,"open",recording_open)
+    monkeypatch.setattr(connection_module.os,"close",recording_close)
+    second=open_sqlcipher(path,KEY)
+    assert second.storage_identities()==first.storage_identities()
+    second.close()
+    assert not [event for event in events if event[1] in protected]
+    assert connection_module._registry_snapshot(path).active==1
+    assert first.execute("SELECT 1").fetchone()==(1,)
+    first.close()
+
+def test_successful_close_orders_sqlcipher_then_registry_then_parent(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
+) -> None:
+    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY); events=[]
+    original_base=QualifiedSQLCipherConnection._close_sqlcipher_base
+    original_release=connection_module._release_reservation_after_close
+    original_parent=connection_module.DatabasePathGuard._close_parent_after_release
+    def base(connection): events.append("sqlcipher"); return original_base(connection)
+    def release(reservation): events.append("registry"); return original_release(reservation)
+    def parent(guard): events.append("parent"); return original_parent(guard)
+    monkeypatch.setattr(QualifiedSQLCipherConnection,"_close_sqlcipher_base",base)
+    monkeypatch.setattr(connection_module,"_release_reservation_after_close",release)
+    monkeypatch.setattr(connection_module.DatabasePathGuard,"_close_parent_after_release",parent)
+    db.close()
+    assert events==["sqlcipher","registry","parent"]
+
+@pytest.mark.parametrize("checkpoint",(
+    "key_validation","keyed_read","wal_activation","sidecar_metadata","integrity",
+))
+def test_initialization_failure_closes_before_rollback_and_preserves_healthy_peer(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,checkpoint:str,
+) -> None:
+    path=_database_path(tmp_path); healthy=open_sqlcipher(path,KEY); before=connection_module._registry_snapshot(path)
+    events=[]; original_base=QualifiedSQLCipherConnection._close_sqlcipher_base
+    original_rollback=connection_module._rollback_reservation_after_close
+    original_parent=connection_module.DatabasePathGuard._close_parent_after_release
+    def fail_at(name):
+        if name==checkpoint: raise RuntimeError(f"injected {checkpoint}")
+    def base(connection): events.append("sqlcipher"); return original_base(connection)
+    def rollback(reservation): events.append("registry"); return original_rollback(reservation)
+    def parent(guard): events.append("parent"); return original_parent(guard)
+    monkeypatch.setattr(connection_module,"_initialization_checkpoint",fail_at)
+    monkeypatch.setattr(QualifiedSQLCipherConnection,"_close_sqlcipher_base",base)
+    monkeypatch.setattr(connection_module,"_rollback_reservation_after_close",rollback)
+    monkeypatch.setattr(connection_module.DatabasePathGuard,"_close_parent_after_release",parent)
+    with pytest.raises(RuntimeError,match=f"injected {checkpoint}"):
+        open_sqlcipher(path,KEY)
+    assert events==["sqlcipher","registry","parent"]
+    after=connection_module._registry_snapshot(path)
+    assert (after.active,after.initializing)==(before.active,before.initializing)==(1,0)
+    assert healthy.execute("SELECT 1").fetchone()==(1,)
+    healthy.close()
+
+def test_initialization_close_failure_retains_initializing_lease_until_retry(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
+) -> None:
+    path=_database_path(tmp_path); healthy=open_sqlcipher(path,KEY)
+    original=QualifiedSQLCipherConnection._close_sqlcipher_base; failed=False
+    def fail_checkpoint(name):
+        if name=="key_validation": raise RuntimeError("injected initialization failure")
+    def fail_first_cleanup(connection):
+        nonlocal failed
+        if not failed:
+            failed=True; raise RuntimeError("injected initialization close failure")
+        return original(connection)
+    monkeypatch.setattr(connection_module,"_initialization_checkpoint",fail_checkpoint)
+    monkeypatch.setattr(QualifiedSQLCipherConnection,"_close_sqlcipher_base",fail_first_cleanup)
+    with pytest.raises(connection_module.SQLCipherCleanupError) as captured:
+        open_sqlcipher(path,KEY)
+    failed_connection=captured.value.connection
+    parent_fd=failed_connection.guarded_parent_descriptor()
+    state=connection_module._registry_snapshot(path)
+    assert (state.active,state.initializing,state.failed_closes)==(1,1,1)
+    assert os.fstat(parent_fd)
+    with pytest.raises(RuntimeError,match="prior SQLCipher close failed"):
+        open_sqlcipher(path,KEY)
+    failed_connection.close()
+    with pytest.raises(OSError): os.fstat(parent_fd)
+    state=connection_module._registry_snapshot(path)
+    assert (state.active,state.initializing,state.failed_closes)==(1,0,0)
+    assert healthy.execute("SELECT 1").fetchone()==(1,)
+    healthy.close()
+
+def test_sqlcipher_close_failure_retains_lease_parent_and_blocks_new_return(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
+) -> None:
+    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY)
+    parent_fd=db.guarded_parent_descriptor(); original=QualifiedSQLCipherConnection._close_sqlcipher_base
+    failed=False
+    def fail_once(connection):
+        nonlocal failed
+        if connection is db and not failed:
+            failed=True; raise RuntimeError("injected SQLCipher close failure")
+        return original(connection)
+    monkeypatch.setattr(QualifiedSQLCipherConnection,"_close_sqlcipher_base",fail_once)
+    with pytest.raises(RuntimeError,match="injected SQLCipher close failure"): db.close()
+    state=connection_module._registry_snapshot(path)
+    assert (state.active,state.initializing,state.failed_closes)==(1,0,1)
+    assert os.fstat(parent_fd) and db.guarded_parent_descriptor()==parent_fd
+    with pytest.raises(RuntimeError,match="prior SQLCipher close failed"):
+        open_sqlcipher(path,KEY)
+    db.close()
+    with pytest.raises(OSError): os.fstat(parent_fd)
+    reopened=open_sqlcipher(path,KEY); reopened.close()
+
+def test_close_failure_mark_is_atomic_with_respect_to_new_open(
+    tmp_path:Path,monkeypatch:pytest.MonkeyPatch,
+) -> None:
+    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY)
+    entered=Event(); allow_failure=Event(); open_done=Event()
+    close_errors=[]; open_errors=[]; returned=[]; original=QualifiedSQLCipherConnection._close_sqlcipher_base
+    failed_once=False
+    def paused_failure(connection):
+        nonlocal failed_once
+        if connection is db and not failed_once:
+            failed_once=True; entered.set()
+            assert allow_failure.wait(5); raise RuntimeError("injected paused close failure")
+        return original(connection)
+    def close_worker():
+        try: db.close()
+        except BaseException as error: close_errors.append(error)
+    def open_worker():
+        try: returned.append(open_sqlcipher(path,KEY))
+        except BaseException as error: open_errors.append(error)
+        finally: open_done.set()
+    monkeypatch.setattr(QualifiedSQLCipherConnection,"_close_sqlcipher_base",paused_failure)
+    closer=Thread(target=close_worker); closer.start(); assert entered.wait(5)
+    opener=Thread(target=open_worker); opener.start()
+    assert not open_done.wait(0.2)
+    allow_failure.set(); closer.join(5); opener.join(5)
+    assert not closer.is_alive() and not opener.is_alive()
+    assert len(close_errors)==1 and "paused close failure" in str(close_errors[0])
+    assert not returned and len(open_errors)==1
+    assert "prior SQLCipher close failed" in str(open_errors[0])
+    db.close()
 
 @pytest.mark.parametrize("replacement",("database","parent"))
 def test_live_connection_revalidation_rejects_named_entry_drift(
@@ -6831,6 +7085,32 @@ def test_two_connections_share_canonical_wal_and_complete_concurrent_writes(tmp_
     assert first.execute("SELECT count(*) FROM concurrent_writes").fetchone()[0]==2
     first.close(); second.close()
 
+def test_closing_peer_does_not_cancel_holder_lock_for_subprocess(tmp_path:Path) -> None:
+    path=_database_path(tmp_path); holder=open_sqlcipher(path,KEY); peer=open_sqlcipher(path,KEY)
+    holder.execute("CREATE TABLE lock_probe(value INTEGER NOT NULL)")
+    holder.execute("BEGIN IMMEDIATE"); holder.execute("INSERT INTO lock_probe VALUES (1)")
+    peer.close()
+    _contend(path,75)
+    holder.execute("COMMIT")
+    _contend(path,0)
+    assert holder.execute("SELECT count(*) FROM lock_probe").fetchone()[0]==2
+    holder.close()
+
+def test_legitimate_close_and_reopen_never_assumes_sidecar_deletion(tmp_path:Path) -> None:
+    path=_database_path(tmp_path); db=open_sqlcipher(path,KEY)
+    db.execute("CREATE TABLE reopen_probe(value INTEGER NOT NULL)")
+    db.execute("INSERT INTO reopen_probe VALUES (1)"); db.close()
+    for suffix in ("-wal","-shm"):
+        try: surviving=os.stat(os.fspath(path)+suffix,follow_symlinks=False)
+        except FileNotFoundError: continue
+        assert stat.S_ISREG(surviving.st_mode) and stat.S_IMODE(surviving.st_mode)==0o600
+    reopened=open_sqlcipher(path,KEY)
+    assert reopened.execute("SELECT value FROM reopen_probe").fetchone()==(1,)
+    for suffix in ("-wal","-shm"):
+        current=os.stat(os.fspath(path)+suffix,follow_symlinks=False)
+        assert stat.S_ISREG(current.st_mode) and stat.S_IMODE(current.st_mode)==0o600
+    reopened.close()
+
 def test_probe_is_sanitized_and_records_driver_runtime(tmp_path:Path) -> None:
     value=probe_storage(_database_path(tmp_path),KEY).as_dict(); encoded=json.dumps(value)
     assert set(value)=={
@@ -6855,18 +7135,18 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 
 ```python
 # apps/core/src/tuntun_core/adapters/sqlcipher/connection.py
-from dataclasses import dataclass,field
+from dataclasses import dataclass
 import os,stat
 from pathlib import Path
 from threading import Lock
+from typing import Literal
 from sqlcipher3 import dbapi2 as sqlcipher3
 from tuntun_core.config.secure_paths import (
     OwnedDirectory,ensure_private_directory,open_owned_directory,
 )
 
 NOFOLLOW=os.O_NOFOLLOW
-FILE_FLAGS=os.O_RDWR|os.O_CLOEXEC|os.O_NONBLOCK|NOFOLLOW
-CREATE_FLAGS=FILE_FLAGS|os.O_CREAT|os.O_EXCL
+CREATE_FLAGS=os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_CLOEXEC|os.O_NONBLOCK|NOFOLLOW
 # Official SQLite value; sqlcipher3 0.6.2 does not export it.
 # https://sqlite.org/c3ref/c_open_autoproxy.html
 SQLITE_OPEN_NOFOLLOW=0x01000000
@@ -6892,121 +7172,232 @@ def _absolute_database_path(path:Path) -> Path:
         raise PermissionError("unsafe database path")
     return absolute
 
-def _require_file(parent:OwnedDirectory,name:str,fd:int) -> os.stat_result:
-    opened=os.fstat(fd)
+@dataclass(frozen=True,slots=True)
+class FileIdentity:
+    device:int; inode:int; owner:int; mode:int; links:int
+
+    @classmethod
+    def from_stat(cls,value:os.stat_result) -> "FileIdentity":
+        return cls(
+            value.st_dev,value.st_ino,value.st_uid,
+            value.st_mode,value.st_nlink,
+        )
+
+def _require_file(parent:OwnedDirectory,name:str) -> FileIdentity:
     named=os.stat(name,dir_fd=parent.fd,follow_symlinks=False)
     if (
-        not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(named.st_mode)
-        or _reported_owner(name,opened)!=os.geteuid() or opened.st_nlink!=1
-        or stat.S_IMODE(opened.st_mode)!=0o600
-        or _reported_device(name,opened)!=parent.device
-        or (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino)
+        not stat.S_ISREG(named.st_mode)
+        or _reported_owner(name,named)!=os.geteuid() or named.st_nlink!=1
+        or stat.S_IMODE(named.st_mode)!=0o600
+        or _reported_device(name,named)!=parent.device
     ): raise PermissionError("unsafe database path")
-    return opened
+    return FileIdentity.from_stat(named)
+
+def _optional_file(parent:OwnedDirectory,name:str) -> FileIdentity|None:
+    try: return _require_file(parent,name)
+    except FileNotFoundError: return None
+
+def _create_exclusive_main(parent:OwnedDirectory,name:str) -> FileIdentity:
+    fd=os.open(name,CREATE_FLAGS,0o600,dir_fd=parent.fd)
+    try:
+        os.fchmod(fd,0o600); opened=os.fstat(fd); named=_require_file(parent,name)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or FileIdentity.from_stat(opened)!=named
+        ): raise PermissionError("unsafe database path")
+    finally:
+        # Creation is allowed only before any reservation, and this close must
+        # complete before sqlcipher3.connect can own a lock-bearing descriptor.
+        os.close(fd)
+    if _require_file(parent,name)!=named:
+        raise PermissionError("unsafe database path")
+    return named
+
+@dataclass(slots=True)
+class _RegistryState:
+    main_identity:FileIdentity
+    active:int=0
+    initializing:int=0
+    failed_closes:int=0
+
+@dataclass(frozen=True,slots=True)
+class RegistrySnapshot:
+    main_identity:FileIdentity
+    active:int
+    initializing:int
+    failed_closes:int
+
+@dataclass(slots=True)
+class _Reservation:
+    path:Path
+    main_identity:FileIdentity
+    phase:Literal["initializing","active"]="initializing"
+    failed_close:bool=False
+    released:bool=False
+
+_ACTIVE_DATABASES:dict[Path,_RegistryState]={}
+
+def _registry_snapshot(path:Path) -> RegistrySnapshot|None:
+    absolute=_absolute_database_path(path)
+    with _OPEN_LOCK:
+        state=_ACTIVE_DATABASES.get(absolute)
+        if state is None: return None
+        return RegistrySnapshot(
+            state.main_identity,state.active,state.initializing,state.failed_closes,
+        )
+
+def _reserve_initializing(path:Path,identity:FileIdentity) -> _Reservation:
+    state=_ACTIVE_DATABASES.get(path)
+    if state is None:
+        state=_RegistryState(identity); _ACTIVE_DATABASES[path]=state
+    elif state.main_identity!=identity:
+        raise PermissionError("unsafe database path")
+    if state.failed_closes:
+        raise RuntimeError("prior SQLCipher close failed; retry close or abort process")
+    state.initializing+=1
+    return _Reservation(path,identity)
+
+def _publish_reservation(reservation:_Reservation) -> None:
+    state=_ACTIVE_DATABASES[reservation.path]
+    if reservation.phase!="initializing" or reservation.released:
+        raise RuntimeError("invalid database reservation")
+    state.initializing-=1; state.active+=1; reservation.phase="active"
+
+def _mark_reservation_close_failed(reservation:_Reservation) -> None:
+    if reservation.released or reservation.failed_close: return
+    _ACTIVE_DATABASES[reservation.path].failed_closes+=1
+    reservation.failed_close=True
+
+def _remove_empty_registry(path:Path,state:_RegistryState) -> None:
+    if state.active==state.initializing==state.failed_closes==0:
+        del _ACTIVE_DATABASES[path]
+
+def _rollback_reservation_after_close(reservation:_Reservation) -> None:
+    state=_ACTIVE_DATABASES[reservation.path]
+    if reservation.phase!="initializing" or reservation.released:
+        raise RuntimeError("invalid database reservation")
+    state.initializing-=1
+    if reservation.failed_close: state.failed_closes-=1
+    reservation.released=True; _remove_empty_registry(reservation.path,state)
+
+def _release_reservation_after_close(reservation:_Reservation) -> None:
+    state=_ACTIVE_DATABASES[reservation.path]
+    if reservation.phase!="active" or reservation.released:
+        raise RuntimeError("invalid database reservation")
+    state.active-=1
+    if reservation.failed_close: state.failed_closes-=1
+    reservation.released=True; _remove_empty_registry(reservation.path,state)
 
 @dataclass(slots=True)
 class DatabasePathGuard:
     path:Path
     parent:OwnedDirectory
-    database_fd:int
-    database_identity:tuple[int,int]
-    sidecars:dict[str,tuple[int,tuple[int,int]]]=field(default_factory=dict)
+    main_identity:FileIdentity
+    reservation:_Reservation
+    sidecar_identities:tuple[tuple[str,FileIdentity],...]=()
+    _registry_released:bool=False
     _closed:bool=False
 
-    def file_descriptors(self) -> tuple[int,...]:
-        if self._closed: return ()
-        return (self.parent.fd,self.database_fd,*(value[0] for value in self.sidecars.values()))
-
-    def _retain_sidecar(self,suffix:str,*,required:bool) -> None:
-        name=self.path.name+suffix
-        if suffix in self.sidecars:
-            fd,identity=self.sidecars[suffix]
-            value=_require_file(self.parent,name,fd)
-            if (value.st_dev,value.st_ino)!=identity:
-                raise PermissionError("unsafe database path")
-            return
-        try: os.stat(name,dir_fd=self.parent.fd,follow_symlinks=False)
-        except FileNotFoundError:
-            if required: raise PermissionError("unsafe database path")
-            return
-        try: fd=os.open(name,FILE_FLAGS,dir_fd=self.parent.fd)
-        except OSError as error: raise PermissionError("unsafe database path") from error
-        try:
-            value=_require_file(self.parent,name,fd)
-            self.sidecars[suffix]=(fd,(value.st_dev,value.st_ino))
-        except BaseException:
-            os.close(fd); raise
-
-    def qualify_preexisting_sidecars(self) -> None:
-        for suffix in ("-wal","-shm"): self._retain_sidecar(suffix,required=False)
-
     def qualify_materialized_sidecars(self) -> None:
-        for suffix in ("-wal","-shm"): self._retain_sidecar(suffix,required=True)
+        previous=dict(self.sidecar_identities); current=[]
+        for suffix in ("-wal","-shm"):
+            identity=_require_file(self.parent,self.path.name+suffix)
+            if suffix in previous and previous[suffix]!=identity:
+                raise PermissionError("unsafe database path")
+            current.append((suffix,identity))
+        self.sidecar_identities=tuple(current)
 
     def revalidate(self) -> None:
         if self._closed: raise PermissionError("unsafe database path")
         try:
             self.parent.revalidate()
-            value=_require_file(self.parent,self.path.name,self.database_fd)
-            if (value.st_dev,value.st_ino)!=self.database_identity:
+            if _require_file(self.parent,self.path.name)!=self.main_identity:
                 raise PermissionError("unsafe database path")
-            for suffix in tuple(self.sidecars): self._retain_sidecar(suffix,required=True)
+            for suffix,identity in self.sidecar_identities:
+                if _require_file(self.parent,self.path.name+suffix)!=identity:
+                    raise PermissionError("unsafe database path")
         except OSError as error:
             if isinstance(error,PermissionError): raise
             raise PermissionError("unsafe database path") from error
 
-    def close(self) -> None:
-        if self._closed: return
-        self._closed=True; failure:OSError|None=None
-        descriptors=[value[0] for value in self.sidecars.values()]+[self.database_fd]
-        self.sidecars.clear()
-        for fd in descriptors:
-            try: os.close(fd)
-            except OSError as error:
-                if failure is None: failure=error
-        try: self.parent.close()
-        except OSError as error:
-            if failure is None: failure=error
-        if failure is not None: raise failure
+    def publish_locked(self) -> None:
+        _publish_reservation(self.reservation)
+
+    def mark_sqlcipher_close_failed_locked(self) -> None:
+        _mark_reservation_close_failed(self.reservation)
+
+    def _release_registry_after_sqlcipher_close_locked(self) -> None:
+        if self._registry_released: return
+        if self.reservation.phase=="initializing":
+            _rollback_reservation_after_close(self.reservation)
+        else:
+            _release_reservation_after_close(self.reservation)
+        self._registry_released=True
+
+    def _close_parent_after_release(self) -> None:
+        if not self._closed:
+            self.parent.close(); self._closed=True
+
+    def rollback_connect_failure_locked(self) -> None:
+        # No returned SQLCipher handle exists: connect either was not called or
+        # its failing constructor/deallocator completed before control returned.
+        self._release_registry_after_sqlcipher_close_locked()
+        self._close_parent_after_release()
 
 def _open_qualified_database(path:Path) -> DatabasePathGuard:
     absolute=_absolute_database_path(path)
+    registered=_ACTIVE_DATABASES.get(absolute)
+    if registered is not None and registered.failed_closes:
+        raise RuntimeError("prior SQLCipher close failed; retry close or abort process")
     identity=ensure_private_directory(absolute.parent)
     parent:OwnedDirectory|None=open_owned_directory(identity.path)
-    guard:DatabasePathGuard|None=None
-    transferred=False
     try:
         assert parent is not None
         parent.revalidate()
-        try: fd=os.open(absolute.name,FILE_FLAGS,dir_fd=parent.fd)
-        except FileNotFoundError:
-            fd=os.open(absolute.name,CREATE_FLAGS,0o600,dir_fd=parent.fd)
-            try: os.fchmod(fd,0o600)
-            except BaseException: os.close(fd); raise
-        try: opened=_require_file(parent,absolute.name,fd)
-        except BaseException: os.close(fd); raise
-        guard=DatabasePathGuard(
-            absolute,parent,fd,(opened.st_dev,opened.st_ino),
+        main=_optional_file(parent,absolute.name)
+        if main is None:
+            if registered is not None:
+                raise PermissionError("unsafe database path")
+            main=_create_exclusive_main(parent,absolute.name)
+        elif registered is not None and registered.main_identity!=main:
+            raise PermissionError("unsafe database path")
+        sidecars=tuple(
+            (suffix,value)
+            for suffix in ("-wal","-shm")
+            if (value:=_optional_file(parent,absolute.name+suffix)) is not None
         )
+        reservation=_reserve_initializing(absolute,main)
+        guard=DatabasePathGuard(absolute,parent,main,reservation,sidecars)
         parent=None
-        guard.qualify_preexisting_sidecars(); guard.revalidate()
-        transferred=True
         return guard
     except OSError as error:
         if isinstance(error,PermissionError): raise
         raise PermissionError("unsafe database path") from error
-    except BaseException:
-        raise
     finally:
-        if not transferred:
-            if guard is not None: guard.close()
-            elif parent is not None: parent.close()
+        if parent is not None: parent.close()
 
 def qualified_database_identity(path:Path) -> tuple[int,int]:
     with _OPEN_LOCK:
-        guard=_open_qualified_database(path)
-        try: return guard.database_identity
-        finally: guard.close()
+        absolute=_absolute_database_path(path)
+        identity=ensure_private_directory(absolute.parent)
+        with open_owned_directory(identity.path) as parent:
+            parent.revalidate(); main=_require_file(parent,absolute.name)
+            registered=_ACTIVE_DATABASES.get(absolute)
+            if registered is not None and registered.main_identity!=main:
+                raise PermissionError("unsafe database path")
+            return main.device,main.inode
+
+class SQLCipherCleanupError(RuntimeError):
+    def __init__(
+        self,connection:sqlcipher3.Connection,
+        initialization_error:BaseException,close_error:BaseException,
+        guard:DatabasePathGuard|None,
+    ) -> None:
+        super().__init__("SQLCipher initialization failed and close failed; retry close or abort process")
+        self.connection=connection
+        self.guard=guard
+        self.initialization_error=initialization_error
+        self.close_error=close_error
 
 class QualifiedSQLCipherConnection(sqlcipher3.Connection):
     _path_guard:DatabasePathGuard|None=None
@@ -7016,18 +7407,48 @@ class QualifiedSQLCipherConnection(sqlcipher3.Connection):
     def revalidate_storage_path(self) -> None:
         if self._path_guard is None: raise PermissionError("unsafe database path")
         self._path_guard.revalidate()
-    def guarded_file_descriptors(self) -> tuple[int,...]:
-        if self._path_guard is None: return ()
-        return self._path_guard.file_descriptors()
+    def guarded_parent_descriptor(self) -> int:
+        if self._path_guard is None: raise PermissionError("unsafe database path")
+        return self._path_guard.parent.fd
+    def storage_identities(
+        self,
+    ) -> tuple[FileIdentity,tuple[tuple[str,FileIdentity],...]]:
+        if self._path_guard is None: raise PermissionError("unsafe database path")
+        return self._path_guard.main_identity,self._path_guard.sidecar_identities
+    def _close_sqlcipher_base(self) -> None: super().close()
+    def _close_after_initialization_failure_locked(self) -> None:
+        guard=self._path_guard
+        if guard is None:
+            self._close_sqlcipher_base(); return
+        try: self._close_sqlcipher_base()
+        except BaseException:
+            guard.mark_sqlcipher_close_failed_locked()
+            raise
+        guard._release_registry_after_sqlcipher_close_locked()
+        guard._close_parent_after_release()
+        self._path_guard=None
     def close(self) -> None:
-        guard=self._path_guard; self._path_guard=None
-        try: super().close()
-        finally:
-            if guard is not None: guard.close()
+        guard=self._path_guard
+        if guard is None:
+            self._close_sqlcipher_base(); return
+        with _OPEN_LOCK:
+            try: self._close_sqlcipher_base()
+            except BaseException:
+                guard.mark_sqlcipher_close_failed_locked()
+                raise
+            guard._release_registry_after_sqlcipher_close_locked()
+        guard._close_parent_after_release()
+        self._path_guard=None
     def __del__(self) -> None:
-        # Finalizer is leak protection only; callers still close explicitly.
-        try: self.close()
-        except BaseException: pass
+        # Leak protection only. A failure becomes Python's unraisable cleanup
+        # report; it never releases the reservation or parent out of order.
+        if self._path_guard is not None: self.close()
+
+_CHECKPOINTS=frozenset({
+    "key_validation","keyed_read","wal_activation","sidecar_metadata","integrity",
+})
+def _initialization_checkpoint(name:str) -> None:
+    if name not in _CHECKPOINTS: raise AssertionError("unknown initialization checkpoint")
 
 def open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection:
     if len(key) != 32: raise ValueError("SQLCipher key must be exactly 32 bytes")
@@ -7050,7 +7471,9 @@ def open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection:
             connection.revalidate_storage_path()  # after connect, before key
             # This must remain the first SQL statement issued on the connection.
             connection.execute(f'PRAGMA key = "x\'{key.hex()}\'"')
+            _initialization_checkpoint("key_validation")
             connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            _initialization_checkpoint("keyed_read")
             version=connection.execute("PRAGMA cipher_version").fetchone()
             if version is None or not version[0]:
                 raise RuntimeError("SQLCipher support is unavailable")
@@ -7060,8 +7483,10 @@ def open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection:
             if connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower()!="wal":
                 raise RuntimeError("SQLCipher WAL mode is unavailable")
             connection.execute("BEGIN IMMEDIATE"); connection.execute("ROLLBACK")
+            _initialization_checkpoint("wal_activation")
             assert connection._path_guard is not None
             connection._path_guard.qualify_materialized_sidecars()
+            _initialization_checkpoint("sidecar_metadata")
             connection.revalidate_storage_path()  # after keyed read/WAL setup
             listed=connection.execute("PRAGMA database_list").fetchall()
             assert connection._path_guard is not None
@@ -7071,10 +7496,22 @@ def open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection:
             integrity=connection.execute("PRAGMA cipher_integrity_check").fetchone()
             if integrity is None or integrity[0]!="ok":
                 raise RuntimeError("SQLCipher integrity check failed")
+            _initialization_checkpoint("integrity")
+            connection._path_guard.publish_locked()
             return connection
-        except BaseException:
-            if connection is not None: connection.close()
-            if guard is not None: guard.close()
+        except BaseException as initialization_error:
+            if connection is not None:
+                try:
+                    if isinstance(connection,QualifiedSQLCipherConnection):
+                        connection._close_after_initialization_failure_locked()
+                    else:
+                        connection.close()
+                except BaseException as close_error:
+                    raise SQLCipherCleanupError(
+                        connection,initialization_error,close_error,guard,
+                    ) from close_error
+            if guard is not None:
+                guard.rollback_connect_failure_locked()
             raise
 ```
 
@@ -7114,11 +7551,11 @@ Implement the Typer command so `--json` prints `json.dumps(probe.as_dict(), sort
 
 Run: `uv run pytest tests/security/test_sqlcipher.py -q && uv run tuntunctl storage probe --path var/probe/foundation.db --json`
 
-Expected: PASS in both exact Task 2 CI jobs, `ubuntu-24.04` and `macos-15-intel`, against the pinned wheel and its bundled SQLite, with no platform skip. The behavior gate proves the ordinary absolute database name and exact `READWRITE|FULLMUTEX|PRIVATECACHE|NOFOLLOW` flags, omission of `CREATE`/URI/custom VFS, and key as the first SQL statement; a direct pinned-driver test also proves those flags reject both ancestor and final symlinks on each runner. Every ancestor/final symlink; main or pre-existing WAL/SHM special file, wrong owner/mode, hard link, or device mismatch; and one-way database/parent replacement fails closed. Newly materialized WAL/SHM are exact qualified siblings, two connections complete concurrent WAL writes against the same canonical names, live guard FDs close only with the connection (and on initialization failure), and explicit revalidation detects post-open named-entry drift. The minimum bundled-SQLite check is necessary but does not replace these behavior tests. Probe JSON has `"driver":"sqlcipher3==0.6.2"`, the exact bundled `sqlite`, non-empty `cipher`, exact numeric `open_flags`, `"integrity_ok":true`, and `"mode":"0o600"`; it contains no username, absolute path, or key material.
+Expected: PASS in both exact Task 2 CI jobs, `ubuntu-24.04` and `macos-15-intel`, against the pinned wheel and its bundled SQLite, with no platform skip. The behavior gate proves the ordinary absolute database name and exact `READWRITE|FULLMUTEX|PRIVATECACHE|NOFOLLOW` flags, omission of `CREATE`/URI/custom VFS, and key as the first SQL statement; a direct pinned-driver test also proves those flags reject both ancestor and final symlinks on each runner. Every ancestor/final symlink; main or pre-existing WAL/SHM special file, wrong owner/mode, hard link, or device mismatch; and one-way database/parent replacement fails closed. Unsafe sidecar cases begin with a fresh, never-opened exclusive empty main and assert absent sidecars plus the intended malicious entry before calling the adapter. Newly materialized WAL/SHM are exact metadata-qualified siblings; only the parent-directory FD survives initialization; immutable main/sidecar identities back revalidation; and opening/closing a second connection performs no adapter open/close of the main/WAL/SHM inodes. Tests prove the creation FD closes before reservation/connect; base-close → registry release/rollback → parent-close ordering; an initialization-cleanup close failure retains its initializing reservation/parent until retry while preserving the healthy peer; an explicit active close failure likewise retains its lease and blocks new return; a barrier-paused failing close cannot race a newly returned connection before the failed state is published; healthy-peer usability after each injected initialization failure; successful open and all five cleanup checkpoints finish inside a subprocess deadline without recursive-lock deadlock; positive close/reopen without deleting or assuming deletion of legitimate sidecars; two-connection WAL concurrency; and the subprocess lock regression while one connection holds `BEGIN IMMEDIATE`. The same lock regression and all other tests run on both hosted platforms. The minimum bundled-SQLite check is necessary but does not replace these behavior tests. Probe JSON has `"driver":"sqlcipher3==0.6.2"`, the exact bundled `sqlite`, non-empty `cipher`, exact numeric `open_flags`, `"integrity_ok":true`, and `"mode":"0o600"`; it contains no username, absolute path, or key material.
 
 Run the shown encrypted CLI probe again on the actual household Intel Mac before accepting the stop/go checkpoint. Record its exact sanitized JSON, macOS/Intel architecture, Python, `sqlcipher3==0.6.2`, bundled SQLite and cipher versions, numeric flags, `uv.lock` SHA-256, date, and PASS decision in `docs/operations/sqlcipher-compatibility.md`; record the Ubuntu CI result beside it. Also document that WAL/SHM are SQLCipher-managed same-directory sidecars, maintenance checkpoints WAL before backup, startup refuses missing/wrong keys or failed cipher integrity, and the local open lock prevents only cooperative races inside one process. Production startup must acquire the application's later lifecycle-owned singleton-instance lock before storage open, but that later lock is not invented or claimed by this Foundation task.
 
-The compatibility document must state the residual exactly: the DB-API receives a pathname, not the qualified FD. Retained descriptors and bracket checks detect stale entries and one-way/non-ABA substitutions, while SQLite `NOFOLLOW` rejects symlink components, but a hostile same-EUID/root process can perform an undetectable swap-and-restore between checks or access process memory/key material. Do not claim descriptor-relative SQLite open or perfect inode binding. If protection from that attacker becomes mandatory, stop and require a native registered VFS/driver with an actual file-handle API.
+The compatibility document must state the residual exactly: the DB-API receives a pathname, not a qualified main-file FD. The retained parent-directory FD, immutable no-follow metadata identities, registry, and bracket checks detect stale entries and one-way/non-ABA substitutions, while SQLite `NOFOLLOW` rejects symlink components. They do not defeat a hostile same-EUID/root process that can perform an undetectable swap-and-restore between checks or access process memory/key material. The document must also state that SQLCipher alone owns lock-bearing main/WAL/SHM descriptors and that adapter close ordering prevents external descriptor closes from canceling a healthy peer's POSIX locks. Do not claim descriptor-relative SQLite open or perfect inode binding. If protection from that attacker becomes mandatory, stop and require a native registered VFS/driver with an actual file-handle API.
 
 - [ ] **Step 5: Commit exact Task 11 paths after the target-Mac gate passes**
 
