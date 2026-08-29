@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from assurance_common import (
+    from scripts.assurance_common import (
         MAX_JSON_CONTAINERS,
         MAX_JSON_DEPTH,
         MAX_JSON_TOKENS,

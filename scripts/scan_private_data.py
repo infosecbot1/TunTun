@@ -5,14 +5,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from assurance_common import (
+    from scripts.assurance_common import (
         AssuranceFinding,
         AssuranceResult,
         ClosedArgumentParser,
         finish,
         lexical_path,
     )
-    from verify_private_data import Finding, scan
+    from scripts.verify_private_data import Finding, scan
 elif __package__:
     from .assurance_common import (
         AssuranceFinding,

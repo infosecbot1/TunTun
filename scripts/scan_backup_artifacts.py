@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from assurance_common import (
+    from scripts.assurance_common import (
         MAX_JSON_CONTAINERS,
         MAX_JSON_DEPTH,
         MAX_JSON_TOKENS,
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
         revalidate_frozen_inventory,
         walk_regular_files,
     )
-    from verify_private_data import scan as scan_private_data
+    from scripts.verify_private_data import scan as scan_private_data
 elif __package__:
     from .assurance_common import (
         MAX_JSON_CONTAINERS,

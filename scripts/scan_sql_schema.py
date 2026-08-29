@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from assurance_common import (
+    from scripts.assurance_common import (
         AssuranceFinding,
         AssuranceInputError,
         AssuranceResult,
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
         incomplete,
         lexical_path,
     )
-    from check_migration_ownership import parse_migration_inventory
+    from scripts.check_migration_ownership import parse_migration_inventory
 elif __package__:
     from .assurance_common import (
         AssuranceFinding,
