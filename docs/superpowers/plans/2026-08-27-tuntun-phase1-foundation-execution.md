@@ -20230,8 +20230,8 @@ for the other, and Task 8 may not begin until both checks are green.
 ### Task 8: Implement secret providers and recursive log redaction
 
 **Master package:** 03
-**Depends on:** Task 7.
-**Estimated effort:** 1 person-day.
+**Depends on:** Tasks 5 and 7, including Task 7's committed dual-host acceptance matrix. Do not begin this task from an unaccepted Task 7 SHA.
+**Estimated effort:** 2 person-days.
 
 **Files:**
 - Modify: `apps/core/pyproject.toml`
@@ -20239,223 +20239,1914 @@ for the other, and Task 8 may not begin until both checks are green.
 - Create: `apps/core/src/tuntun_core/adapters/keychain/provider.py`
 - Create: `apps/core/src/tuntun_core/adapters/keychain/macos.py`
 - Create: `apps/core/src/tuntun_core/config/logging.py`
+- Create: `scripts/probe_macos_keychain.py`
 - Test: `tests/security/test_key_handling.py`
 - Test: `tests/security/test_log_redaction.py`
 
 **Interfaces:**
-- Consumes: service/account identifiers and byte-valued secrets.
-- Produces: `SecretProvider` signature from the locked map; `InMemorySecretProvider`; `MacOSKeychainSecretProvider`; `validate_production_secrets(provider: SecretProvider) -> None`; immutable closed `PRIVATE_KEY_REGISTRY`; `normalize_private_key(key: str) -> str`; and `redact_private_fields(logger: object, method: str, event: MutableMapping[str, object]) -> MutableMapping[str, object]`. The registry covers authorization headers, cookies, API keys/credentials, PINs, recovery codes, audio, transcripts, search queries/results, prompt/messages, memory content, biometric vectors, embeddings, frames/crops, and provider request/response bodies, including the exact singular/plural/structured aliases tested below.
+- Consumes: Task 7's accepted Python 3.12 core environment and Task 5's `MemoryRecord`, `SanitizedProviderMessage`, `ProviderResponse`, `TranscriptResult`, and `SpeechChunk` DTOs; exact canonical service/account identifiers; and byte-valued secrets.
+- Produces: the locked `SecretProvider` protocol, `InMemorySecretProvider`, `MacOSKeychainSecretProvider`, immutable exact `SECRET_IDS`, exact 32-byte production-root requirements, and `validate_production_secrets(provider: SecretProvider) -> None`.
+- `MacOSKeychainSecretProvider` accepts only Darwin's exact `keyring.backends.macOS.Keyring` type with a finite exact-numeric priority of at least 1, captures that validated backend once, and never follows later global-keyring drift. Reads require bounded canonical strict Base64 and reject empty, oversized, noncanonical, malformed, or non-string values. Writes verify readback. Delete is a no-op only after a proved absence, accepts a concurrent delete only after re-proving absence, and otherwise surfaces or verifies every failure.
+- Produces: immutable, canonical, unique, disjoint private/public/structural log-key registries; `normalize_private_key(key: str) -> str`; and a real Structlog processor `redact_private_fields(logger: object, method: str, event: MutableMapping[str, object]) -> MutableMapping[str, object]`.
+- Redaction is closed, bounded, cycle-safe, non-mutating, and JSON-serializable. It recursively converts only exact structural-wrapper mappings/lists/tuples to JSON-safe structures; bounds depth, nodes, container items, keys, public strings, and integers; canonicalizes emitted recognized keys; rejects normalized-key collisions; redacts all known private DTO fields and common literal/JSON/Base64/URL-safe-Base64/hex/URL encodings; permits only the exact public scalar allowlist; and replaces unknown keys and their whole values, binary values, unsupported objects, invalid mappings, non-finite numbers, cycles, and exhausted budgets with typed content-free markers.
+- Ordinary unit, security, `make check`, and dual-host CI runs use only deterministic fake backends and perform no real Keychain I/O. The one real Keychain round trip is a separately acknowledged, cleanup-verifying gate on the owner's target 2020 Intel Mac.
 
-- [ ] **Step 1: Write red secret and logging tests**
+- [ ] **Step 1: Write the complete red secret/keychain and logging tests**
 
 ```python
 # tests/security/test_key_handling.py
+from __future__ import annotations
+
+import base64
+import builtins
+from typing import Any, cast
+from uuid import UUID
+
+import keyring
 import pytest
-from tuntun_core.adapters.keychain.provider import InMemorySecretProvider, validate_production_secrets
+from tuntun_core.adapters.keychain import macos
+from tuntun_core.adapters.keychain.macos import MacOSKeychainSecretProvider
+from tuntun_core.adapters.keychain.provider import (
+    MAX_SECRET_BYTES,
+    REQUIRED_SECRET_LENGTHS,
+    REQUIRED_SECRETS,
+    SECRET_IDS,
+    InMemorySecretProvider,
+    validate_production_secrets,
+)
 
-def test_secret_provider_never_exposes_values_in_repr() -> None:
+from scripts import probe_macos_keychain as probe_script
+
+EXPECTED_SECRET_IDS = {
+    "database": ("tuntun.database", "root-v1"),
+    "audit": ("tuntun.audit", "hmac-v1"),
+    "backup": ("tuntun.backup", "slot-v1"),
+    "records": ("tuntun.records", "root-v1"),
+    "openai": ("tuntun.provider.openai", "api-v1"),
+    "qwen": ("tuntun.provider.qwen", "api-v1"),
+    "edge_ca": ("tuntun.edge.ca", "signing-v1"),
+    "device_signing": ("tuntun.edge.device", "signing-v1"),
+}
+
+
+class FakeMacOSBackend:
+    priority = 5
+
+    def __init__(self) -> None:
+        self.values: dict[tuple[str, str], str] = {}
+        self.get_error: Exception | None = None
+        self.set_error: Exception | None = None
+        self.delete_error: str | None = None
+        self.keep_after_delete = False
+
+    def get_password(self, service: str, account: str) -> str | None:
+        if self.get_error is not None:
+            raise self.get_error
+        return self.values.get((service, account))
+
+    def set_password(self, service: str, account: str, value: str) -> None:
+        if self.set_error is not None:
+            raise self.set_error
+        self.values[(service, account)] = value
+
+    def delete_password(self, service: str, account: str) -> None:
+        key = (service, account)
+        if self.delete_error == "race":
+            self.values.pop(key, None)
+            raise keyring.errors.PasswordDeleteError("already absent")
+        if self.delete_error == "denied":
+            raise keyring.errors.PasswordDeleteError("permission denied")
+        if self.delete_error == "generic":
+            raise keyring.errors.KeyringLocked("locked")
+        if not self.keep_after_delete:
+            self.values.pop(key, None)
+
+
+def _mac_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: FakeMacOSBackend,
+) -> MacOSKeychainSecretProvider:
+    monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(macos, "_load_macos_keyring_type", lambda: FakeMacOSBackend)
+    monkeypatch.setattr(macos.keyring, "get_keyring", lambda: backend)
+    return MacOSKeychainSecretProvider()
+
+
+def _complete_required_provider() -> InMemorySecretProvider:
     provider = InMemorySecretProvider()
-    provider.set("tuntun.database", "root-v1", b"db-secret-sentinel")
-    assert provider.get("tuntun.database", "root-v1") == b"db-secret-sentinel"
-    assert "db-secret-sentinel" not in repr(provider)
+    for service, account in REQUIRED_SECRETS:
+        provider.set(service, account, b"r" * REQUIRED_SECRET_LENGTHS[(service, account)])
+    return provider
 
-def test_missing_production_roots_fail_closed() -> None:
-    with pytest.raises(RuntimeError, match="missing required secret"):
-        validate_production_secrets(InMemorySecretProvider())
+
+def test_secret_identifier_map_is_exact_immutable_and_collision_free() -> None:
+    assert SECRET_IDS == EXPECTED_SECRET_IDS
+    assert len(set(SECRET_IDS.values())) == len(SECRET_IDS)
+    assert tuple(REQUIRED_SECRET_LENGTHS) == REQUIRED_SECRETS
+    assert set(REQUIRED_SECRET_LENGTHS.values()) == {32}
+    with pytest.raises(TypeError):
+        SECRET_IDS["database"] = ("changed", "changed")  # type: ignore[index]
+    with pytest.raises(TypeError):
+        cast(Any, REQUIRED_SECRET_LENGTHS)[SECRET_IDS["database"]] = 64
+
+
+def test_in_memory_provider_round_trip_delete_and_repr_are_content_free() -> None:
+    provider = InMemorySecretProvider()
+    sentinel = b"db-secret-sentinel"
+    provider.set("tuntun.database", "root-v1", sentinel)
+    assert provider.get("tuntun.database", "root-v1") == sentinel
+    assert provider.exists("tuntun.database", "root-v1")
+    assert sentinel.decode() not in repr(provider)
+    provider.delete("tuntun.database", "root-v1")
+    provider.delete("tuntun.database", "root-v1")
+    assert not provider.exists("tuntun.database", "root-v1")
+    with pytest.raises(RuntimeError, match="missing secret"):
+        provider.get("tuntun.database", "root-v1")
+
+
+@pytest.mark.parametrize(
+    "service,account",
+    (
+        ("", "root-v1"),
+        ("Tuntun.database", "root-v1"),
+        ("tuntun.database\n", "root-v1"),
+        ("tuntun.database", ""),
+        ("tuntun.database", "root/v1"),
+    ),
+)
+def test_secret_identifiers_are_bounded_and_canonical(service: str, account: str) -> None:
+    with pytest.raises(ValueError, match="invalid secret identifier"):
+        InMemorySecretProvider().set(service, account, b"value")
+
+
+@pytest.mark.parametrize("value", (b"", b"x" * (MAX_SECRET_BYTES + 1), "not-bytes"))
+def test_secret_values_are_nonempty_bounded_exact_bytes(value: object) -> None:
+    with pytest.raises(ValueError, match="nonempty bounded bytes"):
+        InMemorySecretProvider().set(
+            "tuntun.database",
+            "root-v1",
+            value,  # type: ignore[arg-type]
+        )
+
+
+def test_production_validation_requires_every_exact_length_root() -> None:
+    provider = _complete_required_provider()
+    validate_production_secrets(provider)
+    provider.delete(*SECRET_IDS["audit"])
+    with pytest.raises(RuntimeError, match="missing or invalid required secret"):
+        validate_production_secrets(provider)
+    provider.set(*SECRET_IDS["audit"], b"short")
+    with pytest.raises(RuntimeError, match="invalid required secret length"):
+        validate_production_secrets(provider)
+
+
+def test_production_validation_rejects_exists_true_get_empty() -> None:
+    class EmptyProvider:
+        def get(self, service: str, account: str) -> bytes:
+            return b""
+
+        def set(self, service: str, account: str, value: bytes) -> None:
+            raise AssertionError("not called")
+
+        def delete(self, service: str, account: str) -> None:
+            raise AssertionError("not called")
+
+        def exists(self, service: str, account: str) -> bool:
+            return True
+
+    with pytest.raises(RuntimeError, match="missing or invalid required secret"):
+        validate_production_secrets(EmptyProvider())
+
+
+def test_macos_provider_rejects_wrong_platform_before_backend_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(macos.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        macos,
+        "_load_macos_keyring_type",
+        lambda: pytest.fail("backend loader must not run"),
+    )
+    with pytest.raises(RuntimeError, match="must be macOS Keychain"):
+        MacOSKeychainSecretProvider()
+
+
+def test_macos_backend_loader_fails_closed_on_import_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def reject_macos_backend(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        if name == "keyring.backends.macOS":
+            raise ImportError("synthetic unavailable backend")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", reject_macos_backend)
+    with pytest.raises(RuntimeError, match="backend is unavailable"):
+        macos._load_macos_keyring_type()
+
+
+def test_macos_provider_requires_exact_backend_type_and_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DerivedBackend(FakeMacOSBackend):
+        pass
+
+    monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(macos, "_load_macos_keyring_type", lambda: FakeMacOSBackend)
+    monkeypatch.setattr(macos.keyring, "get_keyring", lambda: DerivedBackend())
+    with pytest.raises(RuntimeError, match="must be macOS Keychain"):
+        MacOSKeychainSecretProvider()
+
+
+def test_macos_provider_surfaces_backend_discovery_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(macos, "_load_macos_keyring_type", lambda: FakeMacOSBackend)
+
+    def fail_discovery() -> FakeMacOSBackend:
+        raise keyring.errors.KeyringLocked("locked")
+
+    monkeypatch.setattr(macos.keyring, "get_keyring", fail_discovery)
+    with pytest.raises(RuntimeError, match="backend is unavailable"):
+        MacOSKeychainSecretProvider()
+
+    for invalid_priority in (object(), "5", float("nan")):
+
+        class InvalidPriorityBackend(FakeMacOSBackend):
+            pass
+
+        InvalidPriorityBackend.priority = cast(Any, invalid_priority)
+        monkeypatch.setattr(macos, "_load_macos_keyring_type", lambda: InvalidPriorityBackend)
+        monkeypatch.setattr(macos.keyring, "get_keyring", lambda: InvalidPriorityBackend())
+        with pytest.raises(RuntimeError, match="backend is unavailable"):
+            MacOSKeychainSecretProvider()
+
+    class ZeroPriorityBackend(FakeMacOSBackend):
+        priority = 0
+
+    monkeypatch.setattr(macos, "_load_macos_keyring_type", lambda: ZeroPriorityBackend)
+    monkeypatch.setattr(macos.keyring, "get_keyring", lambda: ZeroPriorityBackend())
+    with pytest.raises(RuntimeError, match="backend is unavailable"):
+        MacOSKeychainSecretProvider()
+
+
+def test_macos_provider_binds_validated_backend_and_round_trips_base64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeMacOSBackend()
+    provider = _mac_provider(monkeypatch, backend)
+    other_backend = FakeMacOSBackend()
+    monkeypatch.setattr(macos.keyring, "get_keyring", lambda: other_backend)
+    sentinel = b"mac-keychain-secret-sentinel"
+    provider.set("tuntun.database", "root-v1", sentinel)
+    stored = backend.values[("tuntun.database", "root-v1")]
+    assert sentinel.decode() not in stored
+    assert provider.get("tuntun.database", "root-v1") == sentinel
+    assert provider.exists("tuntun.database", "root-v1")
+    assert not other_backend.values
+    assert sentinel.decode() not in repr(provider)
+
+
+@pytest.mark.parametrize(
+    "encoded",
+    (
+        "",
+        "%%%",
+        "YWJjZA==\n",
+        "Zh==",
+        "A" * (macos.MAX_ENCODED_SECRET_CHARS + 1),
+        base64.b64encode(b"x" * (MAX_SECRET_BYTES + 1)).decode("ascii"),
+    ),
+)
+def test_macos_provider_rejects_empty_or_corrupt_stored_values(
+    monkeypatch: pytest.MonkeyPatch,
+    encoded: str,
+) -> None:
+    backend = FakeMacOSBackend()
+    backend.values[("tuntun.database", "root-v1")] = encoded
+    provider = _mac_provider(monkeypatch, backend)
+    with pytest.raises(RuntimeError, match="invalid stored secret"):
+        provider.get("tuntun.database", "root-v1")
+    with pytest.raises(RuntimeError, match="invalid stored secret"):
+        provider.exists("tuntun.database", "root-v1")
+
+
+def test_macos_provider_rejects_non_string_stored_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeMacOSBackend()
+    cast(Any, backend.values)[("tuntun.database", "root-v1")] = b"not-text"
+    provider = _mac_provider(monkeypatch, backend)
+    with pytest.raises(RuntimeError, match="invalid stored secret"):
+        provider.get("tuntun.database", "root-v1")
+
+
+def test_macos_provider_missing_and_backend_read_failures_are_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeMacOSBackend()
+    provider = _mac_provider(monkeypatch, backend)
+    assert not provider.exists("tuntun.database", "root-v1")
+    with pytest.raises(RuntimeError, match="missing secret"):
+        provider.get("tuntun.database", "root-v1")
+    backend.get_error = keyring.errors.KeyringLocked("locked")
+    with pytest.raises(RuntimeError, match="secret read failed") as raised:
+        provider.get("tuntun.database", "root-v1")
+    assert "secret-sentinel" not in str(raised.value)
+
+
+def test_macos_provider_rejects_empty_set_before_backend_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeMacOSBackend()
+    provider = _mac_provider(monkeypatch, backend)
+    with pytest.raises(ValueError, match="nonempty bounded bytes"):
+        provider.set("tuntun.database", "root-v1", b"")
+    assert not backend.values
+
+
+def test_macos_provider_surfaces_write_failure_and_readback_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeMacOSBackend()
+    provider = _mac_provider(monkeypatch, backend)
+    backend.set_error = keyring.errors.KeyringLocked("locked")
+    with pytest.raises(RuntimeError, match="secret write failed"):
+        provider.set("tuntun.database", "root-v1", b"value")
+
+    backend.set_error = None
+
+    def corrupt_write(service: str, account: str, value: str) -> None:
+        del value
+        backend.values[(service, account)] = "ZGlmZmVyZW50"
+
+    monkeypatch.setattr(backend, "set_password", corrupt_write)
+    with pytest.raises(RuntimeError, match="write verification failed"):
+        provider.set("tuntun.database", "root-v1", b"value")
+
+
+def test_macos_provider_delete_is_idempotent_and_verified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeMacOSBackend()
+    provider = _mac_provider(monkeypatch, backend)
+    provider.delete("tuntun.database", "root-v1")
+    provider.set("tuntun.database", "root-v1", b"value")
+    provider.delete("tuntun.database", "root-v1")
+    assert not provider.exists("tuntun.database", "root-v1")
+
+
+def test_macos_provider_accepts_only_proven_concurrent_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeMacOSBackend()
+    provider = _mac_provider(monkeypatch, backend)
+    provider.set("tuntun.database", "root-v1", b"value")
+    backend.delete_error = "race"
+    provider.delete("tuntun.database", "root-v1")
+    assert not provider.exists("tuntun.database", "root-v1")
+
+
+def test_macos_provider_surfaces_denied_or_unverified_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeMacOSBackend()
+    provider = _mac_provider(monkeypatch, backend)
+    provider.set("tuntun.database", "root-v1", b"value")
+    backend.delete_error = "denied"
+    with pytest.raises(RuntimeError, match="secret deletion failed"):
+        provider.delete("tuntun.database", "root-v1")
+    assert provider.exists("tuntun.database", "root-v1")
+    backend.delete_error = None
+    backend.keep_after_delete = True
+    with pytest.raises(RuntimeError, match="deletion verification failed"):
+        provider.delete("tuntun.database", "root-v1")
+
+
+def test_macos_provider_surfaces_generic_and_unverifiable_delete_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeMacOSBackend()
+    provider = _mac_provider(monkeypatch, backend)
+    provider.set("tuntun.database", "root-v1", b"value")
+    backend.delete_error = "generic"
+    with pytest.raises(RuntimeError, match="secret deletion failed"):
+        provider.delete("tuntun.database", "root-v1")
+
+    class VerificationReadFailureBackend(FakeMacOSBackend):
+        def delete_password(self, service: str, account: str) -> None:
+            self.get_error = keyring.errors.KeyringLocked("locked")
+            raise keyring.errors.PasswordDeleteError("permission denied")
+
+    read_failure_backend = VerificationReadFailureBackend()
+    monkeypatch.setattr(
+        macos,
+        "_load_macos_keyring_type",
+        lambda: VerificationReadFailureBackend,
+    )
+    monkeypatch.setattr(macos.keyring, "get_keyring", lambda: read_failure_backend)
+    read_failure_provider = MacOSKeychainSecretProvider()
+    read_failure_provider.set("tuntun.database", "root-v1", b"value")
+    with pytest.raises(RuntimeError, match="deletion could not be verified"):
+        read_failure_provider.delete("tuntun.database", "root-v1")
+
+
+def test_target_probe_round_trip_cleans_up_and_collision_preserves_existing() -> None:
+    provider = InMemorySecretProvider()
+    probe_script.probe_keychain_round_trip(provider, "tuntun.probe", "slot-v1", b"probe")
+    assert not provider.exists("tuntun.probe", "slot-v1")
+    provider.set("tuntun.probe", "slot-v1", b"existing")
+    with pytest.raises(RuntimeError, match="slot already exists"):
+        probe_script.probe_keychain_round_trip(
+            provider,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    assert provider.get("tuntun.probe", "slot-v1") == b"existing"
+
+
+def test_target_probe_cleans_up_a_partially_failed_write() -> None:
+    class PartialFailureProvider(InMemorySecretProvider):
+        def set(self, service: str, account: str, value: bytes) -> None:
+            super().set(service, account, value)
+            raise RuntimeError("synthetic post-write failure")
+
+    provider = PartialFailureProvider()
+    with pytest.raises(RuntimeError, match="synthetic post-write failure"):
+        probe_script.probe_keychain_round_trip(
+            provider,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    assert not provider.exists("tuntun.probe", "slot-v1")
+
+
+def test_target_probe_fails_closed_on_mismatch_or_unverified_cleanup() -> None:
+    class MismatchProvider(InMemorySecretProvider):
+        def get(self, service: str, account: str) -> bytes:
+            super().get(service, account)
+            return b"different"
+
+    mismatch = MismatchProvider()
+    with pytest.raises(RuntimeError, match="readback mismatch"):
+        probe_script.probe_keychain_round_trip(
+            mismatch,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    assert not mismatch.exists("tuntun.probe", "slot-v1")
+
+    class FailedCleanupProvider(InMemorySecretProvider):
+        def delete(self, service: str, account: str) -> None:
+            return None
+
+    failed_cleanup = FailedCleanupProvider()
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        probe_script.probe_keychain_round_trip(
+            failed_cleanup,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+
+
+@pytest.mark.parametrize(
+    "arguments,environment_ack",
+    ((["--acknowledge-keychain-write"], None), ([], "1")),
+)
+def test_target_probe_requires_both_acknowledgements_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    environment_ack: str | None,
+) -> None:
+    if environment_ack is None:
+        monkeypatch.delenv(probe_script.PROBE_ENVIRONMENT_ACK, raising=False)
+    else:
+        monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, environment_ack)
+    monkeypatch.setattr(
+        probe_script,
+        "MacOSKeychainSecretProvider",
+        lambda: pytest.fail("provider must not be constructed"),
+    )
+    monkeypatch.setattr(
+        probe_script.secrets,
+        "token_bytes",
+        lambda size: pytest.fail(f"must not generate {size} bytes"),
+    )
+    monkeypatch.setattr(
+        probe_script,
+        "uuid4",
+        lambda: pytest.fail("must not generate a UUID"),
+    )
+    with pytest.raises(RuntimeError, match="dual acknowledgement"):
+        probe_script.main(arguments)
+
+
+def test_target_probe_cli_emits_no_secret_or_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    provider = InMemorySecretProvider()
+    sentinel = b"target-probe-secret-sentinel-32b"
+    assert len(sentinel) == 32
+    captured: dict[str, object] = {}
+    real_probe = probe_script.probe_keychain_round_trip
+
+    def capture_probe(
+        selected_provider: InMemorySecretProvider,
+        service: str,
+        account: str,
+        value: bytes,
+    ) -> None:
+        captured.update(
+            provider=selected_provider,
+            service=service,
+            account=account,
+            value=value,
+        )
+        real_probe(selected_provider, service, account, value)
+
+    def token_bytes(size: int) -> bytes:
+        assert size == 32
+        return sentinel
+
+    monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
+    monkeypatch.setattr(probe_script, "MacOSKeychainSecretProvider", lambda: provider)
+    monkeypatch.setattr(probe_script, "probe_keychain_round_trip", capture_probe)
+    monkeypatch.setattr(probe_script.secrets, "token_bytes", token_bytes)
+    monkeypatch.setattr(
+        probe_script,
+        "uuid4",
+        lambda: UUID("00000000-0000-4000-8000-000000000801"),
+    )
+    assert probe_script.main(["--acknowledge-keychain-write"]) == 0
+    output = capsys.readouterr().out
+    assert output == "macOS Keychain probe: PASS\n"
+    assert captured == {
+        "provider": provider,
+        "service": "tuntun.probe.keychain",
+        "account": "round-trip-00000000-0000-4000-8000-000000000801",
+        "value": sentinel,
+    }
+    assert sentinel.decode() not in output
+    assert "00000000" not in output
+
+
+def test_target_probe_cli_failure_is_content_free_and_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class PartialFailureProvider(InMemorySecretProvider):
+        def set(self, service: str, account: str, value: bytes) -> None:
+            super().set(service, account, value)
+            raise RuntimeError(f"private-{account}-{value.decode()}-sentinel")
+
+    provider = PartialFailureProvider()
+    sentinel = b"target-probe-secret-sentinel-32b"
+    monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
+    monkeypatch.setattr(probe_script, "MacOSKeychainSecretProvider", lambda: provider)
+    monkeypatch.setattr(probe_script.secrets, "token_bytes", lambda size: sentinel)
+    monkeypatch.setattr(
+        probe_script,
+        "uuid4",
+        lambda: UUID("00000000-0000-4000-8000-000000000801"),
+    )
+    assert probe_script.main(["--acknowledge-keychain-write"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "macOS Keychain probe: FAIL\n"
+    assert sentinel.decode() not in output.err
+    assert "00000000" not in output.err
+    assert not provider.exists(
+        "tuntun.probe.keychain",
+        "round-trip-00000000-0000-4000-8000-000000000801",
+    )
 ```
 
 ```python
 # tests/security/test_log_redaction.py
-import json
-import pytest
-from tuntun_core.config.logging import PRIVATE_KEY_REGISTRY, redact_private_fields
+from __future__ import annotations
 
-EXPECTED_PRIVATE_KEYS={
-    "authorization":frozenset({"authorization","authorization_header","authorization_headers"}),
-    "cookie":frozenset({"cookie","cookies","set_cookie"}),
-    "api_key":frozenset({"api_key","api_keys","provider_api_key","credential","credentials"}),
-    "pin":frozenset({"pin","pins","security_pin"}),
-    "recovery_code":frozenset({"recovery_code","recovery_codes"}),
-    "audio":frozenset({"audio","audio_bytes","audio_chunk","audio_chunks"}),
-    "transcript":frozenset({"transcript","transcripts","transcript_text"}),
-    "search_query":frozenset({"search_query","search_queries","search_query_body"}),
-    "search_result":frozenset({"search_result","search_results","search_result_body","search_excerpts","page_content"}),
-    "prompt_message":frozenset({"prompt","prompts","system_prompt","user_prompt","message","messages","provider_messages"}),
-    "memory_content":frozenset({"memory","memories","memory_content","memory_body"}),
-    "biometric_vector":frozenset({"biometric_vector","biometric_vectors","face_vector","voice_vector"}),
-    "embedding":frozenset({"embedding","embeddings","face_embedding","voice_embedding"}),
-    "frame":frozenset({"frame","frames","face_frame","face_frames","face_crop","camera_frame"}),
-    "provider_body":frozenset({"provider_body","provider_request_body","provider_response_body","request_body","response_body"}),
+import base64
+import io
+import json
+from datetime import UTC, datetime
+from typing import Any, cast
+from urllib.parse import quote
+from uuid import UUID
+
+import pytest
+import structlog
+from tuntun_contracts.base import Sensitivity
+from tuntun_contracts.memory import (
+    EpisodicContent,
+    MemoryAudience,
+    MemoryRecord,
+    PolicyContent,
+    PreferenceContent,
+    ProceduralContent,
+    RelationalContent,
+    SemanticContent,
+    WorkingContent,
+)
+from tuntun_contracts.provider import ProviderResponse, SanitizedProviderMessage
+from tuntun_contracts.speech import SpeechChunk, TranscriptResult
+from tuntun_core.config.logging import (
+    MAX_CONTAINER_ITEMS,
+    MAX_LOG_DEPTH,
+    MAX_LOG_NODES,
+    MAX_PUBLIC_INTEGER,
+    PRIVATE_KEY_REGISTRY,
+    PUBLIC_LOG_KEYS,
+    STRUCTURAL_LOG_KEYS,
+    normalize_private_key,
+    redact_private_fields,
+)
+
+TEXT_SENTINEL = "private-Δ-line\n-sentinel"
+BINARY_SENTINEL = b"private-binary-sentinel"
+
+EXPECTED_PRIVATE_KEYS = {
+    "authorization": frozenset(
+        {
+            "authorization",
+            "authorization_header",
+            "authorization_headers",
+            "access_token",
+            "access_tokens",
+            "refresh_token",
+            "refresh_tokens",
+            "bearer_token",
+            "bearer_tokens",
+            "token",
+            "tokens",
+        }
+    ),
+    "cookie": frozenset({"cookie", "cookies", "set_cookie"}),
+    "api_key": frozenset(
+        {
+            "api_key",
+            "api_keys",
+            "provider_api_key",
+            "credential",
+            "credentials",
+            "password",
+            "passwords",
+            "secret",
+            "secrets",
+            "client_secret",
+            "private_key",
+            "private_keys",
+        }
+    ),
+    "pin": frozenset({"pin", "pins", "security_pin"}),
+    "recovery_code": frozenset({"recovery_code", "recovery_codes"}),
+    "audio": frozenset(
+        {
+            "audio",
+            "audio_bytes",
+            "audio_chunk",
+            "audio_chunks",
+            "pcm",
+            "pcm_bytes",
+            "speech_chunk",
+            "speech_chunks",
+        }
+    ),
+    "transcript": frozenset({"transcript", "transcripts", "transcript_text", "transcript_result"}),
+    "search_query": frozenset(
+        {"query", "queries", "search_query", "search_queries", "search_query_body"}
+    ),
+    "search_result": frozenset(
+        {
+            "result",
+            "results",
+            "search_result",
+            "search_results",
+            "search_result_body",
+            "search_excerpts",
+            "page_content",
+            "snippet",
+            "snippets",
+        }
+    ),
+    "prompt_message": frozenset(
+        {
+            "prompt",
+            "prompts",
+            "system_prompt",
+            "user_prompt",
+            "message",
+            "messages",
+            "provider_messages",
+        }
+    ),
+    "memory_content": frozenset(
+        {"memory", "memories", "memory_content", "memory_body", "edited_content"}
+    ),
+    "free_text": frozenset(
+        {
+            "content",
+            "text",
+            "category",
+            "state_summary",
+            "unresolved_intents",
+            "event_summary",
+            "subject",
+            "predicate",
+            "object",
+            "value",
+            "steps",
+            "note",
+            "reason",
+        }
+    ),
+    "biometric_vector": frozenset(
+        {"biometric_vector", "biometric_vectors", "face_vector", "voice_vector"}
+    ),
+    "embedding": frozenset({"embedding", "embeddings", "face_embedding", "voice_embedding"}),
+    "frame": frozenset(
+        {
+            "frame",
+            "frames",
+            "face_frame",
+            "face_frames",
+            "face_crop",
+            "face_crops",
+            "camera_frame",
+            "camera_frames",
+            "image",
+            "images",
+        }
+    ),
+    "provider_body": frozenset(
+        {
+            "provider_body",
+            "provider_request_body",
+            "provider_response_body",
+            "request_body",
+            "response_body",
+        }
+    ),
 }
 
+EXPECTED_PUBLIC_KEYS = frozenset(
+    {
+        "event",
+        "level",
+        "logger",
+        "method",
+        "status",
+        "kind",
+        "code",
+        "operation",
+        "provider",
+        "model",
+        "language",
+        "role",
+        "schema_version",
+        "version",
+        "ok",
+        "count",
+        "duration_ms",
+        "elapsed_ms",
+        "attempt",
+        "sequence",
+        "port",
+        "enabled",
+        "final",
+        "redacted",
+    }
+)
 
-def test_private_key_registry_is_closed_complete_and_aliases_are_unique() -> None:
+EXPECTED_STRUCTURAL_KEYS = frozenset(
+    {"mapping", "list", "tuple", "payload", "items", "data", "context", "metadata"}
+)
+
+
+def _encoded_forms(value: str) -> frozenset[str]:
+    raw = value.encode("utf-8")
+    return frozenset(
+        {
+            value,
+            json.dumps(value, ensure_ascii=True)[1:-1],
+            base64.b64encode(raw).decode("ascii"),
+            base64.urlsafe_b64encode(raw).decode("ascii"),
+            raw.hex(),
+            quote(value, safe=""),
+        }
+    )
+
+
+def _render(event: str, **fields: object) -> str:
+    output = io.StringIO()
+    logger = structlog.wrap_logger(
+        structlog.PrintLogger(file=output),
+        processors=[
+            redact_private_fields,
+            structlog.processors.JSONRenderer(sort_keys=True),
+        ],
+        cache_logger_on_first_use=False,
+    )
+    logger.info(event, **fields)
+    return output.getvalue()
+
+
+def test_key_registries_are_exact_immutable_canonical_unique_and_disjoint() -> None:
     assert PRIVATE_KEY_REGISTRY == EXPECTED_PRIVATE_KEYS
-    aliases=[alias for values in PRIVATE_KEY_REGISTRY.values() for alias in values]
-    assert len(aliases)==len(set(aliases))
+    assert PUBLIC_LOG_KEYS == EXPECTED_PUBLIC_KEYS
+    assert STRUCTURAL_LOG_KEYS == EXPECTED_STRUCTURAL_KEYS
+    aliases = [alias for values in PRIVATE_KEY_REGISTRY.values() for alias in values]
+    assert len(aliases) == len(set(aliases))
+    assert all(normalize_private_key(alias) == alias for alias in aliases)
+    assert not set(aliases) & (PUBLIC_LOG_KEYS | STRUCTURAL_LOG_KEYS)
+    with pytest.raises(TypeError):
+        cast(Any, PRIVATE_KEY_REGISTRY)["authorization"] = frozenset()
 
 
 @pytest.mark.parametrize(
     "category,key",
-    [(category,key) for category,keys in EXPECTED_PRIVATE_KEYS.items() for key in keys],
+    [
+        (category, key)
+        for category in sorted(EXPECTED_PRIVATE_KEYS)
+        for key in sorted(EXPECTED_PRIVATE_KEYS[category])
+    ],
 )
-def test_every_private_category_and_structured_alias_removes_literal_and_encoded_sentinel(
-    category: str,key: str,
+def test_every_private_alias_removes_literal_and_common_encoded_forms(
+    category: str,
+    key: str,
 ) -> None:
-    sentinel=f"private-{category}-sentinel"
-    event={"event":"probe","mapping":{"list":[{"tuple":({key:sentinel},)}]},"ok":7}
-    redacted=redact_private_fields(None,"error",event)
-    encoded=json.dumps(redacted,sort_keys=True)
-    assert sentinel not in encoded
-    assert json.dumps(sentinel)[1:-1] not in encoded
-    assert redacted["mapping"]["list"][0]["tuple"][0][key] == {"redacted":category}
-    assert redacted["ok"]==7
+    private_value = {form: form for form in _encoded_forms(TEXT_SENTINEL)}
+    rendered = _render(
+        "log.probe",
+        mapping={"list": [{"tuple": ({key: private_value},)}]},
+        ok=7,
+    )
+    for form in _encoded_forms(TEXT_SENTINEL):
+        assert form not in rendered
+    decoded = json.loads(rendered)
+    assert decoded["mapping"]["list"][0]["tuple"][0][key] == {"redacted": category}
+    assert decoded["ok"] == 7
 
 
-@pytest.mark.parametrize("key,category",(
-    ("Authorization Header","authorization"),
-    ("SEARCH-RESULTS","search_result"),
-    ("provider.response.body","provider_body"),
-    ("Biometric Vectors","biometric_vector"),
-))
-def test_key_normalization_cannot_bypass_a_private_category(key: str,category: str) -> None:
-    redacted=redact_private_fields(None,"info",{key:"normalized-sentinel"})
-    assert redacted[key]=={"redacted":category}
+@pytest.mark.parametrize(
+    "key,category",
+    (
+        ("Authorization Header", "authorization"),
+        ("ＳＥＡＲＣＨ－ＲＥＳＵＬＴＳ", "search_result"),
+        ("provider.response.body", "provider_body"),
+        ("Biometric Vectors", "biometric_vector"),
+        ("ACCESS-TOKEN", "authorization"),
+    ),
+)
+def test_key_normalization_cannot_bypass_private_category(
+    key: str,
+    category: str,
+) -> None:
+    redacted = redact_private_fields(None, "info", {key: TEXT_SENTINEL})
+    normalized = normalize_private_key(key)
+    assert redacted[normalized] == {"redacted": category}
+    if key != normalized:
+        assert key not in redacted
+
+
+def test_normalized_key_collisions_fail_closed() -> None:
+    redacted = redact_private_fields(
+        None,
+        "info",
+        {
+            "payload": {
+                "Authorization Header": TEXT_SENTINEL,
+                "authorization_header": TEXT_SENTINEL,
+            }
+        },
+    )
+    assert redacted["payload"] == {"redacted": "invalid_mapping"}
+
+
+@pytest.mark.parametrize("key", ("", "_", "x" * 257, 7))
+def test_invalid_log_keys_fail_closed_without_emitting_the_key(key: object) -> None:
+    redacted = redact_private_fields(
+        None,
+        "info",
+        {"event": "invalid.mapping", "payload": {key: TEXT_SENTINEL}},
+    )
+    rendered = json.dumps(redacted, sort_keys=True)
+    assert TEXT_SENTINEL not in rendered
+    assert redacted["payload"] == {"redacted": "invalid_mapping"}
+
+
+def test_unknown_key_names_and_values_are_not_an_output_channel() -> None:
+    key = f"field-{TEXT_SENTINEL}"
+    rendered = _render(
+        "unknown.probe",
+        payload={key: {"status": TEXT_SENTINEL.encode().hex()}},
+    )
+    for form in _encoded_forms(TEXT_SENTINEL):
+        assert form not in rendered
+    decoded = json.loads(rendered)
+    assert decoded["payload"] == {"unclassified_0": {"redacted": "unclassified"}}
+
+
+def test_public_scalar_allowlist_is_closed_and_rejects_free_text() -> None:
+    rendered = _render(
+        TEXT_SENTINEL,
+        ok=True,
+        status="ready",
+        count=3,
+        attempt=MAX_PUBLIC_INTEGER,
+        sequence=MAX_PUBLIC_INTEGER + 1,
+        duration_ms=float("inf"),
+        elapsed_ms=1.25,
+        model=BINARY_SENTINEL,
+        metadata={"detail": TEXT_SENTINEL},
+    )
+    for form in _encoded_forms(TEXT_SENTINEL):
+        assert form not in rendered
+    decoded = json.loads(rendered)
+    assert decoded["event"] == {"redacted": "unclassified"}
+    assert decoded["ok"] is True
+    assert decoded["status"] == "ready"
+    assert decoded["count"] == 3
+    assert decoded["attempt"] == MAX_PUBLIC_INTEGER
+    assert decoded["sequence"] == {"redacted": "unsupported"}
+    assert decoded["duration_ms"] == {"redacted": "unsupported"}
+    assert decoded["elapsed_ms"] == 1.25
+    assert decoded["model"] == {"redacted": "binary"}
+
+
+def test_public_scalar_keys_reject_container_smuggling() -> None:
+    rendered = _render(
+        "container.probe",
+        status=["private", "sentinel"],
+        code={"payload": "private-sentinel"},
+    )
+    decoded = json.loads(rendered)
+    assert decoded["status"] == {"redacted": "unsupported"}
+    assert decoded["code"] == {"redacted": "unsupported"}
+    assert "private-sentinel" not in rendered
+
+
+def _actual_private_contract_payloads() -> tuple[dict[str, object], ...]:
+    request_id = UUID("00000000-0000-4000-8000-000000000811")
+    memory_id = UUID("00000000-0000-4000-8000-000000000812")
+    household_id = UUID("00000000-0000-4000-8000-000000000813")
+    subject_id = UUID("00000000-0000-4000-8000-000000000814")
+    contents = (
+        WorkingContent(
+            kind="working", state_summary=TEXT_SENTINEL, unresolved_intents=(TEXT_SENTINEL,)
+        ),
+        EpisodicContent(
+            kind="episodic",
+            event_summary=TEXT_SENTINEL,
+            occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+            participant_ids=(subject_id,),
+        ),
+        SemanticContent(
+            kind="semantic",
+            subject=TEXT_SENTINEL,
+            predicate=TEXT_SENTINEL,
+            object=TEXT_SENTINEL,
+        ),
+        PreferenceContent(
+            category=TEXT_SENTINEL,
+            key=TEXT_SENTINEL,
+            value=TEXT_SENTINEL,
+            strength_micros=500_000,
+        ),
+        ProceduralContent(
+            kind="procedural",
+            name=TEXT_SENTINEL,
+            steps=(TEXT_SENTINEL,),
+            tool_label=TEXT_SENTINEL,
+        ),
+        RelationalContent(
+            kind="relational",
+            subject_id=subject_id,
+            relation=TEXT_SENTINEL,
+            object_subject_id=subject_id,
+            note=TEXT_SENTINEL,
+        ),
+        PolicyContent(kind="policy", key=TEXT_SENTINEL, value=TEXT_SENTINEL),
+    )
+    memories = tuple(
+        MemoryRecord(
+            memory_id=memory_id,
+            household_id=household_id,
+            subject_id=subject_id,
+            version=1,
+            content=content,
+            audience=MemoryAudience.SUBJECT_PRIVATE,
+            sensitivity=Sensitivity.PERSONAL,
+            valid_until=None,
+        ).model_dump(mode="python")
+        for content in contents
+    )
+    return memories + (
+        SanitizedProviderMessage(role="user", content=TEXT_SENTINEL).model_dump(mode="python"),
+        ProviderResponse(
+            request_id=request_id,
+            text=TEXT_SENTINEL,
+            language="en",
+            provider_usage_receipt_id=None,
+        ).model_dump(mode="python"),
+        TranscriptResult(
+            request_id=request_id,
+            text=TEXT_SENTINEL,
+            language="en",
+            duration_ms=1,
+        ).model_dump(mode="python"),
+        SpeechChunk(
+            request_id=request_id,
+            sequence=0,
+            pcm=BINARY_SENTINEL,
+            final=True,
+        ).model_dump(mode="python"),
+        {
+            "query": TEXT_SENTINEL,
+            "results": [{"title": TEXT_SENTINEL, "page_content": TEXT_SENTINEL}],
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    _actual_private_contract_payloads(),
+    ids=(
+        "memory-working",
+        "memory-episodic",
+        "memory-semantic",
+        "memory-preference",
+        "memory-procedural",
+        "memory-relational",
+        "memory-policy",
+        "provider-message",
+        "provider-response",
+        "transcript",
+        "speech",
+        "search",
+    ),
+)
+def test_actual_private_contract_shapes_are_json_safe_and_content_free(
+    payload: dict[str, object],
+) -> None:
+    rendered = _render("contract.probe", payload=payload, ok=True)
+    json.loads(rendered)
+    for form in _encoded_forms(TEXT_SENTINEL):
+        assert form not in rendered
+    assert BINARY_SENTINEL.decode() not in rendered
+    assert base64.b64encode(BINARY_SENTINEL).decode() not in rendered
+
+
+def test_cycles_depth_node_limits_and_unsupported_values_fail_closed() -> None:
+    cyclic: dict[str, object] = {"event": "cycle.probe"}
+    cyclic["payload"] = cyclic
+    cycle_result = redact_private_fields(None, "info", cyclic)
+    assert cycle_result["payload"] == {"redacted": "cycle"}
+
+    cyclic_list: list[object] = []
+    cyclic_list.append(cyclic_list)
+    list_cycle_result = redact_private_fields(
+        None,
+        "info",
+        {"event": "cycle.list", "payload": cyclic_list},
+    )
+    assert list_cycle_result["payload"] == [{"redacted": "cycle"}]
+
+    nested: object = {"text": TEXT_SENTINEL}
+    for _ in range(MAX_LOG_DEPTH + 2):
+        nested = {"payload": nested}
+    depth_result = redact_private_fields(
+        None,
+        "info",
+        {"event": "depth.probe", "payload": nested},
+    )
+    assert "limit" in json.dumps(depth_result, sort_keys=True)
+
+    oversized = [{"text": TEXT_SENTINEL} for _ in range(MAX_CONTAINER_ITEMS + 1)]
+    container_result = redact_private_fields(
+        None,
+        "info",
+        {"event": "node.probe", "payload": oversized},
+    )
+    assert container_result["payload"] == {"redacted": "limit"}
+
+    node_heavy = [
+        [{"text": TEXT_SENTINEL} for _ in range(64)] for _ in range(MAX_LOG_NODES // 64 + 1)
+    ]
+    node_result = redact_private_fields(
+        None,
+        "info",
+        {"event": "node.probe", "payload": node_heavy},
+    )
+    assert node_result["payload"] == {"redacted": "limit"}
+
+    unsupported_result = redact_private_fields(
+        None,
+        "info",
+        {
+            "event": "unsupported.probe",
+            "payload": {
+                "blob": BINARY_SENTINEL,
+                "object": object(),
+                "number": float("inf"),
+                "values": {TEXT_SENTINEL},
+            },
+        },
+    )
+    rendered = json.dumps(unsupported_result, sort_keys=True, allow_nan=False)
+    assert TEXT_SENTINEL not in rendered
+    assert BINARY_SENTINEL.decode() not in rendered
+
+
+def test_hostile_mapping_and_sequence_iterators_fail_closed() -> None:
+    class HostileMapping(dict[str, object]):
+        def items(self) -> Any:
+            raise RuntimeError("private-mapping-sentinel")
+
+    class HostileList(list[object]):
+        def __iter__(self) -> Any:
+            raise RuntimeError("private-sequence-sentinel")
+
+    mapping_result = redact_private_fields(
+        None,
+        "info",
+        {"event": "hostile.mapping", "payload": HostileMapping()},
+    )
+    sequence_result = redact_private_fields(
+        None,
+        "info",
+        {"event": "hostile.sequence", "payload": HostileList([TEXT_SENTINEL])},
+    )
+    assert mapping_result["payload"] == {"redacted": "unsupported"}
+    assert sequence_result["payload"] == {"redacted": "unsupported"}
+    rendered = json.dumps((mapping_result, sequence_result), sort_keys=True)
+    assert "private-mapping-sentinel" not in rendered
+    assert "private-sequence-sentinel" not in rendered
+
+
+def test_redaction_does_not_mutate_input_and_invalid_root_is_safe() -> None:
+    event: dict[str, object] = {
+        "event": "immutable.probe",
+        "mapping": {"list": [{"transcript": TEXT_SENTINEL}]},
+    }
+    original = {
+        "event": event["event"],
+        "mapping": {"list": [{"transcript": TEXT_SENTINEL}]},
+    }
+    redacted = redact_private_fields(None, "info", event)
+    assert event == original
+    assert redacted is not event
+    invalid = redact_private_fields(None, "info", cast(Any, [TEXT_SENTINEL]))
+    assert invalid == {"event": "redaction.invalid_root", "redacted": "invalid_root"}
 ```
 
-- [ ] **Step 2: Run the red secret/log tests**
+- [ ] **Step 2: Add the exact direct runtime dependencies and regenerate the lock**
 
-Run: `uv run pytest tests/security/test_key_handling.py tests/security/test_log_redaction.py -q`
+The complete core dependency list becomes:
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_core.adapters.keychain'`.
+```toml
+# apps/core/pyproject.toml
+[project]
+name = "tuntun-core"
+version = "0.1.0.dev0"
+requires-python = "==3.12.*"
+dependencies = [
+  "keyring>=25.6,<26",
+  "platformdirs>=4.4,<5",
+  "pydantic>=2.11,<3",
+  "PyYAML>=6.0,<7",
+  "structlog>=25.4,<26",
+  "typer>=0.16,<1",
+]
 
-- [ ] **Step 3: Implement fail-closed secrets and typed redaction**
+[project.scripts]
+tuntunctl = "tuntun_core.cli.main:app"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+```
+
+Run `uv lock && uv sync --all-packages --locked`. Review the generated `uv.lock`; never hand-edit it. `keyring` and `structlog` are core runtime dependencies, not root development-only dependencies. This step changes only dependency metadata and the generated lock; it must not create any Task 8 implementation module.
+
+- [ ] **Step 3: Prove the dependency-complete predecessor is genuinely red**
+
+Run:
+
+```bash
+uv run pytest tests/security/test_key_handling.py tests/security/test_log_redaction.py -q
+```
+
+Expected after Step 2 and before Step 4: collection fails before any test executes and before any Keychain call. Against accepted Task 7 plus only the dependency/lock changes, `test_key_handling.py` reports `ModuleNotFoundError: No module named 'tuntun_core.adapters'`; `test_log_redaction.py` reports `ModuleNotFoundError: No module named 'tuntun_core.config.logging'`. A `keyring` or `structlog` import failure is not this RED and means Step 2 is incomplete.
+
+- [ ] **Step 4: Implement the bounded providers, redactor, and explicitly destructive target probe**
 
 ```python
 # apps/core/src/tuntun_core/adapters/keychain/provider.py
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Protocol
 
-SECRET_IDS = {
-    "database":("tuntun.database","root-v1"), "audit":("tuntun.audit","hmac-v1"),
-    "backup":("tuntun.backup","slot-v1"), "records":("tuntun.records","root-v1"),
-    "openai":("tuntun.provider.openai","api-v1"), "qwen":("tuntun.provider.qwen","api-v1"),
-    "edge_ca":("tuntun.edge.ca","signing-v1"), "device_signing":("tuntun.edge.device","signing-v1"),
-}
-REQUIRED_SECRETS = tuple(SECRET_IDS[name] for name in ("database","audit","backup","records"))
+SecretId = tuple[str, str]
+
+MAX_SECRET_BYTES = 16_384
+_SECRET_IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+
+SECRET_IDS: Mapping[str, SecretId] = MappingProxyType(
+    {
+        "database": ("tuntun.database", "root-v1"),
+        "audit": ("tuntun.audit", "hmac-v1"),
+        "backup": ("tuntun.backup", "slot-v1"),
+        "records": ("tuntun.records", "root-v1"),
+        "openai": ("tuntun.provider.openai", "api-v1"),
+        "qwen": ("tuntun.provider.qwen", "api-v1"),
+        "edge_ca": ("tuntun.edge.ca", "signing-v1"),
+        "device_signing": ("tuntun.edge.device", "signing-v1"),
+    }
+)
+
+REQUIRED_SECRET_LENGTHS: Mapping[SecretId, int] = MappingProxyType(
+    {
+        SECRET_IDS["database"]: 32,
+        SECRET_IDS["audit"]: 32,
+        SECRET_IDS["backup"]: 32,
+        SECRET_IDS["records"]: 32,
+    }
+)
+REQUIRED_SECRETS = tuple(REQUIRED_SECRET_LENGTHS)
+
+if len(set(SECRET_IDS.values())) != len(SECRET_IDS):
+    raise RuntimeError("secret identifiers must be unique")
+
+
+def validate_secret_identifier(service: str, account: str) -> SecretId:
+    if (
+        type(service) is not str
+        or type(account) is not str
+        or _SECRET_IDENTIFIER.fullmatch(service) is None
+        or _SECRET_IDENTIFIER.fullmatch(account) is None
+    ):
+        raise ValueError("invalid secret identifier")
+    return service, account
+
+
+def validate_secret_value(value: bytes) -> bytes:
+    if type(value) is not bytes or not 1 <= len(value) <= MAX_SECRET_BYTES:
+        raise ValueError("secret value must be nonempty bounded bytes")
+    return value
+
 
 class SecretProvider(Protocol):
-    def get(self, service: str, account: str) -> bytes: raise NotImplementedError
-    def set(self, service: str, account: str, value: bytes) -> None: raise NotImplementedError
-    def delete(self, service: str, account: str) -> None: raise NotImplementedError
-    def exists(self, service: str, account: str) -> bool: raise NotImplementedError
+    def get(self, service: str, account: str) -> bytes: ...
+
+    def set(self, service: str, account: str, value: bytes) -> None: ...
+
+    def delete(self, service: str, account: str) -> None: ...
+
+    def exists(self, service: str, account: str) -> bool: ...
+
 
 class InMemorySecretProvider:
-    def __init__(self) -> None: self._values: dict[tuple[str,str], bytes] = {}
+    def __init__(self) -> None:
+        self._values: dict[SecretId, bytes] = {}
+
     def get(self, service: str, account: str) -> bytes:
-        try: return self._values[(service, account)]
-        except KeyError as error: raise RuntimeError(f"missing secret: {service}/{account}") from error
+        key = validate_secret_identifier(service, account)
+        try:
+            return self._values[key]
+        except KeyError as error:
+            raise RuntimeError(f"missing secret: {service}/{account}") from error
+
     def set(self, service: str, account: str, value: bytes) -> None:
-        if not value: raise ValueError("secret value must not be empty")
-        self._values[(service, account)] = bytes(value)
-    def delete(self, service: str, account: str) -> None: self._values.pop((service, account), None)
-    def exists(self, service: str, account: str) -> bool: return (service, account) in self._values
-    def __repr__(self) -> str: return f"InMemorySecretProvider(entries={len(self._values)})"
+        key = validate_secret_identifier(service, account)
+        self._values[key] = validate_secret_value(value)
+
+    def delete(self, service: str, account: str) -> None:
+        key = validate_secret_identifier(service, account)
+        self._values.pop(key, None)
+
+    def exists(self, service: str, account: str) -> bool:
+        key = validate_secret_identifier(service, account)
+        return key in self._values
+
+    def __repr__(self) -> str:
+        return f"InMemorySecretProvider(entries={len(self._values)})"
+
 
 def validate_production_secrets(provider: SecretProvider) -> None:
-    for service, account in REQUIRED_SECRETS:
-        if not provider.exists(service, account): raise RuntimeError(f"missing required secret: {service}/{account}")
+    for (service, account), required_length in REQUIRED_SECRET_LENGTHS.items():
+        try:
+            value = validate_secret_value(provider.get(service, account))
+        except (RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                f"missing or invalid required secret: {service}/{account}"
+            ) from error
+        if len(value) != required_length:
+            raise RuntimeError(f"invalid required secret length: {service}/{account}")
 ```
 
 ```python
 # apps/core/src/tuntun_core/adapters/keychain/macos.py
-import base64, platform
+from __future__ import annotations
+
+import base64
+import binascii
+import hmac
+import math
+import platform
+
 import keyring
-from .provider import SecretProvider
+from keyring.backend import KeyringBackend
+
+from .provider import (
+    MAX_SECRET_BYTES,
+    SecretProvider,
+    validate_secret_identifier,
+    validate_secret_value,
+)
+
+MAX_ENCODED_SECRET_CHARS = ((MAX_SECRET_BYTES + 2) // 3) * 4
+
+
+def _load_macos_keyring_type() -> type[KeyringBackend]:
+    try:
+        from keyring.backends.macOS import Keyring
+    except (ImportError, RuntimeError) as error:
+        raise RuntimeError("macOS Keychain backend is unavailable") from error
+    return Keyring
+
+
+def _bind_macos_backend(
+    system_name: str,
+    backend: KeyringBackend,
+    expected_type: type[KeyringBackend],
+) -> KeyringBackend:
+    if system_name != "Darwin" or type(backend) is not expected_type:
+        raise RuntimeError("production secret backend must be macOS Keychain")
+    try:
+        raw_priority = expected_type.priority
+        if type(raw_priority) not in {int, float}:
+            raise ValueError("macOS Keychain priority must be numeric")
+        priority = float(raw_priority)
+    except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+        raise RuntimeError("macOS Keychain backend is unavailable") from error
+    if not math.isfinite(priority) or priority < 1:
+        raise RuntimeError("macOS Keychain backend is unavailable")
+    return backend
+
 
 class MacOSKeychainSecretProvider(SecretProvider):
     def __init__(self) -> None:
-        backend = keyring.get_keyring()
-        if platform.system() != "Darwin" or backend.__class__.__module__ != "keyring.backends.macOS":
+        system_name = platform.system()
+        if system_name != "Darwin":
             raise RuntimeError("production secret backend must be macOS Keychain")
+        expected_type = _load_macos_keyring_type()
+        try:
+            backend = keyring.get_keyring()
+        except (keyring.errors.KeyringError, RuntimeError) as error:
+            raise RuntimeError("macOS Keychain backend is unavailable") from error
+        self._backend = _bind_macos_backend(system_name, backend, expected_type)
+
+    def _read_encoded(self, service: str, account: str) -> str | None:
+        try:
+            encoded = self._backend.get_password(service, account)
+        except keyring.errors.KeyringError as error:
+            raise RuntimeError(f"secret read failed: {service}/{account}") from error
+        if encoded is not None and type(encoded) is not str:
+            raise RuntimeError(f"invalid stored secret: {service}/{account}")
+        return encoded
+
+    @staticmethod
+    def _decode(encoded: str, service: str, account: str) -> bytes:
+        try:
+            if not 1 <= len(encoded) <= MAX_ENCODED_SECRET_CHARS:
+                raise ValueError("stored secret encoding is not bounded")
+            value = base64.b64decode(encoded, validate=True)
+            value = validate_secret_value(value)
+            if base64.b64encode(value).decode("ascii") != encoded:
+                raise ValueError("stored secret encoding is not canonical")
+            return value
+        except (binascii.Error, ValueError) as error:
+            raise RuntimeError(f"invalid stored secret: {service}/{account}") from error
+
     def get(self, service: str, account: str) -> bytes:
-        encoded = keyring.get_password(service, account)
-        if encoded is None: raise RuntimeError(f"missing secret: {service}/{account}")
-        return base64.b64decode(encoded, validate=True)
-    def set(self, service: str, account: str, value: bytes) -> None: keyring.set_password(service, account, base64.b64encode(value).decode("ascii"))
+        service, account = validate_secret_identifier(service, account)
+        encoded = self._read_encoded(service, account)
+        if encoded is None:
+            raise RuntimeError(f"missing secret: {service}/{account}")
+        return self._decode(encoded, service, account)
+
+    def set(self, service: str, account: str, value: bytes) -> None:
+        service, account = validate_secret_identifier(service, account)
+        value = validate_secret_value(value)
+        encoded = base64.b64encode(value).decode("ascii")
+        try:
+            self._backend.set_password(service, account, encoded)
+        except keyring.errors.KeyringError as error:
+            raise RuntimeError(f"secret write failed: {service}/{account}") from error
+        if not hmac.compare_digest(self.get(service, account), value):
+            raise RuntimeError(f"secret write verification failed: {service}/{account}")
+
     def delete(self, service: str, account: str) -> None:
-        try: keyring.delete_password(service, account)
-        except keyring.errors.PasswordDeleteError: pass
-    def exists(self, service: str, account: str) -> bool: return keyring.get_password(service, account) is not None
+        service, account = validate_secret_identifier(service, account)
+        if self._read_encoded(service, account) is None:
+            return
+        try:
+            self._backend.delete_password(service, account)
+        except keyring.errors.PasswordDeleteError as error:
+            try:
+                absent = self._read_encoded(service, account) is None
+            except RuntimeError as verification_error:
+                raise RuntimeError(
+                    f"secret deletion could not be verified: {service}/{account}"
+                ) from verification_error
+            if absent:
+                return
+            raise RuntimeError(f"secret deletion failed: {service}/{account}") from error
+        except keyring.errors.KeyringError as error:
+            raise RuntimeError(f"secret deletion failed: {service}/{account}") from error
+        if self._read_encoded(service, account) is not None:
+            raise RuntimeError(f"secret deletion verification failed: {service}/{account}")
+
+    def exists(self, service: str, account: str) -> bool:
+        service, account = validate_secret_identifier(service, account)
+        encoded = self._read_encoded(service, account)
+        if encoded is None:
+            return False
+        self._decode(encoded, service, account)
+        return True
+
+    def __repr__(self) -> str:
+        return "MacOSKeychainSecretProvider()"
 ```
 
 ```python
 # apps/core/src/tuntun_core/config/logging.py
+from __future__ import annotations
+
+import math
 import re
-from collections.abc import Mapping,MutableMapping
+from collections.abc import Mapping, MutableMapping
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 from unicodedata import normalize
 
-PRIVATE_KEY_REGISTRY=MappingProxyType({
-    "authorization":frozenset({"authorization","authorization_header","authorization_headers"}),
-    "cookie":frozenset({"cookie","cookies","set_cookie"}),
-    "api_key":frozenset({"api_key","api_keys","provider_api_key","credential","credentials"}),
-    "pin":frozenset({"pin","pins","security_pin"}),
-    "recovery_code":frozenset({"recovery_code","recovery_codes"}),
-    "audio":frozenset({"audio","audio_bytes","audio_chunk","audio_chunks"}),
-    "transcript":frozenset({"transcript","transcripts","transcript_text"}),
-    "search_query":frozenset({"search_query","search_queries","search_query_body"}),
-    "search_result":frozenset({"search_result","search_results","search_result_body","search_excerpts","page_content"}),
-    "prompt_message":frozenset({"prompt","prompts","system_prompt","user_prompt","message","messages","provider_messages"}),
-    "memory_content":frozenset({"memory","memories","memory_content","memory_body"}),
-    "biometric_vector":frozenset({"biometric_vector","biometric_vectors","face_vector","voice_vector"}),
-    "embedding":frozenset({"embedding","embeddings","face_embedding","voice_embedding"}),
-    "frame":frozenset({"frame","frames","face_frame","face_frames","face_crop","camera_frame"}),
-    "provider_body":frozenset({"provider_body","provider_request_body","provider_response_body","request_body","response_body"}),
-})
-PRIVATE_KEY_TO_CATEGORY=MappingProxyType({
-    alias:category for category,aliases in PRIVATE_KEY_REGISTRY.items() for alias in aliases
-})
-assert len(PRIVATE_KEY_TO_CATEGORY)==sum(map(len,PRIVATE_KEY_REGISTRY.values()))
+MAX_LOG_DEPTH = 32
+MAX_LOG_NODES = 4_096
+MAX_CONTAINER_ITEMS = 256
+MAX_LOG_KEY_CHARS = 256
+MAX_PUBLIC_TEXT_CHARS = 128
+MIN_PUBLIC_INTEGER = -(2**53 - 1)
+MAX_PUBLIC_INTEGER = 2**53 - 1
 
-def normalize_private_key(key:str) -> str:
-    if type(key) is not str: raise TypeError("structured log key must be a string")
-    return re.sub(r"[^a-z0-9]+","_",normalize("NFKC",key).casefold()).strip("_")
+_SAFE_PUBLIC_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 
-def _redact(value: Any) -> Any:
-    if isinstance(value,Mapping):
-        result={}
-        for key,item in value.items():
-            normalized=normalize_private_key(key)
-            category=PRIVATE_KEY_TO_CATEGORY.get(normalized)
-            result[key]={"redacted":category} if category is not None else _redact(item)
-        return result
-    if isinstance(value, list): return [_redact(item) for item in value]
-    if isinstance(value, tuple): return tuple(_redact(item) for item in value)
-    return value
-def redact_private_fields(logger: object, method: str, event: MutableMapping[str, object]) -> MutableMapping[str, object]:
-    redacted=_redact(event)
-    if not isinstance(redacted,MutableMapping): raise TypeError("structured log root invalid")
+PRIVATE_KEY_REGISTRY: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "authorization": frozenset(
+            {
+                "authorization",
+                "authorization_header",
+                "authorization_headers",
+                "access_token",
+                "access_tokens",
+                "refresh_token",
+                "refresh_tokens",
+                "bearer_token",
+                "bearer_tokens",
+                "token",
+                "tokens",
+            }
+        ),
+        "cookie": frozenset({"cookie", "cookies", "set_cookie"}),
+        "api_key": frozenset(
+            {
+                "api_key",
+                "api_keys",
+                "provider_api_key",
+                "credential",
+                "credentials",
+                "password",
+                "passwords",
+                "secret",
+                "secrets",
+                "client_secret",
+                "private_key",
+                "private_keys",
+            }
+        ),
+        "pin": frozenset({"pin", "pins", "security_pin"}),
+        "recovery_code": frozenset({"recovery_code", "recovery_codes"}),
+        "audio": frozenset(
+            {
+                "audio",
+                "audio_bytes",
+                "audio_chunk",
+                "audio_chunks",
+                "pcm",
+                "pcm_bytes",
+                "speech_chunk",
+                "speech_chunks",
+            }
+        ),
+        "transcript": frozenset(
+            {"transcript", "transcripts", "transcript_text", "transcript_result"}
+        ),
+        "search_query": frozenset(
+            {"query", "queries", "search_query", "search_queries", "search_query_body"}
+        ),
+        "search_result": frozenset(
+            {
+                "result",
+                "results",
+                "search_result",
+                "search_results",
+                "search_result_body",
+                "search_excerpts",
+                "page_content",
+                "snippet",
+                "snippets",
+            }
+        ),
+        "prompt_message": frozenset(
+            {
+                "prompt",
+                "prompts",
+                "system_prompt",
+                "user_prompt",
+                "message",
+                "messages",
+                "provider_messages",
+            }
+        ),
+        "memory_content": frozenset(
+            {"memory", "memories", "memory_content", "memory_body", "edited_content"}
+        ),
+        "free_text": frozenset(
+            {
+                "content",
+                "text",
+                "category",
+                "state_summary",
+                "unresolved_intents",
+                "event_summary",
+                "subject",
+                "predicate",
+                "object",
+                "value",
+                "steps",
+                "note",
+                "reason",
+            }
+        ),
+        "biometric_vector": frozenset(
+            {
+                "biometric_vector",
+                "biometric_vectors",
+                "face_vector",
+                "voice_vector",
+            }
+        ),
+        "embedding": frozenset({"embedding", "embeddings", "face_embedding", "voice_embedding"}),
+        "frame": frozenset(
+            {
+                "frame",
+                "frames",
+                "face_frame",
+                "face_frames",
+                "face_crop",
+                "face_crops",
+                "camera_frame",
+                "camera_frames",
+                "image",
+                "images",
+            }
+        ),
+        "provider_body": frozenset(
+            {
+                "provider_body",
+                "provider_request_body",
+                "provider_response_body",
+                "request_body",
+                "response_body",
+            }
+        ),
+    }
+)
+
+PUBLIC_LOG_KEYS = frozenset(
+    {
+        "event",
+        "level",
+        "logger",
+        "method",
+        "status",
+        "kind",
+        "code",
+        "operation",
+        "provider",
+        "model",
+        "language",
+        "role",
+        "schema_version",
+        "version",
+        "ok",
+        "count",
+        "duration_ms",
+        "elapsed_ms",
+        "attempt",
+        "sequence",
+        "port",
+        "enabled",
+        "final",
+        "redacted",
+    }
+)
+
+STRUCTURAL_LOG_KEYS = frozenset(
+    {"mapping", "list", "tuple", "payload", "items", "data", "context", "metadata"}
+)
+
+
+def normalize_private_key(key: str) -> str:
+    if type(key) is not str or not 1 <= len(key) <= MAX_LOG_KEY_CHARS:
+        raise ValueError("structured log key must be a bounded string")
+    normalized = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        normalize("NFKC", key).casefold(),
+    ).strip("_")
+    if not normalized or len(normalized) > MAX_LOG_KEY_CHARS:
+        raise ValueError("structured log key is not canonicalizable")
+    return normalized
+
+
+PRIVATE_KEY_TO_CATEGORY: Mapping[str, str] = MappingProxyType(
+    {alias: category for category, aliases in PRIVATE_KEY_REGISTRY.items() for alias in aliases}
+)
+
+if len(PRIVATE_KEY_TO_CATEGORY) != sum(map(len, PRIVATE_KEY_REGISTRY.values())):
+    raise RuntimeError("private log aliases must be unique")
+if any(normalize_private_key(alias) != alias for alias in PRIVATE_KEY_TO_CATEGORY):
+    raise RuntimeError("private log aliases must be canonical")
+if PRIVATE_KEY_TO_CATEGORY.keys() & (PUBLIC_LOG_KEYS | STRUCTURAL_LOG_KEYS):
+    raise RuntimeError("private and nonprivate log keys must be disjoint")
+
+
+def _marker(category: str) -> dict[str, str]:
+    return {"redacted": category}
+
+
+def _safe_public_scalar(value: object) -> object:
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int:
+        if MIN_PUBLIC_INTEGER <= value <= MAX_PUBLIC_INTEGER:
+            return value
+        return _marker("unsupported")
+    if type(value) is float:
+        return value if math.isfinite(value) else _marker("unsupported")
+    if type(value) is str:
+        if len(value) <= MAX_PUBLIC_TEXT_CHARS and _SAFE_PUBLIC_TEXT.fullmatch(value):
+            return value
+        return _marker("unclassified")
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return _marker("binary")
+    return _marker("unsupported")
+
+
+@dataclass(slots=True)
+class _RedactionTraversal:
+    nodes: int = 0
+    active: set[int] = field(default_factory=set)
+
+    def redact(
+        self,
+        value: Any,
+        *,
+        public_scalar: bool = False,
+        depth: int = 0,
+    ) -> object:
+        self.nodes += 1
+        if self.nodes > MAX_LOG_NODES or depth > MAX_LOG_DEPTH:
+            return _marker("limit")
+        if public_scalar:
+            return _safe_public_scalar(value)
+        if isinstance(value, Mapping):
+            return self._mapping(value, depth)
+        if isinstance(value, (list, tuple)):
+            return self._sequence(value, public_scalar, depth)
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return _marker("binary")
+        return _marker("unclassified")
+
+    def _mapping(self, value: Mapping[object, object], depth: int) -> object:
+        identity = id(value)
+        if identity in self.active:
+            return _marker("cycle")
+        self.active.add(identity)
+        result: dict[str, object] = {}
+        seen: set[str] = set()
+        try:
+            for index, pair in enumerate(value.items()):
+                if self.nodes >= MAX_LOG_NODES:
+                    return _marker("limit")
+                if index >= MAX_CONTAINER_ITEMS:
+                    return _marker("limit")
+                key, item = pair
+                if not isinstance(key, str):
+                    return _marker("invalid_mapping")
+                try:
+                    normalized = normalize_private_key(key)
+                except (TypeError, ValueError):
+                    return _marker("invalid_mapping")
+                if normalized in seen:
+                    return _marker("invalid_mapping")
+                seen.add(normalized)
+                category = PRIVATE_KEY_TO_CATEGORY.get(normalized)
+                if category is not None:
+                    result[normalized] = _marker(category)
+                elif normalized in PUBLIC_LOG_KEYS:
+                    result[normalized] = self.redact(
+                        item,
+                        public_scalar=True,
+                        depth=depth + 1,
+                    )
+                elif normalized in STRUCTURAL_LOG_KEYS:
+                    result[normalized] = self.redact(item, depth=depth + 1)
+                else:
+                    result[f"unclassified_{index}"] = _marker("unclassified")
+            return result
+        except Exception:
+            return _marker("unsupported")
+        finally:
+            self.active.remove(identity)
+
+    def _sequence(
+        self,
+        value: list[object] | tuple[object, ...],
+        public_scalar: bool,
+        depth: int,
+    ) -> object:
+        identity = id(value)
+        if identity in self.active:
+            return _marker("cycle")
+        self.active.add(identity)
+        result: list[object] = []
+        try:
+            for index, item in enumerate(value):
+                if self.nodes >= MAX_LOG_NODES:
+                    return _marker("limit")
+                if index >= MAX_CONTAINER_ITEMS:
+                    return _marker("limit")
+                result.append(
+                    self.redact(
+                        item,
+                        public_scalar=public_scalar,
+                        depth=depth + 1,
+                    )
+                )
+            return result
+        except Exception:
+            return _marker("unsupported")
+        finally:
+            self.active.remove(identity)
+
+
+def redact_private_fields(
+    logger: object,
+    method: str,
+    event: MutableMapping[str, object],
+) -> MutableMapping[str, object]:
+    del logger, method
+    redacted = _RedactionTraversal().redact(event)
+    if not isinstance(redacted, MutableMapping):
+        return {"event": "redaction.invalid_root", "redacted": "invalid_root"}
     return redacted
 ```
 
-Add `keyring>=25.6,<26` and `structlog>=25.4,<26` to core dependencies.
+```python
+# scripts/probe_macos_keychain.py
+from __future__ import annotations
 
-- [ ] **Step 4: Lock and run the green secret/log gate**
+import argparse
+import hmac
+import os
+import secrets
+import sys
+from collections.abc import Sequence
+from uuid import uuid4
 
-Run: `uv lock && uv run pytest tests/security/test_key_handling.py tests/security/test_log_redaction.py -q && uv run python scripts/verify_private_data.py tests/security && uv run ruff check apps/core/src/tuntun_core/adapters/keychain apps/core/src/tuntun_core/config/logging.py tests/security/test_key_handling.py tests/security/test_log_redaction.py && uv run mypy apps/core/src/tuntun_core/adapters/keychain apps/core/src/tuntun_core/config/logging.py`
+from tuntun_core.adapters.keychain.macos import MacOSKeychainSecretProvider
+from tuntun_core.adapters.keychain.provider import SecretProvider
 
-Expected: PASS for both key-provider cases, the exact registry closure, every normative category/alias sentinel, all normalized-key bypass cases, and nested mapping/list/tuple recursion; `private-data scan: PASS`; Ruff/mypy exit 0.
+PROBE_ENVIRONMENT_ACK = "TUNTUN_ALLOW_KEYCHAIN_PROBE"
+PROBE_SERVICE = "tuntun.probe.keychain"
 
-- [ ] **Step 5: Commit exact Task 8 paths**
+
+def probe_keychain_round_trip(
+    provider: SecretProvider,
+    service: str,
+    account: str,
+    value: bytes,
+) -> None:
+    if provider.exists(service, account):
+        raise RuntimeError("Keychain probe slot already exists")
+    try:
+        provider.set(service, account, value)
+        if not hmac.compare_digest(provider.get(service, account), value):
+            raise RuntimeError("Keychain probe readback mismatch")
+    finally:
+        provider.delete(service, account)
+    if provider.exists(service, account):
+        raise RuntimeError("Keychain probe cleanup failed")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser.add_argument("--acknowledge-keychain-write", action="store_true")
+    arguments = parser.parse_args(argv)
+    if not arguments.acknowledge_keychain_write or os.environ.get(PROBE_ENVIRONMENT_ACK) != "1":
+        raise RuntimeError("Keychain probe requires explicit dual acknowledgement")
+    try:
+        account = f"round-trip-{uuid4()}"
+        value = secrets.token_bytes(32)
+        probe_keychain_round_trip(
+            MacOSKeychainSecretProvider(),
+            PROBE_SERVICE,
+            account,
+            value,
+        )
+    except Exception:
+        print("macOS Keychain probe: FAIL", file=sys.stderr)
+        return 1
+    print("macOS Keychain probe: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 5: Run the local green and full regression gate without real Keychain I/O**
+
+Run:
+
+```bash
+uv sync --all-packages --locked
+uv run pytest tests/security/test_key_handling.py tests/security/test_log_redaction.py -q
+uv run python scripts/verify_private_data.py apps/core/src/tuntun_core/adapters/keychain apps/core/src/tuntun_core/config/logging.py scripts/probe_macos_keychain.py tests/security/test_key_handling.py tests/security/test_log_redaction.py
+uv run ruff format --check apps/core/src/tuntun_core/adapters/keychain apps/core/src/tuntun_core/config/logging.py scripts/probe_macos_keychain.py tests/security/test_key_handling.py tests/security/test_log_redaction.py
+uv run ruff check apps/core/src/tuntun_core/adapters/keychain apps/core/src/tuntun_core/config/logging.py scripts/probe_macos_keychain.py tests/security/test_key_handling.py tests/security/test_log_redaction.py
+uv run mypy --python-version 3.12 apps/core/src/tuntun_core/adapters/keychain apps/core/src/tuntun_core/config/logging.py scripts/probe_macos_keychain.py
+PYTEST_ADDOPTS="--basetemp=/tmp/t8-$$" make check
+git diff --check
+```
+
+Expected: the focused suite reports exactly 172 passed. The tests cover the immutable exact secret map and root sizes; every provider operation and testable failure boundary; exact backend binding and drift resistance; bounded canonical storage encoding; verified write/delete semantics; probe dual acknowledgement, collision, mismatch, partial-write, cleanup, and content-free CLI failures; exact log registries; every private alias plus common encodings; all seven Task 5 memory-content shapes plus the provider, transcript, speech, and search shapes; canonical and invalid keys; public-scalar/container smuggling; hostile iterators; non-mutation; JSON rendering; and cycle/depth/node/container/type limits. The combined private-data scan reports `private-data scan: PASS`; Ruff format/check and strict Python-3.12 mypy report zero issues; and `make check` passes all predecessor plus these 172 nodes without losing any accepted node. None of these commands instantiates the real macOS backend.
+
+- [ ] **Step 6: Commit exactly the complete Task 8 closure**
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/adapters/keychain/provider.py apps/core/src/tuntun_core/adapters/keychain/macos.py apps/core/src/tuntun_core/config/logging.py tests/security/test_key_handling.py tests/security/test_log_redaction.py
+git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/adapters/keychain/provider.py apps/core/src/tuntun_core/adapters/keychain/macos.py apps/core/src/tuntun_core/config/logging.py scripts/probe_macos_keychain.py tests/security/test_key_handling.py tests/security/test_log_redaction.py
 git diff --cached --name-only
+git diff --cached --check
 git diff --cached
 git commit -m "feat(core): add Keychain boundary and log redaction"
 ```
+
+`git diff --cached --name-only` must equal the eight-entry Files list exactly. Generated `uv.lock` is reviewed but never hand-edited. No Task 7 configuration/path file, Task 4-6 contract/schema artifact, private-data matcher fixture, real credential, probe evidence, or Task 9 path may be staged.
+
+- [ ] **Step 7: Require the committed dual-host and target-Mac acceptance gates**
+
+Push the exact Task 8 commit through the Task 2 GitHub Actions matrix and require both `check (ubuntu-24.04)` and `check (macos-15-intel)` for that same SHA. Both jobs must complete `uv sync --all-packages --locked` and `make check`; they use the fake backend tests and must not access a host Keychain.
+
+Then, from that exact committed checkout on the owner's target 2020 Intel Mac, after reviewing the fixed probe service and confirming Keychain Access is available, run the deliberately dual-acknowledged write/read/delete smoke gate:
+
+```bash
+TUNTUN_ALLOW_KEYCHAIN_PROBE=1 uv run python scripts/probe_macos_keychain.py --acknowledge-keychain-write
+```
+
+Expected stdout is exactly one line: `macOS Keychain probe: PASS`. The probe generates a fresh random 32-byte value and UUID account, first proves the slot absent, verifies the write/readback, always attempts deletion even after a partial write failure, and finally proves absence. It never prints the value or generated account on success or failure; a handled probe/backend failure instead exits 1 with exactly `macOS Keychain probe: FAIL` on stderr. Missing either acknowledgement must fail before randomness or provider construction.
+
+Record only the commit SHA, UTC timestamp, OS/Python/keyring versions, the content-free invocation, both CI conclusions, and PASS in owner-only encrypted notes outside the repository; record no secret, generated account, backend payload, household path, or Keychain export. Any non-PASS result, CI mismatch, or cleanup result that cannot be proved blocks Task 8 and therefore Task 9. If cleanup cannot be proved, stop automation and use Keychain Access to inspect and remove only entries with service `tuntun.probe.keychain` created at the probe time before retrying.
 
 ### Task 9: Build deterministic fakes and a network-free scenario runner
 
