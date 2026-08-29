@@ -19,4 +19,4 @@ jobs:
         with: {node-version: "22", cache: pnpm}
       - run: uv sync --all-packages --locked
       - run: pnpm install --frozen-lockfile
-      - run: make lint typecheck test test-security test-contract web-test web-build
+      - run: make check

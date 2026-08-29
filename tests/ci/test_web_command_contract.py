@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -83,8 +84,10 @@ def test_playwright_discovers_root_e2e_and_ui_suites() -> None:
 def test_typecheck_and_lint_scope_every_root_e2e_and_ui_typescript_file() -> None:
     tsconfig = json.loads((ROOT / "apps/admin/tsconfig.json").read_text())
     assert {
-        "../../tests/e2e/**/*.ts", "../../tests/e2e/**/*.tsx",
-        "../../tests/ui/**/*.ts", "../../tests/ui/**/*.tsx",
+        "../../tests/e2e/**/*.ts",
+        "../../tests/e2e/**/*.tsx",
+        "../../tests/ui/**/*.ts",
+        "../../tests/ui/**/*.tsx",
     } <= set(tsconfig["include"])
     eslint = (ROOT / "apps/admin/eslint.config.js").read_text()
     for required in (
@@ -128,3 +131,58 @@ def test_typecheck_and_lint_scope_every_root_e2e_and_ui_typescript_file() -> Non
         timeout=60,
     )
     assert lint.returncode == 0, lint.stdout + lint.stderr
+
+
+def test_web_build_scans_dist_only_after_a_successful_build(tmp_path: Path) -> None:
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    log = tmp_path / "commands.log"
+    pnpm = commands / "pnpm"
+    pnpm.write_text(
+        "#!/bin/sh\n"
+        "printf 'build\\n' >> \"$COMMAND_LOG\"\n"
+        'if test "${FAIL_BUILD:-0}" = 1; then exit 7; fi\n'
+        "mkdir -p apps/admin/dist\n",
+        encoding="utf-8",
+    )
+    scanner = commands / "uv"
+    scanner.write_text(
+        "#!/bin/sh\n"
+        "test -d apps/admin/dist || exit 9\n"
+        'test "$*" = '
+        "'run python scripts/verify_private_data.py apps/admin/dist' || exit 10\n"
+        "printf 'scan\\n' >> \"$COMMAND_LOG\"\n",
+        encoding="utf-8",
+    )
+    pnpm.chmod(0o755)
+    scanner.chmod(0o755)
+    environment = {
+        **os.environ,
+        "COMMAND_LOG": str(log),
+        "PATH": f"{commands}:{os.environ['PATH']}",
+    }
+
+    passed = subprocess.run(
+        ["make", "-f", str(ROOT / "Makefile"), "web-build"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == ["build", "scan"]
+
+    log.unlink()
+    failed = subprocess.run(
+        ["make", "-f", str(ROOT / "Makefile"), "web-build"],
+        cwd=tmp_path,
+        env={**environment, "FAIL_BUILD": "1"},
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert failed.returncode == 2
+    assert log.read_text(encoding="utf-8").splitlines() == ["build"]

@@ -20,9 +20,9 @@ web-test:
 	pnpm --filter @tuntun/admin --fail-if-no-match test
 web-build:
 	pnpm --filter @tuntun/admin build
+	uv run python scripts/verify_private_data.py apps/admin/dist
 web-e2e:
 	pnpm --filter @tuntun/admin e2e
 verify-private-data:
-	@echo "verify-private-data: UNAVAILABLE until Task 3 installs the required fail-closed scanner" >&2
-	@exit 2
+	uv run python scripts/verify_private_data.py .
 check: lint typecheck test test-security test-contract web-test web-build verify-private-data
