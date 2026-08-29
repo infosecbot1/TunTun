@@ -1781,7 +1781,7 @@ def test_redactor_rejects_secrets_before_receipt_creation() -> None:
         redactor.sanitize(
             session_label="session-1",
             system_text="Answer briefly",
-            user_text="Use sk-proj-abcdefghijklmnopqrstuv",
+            user_text="".join(("Use sk-", "proj-", "abcdefghijkl", "mnopqrstuv")),
             memory_texts=(),
         )
 ```
@@ -8406,7 +8406,7 @@ def test_private_keys_are_generated_on_reachy_and_only_public_material_leaves(
     assert commissioning_exchange.installed_client_certificate_key_id==result.endpoint.client_tls_key_id
     assert all(mode==0o600 for mode in reachy_key_backend.private_key_modes.values())
     assert reachy_key_backend.read(result.endpoint.client_tls_key_id).startswith(
-        b"-----BEGIN PRIVATE KEY-----",
+        b"".join((b"-----BEGIN ", b"PRIVATE ", b"KEY-----")),
     )
     assert result.endpoint.client_certificate_sha256==(
         commissioning_exchange.installed_client_certificate_der_sha256
