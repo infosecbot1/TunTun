@@ -5,6 +5,7 @@ import errno
 import os
 import stat
 import sys
+import traceback
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,46 @@ def test_relative_base_returns_absolute_bound_identities(
 
     assert paths.root == root / "relative" / "Tuntun"
     paths.revalidate()
+
+
+def test_lexical_absolutization_os_failure_is_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "private-abspath-marker"
+
+    def failing_abspath(path: str) -> str:
+        del path
+        raise OSError(marker)
+
+    monkeypatch.setattr(secure_paths, "_absolute_path", failing_abspath)
+    with pytest.raises(PermissionError) as rejected:
+        secure_paths.absolute_lexical_path(Path("private"))
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("unsafe application path",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
+
+
+def test_root_open_os_failure_is_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "private-root-open-marker"
+
+    def failing_root_open() -> int:
+        raise OSError(marker)
+
+    monkeypatch.setattr(secure_paths, "_open_root", failing_root_open)
+
+    with pytest.raises(PermissionError) as rejected:
+        secure_paths.open_trusted_directory(Path("/"))
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("unsafe application path",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
 
 
 @pytest.mark.parametrize("mode", (0o750, 0o755))
@@ -500,6 +541,36 @@ def test_live_directory_guard_rejects_parent_replacement_and_closes_fd(
     directory.close()
     with pytest.raises(OSError):
         os.fstat(held_fd)
+
+
+def test_live_directory_revalidation_os_failure_is_content_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _fixture_root(tmp_path)
+    base = root / "Tuntun"
+    base.mkdir(mode=0o700)
+    marker = "private-directory-marker"
+
+    with open_owned_directory(base) as directory:
+        held_fd = directory.fd
+        original_fstat = secure_paths.os.fstat
+
+        def failing_fstat(descriptor: int) -> os.stat_result:
+            if descriptor == held_fd:
+                raise OSError(marker)
+            return original_fstat(descriptor)
+
+        monkeypatch.setattr(secure_paths.os, "fstat", failing_fstat)
+
+        with pytest.raises(PermissionError) as rejected:
+            directory.revalidate()
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("unsafe application path",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
 
 
 def test_owned_path_fresh_walk_rejects_one_way_ancestor_replacement(

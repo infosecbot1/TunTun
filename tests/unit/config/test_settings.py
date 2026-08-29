@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import traceback
 from pathlib import Path
 
 import pytest
@@ -115,6 +116,20 @@ def test_invalid_settings_documents_fail(tmp_path: Path, raw: str) -> None:
 
     with pytest.raises((ValidationError, ValueError)):
         load_settings(config, {})
+
+
+def test_yaml_syntax_failure_is_content_free() -> None:
+    marker = "private-config-value-marker"
+    raw = f"network: [{marker}\n".encode()
+
+    with pytest.raises(ValueError) as rejected:
+        loader.parse_bounded_strict_yaml(raw, max_bytes=len(raw))
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("invalid configuration",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
 
 
 def test_environment_overrides_yaml_but_unspecified_yaml_survives(
@@ -369,6 +384,47 @@ def test_settings_cleanup_failure_after_success_is_fixed_and_one_shot(
     assert rejected.value.args == ("unsafe configuration file",)
     assert rejected.value.__cause__ is None
     assert rejected.value.__suppress_context__ is True
+    descriptor_audit.assert_all_closed_once()
+
+
+@pytest.mark.parametrize("failure_point", ("open", "stat", "read"))
+def test_settings_os_failures_are_content_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor_audit,
+    failure_point: str,
+) -> None:
+    marker = "private-settings-marker"
+    config = tmp_path / f"{marker}.yaml"
+    if failure_point != "open":
+        _write_private(config, "{}\n")
+    _audit_config_descriptors(monkeypatch, descriptor_audit)
+
+    if failure_point == "stat":
+        original_stat = loader._stat_regular_at
+
+        def failing_stat(name: str, parent_fd: int) -> os.stat_result:
+            if name == config.name:
+                raise OSError(marker)
+            return original_stat(name, parent_fd)
+
+        monkeypatch.setattr(loader, "_stat_regular_at", failing_stat)
+    elif failure_point == "read":
+
+        def failing_read(descriptor: int, size: int) -> bytes:
+            del descriptor, size
+            raise OSError(marker)
+
+        monkeypatch.setattr(loader.os, "read", failing_read)
+
+    with pytest.raises(PermissionError) as rejected:
+        load_settings(config, {})
+
+    rendered = "".join(traceback.format_exception(rejected.value))
+    assert rejected.value.args == ("unsafe configuration file",)
+    assert rejected.value.__cause__ is None
+    assert rejected.value.__suppress_context__ is True
+    assert marker not in rendered
     descriptor_audit.assert_all_closed_once()
 
 

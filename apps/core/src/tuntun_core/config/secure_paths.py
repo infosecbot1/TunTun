@@ -39,6 +39,10 @@ class _AclInspectionError(ValueError):
     pass
 
 
+def _absolute_path(raw: str) -> str:
+    return os.path.abspath(raw)
+
+
 @dataclass(slots=True)
 class _OwnedDescriptor:
     _value: int | None
@@ -93,19 +97,22 @@ def absolute_lexical_path(
     *,
     allow_root: bool = False,
 ) -> Path:
-    raw = os.fspath(path)
-    if (
-        type(raw) is not str
-        or not raw
-        or "\x00" in raw
-        or raw.startswith(os.sep * 2)
-        or any(component in {".", ".."} for component in raw.split(os.sep))
-    ):
-        raise PermissionError("unsafe application path")
-    absolute = Path(os.path.abspath(raw))
-    if absolute == Path("/") and not allow_root:
-        raise PermissionError("unsafe application path")
-    return absolute
+    try:
+        raw = os.fspath(path)
+        if (
+            type(raw) is not str
+            or not raw
+            or "\x00" in raw
+            or raw.startswith(os.sep * 2)
+            or any(component in {".", ".."} for component in raw.split(os.sep))
+        ):
+            raise PermissionError("unsafe application path")
+        absolute = Path(_absolute_path(raw))
+        if absolute == Path("/") and not allow_root:
+            raise PermissionError("unsafe application path")
+        return absolute
+    except OSError:
+        raise PermissionError("unsafe application path") from None
 
 
 def _reported_owner(value: os.stat_result) -> int:
@@ -343,8 +350,8 @@ class OwnedDirectory:
     def revalidate(self) -> None:
         try:
             held = os.fstat(self.fd)
-        except (OSError, PermissionError) as error:
-            raise PermissionError("unsafe application path") from error
+        except (OSError, PermissionError):
+            raise PermissionError("unsafe application path") from None
         with _walk_directory(
             self.path,
             create=False,
@@ -399,9 +406,10 @@ def _walk_directory(
     allow_root = not create and not leaf_private
     absolute = absolute_lexical_path(path, allow_root=allow_root)
     parts = absolute.parts[1:]
-    parent = _acquire_owned_descriptor(_open_root, _close_fd)
+    parent: _OwnedDescriptor | None = None
     primary_error: BaseException | None = None
     try:
+        parent = _acquire_owned_descriptor(_open_root, _close_fd)
         parent_fd = parent.borrow()
         root = os.fstat(parent_fd)
         _require_directory(
@@ -451,7 +459,7 @@ def _walk_directory(
             leaf_value.st_ino,
             leaf_private,
         )
-        parent = _OwnedDescriptor(None)
+        parent = None
         return result
     except PermissionError as error:
         primary_error = error
@@ -464,7 +472,8 @@ def _walk_directory(
         primary_error = error
         raise
     finally:
-        _close_preserving_primary(parent, _close_fd, primary_error)
+        if parent is not None:
+            _close_preserving_primary(parent, _close_fd, primary_error)
 
 
 def open_trusted_directory(path: Path) -> OwnedDirectory:

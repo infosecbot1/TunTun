@@ -132,8 +132,8 @@ def parse_bounded_strict_yaml(
         if node is not None:
             _validate_mapping_nodes(node)
         loaded = yaml.safe_load(text)
-    except (UnicodeError, yaml.YAMLError, ValueError) as error:
-        raise ValueError("invalid configuration") from error
+    except (UnicodeError, yaml.YAMLError, ValueError):
+        raise ValueError("invalid configuration") from None
     return _require_yaml_value(loaded)
 
 
@@ -192,8 +192,8 @@ def read_bounded_strict_yaml(
                     lambda: _open_regular_at(absolute.name, parent.fd),
                     _close_fd,
                 )
-            except OSError as error:
-                raise PermissionError("unsafe configuration file") from error
+            except OSError:
+                raise PermissionError("unsafe configuration file") from None
             file_error: BaseException | None = None
             try:
                 fd = file_owner.borrow()
@@ -248,8 +248,8 @@ def read_bounded_strict_yaml(
                     raise PermissionError("unsafe configuration file") from None
     except PermissionError:
         raise
-    except OSError as error:
-        raise PermissionError("unsafe configuration file") from error
+    except OSError:
+        raise PermissionError("unsafe configuration file") from None
     return parse_bounded_strict_yaml(raw, max_bytes=max_bytes)
 
 
