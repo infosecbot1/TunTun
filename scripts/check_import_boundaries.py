@@ -6,6 +6,7 @@ import sys
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -57,6 +58,9 @@ else:
 TOOL = "import-boundaries"
 MAX_AST_NODES = 200_000
 DOMAIN = re.compile(r"[a-z][a-z0-9_]{0,63}")
+DISTRIBUTION_IMPORT_ALIASES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {"pyyaml": frozenset({"yaml"})}
+)
 
 
 def _parser() -> ClosedArgumentParser:
@@ -84,7 +88,9 @@ def _declared_dependencies(document: Mapping[str, object]) -> set[str]:
     for dependency in dependencies:
         if isinstance(dependency, str):
             name = re.split(r"[<>=!~;\[]", dependency, maxsplit=1)[0]
-            result.add(name.strip().replace("-", "_").lower())
+            normalized = name.strip().replace("-", "_").lower()
+            result.add(normalized)
+            result.update(DISTRIBUTION_IMPORT_ALIASES.get(normalized, ()))
     return result
 
 

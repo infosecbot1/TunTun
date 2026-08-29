@@ -36,3 +36,6 @@ jobs:
       - run: uv sync --all-packages --locked
       - run: pnpm install --frozen-lockfile
       - run: make check
+        env:
+          PYTEST_ADDOPTS: >-
+            --basetemp=/tmp/t7-${{ github.run_id }}-${{ github.run_attempt }}

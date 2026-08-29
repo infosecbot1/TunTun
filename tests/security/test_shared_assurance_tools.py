@@ -476,6 +476,55 @@ def test_import_boundaries_reconstructs_from_imported_private_targets(
     assert check_import_boundaries.main(["--root", str(workspace), "--domain", "vision"]) == 1
 
 
+def test_import_boundaries_accepts_yaml_only_when_pyyaml_is_declared(
+    shared_assurance_harness,
+) -> None:
+    workspace = shared_assurance_harness.complete_positive_workspace_for(check_import_boundaries)
+    (workspace / "pyproject.toml").write_text(
+        '[project]\nname = "synthetic-workspace"\nversion = "0.0.0"\n'
+        'dependencies = ["PyYAML>=6.0,<7"]\n'
+        '[tool.tuntun-assurance]\nsrc-roots = ["src"]\n',
+        encoding="utf-8",
+    )
+    (workspace / "src" / "vision" / "service.py").write_text(
+        "import yaml\nfrom yaml.nodes import MappingNode, ScalarNode\n",
+        encoding="utf-8",
+    )
+    argv = ["--root", str(workspace), "--all"]
+
+    receipt = check_import_boundaries.evaluate(argv)
+
+    assert receipt.complete is True
+    assert receipt.findings == ()
+    assert check_import_boundaries.main(argv) == 0
+
+
+def test_import_boundaries_rejects_yaml_when_pyyaml_is_undeclared(
+    shared_assurance_harness,
+) -> None:
+    workspace = shared_assurance_harness.complete_positive_workspace_for(check_import_boundaries)
+    (workspace / "src" / "vision" / "service.py").write_text(
+        "import yaml\nfrom yaml.nodes import MappingNode, ScalarNode\n",
+        encoding="utf-8",
+    )
+    argv = ["--root", str(workspace), "--all"]
+
+    receipt = check_import_boundaries.evaluate(argv)
+
+    assert receipt.complete is True
+    assert {finding.code for finding in receipt.findings} == {"undeclared-third-party-import"}
+    assert {finding.detail for finding in receipt.findings} == {"yaml", "yaml.nodes"}
+    assert check_import_boundaries.main(argv) == 1
+
+
+def test_import_boundary_distribution_alias_registry_is_exact_and_immutable() -> None:
+    registry = getattr(check_import_boundaries, "DISTRIBUTION_IMPORT_ALIASES", {})
+
+    assert registry == {"pyyaml": frozenset({"yaml"})}
+    with pytest.raises(TypeError):
+        registry["unreviewed-distribution"] = frozenset({"unreviewed_import"})
+
+
 def test_import_boundaries_parses_pyproject_from_frozen_inventory_bytes(
     shared_assurance_harness,
     monkeypatch: pytest.MonkeyPatch,

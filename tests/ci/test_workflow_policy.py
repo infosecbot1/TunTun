@@ -63,9 +63,15 @@ def _assert_workflow_policy(path: Path) -> None:
     raw = path.read_text()
     lowered = raw.lower()
     for forbidden in (
-        "contents: write", "pages: write", "gh release create", "git tag ",
-        "npm publish", "pnpm publish", "twine upload",
-        "reachy_hardware", "live_cloud",
+        "contents: write",
+        "pages: write",
+        "gh release create",
+        "git tag ",
+        "npm publish",
+        "pnpm publish",
+        "twine upload",
+        "reachy_hardware",
+        "live_cloud",
     ):
         assert forbidden not in lowered, (path, forbidden)
     workflow = yaml.safe_load(raw)
@@ -78,7 +84,12 @@ def _assert_workflow_policy(path: Path) -> None:
         _assert_strategy_matches_runner(job)
         if "uses" in job:
             assert set(job) <= {
-                "name", "needs", "if", "uses", "with", "permissions",
+                "name",
+                "needs",
+                "if",
+                "uses",
+                "with",
+                "permissions",
             }
             _assert_uses_is_immutable(job["uses"])
             continue
@@ -122,7 +133,7 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
                 "runs-on": "ubuntu-24.04",
                 "steps": [{"uses": "actions/checkout@" + "a" * 40}],
             }
-        }
+        },
     }
     (root / "security.yml").write_text(yaml.safe_dump(valid))
     (root / "release.yaml").write_text(yaml.safe_dump(valid))
@@ -136,36 +147,65 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
         ("release.yaml", {"permissions": {"contents": "write"}}),
         ("security.yml", {"permissions": {"issues": "write"}}),
         ("release.yaml", {"permissions": None}),
-        ("security.yml", {
-            "runs-on": "${{ matrix.os }}",
-            "strategy": {"matrix": {
-                "os": ["ubuntu-24.04", "macos-15-intel"],
-                "include": [{"os": "self-hosted"}],
-            }},
-        }),
-        ("release.yaml", {
-            "runs-on": "${{ matrix.os }}",
-            "strategy": {"matrix": {
-                "os": ["ubuntu-24.04", "macos-15-intel"],
-                "exclude": [{"os": "ubuntu-24.04"}],
-            }},
-        }),
+        (
+            "security.yml",
+            {
+                "runs-on": "${{ matrix.os }}",
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "include": [{"os": "self-hosted"}],
+                    }
+                },
+            },
+        ),
+        (
+            "release.yaml",
+            {
+                "runs-on": "${{ matrix.os }}",
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "exclude": [{"os": "ubuntu-24.04"}],
+                    }
+                },
+            },
+        ),
         ("security.yml", {"strategy": {"matrix": {"python": ["3.12"]}}}),
-        ("release.yaml", {"strategy": {"matrix": {
-            "os": ["ubuntu-24.04", "macos-15-intel"],
-            "include": [{"os": "ubuntu-24.04"}],
-        }}}),
-        ("security.yml", {"strategy": {"matrix": {
-            "os": ["ubuntu-24.04", "macos-15-intel"],
-            "exclude": [{"os": "macos-15-intel"}],
-        }}}),
-        ("release.yaml", {
-            "runs-on": "${{ matrix.os }}",
-            "strategy": {"matrix": {
-                "os": ["ubuntu-24.04", "macos-15-intel"],
-                "python": ["3.12"],
-            }},
-        }),
+        (
+            "release.yaml",
+            {
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "include": [{"os": "ubuntu-24.04"}],
+                    }
+                }
+            },
+        ),
+        (
+            "security.yml",
+            {
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "exclude": [{"os": "macos-15-intel"}],
+                    }
+                }
+            },
+        ),
+        (
+            "release.yaml",
+            {
+                "runs-on": "${{ matrix.os }}",
+                "strategy": {
+                    "matrix": {
+                        "os": ["ubuntu-24.04", "macos-15-intel"],
+                        "python": ["3.12"],
+                    }
+                },
+            },
+        ),
     ):
         changed = {**valid, "jobs": {"check": {**valid["jobs"]["check"], **mutation}}}
         path = root / name
@@ -180,14 +220,19 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
         _assert_workflow_policy(path)
 
     for reusable in (
-        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
-         "secrets": "inherit"},
-        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
-         "secrets": {"token": "${{ secrets['TOKEN'] }}"}},
-        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
-         "permissions": {"actions": "write"}},
-        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
-         "strategy": {"matrix": {"python": ["3.12"]}}},
+        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40, "secrets": "inherit"},
+        {
+            "uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+            "secrets": {"token": "${{ secrets['TOKEN'] }}"},
+        },
+        {
+            "uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+            "permissions": {"actions": "write"},
+        },
+        {
+            "uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+            "strategy": {"matrix": {"python": ["3.12"]}},
+        },
     ):
         workflow_with_reusable_job = {
             "permissions": {"contents": "read"},
@@ -196,3 +241,14 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
         path.write_text(yaml.safe_dump(workflow_with_reusable_job))
         with pytest.raises(AssertionError):
             _assert_workflow_policy(path)
+
+
+def test_ci_check_uses_short_per_run_pytest_basetemp() -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
+
+    assert workflow["jobs"]["check"]["steps"][-1] == {
+        "run": "make check",
+        "env": {
+            "PYTEST_ADDOPTS": ("--basetemp=/tmp/t7-${{ github.run_id }}-${{ github.run_attempt }}"),
+        },
+    }

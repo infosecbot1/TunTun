@@ -2,7 +2,12 @@
 name = "tuntun-core"
 version = "0.1.0.dev0"
 requires-python = "==3.12.*"
-dependencies = ["typer>=0.16,<1"]
+dependencies = [
+  "platformdirs>=4.4,<5",
+  "pydantic>=2.11,<3",
+  "PyYAML>=6.0,<7",
+  "typer>=0.16,<1",
+]
 
 [project.scripts]
 tuntunctl = "tuntun_core.cli.main:app"

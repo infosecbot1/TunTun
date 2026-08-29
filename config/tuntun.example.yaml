@@ -1,0 +1,43 @@
+household:
+  timezone: Asia/Singapore
+conversation:
+  active_limit: 1
+  follow_up_window_seconds: 30
+  idle_close_seconds: 60
+  absolute_session_limit_minutes: 30
+privacy:
+  audit_default_view_days: 180
+network:
+  admin_host: 127.0.0.1
+  admin_port: 8787
+  admin_lan_port: 8443
+  edge_gateway_port: 7443
+providers:
+  primary_model: gpt-5.6-sol
+  qwen_enabled: false
+  context_max_tokens: 8000
+  connect_timeout_ms: 5000
+  write_timeout_ms: 30000
+  read_timeout_ms: 120000
+  pool_timeout_ms: 5000
+  max_attempts: 2
+memory:
+  max_items_per_turn: 6
+identity:
+  child_reenrollment_reminder_days: 180
+  child_biometric_hard_expiry_days: 365
+admin:
+  session_idle_seconds: 900
+  session_absolute_seconds: 28800
+  json_body_max_bytes: 1048576
+  read_requests_per_minute: 120
+  mutation_requests_per_minute: 30
+  auth_requests_per_minute: 10
+  trust_proxy_headers: false
+observability:
+  telemetry_enabled: false
+  cloud_tracing_enabled: false
+  provider_body_logging: false
+budget:
+  soft_limit_micros_sgd: 100000000
+  hard_limit_micros_sgd: 150000000
