@@ -1,0 +1,589 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": "1.0",
+  "models": {
+    "tuntun_contracts.base.Commitment": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "HMAC-SHA-256",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "key_id": {
+          "maxLength": 128,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "title": "Key Id",
+          "type": "string"
+        },
+        "value_b64": {
+          "maxLength": 44,
+          "minLength": 44,
+          "pattern": "^[A-Za-z0-9+/]{43}=$",
+          "title": "Value B64",
+          "type": "string"
+        }
+      },
+      "required": [
+        "algorithm",
+        "key_id",
+        "value_b64"
+      ],
+      "title": "Commitment",
+      "type": "object"
+    },
+    "tuntun_contracts.events.EventEnvelope": {
+      "$defs": {
+        "Commitment": {
+          "additionalProperties": false,
+          "properties": {
+            "algorithm": {
+              "const": "HMAC-SHA-256",
+              "title": "Algorithm",
+              "type": "string"
+            },
+            "key_id": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9_.:-]+$",
+              "title": "Key Id",
+              "type": "string"
+            },
+            "value_b64": {
+              "maxLength": 44,
+              "minLength": 44,
+              "pattern": "^[A-Za-z0-9+/]{43}=$",
+              "title": "Value B64",
+              "type": "string"
+            }
+          },
+          "required": [
+            "algorithm",
+            "key_id",
+            "value_b64"
+          ],
+          "title": "Commitment",
+          "type": "object"
+        },
+        "EventType": {
+          "enum": [
+            "speech.wake_detected",
+            "safety.stop_requested"
+          ],
+          "title": "EventType",
+          "type": "string"
+        },
+        "Sensitivity": {
+          "enum": [
+            "public",
+            "household",
+            "personal",
+            "sensitive",
+            "restricted"
+          ],
+          "title": "Sensitivity",
+          "type": "string"
+        },
+        "StopRequestedPayload": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "safety.stop_requested",
+              "title": "Kind",
+              "type": "string"
+            },
+            "turn_id": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Turn Id"
+            },
+            "source": {
+              "enum": [
+                "edge_keyword",
+                "physical_input",
+                "owner_console",
+                "watchdog"
+              ],
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "turn_id",
+            "source"
+          ],
+          "title": "StopRequestedPayload",
+          "type": "object"
+        },
+        "WakeDetectedPayload": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "speech.wake_detected",
+              "title": "Kind",
+              "type": "string"
+            },
+            "turn_id": {
+              "format": "uuid",
+              "title": "Turn Id",
+              "type": "string"
+            },
+            "score_micros": {
+              "maximum": 1000000,
+              "minimum": 0,
+              "title": "Score Micros",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "turn_id",
+            "score_micros"
+          ],
+          "title": "WakeDetectedPayload",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "event_id": {
+          "format": "uuid",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "$ref": "#/models/tuntun_contracts.events.EventEnvelope/$defs/EventType"
+        },
+        "household_id": {
+          "format": "uuid",
+          "title": "Household Id",
+          "type": "string"
+        },
+        "device_id": {
+          "format": "uuid",
+          "title": "Device Id",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Session Id"
+        },
+        "correlation_id": {
+          "format": "uuid",
+          "title": "Correlation Id",
+          "type": "string"
+        },
+        "causation_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Causation Id"
+        },
+        "device_sequence": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Device Sequence",
+          "type": "integer"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "sensitivity": {
+          "$ref": "#/models/tuntun_contracts.events.EventEnvelope/$defs/Sensitivity"
+        },
+        "payload_commitment": {
+          "$ref": "#/models/tuntun_contracts.events.EventEnvelope/$defs/Commitment"
+        },
+        "payload": {
+          "discriminator": {
+            "mapping": {
+              "safety.stop_requested": "#/$defs/StopRequestedPayload",
+              "speech.wake_detected": "#/$defs/WakeDetectedPayload"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/models/tuntun_contracts.events.EventEnvelope/$defs/WakeDetectedPayload"
+            },
+            {
+              "$ref": "#/models/tuntun_contracts.events.EventEnvelope/$defs/StopRequestedPayload"
+            }
+          ],
+          "title": "Payload"
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id",
+        "event_type",
+        "household_id",
+        "device_id",
+        "session_id",
+        "correlation_id",
+        "causation_id",
+        "device_sequence",
+        "occurred_at",
+        "sensitivity",
+        "payload_commitment",
+        "payload"
+      ],
+      "title": "EventEnvelope",
+      "type": "object"
+    },
+    "tuntun_contracts.events.SignedEventEnvelope": {
+      "$defs": {
+        "Commitment": {
+          "additionalProperties": false,
+          "properties": {
+            "algorithm": {
+              "const": "HMAC-SHA-256",
+              "title": "Algorithm",
+              "type": "string"
+            },
+            "key_id": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9_.:-]+$",
+              "title": "Key Id",
+              "type": "string"
+            },
+            "value_b64": {
+              "maxLength": 44,
+              "minLength": 44,
+              "pattern": "^[A-Za-z0-9+/]{43}=$",
+              "title": "Value B64",
+              "type": "string"
+            }
+          },
+          "required": [
+            "algorithm",
+            "key_id",
+            "value_b64"
+          ],
+          "title": "Commitment",
+          "type": "object"
+        },
+        "EventEnvelope": {
+          "additionalProperties": false,
+          "properties": {
+            "schema_version": {
+              "const": "1.0",
+              "title": "Schema Version",
+              "type": "string"
+            },
+            "event_id": {
+              "format": "uuid",
+              "title": "Event Id",
+              "type": "string"
+            },
+            "event_type": {
+              "$ref": "#/models/tuntun_contracts.events.SignedEventEnvelope/$defs/EventType"
+            },
+            "household_id": {
+              "format": "uuid",
+              "title": "Household Id",
+              "type": "string"
+            },
+            "device_id": {
+              "format": "uuid",
+              "title": "Device Id",
+              "type": "string"
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Id"
+            },
+            "correlation_id": {
+              "format": "uuid",
+              "title": "Correlation Id",
+              "type": "string"
+            },
+            "causation_id": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Causation Id"
+            },
+            "device_sequence": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "title": "Device Sequence",
+              "type": "integer"
+            },
+            "occurred_at": {
+              "format": "date-time",
+              "title": "Occurred At",
+              "type": "string"
+            },
+            "sensitivity": {
+              "$ref": "#/models/tuntun_contracts.events.SignedEventEnvelope/$defs/Sensitivity"
+            },
+            "payload_commitment": {
+              "$ref": "#/models/tuntun_contracts.events.SignedEventEnvelope/$defs/Commitment"
+            },
+            "payload": {
+              "discriminator": {
+                "mapping": {
+                  "safety.stop_requested": "#/$defs/StopRequestedPayload",
+                  "speech.wake_detected": "#/$defs/WakeDetectedPayload"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/models/tuntun_contracts.events.SignedEventEnvelope/$defs/WakeDetectedPayload"
+                },
+                {
+                  "$ref": "#/models/tuntun_contracts.events.SignedEventEnvelope/$defs/StopRequestedPayload"
+                }
+              ],
+              "title": "Payload"
+            }
+          },
+          "required": [
+            "schema_version",
+            "event_id",
+            "event_type",
+            "household_id",
+            "device_id",
+            "session_id",
+            "correlation_id",
+            "causation_id",
+            "device_sequence",
+            "occurred_at",
+            "sensitivity",
+            "payload_commitment",
+            "payload"
+          ],
+          "title": "EventEnvelope",
+          "type": "object"
+        },
+        "EventType": {
+          "enum": [
+            "speech.wake_detected",
+            "safety.stop_requested"
+          ],
+          "title": "EventType",
+          "type": "string"
+        },
+        "Sensitivity": {
+          "enum": [
+            "public",
+            "household",
+            "personal",
+            "sensitive",
+            "restricted"
+          ],
+          "title": "Sensitivity",
+          "type": "string"
+        },
+        "StopRequestedPayload": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "safety.stop_requested",
+              "title": "Kind",
+              "type": "string"
+            },
+            "turn_id": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Turn Id"
+            },
+            "source": {
+              "enum": [
+                "edge_keyword",
+                "physical_input",
+                "owner_console",
+                "watchdog"
+              ],
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "turn_id",
+            "source"
+          ],
+          "title": "StopRequestedPayload",
+          "type": "object"
+        },
+        "WakeDetectedPayload": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "speech.wake_detected",
+              "title": "Kind",
+              "type": "string"
+            },
+            "turn_id": {
+              "format": "uuid",
+              "title": "Turn Id",
+              "type": "string"
+            },
+            "score_micros": {
+              "maximum": 1000000,
+              "minimum": 0,
+              "title": "Score Micros",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "turn_id",
+            "score_micros"
+          ],
+          "title": "WakeDetectedPayload",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "envelope": {
+          "$ref": "#/models/tuntun_contracts.events.SignedEventEnvelope/$defs/EventEnvelope"
+        },
+        "signing_key_id": {
+          "maxLength": 83,
+          "minLength": 12,
+          "pattern": "^ed25519:[a-z0-9][a-z0-9._-]{0,63}:v[1-9][0-9]{0,8}$",
+          "title": "Signing Key Id",
+          "type": "string"
+        },
+        "signature_b64": {
+          "maxLength": 88,
+          "minLength": 88,
+          "pattern": "^[A-Za-z0-9+/]{86}==$",
+          "title": "Signature B64",
+          "type": "string"
+        }
+      },
+      "required": [
+        "envelope",
+        "signing_key_id",
+        "signature_b64"
+      ],
+      "title": "SignedEventEnvelope",
+      "type": "object"
+    },
+    "tuntun_contracts.events.StopRequestedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "safety.stop_requested",
+          "title": "Kind",
+          "type": "string"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Turn Id"
+        },
+        "source": {
+          "enum": [
+            "edge_keyword",
+            "physical_input",
+            "owner_console",
+            "watchdog"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "source"
+      ],
+      "title": "StopRequestedPayload",
+      "type": "object"
+    },
+    "tuntun_contracts.events.WakeDetectedPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "speech.wake_detected",
+          "title": "Kind",
+          "type": "string"
+        },
+        "turn_id": {
+          "format": "uuid",
+          "title": "Turn Id",
+          "type": "string"
+        },
+        "score_micros": {
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Score Micros",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "score_micros"
+      ],
+      "title": "WakeDetectedPayload",
+      "type": "object"
+    }
+  }
+}
