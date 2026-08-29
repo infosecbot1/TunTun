@@ -227,8 +227,8 @@
         "payload": {
           "discriminator": {
             "mapping": {
-              "safety.stop_requested": "#/$defs/StopRequestedPayload",
-              "speech.wake_detected": "#/$defs/WakeDetectedPayload"
+              "safety.stop_requested": "#/models/tuntun_contracts.events.EventEnvelope/$defs/StopRequestedPayload",
+              "speech.wake_detected": "#/models/tuntun_contracts.events.EventEnvelope/$defs/WakeDetectedPayload"
             },
             "propertyName": "kind"
           },
@@ -369,8 +369,8 @@
             "payload": {
               "discriminator": {
                 "mapping": {
-                  "safety.stop_requested": "#/$defs/StopRequestedPayload",
-                  "speech.wake_detected": "#/$defs/WakeDetectedPayload"
+                  "safety.stop_requested": "#/models/tuntun_contracts.events.SignedEventEnvelope/$defs/StopRequestedPayload",
+                  "speech.wake_detected": "#/models/tuntun_contracts.events.SignedEventEnvelope/$defs/WakeDetectedPayload"
                 },
                 "propertyName": "kind"
               },

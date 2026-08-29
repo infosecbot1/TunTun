@@ -74,6 +74,14 @@ def _json_pointer_escape(value: str) -> str:
     return value.replace("~", "~0").replace("/", "~1")
 
 
+def _rewrite_local_ref(value: object, *, model_pointer: str) -> str:
+    if not isinstance(value, str):
+        raise GeneratorError("generated schema reference is not a string")
+    if not value.startswith("#/$defs/"):
+        raise GeneratorError(f"unsupported generated schema reference: {value}")
+    return f"{model_pointer}/$defs/{value.removeprefix('#/$defs/')}"
+
+
 def _registered_model_map(
     models: Sequence[type[ContractModel]],
 ) -> dict[str, type[ContractModel]]:
@@ -90,16 +98,28 @@ def _registered_model_map(
 
 def _rewrite_local_refs(value: object, *, model_pointer: str) -> object:
     if isinstance(value, dict):
+        is_discriminator = "propertyName" in value and "mapping" in value
+        if is_discriminator:
+            if not isinstance(value["propertyName"], str):
+                raise GeneratorError("generated discriminator propertyName is not a string")
+            if not isinstance(value["mapping"], dict):
+                raise GeneratorError("generated discriminator mapping is not an object")
         result: dict[str, object] = {}
         for key, child in value.items():
             if not isinstance(key, str):
                 raise GeneratorError("generated schema key is not a string")
             if key == "$ref":
-                if not isinstance(child, str):
-                    raise GeneratorError("generated schema reference is not a string")
-                if not child.startswith("#/$defs/"):
-                    raise GeneratorError(f"unsupported generated schema reference: {child}")
-                result[key] = f"{model_pointer}/$defs/{child.removeprefix('#/$defs/')}"
+                result[key] = _rewrite_local_ref(child, model_pointer=model_pointer)
+            elif is_discriminator and key == "mapping":
+                mapping: dict[str, object] = {}
+                for discriminator_value, reference in child.items():
+                    if not isinstance(discriminator_value, str):
+                        raise GeneratorError("generated discriminator value is not a string")
+                    mapping[discriminator_value] = _rewrite_local_ref(
+                        reference,
+                        model_pointer=model_pointer,
+                    )
+                result[key] = mapping
             else:
                 result[key] = _rewrite_local_refs(child, model_pointer=model_pointer)
         return result
@@ -262,7 +282,11 @@ def _capture_output_baseline(output: Path, output_parent: OutputParent) -> Outpu
     return OutputBaseline(snapshot=snapshot, mode=stat.S_IMODE(metadata.st_mode))
 
 
-def _ensure_output_parent(output_path: Path) -> OutputParent:
+def _bind_output_parent(
+    output_path: Path,
+    *,
+    create_missing: bool,
+) -> OutputParent:
     parent = lexical_path(output_path).parent
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     current_fd = os.open(os.path.sep, flags)
@@ -273,6 +297,8 @@ def _ensure_output_parent(output_path: Path) -> OutputParent:
             try:
                 before = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
             except FileNotFoundError:
+                if not create_missing:
+                    raise AssuranceInputError(display, "missing-input") from None
                 os.mkdir(part, mode=0o700, dir_fd=current_fd)
                 before = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
             if stat.S_ISLNK(before.st_mode):
@@ -301,6 +327,14 @@ def _ensure_output_parent(output_path: Path) -> OutputParent:
     finally:
         if not keep_descriptor:
             os.close(current_fd)
+
+
+def _ensure_output_parent(output_path: Path) -> OutputParent:
+    return _bind_output_parent(output_path, create_missing=True)
+
+
+def _open_existing_output_parent(output_path: Path) -> OutputParent:
+    return _bind_output_parent(output_path, create_missing=False)
 
 
 def _atomic_replace(source_name: str, destination_name: str, parent_fd: int) -> None:
@@ -443,6 +477,28 @@ def _write_atomically(output_path: Path, rendered: bytes) -> None:
         os.close(output_parent.descriptor)
 
 
+def _check_current_output(output_path: Path, rendered: bytes) -> bool:
+    output = lexical_path(output_path)
+    output_parent = _open_existing_output_parent(output)
+    try:
+        initial = _owned_snapshot(
+            output,
+            allow_missing=False,
+            output_parent=output_parent,
+        )
+        final = _owned_snapshot(
+            output,
+            allow_missing=False,
+            output_parent=output_parent,
+        )
+        matches = initial == final and final[0].raw == rendered
+        if not _output_parent_is_current(output_parent):
+            raise GeneratorError("output parent changed at check postcondition")
+        return matches
+    finally:
+        os.close(output_parent.descriptor)
+
+
 def _parse_mode(argv: Sequence[str] | None) -> GeneratorMode:
     arguments = tuple(sys.argv[1:] if argv is None else argv)
     if arguments == ("--check",):
@@ -462,8 +518,7 @@ def run_generator(
         mode = _parse_mode(argv)
         rendered = _render_twice_in_private_tree(renderer, output_path.name)
         if mode == "check":
-            actual = _owned_snapshot(output_path, allow_missing=False)[0].raw
-            return 0 if actual == rendered else 1
+            return 0 if _check_current_output(output_path, rendered) else 1
         _write_atomically(output_path, rendered)
         return 0
     except Exception:

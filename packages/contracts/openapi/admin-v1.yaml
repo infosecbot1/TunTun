@@ -174,8 +174,8 @@ components:
         payload:
           discriminator:
             mapping:
-              safety.stop_requested: '#/$defs/StopRequestedPayload'
-              speech.wake_detected: '#/$defs/WakeDetectedPayload'
+              safety.stop_requested: '#/components/schemas/tuntun_contracts.events.EventEnvelope/$defs/StopRequestedPayload'
+              speech.wake_detected: '#/components/schemas/tuntun_contracts.events.EventEnvelope/$defs/WakeDetectedPayload'
             propertyName: kind
           oneOf:
           - $ref: '#/components/schemas/tuntun_contracts.events.EventEnvelope/$defs/WakeDetectedPayload'
@@ -277,8 +277,8 @@ components:
             payload:
               discriminator:
                 mapping:
-                  safety.stop_requested: '#/$defs/StopRequestedPayload'
-                  speech.wake_detected: '#/$defs/WakeDetectedPayload'
+                  safety.stop_requested: '#/components/schemas/tuntun_contracts.events.SignedEventEnvelope/$defs/StopRequestedPayload'
+                  speech.wake_detected: '#/components/schemas/tuntun_contracts.events.SignedEventEnvelope/$defs/WakeDetectedPayload'
                 propertyName: kind
               oneOf:
               - $ref: '#/components/schemas/tuntun_contracts.events.SignedEventEnvelope/$defs/WakeDetectedPayload'

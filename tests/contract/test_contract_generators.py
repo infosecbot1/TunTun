@@ -125,6 +125,13 @@ def _subprocess_cli(
 
 def _walk_refs(value: object) -> Iterator[str]:
     if isinstance(value, dict):
+        if "propertyName" in value and "mapping" in value:
+            assert isinstance(value["propertyName"], str)
+            mapping = value["mapping"]
+            assert isinstance(mapping, dict)
+            for target in mapping.values():
+                assert isinstance(target, str)
+                yield target
         for key, child in value.items():
             if key == "$ref":
                 assert isinstance(child, str)
@@ -278,6 +285,8 @@ def test_every_generated_local_reference_resolves() -> None:
     documents = (
         json.loads(generate_schemas.render()),
         yaml.safe_load(generate_openapi.render()),
+        json.loads(read_regular_file(ROOT / SCHEMA_OUTPUT, max_bytes=4 * 1024 * 1024)),
+        yaml.safe_load(read_regular_file(ROOT / OPENAPI_OUTPUT, max_bytes=4 * 1024 * 1024)),
     )
     for document in documents:
         references = tuple(_walk_refs(document))
@@ -285,6 +294,50 @@ def test_every_generated_local_reference_resolves() -> None:
         for reference in references:
             assert reference.startswith("#/")
             assert _resolve_local_ref(document, reference) is not None
+
+
+def test_schema_reference_rewrite_is_limited_to_supported_reference_positions() -> None:
+    source: dict[str, object] = {
+        "$ref": "#/$defs/Root",
+        "discriminator": {
+            "propertyName": "kind",
+            "mapping": {
+                "one": "#/$defs/One",
+                "two": "#/$defs/Two",
+            },
+        },
+        "default": "#/$defs/MustRemainLiteral",
+        "metadata": {"mapping": {"literal": "#/$defs/AlsoLiteral"}},
+    }
+    assert contract_generator_common._rewrite_local_refs(
+        source,
+        model_pointer="#/models/example.Model",
+    ) == {
+        "$ref": "#/models/example.Model/$defs/Root",
+        "discriminator": {
+            "propertyName": "kind",
+            "mapping": {
+                "one": "#/models/example.Model/$defs/One",
+                "two": "#/models/example.Model/$defs/Two",
+            },
+        },
+        "default": "#/$defs/MustRemainLiteral",
+        "metadata": {"mapping": {"literal": "#/$defs/AlsoLiteral"}},
+    }
+
+
+@pytest.mark.parametrize("target", (None, 1, "#/unsupported/Target"))
+def test_schema_reference_rewrite_rejects_invalid_discriminator_mapping_targets(
+    target: object,
+) -> None:
+    with pytest.raises(GeneratorError, match="schema reference"):
+        contract_generator_common._rewrite_local_refs(
+            {
+                "propertyName": "kind",
+                "mapping": {"sample": target},
+            },
+            model_pointer="#/models/example.Model",
+        )
 
 
 def test_duplicate_fully_qualified_model_names_fail_before_schema_render(
@@ -482,6 +535,56 @@ def test_write_rejects_parent_swap_between_baseline_and_publication(
     assert swapped
     assert _tree_snapshot(parent) == ()
     assert _tree_snapshot(old_tree) == ()
+
+
+@pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))
+def test_check_rejects_parent_swap_after_clean_inventory_without_mutation(
+    generator: _GeneratorModule,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / generator.__name__
+    parent.mkdir()
+    replacement = tmp_path / f"{generator.__name__}-replacement"
+    replacement.mkdir()
+    old_tree = tmp_path / f"{generator.__name__}-old"
+    output = parent / generator.OUTPUT_PATH.name
+    replacement_output = replacement / generator.OUTPUT_PATH.name
+    rendered = generator.render()
+    output.write_bytes(rendered)
+    output.chmod(0o600)
+    replacement_output.write_bytes(rendered)
+    replacement_output.chmod(0o600)
+    (replacement / "extra.generated").write_bytes(b"unexpected\n")
+    monkeypatch.setattr(generator, "OUTPUT_PATH", output)
+    old_before = _tree_snapshot(parent)
+    replacement_before = _tree_snapshot(replacement)
+    original_snapshot = contract_generator_common._owned_snapshot
+    swapped = False
+
+    def swap_after_inventory(
+        output_path: Path,
+        *,
+        allow_missing: bool,
+        output_parent: contract_generator_common.OutputParent | None = None,
+    ) -> tuple[FrozenRegularFile, ...]:
+        nonlocal swapped
+        result = original_snapshot(
+            output_path,
+            allow_missing=allow_missing,
+            output_parent=output_parent,
+        )
+        if not allow_missing and not swapped:
+            parent.rename(old_tree)
+            replacement.rename(parent)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(contract_generator_common, "_owned_snapshot", swap_after_inventory)
+    assert generator.main(["--check"]) == 1
+    assert swapped
+    assert _tree_snapshot(parent) == replacement_before
+    assert _tree_snapshot(old_tree) == old_before
 
 
 @pytest.mark.parametrize("generator", (generate_schemas, generate_openapi))

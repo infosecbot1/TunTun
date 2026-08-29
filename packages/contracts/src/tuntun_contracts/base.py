@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum, StrEnum
-from typing import Any, Literal, NoReturn, Self, TypeAlias, TypeVar, cast
+from typing import Any, Literal, NoReturn, TypeAlias, TypeVar, cast
 from unicodedata import normalize
 from uuid import UUID
 
@@ -16,7 +16,9 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -89,12 +91,33 @@ class ContractModel(BaseModel):
         validate_assignment=True,
     )
 
-    @model_validator(mode="after")
-    def normalize_and_validate_contract_value(self) -> Self:
-        for field_name in type(self).model_fields:
-            normalized = _normalize_contract_input(getattr(self, field_name))
-            object.__setattr__(self, field_name, normalized)
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_and_validate_contract_value(
+        cls,
+        value: Any,
+        info: ValidationInfo,
+    ) -> Any:
+        normalized = _normalize_contract_input(value)
+        if info.mode != "json" or not isinstance(normalized, Mapping):
+            return normalized
+        result = dict(normalized)
+        for field_name, field in cls.model_fields.items():
+            input_name = field.alias or field_name
+            if input_name not in result:
+                continue
+            field_json = json.dumps(
+                result[input_name],
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            result[input_name] = TypeAdapter(field.rebuild_annotation()).validate_json(
+                field_json,
+                strict=True,
+                context=info.context,
+            )
+        return result
 
 
 def registered_contract_models() -> tuple[type[ContractModel], ...]:

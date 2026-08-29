@@ -8,7 +8,7 @@ from uuid import UUID
 
 import pytest
 import tuntun_contracts
-from pydantic import ValidationError
+from pydantic import AwareDatetime, Field, ValidationError
 from tuntun_contracts.base import (
     JCS_MAX_SAFE_INTEGER,
     JCS_MIN_SAFE_INTEGER,
@@ -260,6 +260,55 @@ class _NFCProbe(ContractModel):
 
 class _IntegerProbe(ContractModel):
     value: dict[str, list[int]]
+
+
+class _NFCMaxLengthProbe(ContractModel):
+    value: str = Field(max_length=1)
+
+
+class _NFCMinLengthProbe(ContractModel):
+    value: str = Field(min_length=2)
+
+
+class _StrictJSONModeProbe(ContractModel):
+    identifier: UUID
+    occurred_at: AwareDatetime
+    labels: tuple[str, ...]
+
+
+def test_before_normalization_preserves_strict_json_native_conversions() -> None:
+    parsed = _StrictJSONModeProbe.model_validate_json(
+        b'{"identifier":"00000000-0000-0000-0000-000000000001",'
+        b'"occurred_at":"2026-08-27T01:02:03Z","labels":["e\\u0301"]}',
+        strict=True,
+    )
+    assert parsed.identifier == UUID(int=1)
+    assert parsed.occurred_at == datetime(2026, 8, 27, 1, 2, 3, tzinfo=UTC)
+    assert parsed.labels == ("\u00e9",)
+
+
+def test_nfc_expansion_is_validated_before_max_length_in_python_and_json_modes() -> None:
+    assert len("\u0344") == 1
+    assert len("\u0308\u0301") == 2
+    with pytest.raises(ValidationError):
+        _NFCMaxLengthProbe(value="\u0344")
+    with pytest.raises(ValidationError):
+        _NFCMaxLengthProbe.model_validate_json(
+            b'{"value":"\\u0344"}',
+            strict=True,
+        )
+
+
+def test_nfc_contraction_is_validated_before_min_length_in_python_and_json_modes() -> None:
+    assert len("e\u0301") == 2
+    assert len("\u00e9") == 1
+    with pytest.raises(ValidationError):
+        _NFCMinLengthProbe(value="e\u0301")
+    with pytest.raises(ValidationError):
+        _NFCMinLengthProbe.model_validate_json(
+            b'{"value":"e\\u0301"}',
+            strict=True,
+        )
 
 
 def test_contract_ingress_normalizes_nfc_recursively_in_python_and_json_modes() -> None:
