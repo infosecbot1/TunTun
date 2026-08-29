@@ -6765,6 +6765,7 @@ git commit -m "feat(contracts): freeze canonical event primitives"
 **Estimated effort:** 1.5 person-days.
 
 **Files:**
+- Modify: `.github/workflows/ci.yml`
 - Create: `packages/contracts/src/tuntun_contracts/audit.py`
 - Create: `packages/contracts/src/tuntun_contracts/actions.py`
 - Create: `packages/contracts/src/tuntun_contracts/budget.py`
@@ -6786,7 +6787,7 @@ git commit -m "feat(contracts): freeze canonical event primitives"
 - Consumes: `ContractModel`, `Commitment`, `Sensitivity`, event DTOs, and the sole schema/OpenAPI generators and owned artifact paths from Task 4.
 - Produces the exact public DTOs, enums, discriminated aliases, and runtime-checkable protocols in the complete module listings below. Later plans import those names rather than redefining them.
 - `AsyncTransactionBoundary` is the smallest contracts-owned structural boundary: it exposes only async `commit()` and `rollback()`. `AuditPort` is generic over one private contravariant type variable bound to that boundary, so an implementation may bind the exact richer transaction capability it consumes without narrowing a non-generic port method. Task 14 remains the sole owner of the application `UnitOfWorkProtocol`, `AsyncUnitOfWorkProtocol`, and concrete `AsyncUnitOfWork`; its async protocol and implementation structurally satisfy the boundary. Task 15 binds `AsyncAuditLedger` as `AuditPort[AsyncUnitOfWorkProtocol]` when it delegates through `run_sync`, so no contracts-to-application import, duplicate concrete UoW, or Liskov-incompatible parameter narrowing is introduced. The Task 5 type gate independently models every Task 14 sync/async unit-of-work method relevant to that boundary and executes the planned `run_sync` delegation body without an inheritance shortcut. This Task 5 repair also augments the frozen Task 15 ledger listing with `_bind_audit_port`, whose real-class return assignment is checked by Task 15's existing application-source `make typecheck` gate.
-- The complete post-Task-5 root registry is the same immutable package-owned sorted singleton established by Task 4, expanded explicitly to exactly 93 `ContractModel` subclasses. Root `__all__` is an explicit 136-name tuple: the 93 registered models, `ContractModel`, 10 enums, 5 type aliases, 18 protocols, and the 9 already-public Task 4 version/constants/errors/functions. Task 5 budget limits and `usage_total` remain module implementation details and are not root exports.
+- The complete post-Task-5 root registry is the same immutable package-owned sorted singleton established by Task 4, expanded explicitly to exactly 93 `ContractModel` subclasses. Root `__all__` is an explicit 136-name tuple: the 93 registered models, `ContractModel`, 10 enums, 5 type aliases, 18 protocols, and the 9 already-public Task 4 version/constants/errors/functions. Task 5 budget limits, `usage_total`, and `ACTION_RESOURCE_TYPE_BY_NAME` remain module implementation details and are not root exports.
 
 - [ ] **Step 1: Write the red DTO and protocol test**
 
@@ -6828,23 +6829,30 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Literal, Protocol, TypeVar, get_origin
 from uuid import UUID
 
 import pytest
 import tuntun_contracts
+import tuntun_contracts.actions as action_contracts
 from pydantic import TypeAdapter, ValidationError
 from tuntun_contracts.actions import (
     ActionBinding,
     ActionProposalDraft,
     ActionReceipt,
+    BackupActionDraft,
     ConsentActionDraft,
+    CredentialActionDraft,
     IdentityActionDraft,
+    LatencyDeviationActionDraft,
+    MemoryActionDraft,
     ProfileActionDraft,
+    SearchActionDraft,
     TimerCreateActionDraft,
     TimerTargetActionDraft,
+    ValidatedActionProposal,
 )
 from tuntun_contracts.audit import AuditDraft, AuditReceipt
 from tuntun_contracts.base import (
@@ -6869,13 +6877,16 @@ from tuntun_contracts.budget import (
 )
 from tuntun_contracts.events import StopRequestedPayload
 from tuntun_contracts.identity import (
+    IdentityDecision,
     IdentityEvidence,
     IdentityRequest,
+    IdentityStatus,
     PersonaProjection,
     PersonaTraits,
 )
 from tuntun_contracts.memory import (
     ApprovedMemory,
+    DecideMemoryProposal,
     EpisodicContent,
     MemoryAudience,
     MemoryKind,
@@ -6888,8 +6899,14 @@ from tuntun_contracts.memory import (
 from tuntun_contracts.policy import (
     AdminSessionPrincipal,
     AssuranceLevel,
+    AuthContext,
+    AuthenticationChallenge,
+    AuthenticationRequest,
     AuthGrant,
     CurrentOwnerAuthority,
+    PolicyDecision,
+    PolicyEffect,
+    TimerIntent,
 )
 from tuntun_contracts.ports import (
     ActionProviderPort,
@@ -6911,7 +6928,7 @@ from tuntun_contracts.provider import (
     SanitizedProviderRequest,
     SanitizedToolReference,
 )
-from tuntun_contracts.reachy import StopSignal
+from tuntun_contracts.reachy import CameraWindowGrant, StopSignal
 from tuntun_contracts.speech import (
     AudioFormat,
     AuthorizedSynthesisRequest,
@@ -6919,6 +6936,64 @@ from tuntun_contracts.speech import (
 )
 
 _T = TypeVar("_T")
+
+
+def _test_commitment(key_id: str = "contract-test-v1") -> Commitment:
+    return Commitment(
+        algorithm="HMAC-SHA-256",
+        key_id=key_id,
+        value_b64="A" * 43 + "=",
+    )
+
+
+def _test_route(
+    *,
+    purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"] = "cloud_reasoning",
+    request_id: UUID | None = None,
+    turn_id: UUID | None = None,
+    provider: Literal["openai", "qwen"] = "openai",
+    model: str = "gpt-5.6-sol",
+) -> RouteAuthorization:
+    if request_id is None:
+        request_id = UUID(int=1_001)
+    if turn_id is None:
+        turn_id = UUID(int=1_002)
+    return RouteAuthorization(
+        authorization_id=UUID(int=1_003),
+        request_id=request_id,
+        attempt_id=UUID(int=1_004),
+        purpose=purpose,
+        household_id=UUID(int=1_005),
+        subject_id=UUID(int=1_006),
+        session_id=UUID(int=1_007),
+        turn_id=turn_id,
+        provider=provider,
+        model=model,
+        request_commitment=_test_commitment("route-v1"),
+        max_input_bytes=8_388_608,
+        max_input_units=8_000,
+        privacy_receipt_id=UUID(int=1_008),
+        consent_receipt_ids=(UUID(int=1_009),),
+        budget_reservation_id=UUID(int=1_010),
+        maximum_sensitivity=Sensitivity.HOUSEHOLD,
+        expires_at=datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+    )
+
+
+def _test_binding(subject_id: UUID | None) -> ActionBinding:
+    return ActionBinding(
+        household_id=UUID(int=1_102),
+        proposal_id=UUID(int=1_103),
+        turn_id=UUID(int=1_104),
+        idempotency_key=UUID(int=1_105),
+        action_name="timer.create",
+        resource_type="timer",
+        resource_id=UUID(int=1_106),
+        parameter_commitment=_test_commitment("action-v1"),
+        policy_version="policy-v1",
+        session_id=UUID(int=1_107),
+        subject_id=subject_id,
+    )
 
 
 class _PlannedExecutable(Protocol):
@@ -7100,7 +7175,12 @@ def test_required_memory_kinds_are_exact() -> None:
     }
     with pytest.raises(ValidationError):
         PreferenceContent.model_validate(
-            {"category": "food", "key": "spice", "value": "high", "strength_micros": 1.5}
+            {
+                "category": "food",
+                "key": "spice",
+                "value": "high",
+                "strength_micros": 1.5,
+            }
         )
 
 
@@ -7197,6 +7277,38 @@ def test_memory_proposal_operation_target_shape_is_total_and_unambiguous() -> No
                 }
             )
 
+    for invalid_version in (0, -1):
+        with pytest.raises(ValidationError):
+            MemoryProposalDraft.model_validate(replace | {"expected_version": invalid_version})
+    with pytest.raises(ValidationError, match="duplicate source receipt"):
+        MemoryProposalDraft.model_validate(
+            create | {"source_receipt_ids": (UUID(int=507), UUID(int=507))}
+        )
+
+
+def test_rejected_memory_decision_cannot_carry_edited_private_content() -> None:
+    edited = PreferenceContent(
+        category="food",
+        key="spice",
+        value="mild",
+        strength_micros=400_000,
+    )
+    rejected = DecideMemoryProposal(
+        proposal_id=UUID(int=509),
+        decision="reject",
+        edited_content=None,
+        expected_version=1,
+    )
+    assert rejected.edited_content is None
+    DecideMemoryProposal(
+        proposal_id=UUID(int=510),
+        decision="approve",
+        edited_content=edited,
+        expected_version=1,
+    )
+    with pytest.raises(ValidationError, match="rejected proposal cannot carry edited content"):
+        DecideMemoryProposal.model_validate(rejected.model_dump() | {"edited_content": edited})
+
 
 def test_budget_request_carries_closed_usage_not_a_caller_cost() -> None:
     common = {
@@ -7275,7 +7387,10 @@ def test_budget_request_carries_closed_usage_not_a_caller_cost() -> None:
 
 def test_budget_settlement_has_no_caller_actual_and_reports_overrun_freeze_truth() -> None:
     request = BudgetSettlementRequest(reservation_id=UUID(int=65), attempt_id=UUID(int=66))
-    assert tuple(BudgetSettlementRequest.model_fields) == ("reservation_id", "attempt_id")
+    assert tuple(BudgetSettlementRequest.model_fields) == (
+        "reservation_id",
+        "attempt_id",
+    )
     for injected in ({"actual_micros_sgd": 1}, {"provider_usage_present": True}):
         with pytest.raises(ValidationError):
             BudgetSettlementRequest.model_validate(request.model_dump() | injected)
@@ -7336,7 +7451,11 @@ def test_provider_usage_receipt_is_closed_and_bound_to_the_exact_call() -> None:
             receipt.model_dump()
             | {
                 "category": "stt",
-                "billable_usage": {"category": "llm", "input_tokens": 100, "output_tokens": 25},
+                "billable_usage": {
+                    "category": "llm",
+                    "input_tokens": 100,
+                    "output_tokens": 25,
+                },
             }
         )
     with pytest.raises(ValidationError, match="web_search_receipt_requires_exactly_one_call"):
@@ -7352,6 +7471,19 @@ def test_provider_usage_receipt_is_closed_and_bound_to_the_exact_call() -> None:
                 },
             }
         )
+    for category, zero_usage in (
+        ("llm", LlmUsageUnits(category="llm", input_tokens=0, output_tokens=0)),
+        ("stt", SttUsageUnits(category="stt", audio_millis=0)),
+        ("tts", TtsUsageUnits(category="tts", characters=0)),
+    ):
+        with pytest.raises(ValidationError, match="provider_usage_must_be_positive"):
+            ProviderUsageReceiptV1.model_validate(
+                receipt.model_dump()
+                | {
+                    "category": category,
+                    "billable_usage": zero_usage,
+                }
+            )
 
 
 def test_provider_response_exposes_only_the_persisted_usage_receipt_identity() -> None:
@@ -7443,10 +7575,288 @@ def test_assurance_values_are_exact_and_auth_grants_have_no_biometric_source() -
     assert "biometric" not in str(AuthGrant.model_json_schema()).lower()
 
 
+def test_authentication_contracts_cannot_cross_subject_boundaries() -> None:
+    subject_id = UUID(int=1_201)
+    other_subject_id = UUID(int=1_202)
+    binding = _test_binding(subject_id)
+    AuthenticationRequest(
+        subject_id=subject_id,
+        binding=binding,
+        requested_assurance=AssuranceLevel.PASSKEY_VERIFIED,
+    )
+    AuthenticationChallenge(
+        challenge_id=UUID(int=1_203),
+        subject_id=subject_id,
+        binding=binding,
+        factor="passkey",
+        expires_at=datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+    )
+    grant = AuthGrant(
+        grant_id=UUID(int=1_204),
+        subject_id=subject_id,
+        binding=binding,
+        assurance=AssuranceLevel.PASSKEY_VERIFIED,
+        assurance_source="passkey",
+        issued_at=datetime(2026, 8, 27, tzinfo=UTC),
+        expires_at=datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+    )
+    for model, payload in (
+        (
+            AuthenticationRequest,
+            {
+                "subject_id": other_subject_id,
+                "binding": binding,
+                "requested_assurance": AssuranceLevel.PASSKEY_VERIFIED,
+            },
+        ),
+        (
+            AuthenticationChallenge,
+            {
+                "challenge_id": UUID(int=1_205),
+                "subject_id": other_subject_id,
+                "binding": binding,
+                "factor": "passkey",
+                "expires_at": datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+            },
+        ),
+        (AuthGrant, grant.model_dump() | {"subject_id": other_subject_id}),
+    ):
+        with pytest.raises(ValidationError, match="authentication subject binding mismatch"):
+            model.model_validate(payload)
+
+
+def test_auth_context_subject_and_grant_shape_is_exact_for_each_source() -> None:
+    subject_id = UUID(int=1_211)
+    identified_binding = _test_binding(subject_id)
+    guest_binding = _test_binding(None)
+    consumed_at = datetime(2026, 8, 27, tzinfo=UTC)
+    AuthContext(
+        grant_id=None,
+        subject_id=None,
+        binding=guest_binding,
+        assurance=AssuranceLevel.GUEST,
+        assurance_source="guest",
+        consumed_at=consumed_at,
+    )
+    AuthContext(
+        grant_id=None,
+        subject_id=subject_id,
+        binding=identified_binding,
+        assurance=AssuranceLevel.IDENTIFIED,
+        assurance_source="identity",
+        consumed_at=consumed_at,
+    )
+    AuthContext(
+        grant_id=UUID(int=1_212),
+        subject_id=subject_id,
+        binding=identified_binding,
+        assurance=AssuranceLevel.PASSKEY_VERIFIED,
+        assurance_source="passkey",
+        consumed_at=consumed_at,
+    )
+    invalid = (
+        {
+            "grant_id": None,
+            "subject_id": subject_id,
+            "binding": identified_binding,
+            "assurance": AssuranceLevel.GUEST,
+            "assurance_source": "guest",
+            "consumed_at": consumed_at,
+        },
+        {
+            "grant_id": None,
+            "subject_id": None,
+            "binding": guest_binding,
+            "assurance": AssuranceLevel.IDENTIFIED,
+            "assurance_source": "identity",
+            "consumed_at": consumed_at,
+        },
+        {
+            "grant_id": UUID(int=1_213),
+            "subject_id": subject_id,
+            "binding": _test_binding(UUID(int=1_214)),
+            "assurance": AssuranceLevel.PASSKEY_VERIFIED,
+            "assurance_source": "passkey",
+            "consumed_at": consumed_at,
+        },
+    )
+    for payload in invalid:
+        with pytest.raises(ValidationError):
+            AuthContext.model_validate(payload)
+
+
+def test_policy_decision_step_up_assurance_shape_is_unambiguous() -> None:
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    PolicyDecision(
+        effect=PolicyEffect.ALLOW,
+        reason_code="allowed",
+        policy_version="policy-v1",
+        required_assurance=None,
+        expires_at=now + timedelta(seconds=10),
+    )
+    PolicyDecision(
+        effect=PolicyEffect.STEP_UP,
+        reason_code="step_up",
+        policy_version="policy-v1",
+        required_assurance=AssuranceLevel.PASSKEY_VERIFIED,
+        expires_at=now + timedelta(seconds=10),
+    )
+    for effect, required in (
+        (PolicyEffect.ALLOW, AssuranceLevel.PASSKEY_VERIFIED),
+        (PolicyEffect.DENY, AssuranceLevel.CONFIRMED),
+        (PolicyEffect.STEP_UP, None),
+        (PolicyEffect.STEP_UP, AssuranceLevel.GUEST),
+        (PolicyEffect.STEP_UP, AssuranceLevel.IDENTIFIED),
+    ):
+        with pytest.raises(ValidationError):
+            PolicyDecision(
+                effect=effect,
+                reason_code="invalid",
+                policy_version="policy-v1",
+                required_assurance=required,
+                expires_at=now + timedelta(seconds=10),
+            )
+
+
+def test_identity_and_authority_temporal_and_subject_shapes_are_ordered() -> None:
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    evidence = IdentityEvidence(
+        modality="face",
+        subject_id=None,
+        confidence_micros=0,
+        quality_micros=0,
+        liveness_accepted=False,
+        model_version="synthetic",
+        observed_at=now,
+        expires_at=now,
+    )
+    assert evidence.expires_at == evidence.observed_at
+    with pytest.raises(ValidationError):
+        IdentityEvidence.model_validate(
+            evidence.model_dump() | {"expires_at": now - timedelta(microseconds=1)}
+        )
+    IdentityDecision(
+        status=IdentityStatus.VERIFIED,
+        subject_id=UUID(int=1_221),
+        reason_code="verified",
+        expires_at=now + timedelta(seconds=10),
+    )
+    for status, subject_id in (
+        (IdentityStatus.VERIFIED, None),
+        (IdentityStatus.UNKNOWN, UUID(int=1_222)),
+        (IdentityStatus.AMBIGUOUS, UUID(int=1_223)),
+        (IdentityStatus.CONFLICT, UUID(int=1_224)),
+    ):
+        with pytest.raises(ValidationError):
+            IdentityDecision(
+                status=status,
+                subject_id=subject_id,
+                reason_code="invalid",
+                expires_at=now + timedelta(seconds=10),
+            )
+
+    binding = _test_binding(UUID(int=1_225))
+    grant = AuthGrant(
+        grant_id=UUID(int=1_226),
+        subject_id=UUID(int=1_225),
+        binding=binding,
+        assurance=AssuranceLevel.CONFIRMED,
+        assurance_source="explicit_confirmation",
+        issued_at=now,
+        expires_at=now + timedelta(seconds=1),
+    )
+    for expires_at in (now, now - timedelta(microseconds=1)):
+        with pytest.raises(ValidationError):
+            AuthGrant.model_validate(grant.model_dump() | {"expires_at": expires_at})
+
+    session = AdminSessionPrincipal(
+        admin_session_id=UUID(int=1_227),
+        household_id=UUID(int=1_228),
+        subject_id=UUID(int=1_229),
+        owner_generation=1,
+        profile_version=1,
+        session_version=1,
+        access_mode="loopback",
+        authenticated_at=now,
+        idle_expires_at=now + timedelta(minutes=15),
+        absolute_expires_at=now + timedelta(hours=8),
+    )
+    for mutation in (
+        {"idle_expires_at": now},
+        {"absolute_expires_at": now},
+        {
+            "idle_expires_at": now + timedelta(hours=9),
+            "absolute_expires_at": now + timedelta(hours=8),
+        },
+    ):
+        with pytest.raises(ValidationError):
+            AdminSessionPrincipal.model_validate(session.model_dump() | mutation)
+
+
+def test_timer_intent_has_operation_specific_payload() -> None:
+    commitment = _test_commitment("timer-label-v1")
+    TimerIntent(
+        timer_id=UUID(int=1_231),
+        operation="create",
+        duration_seconds=30,
+        label_commitment=commitment,
+        idempotency_key=UUID(int=1_232),
+    )
+    invalid_cases: tuple[
+        tuple[
+            Literal["create", "cancel", "status"],
+            int | None,
+            Commitment | None,
+        ],
+        ...,
+    ] = (
+        ("create", None, commitment),
+        ("create", 30, None),
+        ("cancel", 30, commitment),
+        ("status", 30, None),
+    )
+    for operation, duration, label in invalid_cases:
+        with pytest.raises(ValidationError):
+            TimerIntent(
+                timer_id=UUID(int=1_233),
+                operation=operation,
+                duration_seconds=duration,
+                label_commitment=label,
+                idempotency_key=UUID(int=1_234),
+            )
+
+
 def test_stop_event_and_stop_signal_share_the_exact_closed_sources() -> None:
     expected = {"edge_keyword", "physical_input", "owner_console", "watchdog"}
     assert set(StopRequestedPayload.model_json_schema()["properties"]["source"]["enum"]) == expected
     assert set(StopSignal.model_json_schema()["properties"]["source"]["enum"]) == expected
+
+
+def test_camera_window_action_and_purpose_are_an_exact_pair() -> None:
+    now = datetime(2026, 8, 27, tzinfo=UTC)
+    grant = CameraWindowGrant(
+        grant_id=UUID(int=1_241),
+        household_id=UUID(int=1_242),
+        device_id=UUID(int=1_243),
+        session_id=UUID(int=1_244),
+        turn_id=UUID(int=1_245),
+        subject_id=UUID(int=1_246),
+        action_name="identity.enroll",
+        purpose="explicit_enrollment",
+        max_frames=2,
+        max_frame_bytes=1_024,
+        max_total_bytes=2_048,
+        max_frames_per_second=1,
+        issued_at=now,
+        expires_at=now + timedelta(seconds=2),
+        grant_commitment=_test_commitment("camera-grant-v1"),
+    )
+    with pytest.raises(ValidationError):
+        CameraWindowGrant.model_validate(grant.model_dump() | {"action_name": "identity.observe"})
+    with pytest.raises(ValidationError):
+        CameraWindowGrant.model_validate(
+            grant.model_dump() | {"purpose": "active_conversation_identity"}
+        )
 
 
 def test_route_authorization_is_attempt_and_purpose_specific() -> None:
@@ -7503,6 +7913,83 @@ def test_route_authorization_is_attempt_and_purpose_specific() -> None:
     )
 
 
+def test_provider_request_is_exactly_correlated_with_reasoning_route() -> None:
+    route = _test_route()
+    request = SanitizedProviderRequest(
+        request_id=route.request_id,
+        provider=ProviderName.OPENAI,
+        model=route.model,
+        messages=(SanitizedProviderMessage(role="user", content="synthetic"),),
+        allowed_tools=(),
+        max_output_tokens=128,
+        redaction_receipt_id=UUID(int=1_011),
+        route=route,
+        timeout_ms=1_000,
+    )
+    mutations: tuple[dict[str, object], ...] = (
+        {"request_id": UUID(int=1_012)},
+        {"provider": ProviderName.QWEN},
+        {"model": "other-model"},
+        {"route": route.model_copy(update={"purpose": "cloud_stt"})},
+    )
+    for mutation in mutations:
+        with pytest.raises(ValidationError):
+            SanitizedProviderRequest.model_validate(request.model_dump() | mutation)
+
+
+def test_speech_requests_are_exactly_correlated_with_their_routes() -> None:
+    audio_format = AudioFormat(
+        sample_format="s16le",
+        sample_rate_hz=16_000,
+        channels=1,
+        interleaved=True,
+        channel_layout="mono",
+    )
+    stt_route = _test_route(purpose="cloud_stt", model="gpt-transcribe")
+    stt = AuthorizedTranscriptionRequest(
+        request_id=stt_route.request_id,
+        turn_id=stt_route.turn_id,
+        audio_format=audio_format,
+        audio_commitment=stt_route.request_commitment,
+        audio_bytes=320,
+        duration_ms=10,
+        language_hints=("en", "hi"),
+        route=stt_route,
+    )
+    stt_mutations: tuple[dict[str, object], ...] = (
+        {"request_id": UUID(int=1_013)},
+        {"turn_id": UUID(int=1_014)},
+        {"audio_commitment": _test_commitment("different-audio-v1")},
+        {"route": stt_route.model_copy(update={"purpose": "cloud_reasoning"})},
+    )
+    for mutation in stt_mutations:
+        with pytest.raises(ValidationError):
+            AuthorizedTranscriptionRequest.model_validate(stt.model_dump() | mutation)
+
+    tts_route = _test_route(purpose="cloud_tts", model="tts-1")
+    tts = AuthorizedSynthesisRequest(
+        request_id=tts_route.request_id,
+        turn_id=tts_route.turn_id,
+        text="Namaste",
+        text_commitment=tts_route.request_commitment,
+        segment_index=0,
+        segment_count=1,
+        language="hinglish",
+        dlp_receipt_id=UUID(int=1_015),
+        route=tts_route,
+    )
+    tts_mutations: tuple[dict[str, object], ...] = (
+        {"request_id": UUID(int=1_016)},
+        {"turn_id": UUID(int=1_017)},
+        {"text_commitment": _test_commitment("different-text-v1")},
+        {"segment_index": 1},
+        {"route": tts_route.model_copy(update={"purpose": "cloud_reasoning"})},
+    )
+    for mutation in tts_mutations:
+        with pytest.raises(ValidationError):
+            AuthorizedSynthesisRequest.model_validate(tts.model_dump() | mutation)
+
+
 def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
     commitment = Commitment(
         algorithm="HMAC-SHA-256",
@@ -7556,9 +8043,10 @@ def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
         with pytest.raises(ValidationError):
             SanitizedProviderRequest.model_validate(request | mutation)
 
+    audio_route = route.model_copy(update={"purpose": "cloud_stt", "model": "gpt-transcribe"})
     audio = dict(
-        request_id=UUID(int=811),
-        turn_id=route.turn_id,
+        request_id=audio_route.request_id,
+        turn_id=audio_route.turn_id,
         audio_format=AudioFormat(
             sample_format="s16le",
             sample_rate_hz=16_000,
@@ -7570,7 +8058,7 @@ def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
         audio_bytes=2,
         duration_ms=1,
         language_hints=("en",),
-        route=route,
+        route=audio_route,
     )
     AuthorizedTranscriptionRequest.model_validate(audio)
     for hints in ((), ("en", "en"), ("en", "hi", "en")):
@@ -7596,7 +8084,9 @@ def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
         )
     with pytest.raises(ValidationError):
         IdentityRequest(
-            household_id=route.household_id, session_id=route.session_id, evidence=(evidence,) * 3
+            household_id=route.household_id,
+            session_id=route.session_id,
+            evidence=(evidence,) * 3,
         )
 
     proof = TransportProof(
@@ -7613,7 +8103,10 @@ def test_public_request_collections_have_exact_caps_and_uniqueness() -> None:
 
     provider_schema = SanitizedProviderRequest.model_json_schema()["properties"]
     speech_schema = AuthorizedTranscriptionRequest.model_json_schema()["properties"]
-    assert (provider_schema["messages"]["minItems"], provider_schema["messages"]["maxItems"]) == (
+    assert (
+        provider_schema["messages"]["minItems"],
+        provider_schema["messages"]["maxItems"],
+    ) == (
         1,
         32,
     )
@@ -7690,6 +8183,236 @@ def test_action_drafts_are_a_closed_discriminated_union() -> None:
         TypeAdapter(ActionProposalDraft).validate_python(
             {"action_name": "smart_home.unlock", "parameters": {}}
         )
+
+
+def test_action_resource_type_map_is_explicit_and_complete_for_every_discriminator() -> None:
+    expected = {
+        "timer.create": "timer",
+        "timer.cancel": "timer",
+        "timer.status": "timer",
+        "privacy.on": "privacy",
+        "mute": "mute",
+        "stop": "stop",
+        "privacy.off": "privacy",
+        "mute.off": "mute",
+        "system.status": "system",
+        "reachy.status": "reachy",
+        "reachy.gesture_test": "reachy",
+        "offline.prompt_test": "offline",
+        "memory.propose": "memory",
+        "memory.approve": "memory",
+        "memory.edit_approve": "memory",
+        "memory.reject": "memory",
+        "memory.expire": "memory",
+        "memory.delete": "memory",
+        "memory.export": "memory",
+        "profile.create": "profile",
+        "profile.edit": "profile",
+        "profile.revoke": "profile",
+        "profile.delete": "profile",
+        "profile.export": "profile",
+        "consent.grant": "consent",
+        "consent.revoke": "consent",
+        "identity.enroll": "identity",
+        "identity.enrollment.cancel": "identity",
+        "provider.review": "provider",
+        "provider.configure": "provider",
+        "budget.change": "budget",
+        "access.change": "access",
+        "credential.passkey.add": "credential",
+        "credential.passkey.revoke": "credential",
+        "credential.pin.change": "credential",
+        "credential.recovery.rotate": "credential",
+        "audit.export": "audit",
+        "audit.verify": "audit",
+        "backup.recovery_key.create": "backup",
+        "backup.create": "backup",
+        "backup.verify": "backup",
+        "backup.restore": "backup",
+        "search.profile_mode.change": "search",
+        "search.experimental.activate": "search",
+        "security.finding.suppress": "security_finding",
+        "release.latency.accept": "soak_run",
+        "release.family_stage.review": "family_stage",
+        "release.p1r0": "release_candidate",
+    }
+    schema = TypeAdapter(ActionProposalDraft).json_schema()
+    assert expected == action_contracts.ACTION_RESOURCE_TYPE_BY_NAME
+    assert set(action_contracts.ACTION_RESOURCE_TYPE_BY_NAME) == set(
+        schema["discriminator"]["mapping"]
+    )
+
+
+def test_typed_action_targets_cannot_be_substituted_across_resources() -> None:
+    common = {
+        "proposal_id": UUID(int=1_301),
+        "schema_version": "1.0",
+        "parameters_commitment": _test_commitment("action-target-v1"),
+        "uncertainty_micros": 0,
+        "expires_at": datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+        "idempotency_key": UUID(int=1_302),
+    }
+    subject_id = UUID(int=1_303)
+    memory_id = UUID(int=1_304)
+    memory = MemoryActionDraft.model_validate(
+        common
+        | {
+            "action_name": "memory.delete",
+            "resource_type": "memory",
+            "resource_id": memory_id,
+            "subject_id": subject_id,
+            "memory_id": memory_id,
+            "expected_version": 1,
+        }
+    )
+    profile = ProfileActionDraft.model_validate(
+        common
+        | {
+            "action_name": "profile.revoke",
+            "resource_type": "profile",
+            "resource_id": subject_id,
+            "subject_id": subject_id,
+            "expected_version": 1,
+        }
+    )
+    consent = ConsentActionDraft.model_validate(
+        common
+        | {
+            "action_name": "consent.grant",
+            "resource_type": "consent",
+            "resource_id": subject_id,
+            "subject_id": subject_id,
+            "purpose": "personalization",
+            "expected_latest_receipt_id": None,
+            "policy_version": "policy-v1",
+            "disclosure_version": "disclosure-v1",
+        }
+    )
+    search = SearchActionDraft.model_validate(
+        common
+        | {
+            "action_name": "search.profile_mode.change",
+            "resource_type": "search",
+            "resource_id": subject_id,
+            "subject_id": subject_id,
+            "expected_profile_version": 1,
+            "mode": "no_web",
+        }
+    )
+    credential_id = UUID(int=1_306)
+    credential = CredentialActionDraft.model_validate(
+        common
+        | {
+            "action_name": "credential.passkey.revoke",
+            "resource_type": "credential",
+            "resource_id": credential_id,
+            "credential_id": credential_id,
+            "expected_version": 1,
+        }
+    )
+    backup_id = UUID(int=1_307)
+    backup = BackupActionDraft.model_validate(
+        common
+        | {
+            "action_name": "backup.restore",
+            "resource_type": "backup",
+            "resource_id": backup_id,
+            "backup_id": backup_id,
+            "manifest_sha256": "a" * 64,
+        }
+    )
+    run_id = UUID(int=1_308)
+    latency = LatencyDeviationActionDraft.model_validate(
+        common
+        | {
+            "action_name": "release.latency.accept",
+            "resource_type": "soak_run",
+            "resource_id": run_id,
+            "candidate_version": "p1r0",
+            "candidate_commit": "a" * 40,
+            "run_id": run_id,
+            "metric": "first_audio_p95_ms",
+            "observed_ms": 900,
+            "limit_ms": 1_000,
+            "release_notes_sha256": "b" * 64,
+        }
+    )
+    adapter: TypeAdapter[ActionProposalDraft] = TypeAdapter(ActionProposalDraft)
+    for draft in (memory, profile, consent, search, credential, backup, latency):
+        with pytest.raises(ValidationError):
+            adapter.validate_python(draft.model_dump() | {"resource_id": UUID(int=1_305)})
+        with pytest.raises(ValidationError):
+            adapter.validate_python(draft.model_dump() | {"resource_type": "cross_scope"})
+
+
+def test_validated_action_proposal_correlates_draft_and_binding() -> None:
+    timer_id = UUID(int=1_311)
+    draft = TimerCreateActionDraft(
+        proposal_id=UUID(int=1_312),
+        schema_version="1.0",
+        action_name="timer.create",
+        resource_type="timer",
+        resource_id=timer_id,
+        parameters_commitment=_test_commitment("validated-action-v1"),
+        uncertainty_micros=0,
+        expires_at=datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+        idempotency_key=UUID(int=1_313),
+        duration_seconds=30,
+        label="tea",
+    )
+    binding = ActionBinding(
+        household_id=UUID(int=1_314),
+        proposal_id=draft.proposal_id,
+        turn_id=UUID(int=1_315),
+        idempotency_key=draft.idempotency_key,
+        action_name=draft.action_name,
+        resource_type=draft.resource_type,
+        resource_id=draft.resource_id,
+        parameter_commitment=draft.parameters_commitment,
+        policy_version="policy-v1",
+        session_id=UUID(int=1_316),
+        subject_id=UUID(int=1_317),
+    )
+    proposal = ValidatedActionProposal(
+        draft=draft,
+        binding=binding,
+        resource_scope=f"timer:{timer_id}",
+        required_assurance="confirmed",
+    )
+    mutations = (
+        {"proposal_id": UUID(int=1_318)},
+        {"idempotency_key": UUID(int=1_319)},
+        {"action_name": "timer.cancel"},
+        {"resource_type": "backup"},
+        {"resource_id": UUID(int=1_320)},
+        {"parameter_commitment": _test_commitment("different-action-v1")},
+    )
+    for mutation in mutations:
+        with pytest.raises(ValidationError, match="draft binding mismatch"):
+            ValidatedActionProposal.model_validate(
+                proposal.model_dump() | {"binding": binding.model_copy(update=mutation)}
+            )
+
+
+def test_search_profile_mode_rejects_experimental_activation_timestamps() -> None:
+    base = {
+        "proposal_id": UUID(int=1_321),
+        "schema_version": "1.0",
+        "action_name": "search.profile_mode.change",
+        "resource_type": "search",
+        "resource_id": UUID(int=1_322),
+        "subject_id": UUID(int=1_322),
+        "expected_profile_version": 1,
+        "mode": "no_web",
+        "parameters_commitment": _test_commitment("search-profile-v1"),
+        "uncertainty_micros": 0,
+        "expires_at": datetime(2026, 8, 27, 0, 1, tzinfo=UTC),
+        "idempotency_key": UUID(int=1_323),
+    }
+    SearchActionDraft.model_validate(base)
+    for field in ("activation_issued_at", "activation_expires_at"):
+        with pytest.raises(ValidationError):
+            SearchActionDraft.model_validate(base | {field: datetime(2026, 8, 27, tzinfo=UTC)})
 
 
 def test_timer_drafts_bind_the_exact_server_resource(
@@ -7779,7 +8502,14 @@ def test_persona_contract_is_minimized_typed_and_identifier_free() -> None:
     encoded = str(PersonaProjection.model_json_schema()).lower()
     assert all(
         forbidden not in encoded
-        for forbidden in ("subject_id", "name", "birth", "school", "secret", "free_form")
+        for forbidden in (
+            "subject_id",
+            "name",
+            "birth",
+            "school",
+            "secret",
+            "free_form",
+        )
     )
     with pytest.raises(ValidationError):
         PersonaTraits.model_validate(
@@ -7806,26 +8536,38 @@ def test_persona_contract_is_minimized_typed_and_identifier_free() -> None:
         {},
         {
             "persona_traits": PersonaTraits(
-                context="general", tone="neutral", depth="standard", learning_level="none"
+                context="general",
+                tone="neutral",
+                depth="standard",
+                learning_level="none",
             )
         },
         {
             "profile_class": "adult",
             "persona_traits": PersonaTraits(
-                context="general", tone="neutral", depth="standard", learning_level="none"
+                context="general",
+                tone="neutral",
+                depth="standard",
+                learning_level="none",
             ),
             "expected_version": 1,
         },
         {
             "persona_traits": PersonaTraits(
-                context="general", tone="neutral", depth="standard", learning_level="none"
+                context="general",
+                tone="neutral",
+                depth="standard",
+                learning_level="none",
             ),
             "expected_version": 1,
             "guardian_generation": 2,
         },
         {
             "persona_traits": PersonaTraits(
-                context="general", tone="neutral", depth="standard", learning_level="none"
+                context="general",
+                tone="neutral",
+                depth="standard",
+                learning_level="none",
             ),
             "clear_persona_traits": True,
             "expected_version": 1,
@@ -7935,7 +8677,9 @@ def test_profile_edit_rejects_cross_role_or_null_guardian_generation(
             expected_version=1,
             guardian_generation=guardian_generation,
             parameters_commitment=Commitment(
-                algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="
+                algorithm="HMAC-SHA-256",
+                key_id="action-hmac-v1",
+                value_b64="A" * 43 + "=",
             ),
             uncertainty_micros=0,
             expires_at=datetime(2026, 8, 27, tzinfo=UTC),
@@ -7953,7 +8697,9 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
             "resource_type": action_name.split(".", 1)[0],
             "resource_id": UUID(int=resource_id),
             "parameters_commitment": Commitment(
-                algorithm="HMAC-SHA-256", key_id="action-hmac-v1", value_b64="A" * 43 + "="
+                algorithm="HMAC-SHA-256",
+                key_id="action-hmac-v1",
+                value_b64="A" * 43 + "=",
             ),
             "uncertainty_micros": 0,
             "expires_at": datetime(2026, 8, 27, tzinfo=UTC),
@@ -7973,11 +8719,20 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
             "expected_provider_version": 1,
         },
         "credential.passkey.revoke": base("credential.passkey.revoke", 43)
-        | {"credential_id": UUID(int=243), "expected_version": 1},
+        | {
+            "resource_id": UUID(int=243),
+            "credential_id": UUID(int=243),
+            "expected_version": 1,
+        },
         "backup.restore": base("backup.restore", 44)
-        | {"backup_id": UUID(int=244), "manifest_sha256": "a" * 64},
+        | {
+            "resource_id": UUID(int=244),
+            "backup_id": UUID(int=244),
+            "manifest_sha256": "a" * 64,
+        },
         "memory.edit_approve": base("memory.edit_approve", 45)
         | {
+            "resource_id": UUID(int=246),
             "subject_id": UUID(int=245),
             "proposal_id_ref": UUID(int=246),
             "expected_version": 1,
@@ -7994,6 +8749,7 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
         },
         "identity.enroll": base("identity.enroll", 46)
         | {
+            "resource_id": UUID(int=247),
             "subject_id": UUID(int=247),
             "modality": "face",
             "expected_profile_version": 1,
@@ -8002,6 +8758,7 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
         },
         "search.profile_mode.change": base("search.profile_mode.change", 47)
         | {
+            "resource_id": UUID(int=249),
             "subject_id": UUID(int=249),
             "expected_profile_version": 1,
             "mode": "controlled",
@@ -8009,6 +8766,7 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
         },
         "search.experimental.activate": base("search.experimental.activate", 48)
         | {
+            "resource_id": UUID(int=251),
             "subject_id": UUID(int=251),
             "expected_profile_version": 1,
             "expected_web_consent_receipt_id": UUID(int=252),
@@ -8029,6 +8787,16 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
     }
 
 
+def test_grouped_action_fixtures_are_valid_and_reject_cross_scope_substitution(
+    valid_action_payloads: dict[str, dict[str, object]],
+) -> None:
+    adapter: TypeAdapter[ActionProposalDraft] = TypeAdapter(ActionProposalDraft)
+    for payload in valid_action_payloads.values():
+        adapter.validate_python(payload)
+        with pytest.raises(ValidationError):
+            adapter.validate_python(payload | {"resource_type": "cross_scope"})
+
+
 @pytest.mark.parametrize(
     "action_name,invalid",
     [
@@ -8042,7 +8810,10 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
                 "hard_limit_micros_sgd": 1,
             },
         ),
-        ("credential.passkey.revoke", {"credential_id": UUID(int=31), "expected_version": None}),
+        (
+            "credential.passkey.revoke",
+            {"credential_id": UUID(int=31), "expected_version": None},
+        ),
         ("backup.restore", {"backup_id": None, "manifest_sha256": None}),
         (
             "memory.edit_approve",
@@ -8059,7 +8830,11 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
         ("memory.export", {"profile_id": UUID(int=36)}),
         (
             "identity.enroll",
-            {"subject_id": UUID(int=33), "modality": "face", "expected_profile_version": None},
+            {
+                "subject_id": UUID(int=33),
+                "modality": "face",
+                "expected_profile_version": None,
+            },
         ),
         (
             "search.profile_mode.change",
@@ -8072,7 +8847,11 @@ def valid_action_payloads() -> dict[str, dict[str, object]]:
         ),
         (
             "search.experimental.activate",
-            {"subject_id": UUID(int=34), "mode": "controlled", "expected_profile_version": 1},
+            {
+                "subject_id": UUID(int=34),
+                "mode": "controlled",
+                "expected_profile_version": 1,
+            },
         ),
     ],
 )
@@ -8125,16 +8904,84 @@ def test_planned_task_14_15_audit_signatures_bind_to_the_generic_port() -> None:
 
 ```python
 # tests/contract/test_dependency_direction.py
+from __future__ import annotations
+
+import ast
 from pathlib import Path
+
+
+def _package_for(path: Path, root: Path) -> tuple[str, ...]:
+    relative = path.relative_to(root).with_suffix("")
+    module_parts = ("tuntun_core", *relative.parts)
+    return module_parts[:-1]
+
+
+def _from_import_targets(node: ast.ImportFrom, package: tuple[str, ...]) -> tuple[str, ...]:
+    if node.level:
+        keep = len(package) - (node.level - 1)
+        if keep < 0:
+            return ()
+        base = package[:keep]
+    else:
+        base = ()
+    if node.module:
+        base += tuple(node.module.split("."))
+    return tuple(".".join((*base, alias.name)) for alias in node.names)
+
+
+def _adapter_imports(path: Path, root: Path) -> tuple[str, ...]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    package = _package_for(path, root)
+    targets: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            targets.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level == 0 and (
+                base == "tuntun_core.adapters" or base.startswith("tuntun_core.adapters.")
+            ):
+                targets.append(base)
+            targets.extend(_from_import_targets(node, package))
+    return tuple(
+        target
+        for target in targets
+        if target == "tuntun_core.adapters" or target.startswith("tuntun_core.adapters.")
+    )
+
+
+def test_adapter_import_detector_covers_absolute_and_relative_forms(tmp_path: Path) -> None:
+    root = tmp_path / "tuntun_core"
+    cases = {
+        "domain/absolute.py": "import tuntun_core.adapters.openai\n",
+        "services/from_package.py": "from tuntun_core import adapters\n",
+        "workflows/from_adapter.py": "from tuntun_core.adapters import openai\n",
+        "domain/relative.py": "from .. import adapters\n",
+        "services/nested/relative.py": "from ...adapters import openai\n",
+    }
+    for relative, source in cases.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        assert _adapter_imports(path, root), relative
+
+    allowed = root / "domain" / "allowed.py"
+    allowed.write_text(
+        'TEXT = "tuntun_core.adapters"\n# import tuntun_core.adapters\n',
+        encoding="utf-8",
+    )
+    assert _adapter_imports(allowed, root) == ()
 
 
 def test_domain_services_and_workflows_do_not_import_adapters() -> None:
     root = Path("apps/core/src/tuntun_core")
+    assert root.is_dir()
     violations: list[str] = []
     for area in ("domain", "services", "workflows"):
-        for path in (root / area).rglob("*.py") if (root / area).exists() else ():
-            if "tuntun_core.adapters" in path.read_text(encoding="utf-8"):
-                violations.append(str(path))
+        area_root = root / area
+        for path in area_root.rglob("*.py") if area_root.is_dir() else ():
+            for target in _adapter_imports(path, root):
+                violations.append(f"{path}: {target}")
     assert violations == []
 ```
 
@@ -8150,10 +8997,10 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 # packages/contracts/src/tuntun_contracts/speech.py
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from .base import Commitment, ContractModel
 from .provider import RouteAuthorization
@@ -8190,6 +9037,17 @@ class AuthorizedTranscriptionRequest(ContractModel):
             raise ValueError("duplicate language hint")
         return value
 
+    @model_validator(mode="after")
+    def exact_transcription_route(self) -> Self:
+        if (
+            self.request_id != self.route.request_id
+            or self.turn_id != self.route.turn_id
+            or self.route.purpose != "cloud_stt"
+            or self.audio_commitment != self.route.request_commitment
+        ):
+            raise ValueError("transcription request route mismatch")
+        return self
+
 
 class TranscriptResult(ContractModel):
     request_id: UUID
@@ -8209,6 +9067,18 @@ class AuthorizedSynthesisRequest(ContractModel):
     dlp_receipt_id: UUID
     route: RouteAuthorization
 
+    @model_validator(mode="after")
+    def exact_synthesis_route(self) -> Self:
+        if (
+            self.request_id != self.route.request_id
+            or self.turn_id != self.route.turn_id
+            or self.route.purpose != "cloud_tts"
+            or self.text_commitment != self.route.request_commitment
+            or self.segment_index >= self.segment_count
+        ):
+            raise ValueError("synthesis request route mismatch")
+        return self
+
 
 class SpeechChunk(ContractModel):
     request_id: UUID
@@ -8222,10 +9092,10 @@ class SpeechChunk(ContractModel):
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, field_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from .base import Commitment, ContractModel, Sensitivity
 
@@ -8343,6 +9213,17 @@ class SanitizedProviderRequest(ContractModel):
     redaction_receipt_id: UUID
     route: RouteAuthorization
     timeout_ms: Annotated[int, Field(ge=1_000, le=120_000)]
+
+    @model_validator(mode="after")
+    def exact_reasoning_route(self) -> Self:
+        if (
+            self.route.request_id != self.request_id
+            or self.route.purpose != "cloud_reasoning"
+            or self.route.provider != self.provider.value
+            or self.route.model != self.model
+        ):
+            raise ValueError("provider request route mismatch")
+        return self
 
 
 class ProviderResponse(ContractModel):
@@ -8492,13 +9373,20 @@ class MemoryProposalDraft(ContractModel):
     content: MemoryContent | None
     audience: MemoryAudience | None
     target_memory_id: UUID | None
-    expected_version: int | None
+    expected_version: Annotated[int, Field(ge=1)] | None
     sensitivity: Sensitivity
     confidence_micros: Annotated[int, Field(ge=0, le=1_000_000)]
     reason: Annotated[str, Field(min_length=1, max_length=256)]
     claim_commitment: Commitment
     source_receipt_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=8)]
     expires_at: AwareDatetime
+
+    @field_validator("source_receipt_ids")
+    @classmethod
+    def unique_draft_source_receipts(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate source receipt")
+        return value
 
     @model_validator(mode="after")
     def operation_shape(self) -> Self:
@@ -8591,6 +9479,12 @@ class DecideMemoryProposal(ContractModel):
     decision: Literal["approve", "reject"]
     edited_content: MemoryContent | None
     expected_version: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def rejected_content_is_absent(self) -> Self:
+        if self.decision == "reject" and self.edited_content is not None:
+            raise ValueError("rejected proposal cannot carry edited content")
+        return self
 ```
 
 Create the remaining modules with these exact, complete declarations:
@@ -8600,10 +9494,10 @@ Create the remaining modules with these exact, complete declarations:
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, field_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
 from .base import ContractModel
 
@@ -8624,6 +9518,12 @@ class IdentityEvidence(ContractModel):
     model_version: str
     observed_at: AwareDatetime
     expires_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def expiry_does_not_precede_observation(self) -> Self:
+        if self.expires_at < self.observed_at:
+            raise ValueError("identity evidence expires before observation")
+        return self
 
 
 class IdentityRequest(ContractModel):
@@ -8648,6 +9548,12 @@ class IdentityDecision(ContractModel):
     reason_code: str
     expires_at: AwareDatetime
 
+    @model_validator(mode="after")
+    def verified_subject_shape(self) -> Self:
+        if (self.status is IdentityStatus.VERIFIED) != (self.subject_id is not None):
+            raise ValueError("identity decision subject mismatch")
+        return self
+
 
 class PersonaTraits(ContractModel):
     context: Literal["general", "technical_security", "household_practical", "early_learning"]
@@ -8668,6 +9574,8 @@ class PersonaProjection(ContractModel):
 # packages/contracts/src/tuntun_contracts/actions.py
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Annotated, Literal, Self, TypeAlias
 from uuid import UUID
 
@@ -8677,16 +9585,79 @@ from .base import Commitment, ContractModel
 from .identity import PersonaTraits
 from .memory import MemoryContent, MemoryProposalDraft
 
+ACTION_RESOURCE_TYPE_BY_NAME: Mapping[str, str] = MappingProxyType(
+    {
+        "timer.create": "timer",
+        "timer.cancel": "timer",
+        "timer.status": "timer",
+        "privacy.on": "privacy",
+        "mute": "mute",
+        "stop": "stop",
+        "privacy.off": "privacy",
+        "mute.off": "mute",
+        "system.status": "system",
+        "reachy.status": "reachy",
+        "reachy.gesture_test": "reachy",
+        "offline.prompt_test": "offline",
+        "memory.propose": "memory",
+        "memory.approve": "memory",
+        "memory.edit_approve": "memory",
+        "memory.reject": "memory",
+        "memory.expire": "memory",
+        "memory.delete": "memory",
+        "memory.export": "memory",
+        "profile.create": "profile",
+        "profile.edit": "profile",
+        "profile.revoke": "profile",
+        "profile.delete": "profile",
+        "profile.export": "profile",
+        "consent.grant": "consent",
+        "consent.revoke": "consent",
+        "identity.enroll": "identity",
+        "identity.enrollment.cancel": "identity",
+        "provider.review": "provider",
+        "provider.configure": "provider",
+        "budget.change": "budget",
+        "access.change": "access",
+        "credential.passkey.add": "credential",
+        "credential.passkey.revoke": "credential",
+        "credential.pin.change": "credential",
+        "credential.recovery.rotate": "credential",
+        "audit.export": "audit",
+        "audit.verify": "audit",
+        "backup.recovery_key.create": "backup",
+        "backup.create": "backup",
+        "backup.verify": "backup",
+        "backup.restore": "backup",
+        "search.profile_mode.change": "search",
+        "search.experimental.activate": "search",
+        "security.finding.suppress": "security_finding",
+        "release.latency.accept": "soak_run",
+        "release.family_stage.review": "family_stage",
+        "release.p1r0": "release_candidate",
+    }
+)
+
 
 class ActionDraftBase(ContractModel):
     proposal_id: UUID
     schema_version: Literal["1.0"]
-    resource_type: str
+    resource_type: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
     resource_id: UUID | None
     parameters_commitment: Commitment
     uncertainty_micros: Annotated[int, Field(ge=0, le=1_000_000)]
     expires_at: AwareDatetime
     idempotency_key: UUID
+
+    @model_validator(mode="after")
+    def exact_resource_type(self) -> Self:
+        action_name = getattr(self, "action_name", None)
+        if (
+            action_name is not None
+            and (expected := ACTION_RESOURCE_TYPE_BY_NAME.get(action_name)) != self.resource_type
+        ):
+            raise ValueError(f"{action_name} resource type mismatch; expected {expected}")
+        return self
 
 
 class TimerCreateActionDraft(ActionDraftBase):
@@ -8780,7 +9751,11 @@ class MemoryActionDraft(ActionDraftBase):
                 )
             ):
                 raise ValueError("memory.propose contains decision fields")
-        elif self.action_name in {"memory.approve", "memory.edit_approve", "memory.reject"}:
+        elif self.action_name in {
+            "memory.approve",
+            "memory.edit_approve",
+            "memory.reject",
+        }:
             expected_decision = "reject" if self.action_name == "memory.reject" else "approve"
             if (
                 self.proposal_id_ref is None
@@ -8827,17 +9802,43 @@ class MemoryActionDraft(ActionDraftBase):
             or self.expected_version is None
             or self.export_format != "json"
             or self.resource_id != self.memory_id
-            or any((self.proposal_id_ref, self.decision, self.edited_content, self.memory_proposal))
+            or any(
+                (
+                    self.proposal_id_ref,
+                    self.decision,
+                    self.edited_content,
+                    self.memory_proposal,
+                )
+            )
         ):
             raise ValueError(
                 "memory.export requires one exact resource, version, and closed export format"
             )
+        if self.action_name == "memory.propose":
+            target_resource_id = (
+                None if self.memory_proposal is None else self.memory_proposal.proposal_id
+            )
+        elif self.action_name in {
+            "memory.approve",
+            "memory.edit_approve",
+            "memory.reject",
+            "memory.expire",
+        }:
+            target_resource_id = self.proposal_id_ref
+        else:
+            target_resource_id = self.memory_id
+        if target_resource_id is None or self.resource_id != target_resource_id:
+            raise ValueError("memory action resource must equal the typed target")
         return self
 
 
 class ProfileActionDraft(ActionDraftBase):
     action_name: Literal[
-        "profile.create", "profile.edit", "profile.revoke", "profile.delete", "profile.export"
+        "profile.create",
+        "profile.edit",
+        "profile.revoke",
+        "profile.delete",
+        "profile.export",
     ]
     subject_id: UUID
     profile_class: Literal["owner", "adult", "k2", "n1"] | None = None
@@ -8914,6 +9915,8 @@ class ProfileActionDraft(ActionDraftBase):
                 or self.clear_persona_traits
             ):
                 raise ValueError("profile lifecycle draft requires only expected version")
+        if self.resource_id != self.subject_id:
+            raise ValueError("profile action resource must equal subject")
         return self
 
 
@@ -8939,6 +9942,8 @@ class ConsentActionDraft(ActionDraftBase):
     def expected_state_shape(self) -> ConsentActionDraft:
         if self.action_name == "consent.revoke" and self.expected_latest_receipt_id is None:
             raise ValueError("consent.revoke requires expected latest receipt")
+        if self.resource_id != self.subject_id:
+            raise ValueError("consent action resource must equal subject")
         return self
 
 
@@ -9050,6 +10055,15 @@ class CredentialActionDraft(ActionDraftBase):
         }[self.action_name]
         if {name for name, value in present.items() if value} != expected:
             raise ValueError("credential operation shape mismatch")
+        if (
+            self.action_name
+            in {
+                "credential.passkey.add",
+                "credential.passkey.revoke",
+            }
+            and self.resource_id != self.credential_id
+        ):
+            raise ValueError("passkey action resource must equal credential")
         return self
 
 
@@ -9087,6 +10101,8 @@ class BackupActionDraft(ActionDraftBase):
         }[self.action_name]
         if {name for name, value in present.items() if value} != expected:
             raise ValueError("backup operation shape mismatch")
+        if self.backup_id is not None and self.resource_id != self.backup_id:
+            raise ValueError("backup action resource must equal backup")
         return self
 
 
@@ -9117,6 +10133,8 @@ class SearchActionDraft(ActionDraftBase):
             self.pricing_version,
             self.privacy_generation,
             self.feature_generation,
+            self.activation_issued_at,
+            self.activation_expires_at,
             self.max_passes,
             self.max_sources,
             self.max_duration_seconds,
@@ -9148,6 +10166,8 @@ class SearchActionDraft(ActionDraftBase):
             raise ValueError(
                 "experimental search activation must be positive and at most 30 minutes"
             )
+        if self.resource_id != self.subject_id:
+            raise ValueError("search action resource must equal subject")
         return self
 
 
@@ -9178,6 +10198,12 @@ class LatencyDeviationActionDraft(ActionDraftBase):
     observed_ms: Annotated[int, Field(ge=0, le=120_000)]
     limit_ms: Annotated[int, Field(ge=1, le=120_000)]
     release_notes_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @model_validator(mode="after")
+    def exact_run_resource(self) -> Self:
+        if self.resource_id != self.run_id:
+            raise ValueError("latency action resource must equal soak run")
+        return self
 
 
 class FamilyStageReviewActionDraft(ActionDraftBase):
@@ -9231,8 +10257,26 @@ class ValidatedActionProposal(ContractModel):
     binding: ActionBinding
     resource_scope: Annotated[str, Field(min_length=1, max_length=256)]
     required_assurance: Literal[
-        "guest", "identified", "confirmed", "pin_verified", "passkey_verified", "recovery_verified"
+        "guest",
+        "identified",
+        "confirmed",
+        "pin_verified",
+        "passkey_verified",
+        "recovery_verified",
     ]
+
+    @model_validator(mode="after")
+    def draft_matches_binding(self) -> Self:
+        if (
+            self.binding.proposal_id != self.draft.proposal_id
+            or self.binding.idempotency_key != self.draft.idempotency_key
+            or self.binding.action_name != self.draft.action_name
+            or self.binding.resource_type != self.draft.resource_type
+            or self.binding.resource_id != self.draft.resource_id
+            or self.binding.parameter_commitment != self.draft.parameters_commitment
+        ):
+            raise ValueError("draft binding mismatch")
+        return self
 
 
 class ActionReceipt(ContractModel):
@@ -9299,11 +10343,31 @@ class PolicyDecision(ContractModel):
     required_assurance: AssuranceLevel | None
     expires_at: AwareDatetime
 
+    @model_validator(mode="after")
+    def exact_step_up_shape(self) -> Self:
+        if self.effect is PolicyEffect.STEP_UP:
+            if self.required_assurance not in {
+                AssuranceLevel.CONFIRMED,
+                AssuranceLevel.PIN_VERIFIED,
+                AssuranceLevel.PASSKEY_VERIFIED,
+                AssuranceLevel.RECOVERY_VERIFIED,
+            }:
+                raise ValueError("step-up requires elevated assurance")
+        elif self.required_assurance is not None:
+            raise ValueError("non-step-up decision cannot require assurance")
+        return self
+
 
 class AuthenticationRequest(ContractModel):
     subject_id: UUID
     binding: ActionBinding
     requested_assurance: AssuranceLevel
+
+    @model_validator(mode="after")
+    def subject_matches_binding(self) -> Self:
+        if self.subject_id != self.binding.subject_id:
+            raise ValueError("authentication subject binding mismatch")
+        return self
 
 
 class AuthenticationChallenge(ContractModel):
@@ -9312,6 +10376,12 @@ class AuthenticationChallenge(ContractModel):
     binding: ActionBinding
     factor: Literal["confirmation", "pin", "passkey"]
     expires_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def subject_matches_binding(self) -> Self:
+        if self.subject_id != self.binding.subject_id:
+            raise ValueError("authentication subject binding mismatch")
+        return self
 
 
 class AuthenticationResponse(ContractModel):
@@ -9339,6 +10409,10 @@ class AuthGrant(ContractModel):
         }
         if self.assurance is not expected[self.assurance_source]:
             raise ValueError("assurance source mismatch")
+        if self.subject_id != self.binding.subject_id:
+            raise ValueError("authentication subject binding mismatch")
+        if self.expires_at <= self.issued_at:
+            raise ValueError("authentication grant expiry ordering")
         return self
 
 
@@ -9369,8 +10443,16 @@ class AuthContext(ContractModel):
         }
         if self.assurance is not expected[self.assurance_source]:
             raise ValueError("assurance source mismatch")
-        if (self.assurance_source in {"guest", "identity"}) != (self.grant_id is None):
-            raise ValueError("grant presence mismatch")
+        if self.subject_id != self.binding.subject_id:
+            raise ValueError("authentication context subject binding mismatch")
+        if self.assurance_source == "guest":
+            if self.subject_id is not None or self.grant_id is not None:
+                raise ValueError("guest authentication context shape")
+        elif self.assurance_source == "identity":
+            if self.subject_id is None or self.grant_id is not None:
+                raise ValueError("identity authentication context shape")
+        elif self.subject_id is None or self.grant_id is None:
+            raise ValueError("grant-backed authentication context shape")
         return self
 
 
@@ -9394,6 +10476,12 @@ class AdminSessionPrincipal(ContractModel):
     idle_expires_at: AwareDatetime
     absolute_expires_at: AwareDatetime
 
+    @model_validator(mode="after")
+    def expiry_ordering(self) -> Self:
+        if not self.authenticated_at < self.idle_expires_at <= self.absolute_expires_at:
+            raise ValueError("admin session expiry ordering")
+        return self
+
 
 class TimerIntent(ContractModel):
     timer_id: UUID
@@ -9401,6 +10489,17 @@ class TimerIntent(ContractModel):
     duration_seconds: Annotated[int, Field(ge=1, le=86_400)] | None
     label_commitment: Commitment | None
     idempotency_key: UUID
+
+    @model_validator(mode="after")
+    def exact_operation_payload(self) -> Self:
+        create_payload = self.duration_seconds is not None and self.label_commitment is not None
+        if (self.operation == "create") != create_payload:
+            raise ValueError("timer intent operation payload mismatch")
+        if self.operation != "create" and (
+            self.duration_seconds is not None or self.label_commitment is not None
+        ):
+            raise ValueError("timer intent operation payload mismatch")
+        return self
 ```
 
 ```python
@@ -9499,7 +10598,10 @@ class BudgetReservation(ContractModel):
 
     @model_validator(mode="after")
     def exact_quote_shape(self) -> Self:
-        quote_absent = self.outcome in {"deny_unknown_price", "deny_cloud_egress_frozen"}
+        quote_absent = self.outcome in {
+            "deny_unknown_price",
+            "deny_cloud_egress_frozen",
+        }
         if quote_absent != (self.pricing_commitment is None):
             raise ValueError("budget_reservation_quote_shape_invalid")
         allowed = self.outcome in {"allow", "allow_soft_warning"}
@@ -9546,6 +10648,8 @@ class ProviderUsageReceiptV1(ContractModel):
     def exact_usage_category(self) -> Self:
         if self.category != self.billable_usage.category:
             raise ValueError("provider_usage_category_mismatch")
+        if usage_total(self.billable_usage) <= 0:
+            raise ValueError("provider_usage_must_be_positive")
         if (
             isinstance(self.billable_usage, WebSearchUsageUnits)
             and self.billable_usage.web_search_calls != 1
@@ -9718,6 +10822,12 @@ class CameraWindowGrant(ContractModel):
 
     @model_validator(mode="after")
     def bounded_window(self) -> Self:
+        expected_purpose = {
+            "identity.enroll": "explicit_enrollment",
+            "identity.observe": "active_conversation_identity",
+        }[self.action_name]
+        if self.purpose != expected_purpose:
+            raise ValueError("camera action purpose mismatch")
         if (
             self.expires_at <= self.issued_at
             or (self.expires_at - self.issued_at).total_seconds() > 10
@@ -9780,7 +10890,13 @@ from .provider import (
     RouteConsumption,
     SanitizedProviderRequest,
 )
-from .reachy import ReachyCommand, ReachyHealth, ReachyReceipt, SafetyReceipt, StopSignal
+from .reachy import (
+    ReachyCommand,
+    ReachyHealth,
+    ReachyReceipt,
+    SafetyReceipt,
+    StopSignal,
+)
 from .speech import (
     AudioFormat,
     AuthorizedSynthesisRequest,
@@ -10382,9 +11498,35 @@ __all__ = (
 )
 ```
 
+The Python 3.11 runtime claim is exercised by this dedicated wheel-install job; it does not install or import the Python-3.12-only workspace applications:
+
+```yaml
+# .github/workflows/ci.yml (Task 5 job appended under `jobs`)
+contracts-python311:
+  runs-on: ubuntu-24.04
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      with: {version: "0.8.13", enable-cache: true}
+    - run: uv python install 3.11
+    - run: uv build --package tuntun-contracts --wheel --out-dir dist-py311
+    - run: uv venv --python 3.11 .venv-contracts-py311
+    - run: >-
+        uv pip install --python .venv-contracts-py311/bin/python
+        dist-py311/*.whl "pytest>=8.4,<9"
+    - run: >-
+        .venv-contracts-py311/bin/python -m pytest
+        tests/contract/test_v1_types_and_ports.py
+        tests/contract/test_dependency_direction.py -q
+```
+
 Use the imports shown by each complete module. Every validator has an explicit input and return type, every Python 3.11 alias uses `TypeAlias` plus the targeted Ruff compatibility suppression, and no file has an unused import. Export the public DTO, enum, alias, and protocol names from `tuntun_contracts/__init__.py` without importing any application package; do not root-export Task 5 constants or helper functions.
 
 The contract semantics are also frozen: `IdentityFusionPort` returns identity only and cannot mint assurance. `AuthGrant`/`AuthContext.assurance_source` deliberately has no biometric value, so face/voice evidence cannot create `confirmed` or a stronger assurance. `CurrentOwnerAuthority` is the current database observation of one exact household owner subject, owner generation, and active profile version. `AdminSessionPrincipal` additionally binds that authority snapshot to one exact admin-session version plus idle/absolute expiries; request and mutation boundaries must re-open the session row, reject `revoked_at`, compare every principal field, and revalidate the current owner snapshot before use. It proves only a current owner console session and can never substitute for an action-bound `AuthGrant`/`AuthContext`; every mutation reconstructs its exact binding on the server and consumes a fresh matching grant when the registry requires one. The same admin principal grants no implicit memory-body visibility: every memory create/replace persists one closed `MemoryAudience`, and later read projections use subject, current guardian, and audience policy before decryption. An `ActionBinding` includes household, proposal, turn, idempotency, action, resource, parameter commitment, policy, conversation session, and subject, so a proof cannot be transplanted across any of those boundaries. `ActionReceipt` additionally persists `household_id` and the server-derived `resource_scope`; its idempotency boundary is exactly `(household_id, action_name, resource_scope, idempotency_key)`, matching `action_proposals`, and a global unique idempotency key is forbidden. Frozen DTOs remain fields-only: callers use explicit binding comparators, policy-request factories, and audit-draft mappers rather than calling undeclared methods on them. `RouteAuthorizerPort.consume` is single-use and must compare every `RouteConsumption` binding field to the stored authorization in constant time for commitments before any adapter I/O. `BudgetReservationRequest` carries only a closed, positive, bounded usage ceiling; extra caller monetary estimates are forbidden. Reservation pricing is recomputed locally from the exact provider/model/category and one current price/FX record, and the returned `pricing_commitment` is null exactly for unknown-price or already-frozen denials. `BudgetSettlementRequest` carries no caller cost or usage-presence claim: settlement loads and purpose-verifies the full `ProviderUsageReceiptV1` persisted by the gateway against the exact call/reservation/request/attempt/authorization/provider/model/category and the provider-response commitment, then recomputes the charge from the immutable reservation price snapshot. `ProviderResponse` exposes only the nullable ID of that already-persisted receipt, never raw usage or an authority boolean; a non-null ID is gateway-bound to the exact call/route, while missing or malformed usage never means zero and a succeeded call without one valid persisted receipt freezes/alerts and fails settlement as an unknown possible overage. `BudgetPort.release_unsent` accepts only a matching `TransportProof(disposition="never_sent")`; `sent` and `unknown` reconcile conservatively through settlement, while every retry retains `request_id` and receives a fresh `attempt_id`. A verified actual above the reservation is never clipped; `estimate_overrun` and `cloud_egress_frozen` expose the durable overrun/freeze truth. `CameraWindowGrant` is the only contract that permits camera frames; it is action/subject/session/turn/purpose-bound, single-use, at most 10 seconds/20 frames/10 MiB, and its byte/frame/rate/expiry bounds may only be narrowed downstream.
+
+Every authority-bearing Task 5 DTO is internally total before it reaches an adapter. Authentication requests, challenges, grants, and contexts bind the same non-Guest subject as their `ActionBinding`; Guest carries neither subject nor grant, identity carries a subject without a grant, and grant-backed sources carry both. Provider, STT, and TTS requests bind their outer request/turn/provider/model/purpose and private commitment to the exact route, and TTS requires `segment_index < segment_count`. `PolicyDecision` carries a non-null elevated assurance exactly for `step_up`; camera action/purpose values are an exact pair. Evidence, grants, and admin sessions enforce their nondecreasing/strict expiry order. Successful provider usage is positive, memory versions are positive with unique provenance receipts, rejection cannot smuggle edited content, and timer payloads exist exactly for `create`.
+
+Action resource authority is explicit rather than inferred from a string prefix. `ACTION_RESOURCE_TYPE_BY_NAME` covers every discriminator, including the non-prefix release resources `security_finding`, `soak_run`, `family_stage`, and `release_candidate`. Typed UUID targets are equal to the generic resource ID for timers, memory proposals/records, profiles, consent, identity, search profiles, passkeys, backups, and latency runs. `ValidatedActionProposal` re-correlates proposal, idempotency, action, resource, and commitment fields across its draft and binding. The dependency-direction gate parses absolute and relative Python imports with `ast`, so comments/string literals do not create false positives and alternate import syntax cannot evade the boundary. The contracts wheel has a dedicated Python 3.11 build/install/focused-test CI job in addition to the workspace Python 3.12 matrix.
 
 `web_search` and `child_durable_memory_v1` are Phase 1 contract amendments consumed by the controlled-web and identity/memory supplements. `web_search` is durable owner/adult self-consent; `child_durable_memory_v1` is durable K2/N1 consent granted or revoked only by that child's current primary guardian with the exact guardian generation. Neither widens the baseline `RouteAuthorization` speech/reasoning/TTS purpose union. Every consent draft carries the expected latest receipt ID, guardian generation when applicable, and policy/disclosure versions; revoke requires a non-null expected receipt. Its purpose-separated parameter commitment covers exactly subject, purpose, expected receipt state, guardian generation, and both versions, while the `ActionBinding` separately fixes household, authenticated actor, action, resource, session, and turn. The mutation service reconstructs that payload and compares its HMAC before any receipt access. Guest disclosure/session-consent contracts remain exactly `cloud_stt|cloud_reasoning|cloud_tts`; K2/N1 search and owner/adult child-memory consent are policy-denied even if a caller forges a prepared consent action. This amendment changes no task number or effort estimate.
 
@@ -10424,13 +11566,13 @@ MYPYPATH=packages/contracts/src:. uv run mypy --explicit-package-bases --python-
 git diff --check
 ```
 
-Expected: PASS with `91 passed` from the focused pytest command against the reviewed Task 4 generator suite; required enum values match exactly, every asserted port operation is async, the modeled Task 14/15 ledger signature is statically assignable to `AuditPort[_PlannedAsyncUnitOfWorkProtocol]`, `registered_contract_models()` is the immutable sorted 93-model singleton, and root exports contain exactly 136 unique names spanning 10 enums, 5 aliases, and 18 runtime-checkable protocols without exposing Task 5 constants/helpers. Both generated artifacts contain exactly that complete post-DTO public model registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output. Ruff format/check and strict mypy under Python 3.11 semantics report no errors on all 14 Task 5 Python paths.
+Expected: PASS with `106 passed` from the focused pytest command against the reviewed Task 4 generator suite; required enum values match exactly, every asserted port operation is async, the modeled Task 14/15 ledger signature is statically assignable to `AuditPort[_PlannedAsyncUnitOfWorkProtocol]`, `registered_contract_models()` is the immutable sorted 93-model singleton, and root exports contain exactly 136 unique names spanning 10 enums, 5 aliases, and 18 runtime-checkable protocols without exposing Task 5 constants/helpers. Both generated artifacts contain exactly that complete post-DTO public model registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output. Ruff format/check and strict mypy under Python 3.11 semantics report no errors on all 14 Task 5 Python paths. The standalone CI job builds the wheel, installs it into Python 3.11, and reruns the focused contract/dependency tests outside the Python 3.12 workspace environment.
 
 - [ ] **Step 5: Commit exact Task 5 paths**
 
 ```bash
 git status --short
-git add packages/contracts/src/tuntun_contracts/actions.py packages/contracts/src/tuntun_contracts/audit.py packages/contracts/src/tuntun_contracts/budget.py packages/contracts/src/tuntun_contracts/identity.py packages/contracts/src/tuntun_contracts/memory.py packages/contracts/src/tuntun_contracts/policy.py packages/contracts/src/tuntun_contracts/provider.py packages/contracts/src/tuntun_contracts/reachy.py packages/contracts/src/tuntun_contracts/speech.py packages/contracts/src/tuntun_contracts/ports.py packages/contracts/src/tuntun_contracts/__init__.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/conftest.py tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py
+git add .github/workflows/ci.yml packages/contracts/src/tuntun_contracts/actions.py packages/contracts/src/tuntun_contracts/audit.py packages/contracts/src/tuntun_contracts/budget.py packages/contracts/src/tuntun_contracts/identity.py packages/contracts/src/tuntun_contracts/memory.py packages/contracts/src/tuntun_contracts/policy.py packages/contracts/src/tuntun_contracts/provider.py packages/contracts/src/tuntun_contracts/reachy.py packages/contracts/src/tuntun_contracts/speech.py packages/contracts/src/tuntun_contracts/ports.py packages/contracts/src/tuntun_contracts/__init__.py packages/contracts/schema/v1/contracts.schema.json packages/contracts/openapi/admin-v1.yaml tests/contract/conftest.py tests/contract/test_v1_types_and_ports.py tests/contract/test_dependency_direction.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(contracts): define versioned DTOs and ports"
