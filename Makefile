@@ -17,7 +17,7 @@ test-security:
 test-contract:
 	@files="$$(find tests/contract -type f -name 'test_*.py' -print 2>/dev/null | sort)"; count="$$(printf '%s\n' "$$files" | sed '/^$$/d' | wc -l | tr -d ' ')"; echo "test-contract: $$count discovered files"; if [ "$$count" -gt 0 ]; then uv run pytest $$files; fi
 web-test:
-	pnpm --filter @tuntun/admin test
+	pnpm --filter @tuntun/admin --fail-if-no-match test
 web-build:
 	pnpm --filter @tuntun/admin build
 web-e2e:

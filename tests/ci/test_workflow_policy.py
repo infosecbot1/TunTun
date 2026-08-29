@@ -7,6 +7,8 @@ import yaml
 
 FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 FIXED_RUNNERS = {"ubuntu-24.04", "macos-15-intel"}
+MATRIX_RUNNER = "${{ matrix.os }}"
+APPROVED_MATRIX = {"os": ["ubuntu-24.04", "macos-15-intel"]}
 WORKFLOW_ROOT = Path(".github/workflows")
 
 
@@ -45,6 +47,17 @@ def _assert_permissions(owner: Mapping[str, object], *, required: bool) -> None:
     assert owner["permissions"] == {"contents": "read"}
 
 
+def _assert_strategy_matches_runner(job: Mapping[str, object]) -> None:
+    runner = job.get("runs-on")
+    strategy = job.get("strategy")
+    if runner != MATRIX_RUNNER:
+        assert strategy is None
+        return
+    assert isinstance(strategy, Mapping)
+    assert set(strategy) <= {"fail-fast", "matrix"}
+    assert strategy["matrix"] == APPROVED_MATRIX
+
+
 def _assert_workflow_policy(path: Path) -> None:
     assert path.is_file() and not path.is_symlink()
     raw = path.read_text()
@@ -62,17 +75,16 @@ def _assert_workflow_policy(path: Path) -> None:
     for job in workflow["jobs"].values():
         assert isinstance(job, dict)
         _assert_permissions(job, required=False)
+        _assert_strategy_matches_runner(job)
         if "uses" in job:
             assert set(job) <= {
-                "name", "needs", "if", "strategy", "uses", "with", "permissions",
+                "name", "needs", "if", "uses", "with", "permissions",
             }
             _assert_uses_is_immutable(job["uses"])
             continue
         runner = job["runs-on"]
         if isinstance(runner, str) and runner.startswith("${{"):
-            assert runner == "${{ matrix.os }}"
-            matrix = job["strategy"]["matrix"]
-            assert matrix == {"os": ["ubuntu-24.04", "macos-15-intel"]}
+            assert runner == MATRIX_RUNNER
         else:
             assert runner in FIXED_RUNNERS
         for step in job.get("steps", []):
@@ -138,6 +150,22 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
                 "exclude": [{"os": "ubuntu-24.04"}],
             }},
         }),
+        ("security.yml", {"strategy": {"matrix": {"python": ["3.12"]}}}),
+        ("release.yaml", {"strategy": {"matrix": {
+            "os": ["ubuntu-24.04", "macos-15-intel"],
+            "include": [{"os": "ubuntu-24.04"}],
+        }}}),
+        ("security.yml", {"strategy": {"matrix": {
+            "os": ["ubuntu-24.04", "macos-15-intel"],
+            "exclude": [{"os": "macos-15-intel"}],
+        }}}),
+        ("release.yaml", {
+            "runs-on": "${{ matrix.os }}",
+            "strategy": {"matrix": {
+                "os": ["ubuntu-24.04", "macos-15-intel"],
+                "python": ["3.12"],
+            }},
+        }),
     ):
         changed = {**valid, "jobs": {"check": {**valid["jobs"]["check"], **mutation}}}
         path = root / name
@@ -158,6 +186,8 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
          "secrets": {"token": "${{ secrets['TOKEN'] }}"}},
         {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
          "permissions": {"actions": "write"}},
+        {"uses": "owner/repository/.github/workflows/reuse.yml@" + "b" * 40,
+         "strategy": {"matrix": {"python": ["3.12"]}}},
     ):
         workflow_with_reusable_job = {
             "permissions": {"contents": "read"},

@@ -35,6 +35,19 @@ def test_workspace_admits_all_later_apps_and_typescript_packages() -> None:
     assert workspace == {"packages": ["apps/*", "packages/*"]}
 
 
+def test_web_test_fails_closed_without_an_admin_workspace(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        ["make", "-f", str(ROOT / "Makefile"), "web-test"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode != 0, completed.stdout + completed.stderr
+    assert "No projects found" in completed.stdout + completed.stderr
+
+
 def test_playwright_config_owns_root_discovery_server_and_project() -> None:
     config = (ROOT / "apps/admin/playwright.config.ts").read_text()
     required_fragments = (
