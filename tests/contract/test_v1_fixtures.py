@@ -654,6 +654,13 @@ def test_privacy_documents_have_the_exact_required_structure_and_closed_rows() -
         "build ↔ dependency and model sources",
         "Task 3 private-data and structural scans",
         "manifest hashes and audit triggers",
+        "different EUID",
+        "ACL_TYPE_EXTENDED",
+        "non-owner write ACLs",
+        "non-POSIX ACL filesystems are unsupported",
+        "noncooperative same-EUID filesystem mutation",
+        "stable process umask",
+        "honor the retained parent-directory flock",
     ):
         assert required in threat
 

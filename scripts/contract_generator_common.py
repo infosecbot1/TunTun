@@ -49,6 +49,18 @@ else:
 
 MAX_GENERATED_BYTES = 4 * 1024 * 1024
 MAX_PARENT_FILES = 3
+MAX_LINUX_XATTR_LIST_BYTES = 64 * 1024
+LINUX_POSIX_ACL_FILESYSTEM_MAGICS = frozenset(
+    {
+        0xEF53,  # ext2/ext3/ext4
+        0x58465342,  # XFS
+        0x9123683E,  # Btrfs
+        0x01021994,  # tmpfs
+        0x794C7630,  # overlayfs
+        0xF2F52010,  # F2FS
+    }
+)
+LINUX_POSIX_ACL_ATTRIBUTES = frozenset({b"system.posix_acl_access", b"system.posix_acl_default"})
 GeneratorMode: TypeAlias = Literal["check", "write"]  # noqa: UP040
 Renderer: TypeAlias = Callable[[], bytes]  # noqa: UP040
 
@@ -304,17 +316,20 @@ def _bind_output_parent(
             except FileNotFoundError:
                 if not create_missing:
                     raise AssuranceInputError(display, "missing-input") from None
+                _require_owner_controlled_creation_parent(current_fd)
+                _require_supported_private_directory_umask(current_fd)
                 os.mkdir(part, mode=0o700, dir_fd=current_fd)
-                before = os.stat(part, dir_fd=current_fd, follow_symlinks=False)
-            if stat.S_ISLNK(before.st_mode):
-                raise AssuranceInputError(display, "symlink-input")
-            if not stat.S_ISDIR(before.st_mode):
-                raise AssuranceInputError(display, "not-directory")
-            child_fd = os.open(part, flags, dir_fd=current_fd)
-            opened = os.fstat(child_fd)
-            if before.st_dev != opened.st_dev or before.st_ino != opened.st_ino:
-                os.close(child_fd)
-                raise AssuranceInputError(display, "input-changed-during-scan")
+                child_fd, opened = _open_created_private_directory(current_fd, part)
+            else:
+                if stat.S_ISLNK(before.st_mode):
+                    raise AssuranceInputError(display, "symlink-input")
+                if not stat.S_ISDIR(before.st_mode):
+                    raise AssuranceInputError(display, "not-directory")
+                child_fd = os.open(part, flags, dir_fd=current_fd)
+                opened = os.fstat(child_fd)
+                if before.st_dev != opened.st_dev or before.st_ino != opened.st_ino:
+                    os.close(child_fd)
+                    raise AssuranceInputError(display, "input-changed-during-scan")
             os.close(current_fd)
             current_fd = child_fd
         validated = validate_root(parent)
@@ -594,6 +609,8 @@ class GeneratedDirectorySnapshot:
     _directory: GeneratedDirectoryHandle
     _entries: tuple[GeneratedDirectoryEntry, ...]
     _closed: bool = False
+    _directory_disposed: bool = False
+    _parent_disposed: bool = False
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -612,14 +629,31 @@ class GeneratedDirectorySnapshot:
             raise GeneratorError("generated directory snapshot is closed")
 
     def close(self) -> None:
-        if self._closed:
+        if self._directory_disposed and self._parent_disposed:
             return
         self._closed = True
-        os.close(self._directory.descriptor)
-        try:
-            fcntl.flock(self._parent.descriptor, fcntl.LOCK_UN)
-        finally:
-            os.close(self._parent.descriptor)
+        cleanup_errors: list[BaseException] = []
+        if not self._directory_disposed:
+            self._directory_disposed = True
+            try:
+                os.close(self._directory.descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if not self._parent_disposed:
+            try:
+                fcntl.flock(self._parent.descriptor, fcntl.LOCK_UN)
+            except BaseException as error:
+                cleanup_errors.append(error)
+            self._parent_disposed = True
+            try:
+                os.close(self._parent.descriptor)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if cleanup_errors:
+            primary_error, *additional_errors = cleanup_errors
+            for cleanup_error in additional_errors:
+                primary_error.add_note(f"additional snapshot cleanup failure: {cleanup_error}")
+            raise primary_error
 
     def __enter__(self) -> GeneratedDirectorySnapshot:
         self._require_open()
@@ -631,7 +665,13 @@ class GeneratedDirectorySnapshot:
         exception: object,
         traceback: object,
     ) -> None:
-        del exception_type, exception, traceback
+        del exception_type, traceback
+        if isinstance(exception, BaseException):
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                exception.add_note(f"generated snapshot cleanup failure: {cleanup_error}")
+            return
         self.close()
 
 
@@ -706,6 +746,188 @@ def _require_directory_transaction_platform() -> None:
         _native_function("renameat2")
     else:
         raise GeneratorError("atomic generated-directory publication is unsupported")
+
+
+def _require_supported_private_directory_umask(parent_fd: int) -> None:
+    """Probe mkdir permission semantics on the exact bound creation parent."""
+
+    flags = (
+        os.O_RDONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    probe_name = ""
+    for _ in range(8):
+        probe_name = f".tuntun-directory-mode-probe.{secrets.token_hex(16)}"
+        try:
+            descriptor = os.open(probe_name, flags, stat.S_IRUSR, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        break
+    if descriptor is None:
+        raise GeneratorError("could not reserve a private directory-mode probe")
+
+    primary_error: BaseException | None = None
+    try:
+        os.unlink(probe_name, dir_fd=parent_fd)
+    except BaseException as error:
+        primary_error = error
+
+    if primary_error is None:
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 0
+                or stat.S_IMODE(metadata.st_mode) != stat.S_IRUSR
+                or _directory_has_extended_acl(descriptor)
+            ):
+                raise GeneratorError(
+                    "process umask and creation-parent ACLs must preserve an owner-only "
+                    "readable probe"
+                )
+        except BaseException as error:
+            primary_error = error
+
+    cleanup_errors: list[BaseException] = []
+    try:
+        os.close(descriptor)
+    except BaseException as error:
+        cleanup_errors.append(error)
+
+    if primary_error is not None:
+        for cleanup_error in cleanup_errors:
+            primary_error.add_note(f"directory-mode probe cleanup failure: {cleanup_error}")
+        raise primary_error
+    if cleanup_errors:
+        cleanup_error, *additional_errors = cleanup_errors
+        for additional_error in additional_errors:
+            cleanup_error.add_note(
+                f"additional directory-mode probe cleanup failure: {additional_error}"
+            )
+        raise cleanup_error
+
+
+def _require_supported_linux_acl_filesystem_magic(magic: int) -> None:
+    if magic not in LINUX_POSIX_ACL_FILESYSTEM_MAGICS:
+        raise GeneratorError(f"unsupported Linux filesystem ACL semantics: 0x{magic:x}")
+
+
+def _classify_linux_acl_attribute(attribute: bytes) -> Literal["posix", "other"]:
+    if attribute in LINUX_POSIX_ACL_ATTRIBUTES:
+        return "posix"
+    normalized = attribute.lower()
+    if normalized.startswith((b"system.", b"security.", b"trusted.")) and b"acl" in normalized:
+        raise GeneratorError(
+            f"unsupported Linux discretionary ACL attribute: {attribute.decode('ascii', 'replace')}"
+        )
+    return "other"
+
+
+def _linux_filesystem_magic(library: ctypes.CDLL, descriptor: int) -> int:
+    filesystem_words = (ctypes.c_long * 32)()
+    inspector = library.fstatfs
+    inspector.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    inspector.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if inspector(descriptor, ctypes.byref(filesystem_words)) != 0:
+        error_number = ctypes.get_errno()
+        raise GeneratorError(
+            f"creation-parent filesystem inspection failed: {os.strerror(error_number)}"
+        )
+    word_bits = ctypes.sizeof(ctypes.c_long) * 8
+    return int(filesystem_words[0]) & ((1 << word_bits) - 1)
+
+
+def _linux_extended_attribute_names(
+    library: ctypes.CDLL,
+    descriptor: int,
+) -> tuple[bytes, ...]:
+    lister = library.flistxattr
+    lister.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_size_t]
+    lister.restype = ctypes.c_ssize_t
+    for _ in range(4):
+        ctypes.set_errno(0)
+        required = lister(descriptor, None, 0)
+        if required < 0:
+            error_number = ctypes.get_errno()
+            raise GeneratorError(
+                f"creation-parent ACL inspection failed: {os.strerror(error_number)}"
+            )
+        if required == 0:
+            return ()
+        if required > MAX_LINUX_XATTR_LIST_BYTES:
+            raise GeneratorError("creation-parent extended-attribute inventory is too large")
+        buffer = ctypes.create_string_buffer(required)
+        ctypes.set_errno(0)
+        actual = lister(descriptor, buffer, required)
+        if actual < 0:
+            error_number = ctypes.get_errno()
+            if error_number == errno.ERANGE:
+                continue
+            raise GeneratorError(
+                f"creation-parent ACL inspection failed: {os.strerror(error_number)}"
+            )
+        if actual == 0 or actual > required:
+            raise GeneratorError("creation-parent ACL inventory changed during inspection")
+        raw_names = buffer.raw[:actual]
+        if not raw_names.endswith(b"\0"):
+            raise GeneratorError("creation-parent ACL inventory is malformed")
+        names = tuple(raw_names[:-1].split(b"\0"))
+        if not names or any(not name for name in names):
+            raise GeneratorError("creation-parent ACL inventory is malformed")
+        return names
+    raise GeneratorError("creation-parent ACL inventory changed during inspection")
+
+
+def _directory_has_extended_acl(descriptor: int) -> bool:
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        getter = library.acl_get_fd_np
+        getter.argtypes = [ctypes.c_int, ctypes.c_int]
+        getter.restype = ctypes.c_void_p
+        ctypes.set_errno(0)
+        acl_pointer = getter(descriptor, 0x00000100)
+        if acl_pointer is None:
+            error_number = ctypes.get_errno()
+            if error_number == errno.ENOENT:
+                return False
+            raise GeneratorError(
+                f"creation-parent ACL inspection failed: {os.strerror(error_number)}"
+            )
+        freer = library.acl_free
+        freer.argtypes = [ctypes.c_void_p]
+        freer.restype = ctypes.c_int
+        if freer(acl_pointer) != 0:
+            error_number = ctypes.get_errno()
+            raise GeneratorError(f"creation-parent ACL release failed: {os.strerror(error_number)}")
+        return True
+    if sys.platform.startswith("linux"):
+        magic = _linux_filesystem_magic(library, descriptor)
+        _require_supported_linux_acl_filesystem_magic(magic)
+        for attribute in _linux_extended_attribute_names(library, descriptor):
+            if _classify_linux_acl_attribute(attribute) == "posix":
+                return True
+        return False
+    raise GeneratorError("directory ACL inspection is unsupported")
+
+
+def _require_owner_controlled_creation_parent(parent_fd: int) -> None:
+    metadata = os.fstat(parent_fd)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or _directory_has_extended_acl(parent_fd)
+    ):
+        raise GeneratorError(
+            "private directory creation parent must be owner-controlled, ACL-free, and not "
+            "shared-writable"
+        )
 
 
 def _native_rename(
@@ -834,6 +1056,59 @@ def _descriptor_identity(metadata: os.stat_result) -> tuple[int, int]:
     return metadata.st_dev, metadata.st_ino
 
 
+def _open_created_private_directory(
+    parent_fd: int,
+    name: str,
+) -> tuple[int, os.stat_result]:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or before.st_uid != os.geteuid()
+        or stat.S_IMODE(before.st_mode) & ~PRIVATE_DIRECTORY_MODE
+    ):
+        raise GeneratorError("new private directory has an unsafe type, owner, or mode")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=parent_fd,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            _descriptor_identity(before) != _descriptor_identity(opened)
+            or not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) & ~PRIVATE_DIRECTORY_MODE
+        ):
+            raise GeneratorError("new private directory changed during open")
+        os.fchmod(descriptor, PRIVATE_DIRECTORY_MODE)
+        normalized = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        _validate_directory_metadata(normalized, private=True)
+        _validate_directory_metadata(named, private=True)
+        if _directory_has_extended_acl(descriptor):
+            raise GeneratorError("new private directory inherited a discretionary ACL")
+        if not (
+            _descriptor_identity(before)
+            == _descriptor_identity(opened)
+            == _descriptor_identity(normalized)
+            == _descriptor_identity(named)
+        ):
+            raise GeneratorError("new private directory changed during normalization")
+    except BaseException as validation_error:
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup_error:
+            validation_error.add_note(
+                f"created-directory validation cleanup failure: {cleanup_error}"
+            )
+        raise
+    return descriptor, normalized
+
+
 def _open_generated_directory(
     parent_fd: int,
     name: str,
@@ -853,10 +1128,17 @@ def _open_generated_directory(
     opened = os.fstat(descriptor)
     try:
         _validate_directory_metadata(opened, private=private)
+        if _directory_has_extended_acl(descriptor):
+            raise GeneratorError("generated directory has a discretionary ACL")
         if _descriptor_identity(before) != _descriptor_identity(opened):
             raise GeneratorError("generated directory changed during open")
-    except Exception:
-        os.close(descriptor)
+    except BaseException as validation_error:
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup_error:
+            validation_error.add_note(
+                f"generated-directory validation cleanup failure: {cleanup_error}"
+            )
         raise
     return GeneratedDirectoryHandle(
         name=name,
@@ -882,10 +1164,16 @@ def _create_generated_directory(
     parent_fd: int,
     name: str,
 ) -> GeneratedDirectoryHandle:
+    _require_owner_controlled_creation_parent(parent_fd)
+    _require_supported_private_directory_umask(parent_fd)
     os.mkdir(name, mode=PRIVATE_DIRECTORY_MODE, dir_fd=parent_fd)
-    handle = _open_generated_directory(parent_fd, name, private=True)
-    os.fchmod(handle.descriptor, PRIVATE_DIRECTORY_MODE)
-    return handle
+    descriptor, opened = _open_created_private_directory(parent_fd, name)
+    return GeneratedDirectoryHandle(
+        name=name,
+        descriptor=descriptor,
+        device=opened.st_dev,
+        inode=opened.st_ino,
+    )
 
 
 def _directory_is_named(
@@ -1671,8 +1959,11 @@ def _write_generated_directory(
     transaction: GeneratedDirectoryHandle | None = None
     stage: GeneratedDirectoryHandle | None = None
     candidate_receipt: GeneratedDirectoryReceipt | None = None
+    exclusive_lock_acquired = False
     try:
+        _require_owner_controlled_creation_parent(parent.descriptor)
         _lock_output_parent(parent, exclusive=True)
+        exclusive_lock_acquired = True
         _reconcile_transaction_locked(parent, output.name, expected_names, rendered)
         baseline_pair = _public_receipt(parent, output.name, expected_names)
         baseline_receipt: GeneratedDirectoryReceipt | None = None
@@ -1780,17 +2071,21 @@ def _write_generated_directory(
         finally:
             os.close(final[0].descriptor)
     except BaseException as publication_error:
-        try:
-            _reconcile_transaction_locked(parent, output.name, expected_names, rendered)
-        except BaseException as recovery_error:
-            publication_error.add_note(f"transaction recovery retained state: {recovery_error}")
+        if exclusive_lock_acquired:
+            try:
+                _reconcile_transaction_locked(parent, output.name, expected_names, rendered)
+            except BaseException as recovery_error:
+                publication_error.add_note(f"transaction recovery retained state: {recovery_error}")
         raise
     finally:
         for handle in (stage, transaction, baseline_handle):
             if handle is not None:
                 with suppress(OSError):
                     os.close(handle.descriptor)
-        _close_output_parent(parent)
+        if exclusive_lock_acquired:
+            _close_output_parent(parent)
+        else:
+            os.close(parent.descriptor)
 
 
 def open_generated_directory_snapshot(
@@ -1802,8 +2097,10 @@ def open_generated_directory_snapshot(
     output = lexical_path(output_directory)
     parent = _bind_output_parent(output, create_missing=False)
     directory: GeneratedDirectoryHandle | None = None
+    parent_lock_acquired = False
     try:
         _lock_output_parent(parent, exclusive=False)
+        parent_lock_acquired = True
         try:
             os.stat(
                 _transaction_name(output.name),
@@ -1825,10 +2122,24 @@ def open_generated_directory_snapshot(
             raise GeneratorError("published generated directory changed during snapshot")
         _require_output_parent_current(parent)
         return GeneratedDirectorySnapshot(parent, directory, entries)
-    except BaseException:
+    except BaseException as snapshot_error:
+        cleanup_errors: list[BaseException] = []
         if directory is not None:
-            os.close(directory.descriptor)
-        _close_output_parent(parent)
+            try:
+                os.close(directory.descriptor)
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        if parent_lock_acquired:
+            try:
+                fcntl.flock(parent.descriptor, fcntl.LOCK_UN)
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        try:
+            os.close(parent.descriptor)
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+        for recorded_cleanup_error in cleanup_errors:
+            snapshot_error.add_note(f"generated snapshot cleanup failure: {recorded_cleanup_error}")
         raise
 
 
@@ -1850,6 +2161,12 @@ def run_directory_generator(
     renderer: DirectoryRenderer,
     argv: Sequence[str] | None,
 ) -> int:
+    """Run the maintainer-only fixture writer or its nonmutating check.
+
+    Write mode requires a stable process umask and owner-controlled creation
+    parents. Same-EUID local writers are trusted to honor the parent flock.
+    """
+
     try:
         names = _closed_generated_names(expected_names)
         rendered = _render_directory_twice(renderer, names)

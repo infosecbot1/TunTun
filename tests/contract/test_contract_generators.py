@@ -2,17 +2,21 @@ from __future__ import annotations
 
 # The import split below deliberately bootstraps the uninstalled root namespace.
 # ruff: noqa: E402
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import stat
+import struct
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
-from typing import Protocol, cast
+from typing import NoReturn, Protocol, cast
 
 # The root project is not an installed package; preserve package-import coverage
 # without changing workspace metadata or adding a suite-wide import side effect.
@@ -835,6 +839,186 @@ def test_generated_directory_write_check_snapshot_and_exact_inventory(
         snapshot.read_bytes("a.json")
 
 
+def test_snapshot_close_failure_still_releases_parent_lock_and_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    snapshot = contract_generator_common.open_generated_directory_snapshot(
+        output,
+        DIRECTORY_NAMES,
+    )
+    directory_fd = snapshot._directory.descriptor
+    parent_fd = snapshot._parent.descriptor
+    real_close = os.close
+    failed = False
+
+    def consume_directory_close_then_fail(descriptor: int) -> None:
+        nonlocal failed
+        if descriptor == directory_fd and not failed:
+            failed = True
+            real_close(descriptor)
+            raise OSError(errno.EIO, "synthetic snapshot close failure")
+        real_close(descriptor)
+
+    monkeypatch.setattr(os, "close", consume_directory_close_then_fail)
+    with pytest.raises(OSError, match="synthetic snapshot close failure") as close_error:
+        snapshot.close()
+    assert close_error.value.errno == errno.EIO
+    assert failed
+    with pytest.raises(OSError) as parent_error:
+        os.fstat(parent_fd)
+    assert parent_error.value.errno == errno.EBADF
+    with pytest.raises(OSError) as directory_error:
+        os.fstat(directory_fd)
+    assert directory_error.value.errno == errno.EBADF
+
+    replacement_fd = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    if replacement_fd != directory_fd:
+        os.dup2(replacement_fd, directory_fd)
+        real_close(replacement_fd)
+    snapshot.close()
+    os.fstat(directory_fd)
+    real_close(directory_fd)
+    snapshot.close()
+
+
+def test_snapshot_close_preserves_primary_error_across_parent_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    snapshot = contract_generator_common.open_generated_directory_snapshot(
+        output,
+        DIRECTORY_NAMES,
+    )
+    directory_fd = snapshot._directory.descriptor
+    parent_fd = snapshot._parent.descriptor
+    real_close = os.close
+    real_flock = fcntl.flock
+    failed_directory_close = False
+
+    def consume_directory_close_then_fail(descriptor: int) -> None:
+        nonlocal failed_directory_close
+        if descriptor == directory_fd and not failed_directory_close:
+            failed_directory_close = True
+            real_close(descriptor)
+            raise OSError(errno.EIO, "synthetic snapshot close failure")
+        real_close(descriptor)
+
+    def fail_parent_unlock(descriptor: int, operation: int) -> None:
+        if descriptor == parent_fd and operation == fcntl.LOCK_UN:
+            raise OSError(errno.EPERM, "synthetic parent unlock failure")
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(os, "close", consume_directory_close_then_fail)
+    monkeypatch.setattr(fcntl, "flock", fail_parent_unlock)
+    with pytest.raises(OSError, match="synthetic snapshot close failure") as close_error:
+        snapshot.close()
+    assert close_error.value.errno == errno.EIO
+    assert any("synthetic parent unlock failure" in note for note in close_error.value.__notes__)
+    with pytest.raises(OSError) as parent_error:
+        os.fstat(parent_fd)
+    assert parent_error.value.errno == errno.EBADF
+    with pytest.raises(OSError) as directory_error:
+        os.fstat(directory_fd)
+    assert directory_error.value.errno == errno.EBADF
+    snapshot.close()
+
+
+def test_snapshot_context_preserves_body_error_when_cleanup_also_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    snapshot = contract_generator_common.open_generated_directory_snapshot(
+        output,
+        DIRECTORY_NAMES,
+    )
+    directory_fd = snapshot._directory.descriptor
+    parent_fd = snapshot._parent.descriptor
+    real_close = os.close
+    failed = False
+
+    def consume_directory_close_then_fail(descriptor: int) -> None:
+        nonlocal failed
+        real_close(descriptor)
+        if descriptor == directory_fd and not failed:
+            failed = True
+            raise OSError(errno.EIO, "synthetic snapshot close failure")
+
+    monkeypatch.setattr(os, "close", consume_directory_close_then_fail)
+    with pytest.raises(ValueError, match="synthetic body failure") as body_error, snapshot:
+        raise ValueError("synthetic body failure")
+    assert any("synthetic snapshot close failure" in note for note in body_error.value.__notes__)
+    for descriptor in (directory_fd, parent_fd):
+        with pytest.raises(OSError) as closed_error:
+            os.fstat(descriptor)
+        assert closed_error.value.errno == errno.EBADF
+
+
+def test_snapshot_construction_preserves_primary_error_and_disposes_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    assert _run_directory_generator(output, ["--write"]) == 0
+    real_open = contract_generator_common._open_generated_directory
+    real_lock = contract_generator_common._lock_output_parent
+    real_close = os.close
+    directory_fd: int | None = None
+    parent_fd: int | None = None
+    failed = False
+
+    def capture_open(
+        bound_parent_fd: int,
+        name: str,
+        *,
+        private: bool,
+    ) -> contract_generator_common.GeneratedDirectoryHandle:
+        nonlocal directory_fd
+        handle = real_open(bound_parent_fd, name, private=private)
+        directory_fd = handle.descriptor
+        return handle
+
+    def capture_lock(
+        parent: contract_generator_common.OutputParent,
+        *,
+        exclusive: bool,
+    ) -> None:
+        nonlocal parent_fd
+        real_lock(parent, exclusive=exclusive)
+        parent_fd = parent.descriptor
+
+    def fail_snapshot(*args: object, **kwargs: object) -> NoReturn:
+        del args, kwargs
+        raise ValueError("synthetic snapshot construction failure")
+
+    def consume_directory_close_then_fail(descriptor: int) -> None:
+        nonlocal failed
+        real_close(descriptor)
+        if descriptor == directory_fd and not failed:
+            failed = True
+            raise OSError(errno.EIO, "synthetic directory cleanup failure")
+
+    monkeypatch.setattr(contract_generator_common, "_open_generated_directory", capture_open)
+    monkeypatch.setattr(contract_generator_common, "_lock_output_parent", capture_lock)
+    monkeypatch.setattr(contract_generator_common, "_snapshot_generated_directory", fail_snapshot)
+    monkeypatch.setattr(os, "close", consume_directory_close_then_fail)
+    with pytest.raises(ValueError, match="synthetic snapshot construction failure") as primary:
+        contract_generator_common.open_generated_directory_snapshot(output, DIRECTORY_NAMES)
+    assert any("synthetic directory cleanup failure" in note for note in primary.value.__notes__)
+    assert directory_fd is not None
+    assert parent_fd is not None
+    for descriptor in (directory_fd, parent_fd):
+        with pytest.raises(OSError) as closed_error:
+            os.fstat(descriptor)
+        assert closed_error.value.errno == errno.EBADF
+
+
 def test_safe_git_checkout_modes_are_accepted_and_replaced(tmp_path: Path) -> None:
     output = tmp_path / "v1"
     assert _run_directory_generator(output, ["--write"]) == 0
@@ -1093,6 +1277,449 @@ def test_parent_directory_fd_is_the_only_lock_object(
     assert _run_directory_generator(output, ["--check"]) == 0
     assert locked_modes and all(stat.S_ISDIR(mode) for mode in locked_modes)
     assert not any("lock" in path.name for path in tmp_path.rglob("*"))
+
+
+def test_failed_exclusive_lock_does_not_reconcile_pending_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    crashed = _crash_writer(output, "prepared")
+    assert crashed.returncode == 73
+    assert _transaction_path(output).is_dir()
+    before = _tree_snapshot(tmp_path)
+    real_flock = fcntl.flock
+
+    def fail_exclusive_lock(descriptor: int, operation: int) -> None:
+        if operation == fcntl.LOCK_EX:
+            raise OSError(errno.EIO, "synthetic exclusive lock failure")
+        real_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", fail_exclusive_lock)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(tmp_path) == before
+    assert _transaction_path(output).is_dir()
+
+
+def test_restrictive_umask_normalizes_new_output_parents(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "fresh/fixtures/v1"
+    previous_umask = os.umask(0o177)
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 0
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE((tmp_path / "fresh").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "fresh/fixtures").stat().st_mode) == 0o700
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in output.iterdir())
+    assert not _transaction_path(output).exists()
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
+
+
+def test_restrictive_umask_normalizes_transaction_and_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "v1"
+    inspected = False
+
+    def inspect_prepared_modes(name: str) -> None:
+        nonlocal inspected
+        if name != "prepared":
+            return
+        transaction = _transaction_path(output)
+        stage = transaction / "stage"
+        assert stat.S_IMODE(transaction.stat().st_mode) == 0o700
+        assert stat.S_IMODE(stage.stat().st_mode) == 0o700
+        assert stat.S_IMODE((transaction / "intent.json").stat().st_mode) == 0o600
+        assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in stage.iterdir())
+        inspected = True
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_transaction_checkpoint",
+        inspect_prepared_modes,
+    )
+    previous_umask = os.umask(0o177)
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 0
+    finally:
+        os.umask(previous_umask)
+    assert inspected
+    assert not _transaction_path(output).exists()
+    assert _run_directory_generator(output, ["--write"], _alternate_directory_render) == 0
+
+
+def test_owner_read_removing_umask_is_rejected_before_output_path_touch(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "missing/fixtures/v1"
+    previous_umask = os.umask(0o777)
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 1
+    finally:
+        os.umask(previous_umask)
+    try:
+        assert not output.parents[1].exists()
+    finally:
+        if output.parents[1].exists():
+            output.parents[1].chmod(0o700)
+            output.parents[1].rmdir()
+
+
+def test_private_directory_umask_probe_uses_each_bound_creation_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "fresh/fixtures/v1"
+    real_probe = contract_generator_common._require_supported_private_directory_umask
+    inspected: list[tuple[int, int]] = []
+
+    def inspect_bound_parent(parent_fd: int) -> None:
+        metadata = os.fstat(parent_fd)
+        assert stat.S_ISDIR(metadata.st_mode)
+        assert metadata.st_uid == os.geteuid()
+        assert not stat.S_IMODE(metadata.st_mode) & 0o022
+        inspected.append((metadata.st_dev, metadata.st_ino))
+        real_probe(parent_fd)
+
+    def reject_ambient_probe(*args: object, **kwargs: object) -> NoReturn:
+        del args, kwargs
+        raise AssertionError("ambient temporary directory must not prove output-parent umask")
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_require_supported_private_directory_umask",
+        inspect_bound_parent,
+    )
+    monkeypatch.setattr(
+        contract_generator_common,
+        "TemporaryFile",
+        reject_ambient_probe,
+        raising=False,
+    )
+    assert _run_directory_generator(output, ["--write"]) == 0
+    assert len(inspected) == 4
+    assert len(set(inspected)) == 4
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux default ACL regression")
+def test_linux_ambient_default_acl_cannot_mask_unsafe_output_parent_umask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient = tmp_path / "ambient"
+    output_parent = tmp_path / "output-parent"
+    ambient.mkdir(mode=0o700)
+    output_parent.mkdir(mode=0o700)
+    default_acl = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, 0xFFFFFFFF)
+        for tag, permissions in ((0x01, 0o7), (0x04, 0), (0x20, 0))
+    )
+    setter = getattr(os, "setxattr", None)
+    if not callable(setter):
+        pytest.skip("platform has no extended-attribute API")
+    set_extended_attribute = cast(Callable[[Path, bytes, bytes], None], setter)
+    try:
+        set_extended_attribute(ambient, b"system.posix_acl_default", default_acl)
+    except OSError as error:
+        pytest.skip(f"filesystem cannot establish a Linux default ACL: {error}")
+
+    validation_name = "acl-umask-validation"
+    validation_fd: int | None = None
+    ambient_fd = os.open(ambient, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    inherited_mode = 0
+    previous_umask = os.umask(0o777)
+    try:
+        validation_fd = os.open(
+            validation_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=ambient_fd,
+        )
+        inherited_mode = stat.S_IMODE(os.fstat(validation_fd).st_mode)
+    finally:
+        os.umask(previous_umask)
+        if validation_fd is not None:
+            os.close(validation_fd)
+        os.close(ambient_fd)
+        with suppress(FileNotFoundError):
+            (ambient / validation_name).unlink()
+    if not inherited_mode & stat.S_IRUSR:
+        pytest.skip("filesystem default ACL did not override the process umask")
+
+    output = output_parent / "missing/v1"
+    monkeypatch.setattr(
+        contract_generator_common, "gettempdir", lambda: str(ambient), raising=False
+    )
+    previous_umask = os.umask(0o777)
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 1
+    finally:
+        os.umask(previous_umask)
+        if output.parent.exists():
+            output.parent.chmod(0o700)
+            output.parent.rmdir()
+    assert not output.parent.exists()
+
+
+def test_linux_acl_policy_rejects_non_posix_and_unknown_filesystem_surfaces() -> None:
+    for magic in (0xEF53, 0x58465342, 0x9123683E, 0x01021994, 0x794C7630, 0xF2F52010):
+        contract_generator_common._require_supported_linux_acl_filesystem_magic(magic)
+    for magic in (0x6969, 0xFF534D42, 0x2FC12FC1, 0xDEADBEEF):
+        with pytest.raises(GeneratorError, match="unsupported Linux filesystem ACL semantics"):
+            contract_generator_common._require_supported_linux_acl_filesystem_magic(magic)
+
+    for attribute in (b"system.posix_acl_access", b"system.posix_acl_default"):
+        assert contract_generator_common._classify_linux_acl_attribute(attribute) == "posix"
+    assert contract_generator_common._classify_linux_acl_attribute(b"security.selinux") == "other"
+    for attribute in (
+        b"system.nfs4_acl",
+        b"system.cifs_acl",
+        b"system.richacl",
+        b"security.NTACL",
+        b"trusted.SGI_ACL_FILE",
+    ):
+        with pytest.raises(GeneratorError, match="unsupported Linux discretionary ACL"):
+            contract_generator_common._classify_linux_acl_attribute(attribute)
+
+    class UnsupportedXattrLister:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, descriptor: int, names: object, size: int) -> int:
+            del descriptor, names, size
+            ctypes.set_errno(errno.EOPNOTSUPP)
+            return -1
+
+    class UnsupportedXattrLibrary:
+        flistxattr = UnsupportedXattrLister()
+
+    with pytest.raises(GeneratorError, match="ACL inspection failed"):
+        contract_generator_common._linux_extended_attribute_names(
+            cast(ctypes.CDLL, UnsupportedXattrLibrary()),
+            42,
+        )
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux POSIX ACL regression")
+def test_linux_posix_acl_creation_parent_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "acl-parent"
+    parent.mkdir(mode=0o700)
+    default_acl = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, 0xFFFFFFFF)
+        for tag, permissions in ((0x01, 0o7), (0x04, 0), (0x20, 0))
+    )
+    setter = getattr(os, "setxattr", None)
+    if not callable(setter):
+        pytest.skip("platform has no extended-attribute API")
+    set_extended_attribute = cast(Callable[[Path, bytes, bytes], None], setter)
+    getter = getattr(os, "getxattr", None)
+    if not callable(getter):
+        pytest.skip("platform has no extended-attribute read API")
+    get_extended_attribute = cast(Callable[[Path, bytes], bytes], getter)
+    try:
+        set_extended_attribute(parent, b"system.posix_acl_default", default_acl)
+    except OSError as error:
+        pytest.skip(f"filesystem cannot establish a Linux default ACL: {error}")
+
+    output = parent / "v1"
+    before = _tree_snapshot(parent)
+    acl_before = get_extended_attribute(parent, b"system.posix_acl_default")
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(parent) == before
+    assert get_extended_attribute(parent, b"system.posix_acl_default") == acl_before
+
+
+def test_created_private_directory_name_swap_fails_without_touching_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "fresh/v1"
+    created = output.parent
+    displaced = tmp_path / "displaced"
+    real_fchmod = os.fchmod
+    swapped = False
+
+    def swap_during_normalization(descriptor: int, mode: int) -> None:
+        nonlocal swapped
+        if not swapped and created.exists():
+            named = created.stat(follow_symlinks=False)
+            opened = os.fstat(descriptor)
+            if (named.st_dev, named.st_ino) == (opened.st_dev, opened.st_ino):
+                created.rename(displaced)
+                created.mkdir(mode=0o700)
+                (created / "sentinel").write_bytes(b"replacement\n")
+                swapped = True
+        real_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(os, "fchmod", swap_during_normalization)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert swapped
+    assert (created / "sentinel").read_bytes() == b"replacement\n"
+    assert stat.S_IMODE(created.stat().st_mode) == 0o700
+    assert stat.S_IMODE(displaced.stat().st_mode) == 0o700
+    assert not output.exists()
+
+
+def test_created_private_directory_rejects_unsafe_replacement_before_first_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "fresh/v1"
+    created = output.parent
+    displaced = tmp_path / "displaced"
+    real_mkdir = os.mkdir
+    swapped = False
+
+    def swap_before_first_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal swapped
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if not swapped and path == "fresh":
+            created.rename(displaced)
+            real_mkdir(created, 0o700)
+            created.chmod(0o777)
+            (created / "sentinel").write_bytes(b"unsafe replacement\n")
+            swapped = True
+
+    monkeypatch.setattr(os, "mkdir", swap_before_first_stat)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert swapped
+    assert (created / "sentinel").read_bytes() == b"unsafe replacement\n"
+    assert stat.S_IMODE(created.stat().st_mode) == 0o777
+    assert displaced.is_dir()
+    assert not output.exists()
+
+
+def test_created_private_directory_preserves_validation_error_when_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    os.mkdir("created", mode=0o700, dir_fd=parent_fd)
+    real_open = os.open
+    real_close = os.close
+    created_fd: int | None = None
+
+    def capture_created_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal created_fd
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "created":
+            created_fd = descriptor
+        return descriptor
+
+    def fail_validation(descriptor: int) -> bool:
+        if descriptor == created_fd:
+            raise ValueError("synthetic created-directory validation failure")
+        return False
+
+    def consume_created_close_then_fail(descriptor: int) -> None:
+        real_close(descriptor)
+        if descriptor == created_fd:
+            raise OSError(errno.EIO, "synthetic created-directory close failure")
+
+    monkeypatch.setattr(os, "open", capture_created_open)
+    monkeypatch.setattr(contract_generator_common, "_directory_has_extended_acl", fail_validation)
+    monkeypatch.setattr(os, "close", consume_created_close_then_fail)
+    try:
+        with pytest.raises(
+            ValueError,
+            match="synthetic created-directory validation failure",
+        ) as primary:
+            contract_generator_common._open_created_private_directory(parent_fd, "created")
+        assert any(
+            "synthetic created-directory close failure" in note for note in primary.value.__notes__
+        )
+    finally:
+        real_close(parent_fd)
+
+
+def test_directory_creation_rejects_group_or_world_writable_parent_without_mutation(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o700)
+    parent.chmod(0o777)
+    output = parent / "v1"
+    before = _tree_snapshot(parent)
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(parent) == before
+
+
+def test_directory_creation_rejects_acl_signaled_parent_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "acl-parent"
+    parent.mkdir(mode=0o700)
+    output = parent / "v1"
+    parent_identity = (parent.stat().st_dev, parent.stat().st_ino)
+    before = _tree_snapshot(parent)
+
+    def has_extended_acl(descriptor: int) -> bool:
+        metadata = os.fstat(descriptor)
+        return (metadata.st_dev, metadata.st_ino) == parent_identity
+
+    monkeypatch.setattr(
+        contract_generator_common,
+        "_directory_has_extended_acl",
+        has_extended_acl,
+        raising=False,
+    )
+    assert _run_directory_generator(output, ["--write"]) == 1
+    assert _tree_snapshot(parent) == before
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL regression")
+def test_darwin_inherited_extended_acl_parent_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "acl-parent"
+    parent.mkdir(mode=0o700)
+    acl = "everyone allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit"
+    subprocess.run(["/bin/chmod", "+a", acl, str(parent)], check=True, capture_output=True)
+    output = parent / "v1"
+    before = _tree_snapshot(parent)
+    acl_before = subprocess.run(
+        ["/bin/ls", "-lde", str(parent)],
+        check=True,
+        capture_output=True,
+    ).stdout
+    try:
+        assert _run_directory_generator(output, ["--write"]) == 1
+        assert _tree_snapshot(parent) == before
+        assert (
+            subprocess.run(
+                ["/bin/ls", "-lde", str(parent)],
+                check=True,
+                capture_output=True,
+            ).stdout
+            == acl_before
+        )
+    finally:
+        subprocess.run(["/bin/chmod", "-RN", str(parent)], check=True, capture_output=True)
+
+
+def test_directory_writer_declares_same_euid_and_stable_umask_trust_boundary() -> None:
+    contract = contract_generator_common.run_directory_generator.__doc__
+    assert contract is not None
+    assert "stable process umask" in contract
+    assert "Same-EUID local writers are trusted to honor the parent flock" in contract
 
 
 def test_private_transaction_modes_are_exact_at_prepared_checkpoint(
