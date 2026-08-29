@@ -106,6 +106,74 @@ def test_shared_assurance_tools_never_convert_incomplete_scan_to_pass(
     assert all(receipt.complete is False for receipt in result.receipts)
 
 
+def test_regular_file_read_ignores_unrelated_sibling_entry_during_path_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bound_directory = tmp_path / "bound"
+    bound_directory.mkdir()
+    payload = bound_directory / "stable.txt"
+    payload.write_bytes(b"stable")
+    sibling = bound_directory / "unrelated-sibling"
+    real_open = assurance_common.os.open
+    injected_sibling = False
+
+    def open_after_sibling_entry_change(
+        path: str | bytes | int | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal injected_sibling
+        if path == bound_directory.name and dir_fd is not None and not injected_sibling:
+            sibling_descriptor = real_open(
+                sibling,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            os.close(sibling_descriptor)
+            injected_sibling = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(assurance_common.os, "open", open_after_sibling_entry_change)
+
+    assert assurance_common.read_regular_file(payload, max_bytes=1024) == b"stable"
+    assert injected_sibling is True
+
+
+def test_bound_directory_revalidation_rejects_named_replacement(tmp_path: Path) -> None:
+    bound_path = tmp_path / "bound"
+    bound_path.mkdir()
+    binding = assurance_common.BoundDirectory.open(bound_path)
+    displaced = tmp_path / "displaced"
+    try:
+        bound_path.rename(displaced)
+        bound_path.mkdir()
+
+        with pytest.raises(assurance_common.AssuranceInputError) as raised:
+            binding.revalidate()
+
+        assert raised.value.finding().code == "input-changed-during-scan"
+    finally:
+        binding.close()
+
+
+def test_bound_directory_revalidation_rejects_content_drift(tmp_path: Path) -> None:
+    bound_path = tmp_path / "bound"
+    bound_path.mkdir()
+    binding = assurance_common.BoundDirectory.open(bound_path)
+    try:
+        (bound_path / "new-entry").write_bytes(b"drift")
+
+        with pytest.raises(assurance_common.AssuranceInputError) as raised:
+            binding.revalidate()
+
+        assert raised.value.finding().code == "input-changed-during-scan"
+    finally:
+        binding.close()
+
+
 @pytest.mark.parametrize(
     ("tool", "argv"),
     (

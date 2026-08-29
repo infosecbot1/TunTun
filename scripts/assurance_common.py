@@ -169,6 +169,12 @@ def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
     )
 
 
+def _directory_identity(metadata: os.stat_result) -> tuple[int, int]:
+    """Return the stable object identity of an opened directory anchor."""
+
+    return (metadata.st_dev, metadata.st_ino)
+
+
 def _raise(path: Path, code: str, detail: str | None = None) -> NoReturn:
     raise AssuranceInputError(path, code, detail)
 
@@ -187,7 +193,7 @@ def _open_directory(path: Path) -> tuple[int, os.stat_result]:
                 _raise(display, "not-directory")
             child = os.open(part, flags, dir_fd=current)
             opened = os.fstat(child)
-            if _identity(before) != _identity(opened):
+            if _directory_identity(before) != _directory_identity(opened):
                 os.close(child)
                 _raise(display, "input-changed-during-scan")
             os.close(current)
