@@ -1101,7 +1101,7 @@ git commit -m "build: add web workspace and baseline CI"
 - `check_migration_ownership.py` accepts `--revisions REV [REV ...]`, optional `--exact-head REVISION_NAME`, and optional `--forbid-branch-merge-orphan`. It parses Alembic modules without importing them, requires each requested numeric revision to have exactly one file/`revision` value, validates `down_revision`, rejects duplicate/edited/unknown ancestry and, under the strict flag, requires one linear reachable head with no branch, merge, or orphan.
 - `scan_browser_artifacts.py` accepts optional `--playwright-output PATH` and required `--forbid CSV`; it scans every existing production browser bundle/source map/manifest plus the explicit Playwright tree when named, including compressed/textual assets, and matches normalized JSON/property names and literal browser persistence/URL/path patterns. A missing explicit output, corrupt map/archive, unreadable bundle, or build tree changing during the scan blocks.
 - `scan_network_surface.py` accepts the closed Phase 3/6 flag vocabulary `--require-listener ADDRESS:PORT=OWNER`, `--forbid-lan-port PORT`, `--optional-exact-commissioned-private-lan-port PORT=OWNER`, `--forbid-wildcard`, `--forbid-ipv6`, `--forbid-core-tcp`, `--forbid-media-proxy-tcp`, `--forbid-camera-ports`, and `--forbid-camera-public`. It obtains one bounded point-in-time process/socket snapshot, joins socket owner PID to executable/service identity, rejects ambiguous/truncated inventory, and never treats an unavailable platform probe as an empty passing surface.
-- `scan_private_data.py` is a thin CLI over the same `verify_private_data.scan` engine, not a second matcher. It preserves the later closed `--paths PATH...`, `--include-git-history`, and `--allow-safe-ids` grammar; history mode uses one bounded fixed-argv Git object stream and applies the same byte/archive budgets. Its incomplete-reason set includes `git-state-unprovable`, `git-inventory-failed`, `git-inventory-timeout`, `git-inventory-output-limit`, `git-inventory-malformed`, `git-index-conflict`, `git-index-mode-invalid`, and `source-inventory-drift`, so every such result exits `2` rather than being mislabeled as a complete policy finding. The pre-existing `--allow-safe-ids` mode remains limited to its documented synthetic/public identifier grammar and cannot suppress a credential/private-key match, forbidden suffix, household/device/subject/network value, or arbitrary caller-supplied pattern/path. Task 3 adds no scanner allowlist or repository-path exemption.
+- `scan_private_data.py` is a thin CLI over the same `verify_private_data.scan` engine, not a second matcher. It preserves the later closed `--paths PATH...`, `--include-git-history`, and `--allow-safe-ids` grammar; history mode uses one bounded fixed-argv Git object stream and applies the same byte/archive budgets. Its incomplete-reason set includes `git-state-unprovable`, `git-inventory-failed`, `git-inventory-timeout`, `git-inventory-output-limit`, `git-inventory-malformed`, `git-index-conflict`, `git-index-mode-invalid`, `source-inventory-drift`, `source-inventory-incomplete`, every `git-batch-*` framing/object failure, `filesystem-symlink-ancestor`, and `duplicate-root`, so every such result exits `2` rather than being mislabeled as a complete policy finding. The pre-existing `--allow-safe-ids` mode remains limited to its documented synthetic/public identifier grammar and cannot suppress a credential/private-key match, forbidden suffix, household/device/subject/network value, or arbitrary caller-supplied pattern/path. Task 3 adds no scanner allowlist or repository-path exemption.
 - `scan_backup_artifacts.py --root PATH --require-encrypted --forbid CSV` verifies a bounded nofollow backup tree contains only authenticated ciphertext/manifests and none of the named portable-secret/video/plaintext classes; unknown classes, missing encryption proof, corrupt archives, or incomplete inventory block. `scan_sandbox_residue.py --root PATH --require-empty` proves the descriptor-walked root has no remaining entry/mount/process handle and fails on an absent, changing, symlinked, unreadable, or nonempty root. `scan_sql_schema.py --db-kind vision|canonical --forbid CSV` uses the migration/schema parser without importing migrations, requires the selected registered schema inventory to be complete, and rejects forbidden normalized table/column/index/trigger/view tokens or unowned/unknown DDL.
 - `check_migration_graph.py` is the richer graph-view CLI over `check_migration_ownership.py`'s same parser. It accepts exact core version table/head plus repeated `--exact-edge CHILD:PARENT` and `--forbid-forks|--forbid-merges|--forbid-orphans`; it proves the complete unique closed ancestry without importing migration code. The two CLIs share implementation and fixtures, so no second migration truth exists.
 
@@ -1110,6 +1110,8 @@ git commit -m "build: add web workspace and baseline CI"
 ```python
 # tests/security/test_private_data_scanner.py
 import dataclasses
+import os
+import socket
 import subprocess
 from pathlib import Path
 
@@ -1313,6 +1315,236 @@ def test_git_inventory_drift_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert any(item.reason == "source-inventory-drift" for item in scan(root))
 
 
+def test_symlink_ancestor_cannot_swap_the_classified_repository(tmp_path: Path) -> None:
+    dirty = tmp_path / "dirty"
+    clean = tmp_path / "clean"
+    dirty.mkdir(); clean.mkdir()
+    _source_repository(dirty); _source_repository(clean)
+    (dirty / "secret.txt").write_bytes(_credential())
+    (clean / "secret.txt").write_text("synthetic\n", encoding="utf-8")
+    _git(dirty, "add", "secret.txt"); _git(clean, "add", "secret.txt")
+    entry = tmp_path / "selected"
+    entry.symlink_to(dirty, target_is_directory=True)
+    findings = scan(entry / "secret.txt")
+    assert findings == (
+        private_data_scanner.Finding(entry, "filesystem-symlink-ancestor"),
+    )
+
+
+def test_opened_working_candidate_must_match_snapshot_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    candidate = root / "visible.txt"
+    replacement = root / "replacement.txt"
+    candidate.write_bytes(_credential())
+    replacement.write_text("synthetic\n", encoding="utf-8")
+    original = private_data_scanner._open_relative_candidate
+    swapped = False
+
+    def replace_before_open(root_fd, repository, relative, expected_identity):
+        nonlocal swapped
+        if not swapped and relative == Path("visible.txt"):
+            swapped = True
+            candidate.replace(root / "old-visible.txt")
+            replacement.replace(candidate)
+        yield from original(root_fd, repository, relative, expected_identity)
+
+    monkeypatch.setattr(
+        private_data_scanner, "_open_relative_candidate", replace_before_open,
+    )
+    assert any(item.reason == "input-changed-during-scan" for item in scan(root))
+
+
+@pytest.mark.parametrize("kind", ("fifo", "socket"))
+def test_unignored_special_entry_missing_from_git_inventory_blocks(
+    tmp_path: Path, kind: str,
+) -> None:
+    root = _source_repository(tmp_path)
+    special = root / f"visible-{kind}"
+    listener = None
+    if kind == "fifo":
+        os.mkfifo(special)
+    else:
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(special))
+    try:
+        assert any(
+            item.path == special and item.reason == "filesystem-special"
+            for item in scan(root)
+        )
+    finally:
+        if listener is not None:
+            listener.close()
+
+
+def test_explicit_out_root_with_ignored_child_is_artifact_scanned(tmp_path: Path) -> None:
+    root = _source_repository(tmp_path)
+    (root / ".gitignore").write_text("out/*\n", encoding="utf-8")
+    _git(root, "add", ".gitignore")
+    output = root / "out"
+    output.mkdir()
+    (output / "hidden.txt").write_bytes(_credential())
+    assert any(item.reason == "credential-pattern" for item in scan(output))
+
+
+@pytest.mark.parametrize("exclude_source", ("info", "local", "global", "system"))
+def test_ambient_git_excludes_cannot_hide_source_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exclude_source: str,
+) -> None:
+    root = _source_repository(tmp_path)
+    hidden = root / "hidden.txt"
+    hidden.write_bytes(_credential())
+    if exclude_source == "info":
+        (root / ".git" / "info" / "exclude").write_text("hidden.txt\n", encoding="utf-8")
+    elif exclude_source == "local":
+        exclude = tmp_path / "local-excludes"
+        exclude.write_text("hidden.txt\n", encoding="utf-8")
+        _git(root, "config", "core.excludesFile", str(exclude))
+    else:
+        config = tmp_path / f"{exclude_source}.gitconfig"
+        exclude = tmp_path / f"{exclude_source}-excludes"
+        exclude.write_text("hidden.txt\n", encoding="utf-8")
+        config.write_text(
+            f"[core]\n\texcludesFile = {exclude}\n", encoding="utf-8",
+        )
+        monkeypatch.setenv(f"GIT_CONFIG_{exclude_source.upper()}", str(config))
+    assert any(item.reason == "credential-pattern" for item in scan(root))
+
+
+def test_git_processes_disable_lazy_fetch_prompts_configs_and_proxies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    tracked = root / "tracked.txt"
+    tracked.write_text("synthetic\n", encoding="utf-8")
+    _git(root, "add", "tracked.txt")
+    observed = []
+    original = private_data_scanner.subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        observed.append((args[0], dict(kwargs["env"]), kwargs.get("pass_fds", ())))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(private_data_scanner.subprocess, "Popen", recording_popen)
+    assert scan(root) == ()
+    assert observed
+    for argv, environment, pass_fds in observed:
+        assert argv[:4] == ("git", "-c", "core.excludesFile=/dev/null", "-C")
+        assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
+        assert environment["GIT_CONFIG_SYSTEM"] == "/dev/null"
+        assert environment["GIT_NO_LAZY_FETCH"] == "1"
+        assert environment["GIT_TERMINAL_PROMPT"] == "0"
+        assert environment["GCM_INTERACTIVE"] == "never"
+        assert environment["http_proxy"] == environment["https_proxy"] == ""
+        assert pass_fds
+
+
+def test_missing_promised_blob_blocks_without_lazy_fetch(tmp_path: Path) -> None:
+    root = _source_repository(tmp_path)
+    missing_oid = "f" * 40
+    _git(root, "config", "extensions.partialClone", "origin")
+    _git(root, "config", "remote.origin.promisor", "true")
+    _git(root, "config", "remote.origin.url", "https://127.0.0.1:9/unreachable")
+    _git(
+        root, "update-index", "--add", "--info-only", "--cacheinfo",
+        f"100644,{missing_oid},promised.txt",
+    )
+    assert scan(root) == (
+        private_data_scanner.Finding(
+            Path("<git-index>/promised.txt"), "git-batch-object-missing",
+        ),
+    )
+    assert private_data_cli.evaluate(["--paths", str(root)]).complete is False
+    assert private_data_cli.main(["--paths", str(root)]) == 2
+
+
+def test_index_blobs_use_one_batch_and_charge_before_body_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    for name in ("one.txt", "two.txt"):
+        (root / name).write_bytes(b"x" * 256)
+    _git(root, "add", "one.txt", "two.txt")
+    starts = 0
+    original_start = private_data_scanner._start_git_batch
+    original_copy = private_data_scanner.GitBatch._copy_body
+
+    def counted_start(*args, **kwargs):
+        nonlocal starts
+        starts += 1
+        return original_start(*args, **kwargs)
+
+    def charged_copy(self, destination, declared_size, display, budget):
+        assert budget.input_bytes >= declared_size
+        return original_copy(self, destination, declared_size, display, budget)
+
+    monkeypatch.setattr(private_data_scanner, "_start_git_batch", counted_start)
+    monkeypatch.setattr(private_data_scanner.GitBatch, "_copy_body", charged_copy)
+    assert scan(root) == ()
+    assert starts == 1
+
+
+def test_shared_budget_blocks_index_blob_before_body_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    (root / "large.txt").write_bytes(b"x" * 1024)
+    _git(root, "add", "large.txt")
+    monkeypatch.setattr(private_data_scanner, "MAX_TOTAL_INPUT_BYTES", 100)
+    monkeypatch.setattr(
+        private_data_scanner.GitBatch,
+        "_copy_body",
+        lambda *_args, **_kwargs: pytest.fail("blob body read before budget rejection"),
+    )
+    assert scan(root)[-1].reason == "total-input-byte-limit"
+
+
+@pytest.mark.parametrize(
+    ("header", "reason"),
+    (
+        (b"missing\n", "git-batch-object-missing"),
+        (b"0" * 40 + b" tree 1\n", "git-batch-type-invalid"),
+        (b"1" * 40 + b" blob 1\n", "git-batch-oid-mismatch"),
+        (b"0" * 40 + b" blob -1\n", "git-batch-size-invalid"),
+        (b"0" * 40 + b" blob 01\n", "git-batch-size-invalid"),
+    ),
+)
+def test_git_batch_header_is_exact(header: bytes, reason: str) -> None:
+    with pytest.raises(private_data_scanner.GitInventoryError) as captured:
+        private_data_scanner._parse_batch_header(header, "0" * 40, Path("index.txt"))
+    assert captured.value.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("delimiter", "reason"),
+    ((b"", "git-batch-short-read"), (b"x", "git-batch-framing"), (b"\nextra", "git-batch-trailing-data")),
+)
+def test_git_batch_delimiter_is_exact(delimiter: bytes, reason: str) -> None:
+    with pytest.raises(private_data_scanner.GitInventoryError) as captured:
+        private_data_scanner._validate_batch_delimiter(delimiter, Path("index.txt"))
+    assert captured.value.reason == reason
+
+
+@pytest.mark.parametrize("alias_kind", ("same", "lexical", "hardlink"))
+def test_duplicate_or_alias_roots_block_before_scanning(
+    tmp_path: Path, alias_kind: str,
+) -> None:
+    first = tmp_path / "first.txt"
+    first.write_text("synthetic\n", encoding="utf-8")
+    if alias_kind == "same":
+        second = first
+    elif alias_kind == "lexical":
+        second = tmp_path / "." / "first.txt"
+    else:
+        second = tmp_path / "second.txt"
+        os.link(first, second)
+    assert scan((first, second)) == (
+        private_data_scanner.Finding(second.absolute(), "duplicate-root"),
+    )
+
+
 def test_one_budget_spans_mixed_source_and_artifact_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1467,7 +1699,6 @@ def test_nested_archive_member_is_recursively_scanned_under_the_same_budget(tmp_
 
 
 def test_filesystem_and_archive_symlink_or_special_entries_fail_closed(tmp_path: Path) -> None:
-    import io
     import os
     import tarfile
 
@@ -1973,15 +2204,16 @@ import tempfile
 import time
 import zipfile
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path,PurePosixPath
-from collections.abc import Iterator,Sequence
+from collections.abc import Sequence
 
 FORBIDDEN_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".pem", ".key", ".crt", ".wav", ".mp3", ".mp4", ".jpg", ".jpeg", ".png", ".onnx", ".safetensors"}
 PATTERNS = (("credential-pattern", re.compile(rb"(?:sk-proj-|AKIA)[A-Za-z0-9_-]{16,}")), ("private-key", re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----")))
 GENERATED_ROOT_PARTS = {
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__",
-    "build", "coverage", "dist", "htmlcov", "node_modules", "var",
+    "build", "coverage", "dist", "htmlcov", "node_modules", "out", "var",
 }
 ARTIFACT_ROOT_PARTS = {"artifact", "artifacts", "candidate", "candidates", "evidence", "release"}
 ARCHIVE_ROOT_SUFFIXES = (".zip", ".whl", ".tar", ".tar.gz", ".tgz")
@@ -2325,6 +2557,10 @@ def _scan_ustar(source,display:Path,budget:ScanBudget,depth:int):
             saw_end=True; break
         if header[257:263] not in {b"ustar\0",b"ustar "}:
             raise ArchiveFormatError("unsupported tar format")
+        findings.extend(_patterns_stream(
+            display,io.BytesIO(header),expected_size=len(header),byte_limit=len(header),
+            limit_reason="archive-member-byte-limit",
+        ))
         stored=_tar_octal(header[148:156])
         checksum=sum(header[:148])+8*ord(" ")+sum(header[156:])
         if stored!=checksum: raise ArchiveFormatError("invalid tar checksum")
@@ -2487,17 +2723,174 @@ class IndexEntry:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceSnapshot:
-    index_raw: bytes
-    untracked_raw: bytes
-    index: tuple[IndexEntry, ...]
-    untracked: tuple[PurePosixPath, ...]
-    working: tuple[tuple[str, tuple[int, int, int, int, int, int] | None], ...]
+class IgnoredEntry:
+    path: PurePosixPath
+    directory: bool
+
+
+Identity = tuple[int, int, int, int, int, int]
+AnchorIdentity = tuple[int, int, int]
+
+
+@dataclass(slots=True)
+class DirectoryBinding:
+    path: Path
+    paths: tuple[Path, ...]
+    names: tuple[str | None, ...]
+    fds: tuple[int, ...]
+    identities: tuple[AnchorIdentity, ...]
+
+    @classmethod
+    def open(cls, path: Path) -> DirectoryBinding:
+        path = Path(os.path.abspath(os.fspath(path)))
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        paths = [Path("/")]
+        names: list[str | None] = [None]
+        fds = [os.open("/", flags)]
+        identities = [_anchor_identity(os.fstat(fds[0]))]
+        try:
+            current = Path("/")
+            for part in path.parts[1:]:
+                current = current / part
+                metadata = os.stat(part, dir_fd=fds[-1], follow_symlinks=False)
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise ScanLimit(current, "filesystem-symlink-ancestor")
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise ScanLimit(current, "filesystem-special")
+                child = os.open(part, flags, dir_fd=fds[-1])
+                opened = os.fstat(child)
+                if _anchor_identity(opened) != _anchor_identity(metadata):
+                    os.close(child)
+                    raise ScanLimit(current, "input-changed-during-scan")
+                paths.append(current)
+                names.append(part)
+                fds.append(child)
+                identities.append(_anchor_identity(opened))
+            return cls(path, tuple(paths), tuple(names), tuple(fds), tuple(identities))
+        except BaseException:
+            for fd in reversed(fds):
+                os.close(fd)
+            raise
+
+    @property
+    def fd(self) -> int:
+        return self.fds[-1]
+
+    def revalidate(self) -> None:
+        for index, (fd, expected) in enumerate(zip(self.fds, self.identities, strict=True)):
+            if _anchor_identity(os.fstat(fd)) != expected:
+                raise ScanLimit(self.paths[index], "input-changed-during-scan")
+            if index:
+                metadata = os.stat(
+                    self.names[index], dir_fd=self.fds[index - 1], follow_symlinks=False,
+                )
+                if _anchor_identity(metadata) != expected:
+                    raise ScanLimit(self.paths[index], "input-changed-during-scan")
+
+    def close(self) -> None:
+        for fd in reversed(self.fds):
+            os.close(fd)
+        self.fds = ()
+
+
+@dataclass(slots=True)
+class RootBinding:
+    path: Path
+    parent: DirectoryBinding
+    name: str
+    fd: int
+    identity: Identity
+    directory: bool
+
+    @classmethod
+    def open(cls, path: Path) -> RootBinding:
+        path = Path(os.path.abspath(os.fspath(path)))
+        if path == Path("/"):
+            raise ScanLimit(path, "root-scope-unsupported")
+        parent = DirectoryBinding.open(path.parent)
+        try:
+            metadata = os.stat(path.name, dir_fd=parent.fd, follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ScanLimit(path, "filesystem-symlink")
+            directory = stat.S_ISDIR(metadata.st_mode)
+            if not directory and not stat.S_ISREG(metadata.st_mode):
+                raise ScanLimit(path, "filesystem-special")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            if directory:
+                flags |= getattr(os, "O_DIRECTORY", 0)
+            fd = os.open(path.name, flags, dir_fd=parent.fd)
+            opened = os.fstat(fd)
+            if _identity(opened) != _identity(metadata):
+                os.close(fd)
+                raise ScanLimit(path, "input-changed-during-scan")
+            return cls(path, parent, path.name, fd, _identity(opened), directory)
+        except BaseException:
+            parent.close()
+            raise
+
+    def revalidate(self) -> None:
+        self.parent.revalidate()
+        if _identity(os.fstat(self.fd)) != self.identity:
+            raise ScanLimit(self.path, "input-changed-during-scan")
+        metadata = os.stat(self.name, dir_fd=self.parent.fd, follow_symlinks=False)
+        if _identity(metadata) != self.identity:
+            raise ScanLimit(self.path, "input-changed-during-scan")
+
+    def ancestry(self) -> tuple[tuple[Path, int, AnchorIdentity], ...]:
+        result = []
+        if self.directory:
+            result.append((self.path, self.fd, _anchor_identity(os.fstat(self.fd))))
+        result.extend(
+            reversed(tuple(zip(self.parent.paths, self.parent.fds, self.parent.identities, strict=True)))
+        )
+        return tuple(result)
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+        self.parent.close()
+
+
+@dataclass(slots=True)
+class RepositoryBinding:
+    root: RootBinding
+    marker_identity: Identity
+
+    @property
+    def path(self) -> Path:
+        return self.root.path
+
+    @property
+    def fd(self) -> int:
+        return self.root.fd
+
+    def revalidate(self) -> None:
+        self.root.revalidate()
+        marker = os.stat(".git", dir_fd=self.fd, follow_symlinks=False)
+        if _identity(marker) != self.marker_identity:
+            raise GitInventoryError(self.path, "git-state-unprovable")
+
+    def close(self) -> None:
+        self.root.close()
 
 
 @dataclass(frozen=True, slots=True)
+class SourceSnapshot:
+    index_raw: bytes
+    untracked_raw: bytes
+    ignored_raw: bytes
+    ignore_sources_raw: bytes
+    index: tuple[IndexEntry, ...]
+    untracked: tuple[PurePosixPath, ...]
+    ignored: tuple[IgnoredEntry, ...]
+    working: tuple[tuple[str, Identity | None], ...]
+    ignore_sources: tuple[tuple[str, Identity], ...]
+
+
+@dataclass(slots=True)
 class RootClassification:
-    repository: Path | None
+    repository: RepositoryBinding | None
     scope: PurePosixPath | None
 
     @property
@@ -2505,24 +2898,73 @@ class RootClassification:
         return self.repository is not None and self.scope is not None
 
 
+def _identity(metadata: os.stat_result) -> Identity:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
+        metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _anchor_identity(metadata: os.stat_result) -> AnchorIdentity:
+    return metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode)
+
+
+def _git_environment() -> dict[str, str]:
+    return {
+        "ALL_PROXY": "",
+        "GCM_INTERACTIVE": "never",
+        "GIT_ASKPASS": "/bin/false",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HTTP_PROXY": "",
+        "HTTPS_PROXY": "",
+        "LC_ALL": "C",
+        "NO_PROXY": "*",
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "SSH_ASKPASS": "/bin/false",
+        "TMPDIR": "/tmp",
+        "all_proxy": "",
+        "http_proxy": "",
+        "https_proxy": "",
+    }
+
+
+def _descriptor_path(fd: int) -> str:
+    prefix = "/dev/fd" if sys.platform == "darwin" else "/proc/self/fd"
+    return f"{prefix}/{fd}"
+
+
+def _git_argv(repository: RepositoryBinding, arguments: Sequence[str]) -> tuple[str, ...]:
+    working_tree = (
+        str(repository.path)
+        if sys.platform == "darwin"
+        else _descriptor_path(repository.fd)
+    )
+    return (
+        "git", "-c", "core.excludesFile=/dev/null", "-C",
+        working_tree, *arguments,
+    )
+
+
 def _run_git(
-    repository: Path,
+    repository: RepositoryBinding,
     arguments: Sequence[str],
     *,
     max_bytes: int,
     allowed_returncodes: tuple[int, ...] = (0,),
 ) -> tuple[int, bytes]:
+    repository.revalidate()
     process = subprocess.Popen(
-        ("git", "-C", str(repository), *arguments),
+        _git_argv(repository, arguments),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         shell=False,
-        env={
-            "LC_ALL": "C",
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "TMPDIR": "/tmp",
-        },
+        env=_git_environment(),
+        pass_fds=(repository.fd,),
     )
     assert process.stdout is not None and process.stderr is not None
     selector = selectors.DefaultSelector()
@@ -2535,10 +2977,10 @@ def _run_git(
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise GitInventoryError(repository, "git-inventory-timeout")
+                raise GitInventoryError(repository.path, "git-inventory-timeout")
             ready = selector.select(remaining)
             if not ready:
-                raise GitInventoryError(repository, "git-inventory-timeout")
+                raise GitInventoryError(repository.path, "git-inventory-timeout")
             for key, _ in ready:
                 chunk = os.read(key.fd, 64 * 1024)
                 if not chunk:
@@ -2548,13 +2990,14 @@ def _run_git(
                 target.extend(chunk)
                 limit = max_bytes if key.data == "stdout" else MAX_GIT_STDERR_BYTES
                 if len(target) > limit:
-                    raise GitInventoryError(repository, "git-inventory-output-limit")
+                    raise GitInventoryError(repository.path, "git-inventory-output-limit")
         returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
         if returncode not in allowed_returncodes or errors:
-            raise GitInventoryError(repository, "git-inventory-failed")
+            raise GitInventoryError(repository.path, "git-inventory-failed")
+        repository.revalidate()
         return returncode, bytes(output)
     except subprocess.SubprocessError as error:
-        raise GitInventoryError(repository, "git-inventory-failed") from error
+        raise GitInventoryError(repository.path, "git-inventory-failed") from error
     finally:
         selector.close()
         if process.poll() is None:
@@ -2562,45 +3005,54 @@ def _run_git(
         process.wait()
 
 
-def _git_output(repository: Path, arguments: Sequence[str], *, max_bytes: int) -> bytes:
+def _git_output(
+    repository: RepositoryBinding, arguments: Sequence[str], *, max_bytes: int,
+) -> bytes:
     return _run_git(repository, arguments, max_bytes=max_bytes)[1]
 
 
-def _repository_for(root: Path) -> Path | None:
-    start = root if root.is_dir() else root.parent
-    candidate = None
-    marker = None
-    for path in (start, *start.parents):
+def _repository_for(root: RootBinding) -> RepositoryBinding | None:
+    for path, directory_fd, expected_identity in root.ancestry():
         try:
-            candidate_marker = (path / ".git").stat(follow_symlinks=False)
+            marker = os.stat(".git", dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:
             continue
         except OSError as error:
             raise GitInventoryError(path, "git-state-unprovable") from error
-        candidate = path
-        marker = candidate_marker
+        if stat.S_ISLNK(marker.st_mode) or not (
+            stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)
+        ):
+            raise GitInventoryError(path, "git-state-unprovable")
+        candidate = RootBinding.open(path)
+        if _anchor_identity(os.fstat(candidate.fd)) != expected_identity:
+            candidate.close()
+            raise GitInventoryError(path, "git-state-unprovable")
+        repository = RepositoryBinding(candidate, _identity(marker))
         break
-    if candidate is None or marker is None:
+    else:
         return None
-    if stat.S_ISLNK(marker.st_mode) or not (
-        stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)
-    ):
-        raise GitInventoryError(candidate, "git-state-unprovable")
-    raw = _git_output(candidate, ("rev-parse", "--show-toplevel"), max_bytes=4096)
     try:
-        decoded = raw.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise GitInventoryError(candidate, "git-inventory-malformed") from error
-    if not decoded.endswith("\n") or decoded.count("\n") != 1:
-        raise GitInventoryError(candidate, "git-inventory-malformed")
-    reported = Path(decoded[:-1])
-    try:
-        same = os.path.samefile(candidate, reported)
-    except OSError as error:
-        raise GitInventoryError(candidate, "git-state-unprovable") from error
-    if not same:
-        raise GitInventoryError(candidate, "git-state-unprovable")
-    return candidate
+        raw = _git_output(repository, ("rev-parse", "--show-toplevel"), max_bytes=4096)
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise GitInventoryError(repository.path, "git-inventory-malformed") from error
+        if not decoded.endswith("\n") or decoded.count("\n") != 1:
+            raise GitInventoryError(repository.path, "git-inventory-malformed")
+        try:
+            reported = RootBinding.open(Path(decoded[:-1]))
+        except (OSError, ScanLimit) as error:
+            raise GitInventoryError(repository.path, "git-state-unprovable") from error
+        try:
+            if reported.identity != repository.root.identity:
+                raise GitInventoryError(repository.path, "git-state-unprovable")
+        finally:
+            reported.close()
+        repository.revalidate()
+        return repository
+    except BaseException:
+        repository.close()
+        raise
 
 
 def _canonical_git_path(
@@ -2676,7 +3128,42 @@ def _parse_untracked_inventory(
     return tuple(result)
 
 
-def _capture_source_snapshot(repository: Path, scope: PurePosixPath) -> SourceSnapshot:
+def _parse_ignored_inventory(
+    raw: bytes, repository: Path, scope: PurePosixPath,
+) -> tuple[IgnoredEntry, ...]:
+    result = []
+    seen = set()
+    for record in _nul_records(raw, repository):
+        directory = record.endswith(b"/")
+        canonical = record[:-1] if directory else record
+        path = _canonical_git_path(canonical, repository, scope)
+        if path in seen:
+            raise GitInventoryError(repository, "git-inventory-malformed")
+        seen.add(path)
+        result.append(IgnoredEntry(path, directory))
+    return tuple(result)
+
+
+def _captured_identity(
+    repository: RepositoryBinding, relative: PurePosixPath,
+) -> Identity | None:
+    try:
+        for candidate in _open_relative_candidate(
+            repository.fd, repository.path, Path(relative.as_posix()), None,
+        ):
+            identity = _identity(candidate.metadata)
+            if candidate.fd is not None:
+                os.close(candidate.fd)
+                candidate.fd = None
+            return identity
+    except FileNotFoundError:
+        return None
+    raise GitInventoryError(repository.path, "git-inventory-malformed")
+
+
+def _capture_source_snapshot(
+    repository: RepositoryBinding, scope: PurePosixPath,
+) -> SourceSnapshot:
     pathspec = scope.as_posix()
     index_raw = _git_output(
         repository,
@@ -2685,29 +3172,66 @@ def _capture_source_snapshot(repository: Path, scope: PurePosixPath) -> SourceSn
     )
     untracked_raw = _git_output(
         repository,
-        ("ls-files", "--others", "--exclude-standard", "-z", "--", pathspec),
+        (
+            "ls-files", "--others", "--exclude-per-directory=.gitignore",
+            "-z", "--", pathspec,
+        ),
         max_bytes=MAX_GIT_INVENTORY_BYTES,
     )
-    index = _parse_index_inventory(index_raw, repository, scope)
-    untracked = _parse_untracked_inventory(untracked_raw, repository, scope)
+    ignored_raw = _git_output(
+        repository,
+        (
+            "ls-files", "--others", "--ignored", "--directory",
+            "--exclude-per-directory=.gitignore", "-z", "--", pathspec,
+        ),
+        max_bytes=MAX_GIT_INVENTORY_BYTES,
+    )
+    ignore_sources_raw = _git_output(
+        repository,
+        (
+            "ls-files", "--cached", "--others", "-z", "--",
+            ".gitignore", ":(glob)**/.gitignore",
+        ),
+        max_bytes=MAX_GIT_INVENTORY_BYTES,
+    )
+    index = _parse_index_inventory(index_raw, repository.path, scope)
+    untracked = _parse_untracked_inventory(untracked_raw, repository.path, scope)
+    ignored = _parse_ignored_inventory(ignored_raw, repository.path, scope)
+    ignore_sources = _parse_untracked_inventory(
+        ignore_sources_raw, repository.path, PurePosixPath("."),
+    )
     tracked_paths = tuple(entry.path for entry in index)
     if set(tracked_paths) & set(untracked):
-        raise GitInventoryError(repository, "git-inventory-malformed")
+        raise GitInventoryError(repository.path, "git-inventory-malformed")
+    if (set(tracked_paths) | set(untracked)) & {entry.path for entry in ignored}:
+        raise GitInventoryError(repository.path, "git-inventory-malformed")
     working = []
+    untracked_set = set(untracked)
     for relative in (*tracked_paths, *untracked):
-        path = repository / Path(relative.as_posix())
         try:
-            metadata = path.stat(follow_symlinks=False)
-        except FileNotFoundError:
-            if relative in set(untracked):
-                raise GitInventoryError(path, "source-inventory-drift")
-            identity = None
+            identity = _captured_identity(repository, relative)
         except OSError as error:
-            raise GitInventoryError(path, "unreadable-input") from error
-        else:
-            identity = _identity(metadata)
+            raise GitInventoryError(
+                repository.path / Path(relative.as_posix()), "unreadable-input",
+            ) from error
+        if identity is None and relative in untracked_set:
+            raise GitInventoryError(
+                repository.path / Path(relative.as_posix()), "source-inventory-drift",
+            )
         working.append((relative.as_posix(), identity))
-    return SourceSnapshot(index_raw, untracked_raw, index, untracked, tuple(working))
+    captured_ignores = []
+    for relative in ignore_sources:
+        identity = _captured_identity(repository, relative)
+        if identity is None:
+            raise GitInventoryError(
+                repository.path / Path(relative.as_posix()), "source-inventory-drift",
+            )
+        captured_ignores.append((relative.as_posix(), identity))
+    repository.revalidate()
+    return SourceSnapshot(
+        index_raw, untracked_raw, ignored_raw, ignore_sources_raw, index, untracked,
+        ignored, tuple(working), tuple(captured_ignores),
+    )
 
 
 def _is_explicit_artifact(root: Path, repository: Path) -> bool:
@@ -2721,41 +3245,45 @@ def _is_explicit_artifact(root: Path, repository: Path) -> bool:
     return Path(name).stem in ARTIFACT_ROOT_PARTS
 
 
-def _classify_root(root: Path) -> RootClassification:
+def _classify_root(root: RootBinding) -> RootClassification:
     repository = _repository_for(root)
     if repository is None:
         return RootClassification(None, None)
     try:
-        relative = root.relative_to(repository)
+        relative = root.path.relative_to(repository.path)
     except ValueError as error:
-        raise GitInventoryError(root, "git-state-unprovable") from error
+        repository.close()
+        raise GitInventoryError(root.path, "git-state-unprovable") from error
     scope = PurePosixPath(".") if not relative.parts else PurePosixPath(relative.as_posix())
     if scope == PurePosixPath("."):
         return RootClassification(repository, scope)
-    if _is_explicit_artifact(root, repository):
+    if _is_explicit_artifact(root.path, repository.path):
+        repository.close()
         return RootClassification(None, None)
-    returncode, output = _run_git(
-        repository,
-        ("check-ignore", "--no-index", "-q", "--", scope.as_posix()),
-        max_bytes=1,
-        allowed_returncodes=(0, 1),
-    )
+    try:
+        returncode, output = _run_git(
+            repository,
+            ("check-ignore", "--no-index", "-q", "--", scope.as_posix()),
+            max_bytes=1,
+            allowed_returncodes=(0, 1),
+        )
+    except BaseException:
+        repository.close()
+        raise
     if output:
-        raise GitInventoryError(root, "git-inventory-malformed")
+        repository.close()
+        raise GitInventoryError(root.path, "git-inventory-malformed")
     if returncode == 0:
+        repository.close()
         return RootClassification(None, None)
     return RootClassification(repository, scope)
 
 
-def _identity(metadata):
-    return (metadata.st_dev,metadata.st_ino,metadata.st_mode,metadata.st_size,metadata.st_mtime_ns,metadata.st_ctime_ns)
-
-
 def _opened_candidate(
-    parent_fd:int,name:str,path:Path,expected:os.stat_result|None=None,
+    parent_fd:int,name:str,path:Path,expected_identity:Identity|None=None,
 ) -> OpenedCandidate:
     metadata=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
-    if expected is not None and _identity(metadata)!=_identity(expected):
+    if expected_identity is not None and _identity(metadata)!=expected_identity:
         raise ScanLimit(path,"input-changed-during-scan")
     if not stat.S_ISREG(metadata.st_mode):
         return OpenedCandidate(path,metadata,None,parent_fd,name)
@@ -2766,13 +3294,15 @@ def _opened_candidate(
     return OpenedCandidate(path,metadata,fd,parent_fd,name)
 
 
-def _open_relative_candidate(root_fd:int,root:Path,relative:Path):
+def _open_relative_candidate(
+    root_fd:int,root:Path,relative:Path,expected_identity:Identity|None,
+):
     current=os.dup(root_fd)
     try:
         for index,part in enumerate(relative.parts):
             path=root.joinpath(*relative.parts[:index+1])
             if index==len(relative.parts)-1:
-                yield _opened_candidate(current,part,path); return
+                yield _opened_candidate(current,part,path,expected_identity); return
             metadata=os.stat(part,dir_fd=current,follow_symlinks=False)
             if stat.S_ISLNK(metadata.st_mode): raise ScanLimit(path,"filesystem-symlink")
             if not stat.S_ISDIR(metadata.st_mode): raise ScanLimit(path,"filesystem-special")
@@ -2811,21 +3341,112 @@ def _walk_directory(
                         raise ScanLimit(path,"input-changed-during-scan")
                 finally: os.close(child)
                 continue
-            yield _opened_candidate(directory_fd,entry.name,path,metadata)
+            yield _opened_candidate(directory_fd,entry.name,path,_identity(metadata))
 
 
-def _walk(root:Path,budget:ScanBudget):
-    flags=os.O_RDONLY|getattr(os,"O_DIRECTORY",0)|getattr(os,"O_NOFOLLOW",0)
-    root_fd=os.open(root,flags); opened=os.fstat(root_fd)
+def _walk(root:RootBinding,budget:ScanBudget):
+    root_fd=os.dup(root.fd); opened=os.fstat(root_fd)
     try:
-        named=root.stat(follow_symlinks=False)
-        if not stat.S_ISDIR(named.st_mode) or (named.st_dev,named.st_ino)!=(opened.st_dev,opened.st_ino):
-            raise ScanLimit(root,"input-changed-during-scan")
-        yield from _walk_directory(root,root,root_fd,budget,depth=0)
-        renamed=root.stat(follow_symlinks=False)
-        if _identity(renamed)!=_identity(opened):
-            raise ScanLimit(root,"input-changed-during-scan")
+        root.revalidate()
+        if not stat.S_ISDIR(opened.st_mode) or _identity(opened)!=root.identity:
+            raise ScanLimit(root.path,"input-changed-during-scan")
+        yield from _walk_directory(root.path,root.path,root_fd,budget,depth=0)
+        root.revalidate()
     finally: os.close(root_fd)
+
+
+def _joined_git_path(parent: PurePosixPath, name: str) -> PurePosixPath:
+    return PurePosixPath(name) if parent == PurePosixPath(".") else parent / name
+
+
+def _ignored_by_snapshot(path: PurePosixPath, snapshot: SourceSnapshot) -> bool:
+    for entry in snapshot.ignored:
+        if path == entry.path or (entry.directory and entry.path in path.parents):
+            return True
+    return False
+
+
+def _physical_source_directory(
+    root: RootBinding,
+    repository: RepositoryBinding,
+    directory_fd: int,
+    directory_path: Path,
+    relative: PurePosixPath,
+    candidates: set[PurePosixPath],
+    snapshot: SourceSnapshot,
+    budget: ScanBudget,
+    depth: int,
+) -> None:
+    if depth > 64:
+        raise ScanLimit(directory_path, "directory-depth-limit")
+    with os.scandir(directory_fd) as entries:
+        for entry in entries:
+            path = directory_path / entry.name
+            child_relative = _joined_git_path(relative, entry.name)
+            if relative == PurePosixPath(".") and entry.name == ".git":
+                marker = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)
+                if _identity(marker) != repository.marker_identity:
+                    raise GitInventoryError(repository.path, "git-state-unprovable")
+                continue
+            budget.path_entry(Path(child_relative.as_posix()))
+            metadata = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)
+            if _ignored_by_snapshot(child_relative, snapshot):
+                continue
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ScanLimit(path, "filesystem-symlink")
+            if stat.S_ISDIR(metadata.st_mode):
+                flags = (
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                child = os.open(entry.name, flags, dir_fd=directory_fd)
+                opened = os.fstat(child)
+                if _identity(opened) != _identity(metadata):
+                    os.close(child)
+                    raise ScanLimit(path, "input-changed-during-scan")
+                try:
+                    _physical_source_directory(
+                        root, repository, child, path, child_relative, candidates,
+                        snapshot, budget, depth + 1,
+                    )
+                    renamed = os.stat(
+                        entry.name, dir_fd=directory_fd, follow_symlinks=False,
+                    )
+                    if _identity(renamed) != _identity(opened):
+                        raise ScanLimit(path, "input-changed-during-scan")
+                finally:
+                    os.close(child)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ScanLimit(path, "filesystem-special")
+            if child_relative not in candidates:
+                raise GitInventoryError(path, "source-inventory-incomplete")
+    root.revalidate()
+
+
+def _supplement_source_inventory(
+    root: RootBinding,
+    classification: RootClassification,
+    snapshot: SourceSnapshot,
+    budget: ScanBudget,
+) -> None:
+    repository = classification.repository
+    scope = classification.scope
+    assert repository is not None and scope is not None
+    candidates = {entry.path for entry in snapshot.index} | set(snapshot.untracked)
+    if root.directory:
+        directory_fd = os.dup(root.fd)
+        try:
+            _physical_source_directory(
+                root, repository, directory_fd, root.path, scope, candidates,
+                snapshot, budget, 0,
+            )
+        finally:
+            os.close(directory_fd)
+    elif scope not in candidates:
+        raise GitInventoryError(root.path, "source-inventory-incomplete")
+    root.revalidate()
+    repository.revalidate()
 
 
 def _terminal_limit(findings: Sequence[Finding]) -> bool:
@@ -2836,93 +3457,271 @@ def _terminal_limit(findings: Sequence[Finding]) -> bool:
 
 
 def _source_display(
-    root: Path, repository: Path, relative: PurePosixPath, *, index: bool,
+    root: RootBinding, repository: RepositoryBinding, relative: PurePosixPath, *, index: bool,
 ) -> Path:
     if index:
         return Path("<git-index>") / Path(relative.as_posix())
-    if root.is_file():
-        return root
-    scope = root.relative_to(repository)
+    if not root.directory:
+        return root.path
+    scope = root.path.relative_to(repository.path)
     visible = relative if not scope.parts else relative.relative_to(PurePosixPath(scope.as_posix()))
     return Path(visible.as_posix())
 
 
+def _parse_batch_header(header: bytes, expected_oid: str, display: Path) -> int:
+    if header == b"missing\n" or header.endswith(b" missing\n"):
+        raise GitInventoryError(display, "git-batch-object-missing")
+    if not header.endswith(b"\n") or len(header) > 256:
+        raise GitInventoryError(display, "git-batch-framing")
+    fields = header[:-1].split(b" ")
+    if len(fields) != 3:
+        raise GitInventoryError(display, "git-batch-framing")
+    raw_oid, object_type, raw_size = fields
+    if object_type != b"blob":
+        raise GitInventoryError(display, "git-batch-type-invalid")
+    if raw_oid != expected_oid.encode("ascii"):
+        raise GitInventoryError(display, "git-batch-oid-mismatch")
+    if (
+        not raw_size or re.fullmatch(rb"[0-9]+", raw_size) is None
+        or (len(raw_size) > 1 and raw_size.startswith(b"0"))
+    ):
+        raise GitInventoryError(display, "git-batch-size-invalid")
+    return int(raw_size)
+
+
+def _validate_batch_delimiter(delimiter: bytes, display: Path) -> None:
+    if not delimiter:
+        raise GitInventoryError(display, "git-batch-short-read")
+    if delimiter == b"\n":
+        return
+    if delimiter.startswith(b"\n"):
+        raise GitInventoryError(display, "git-batch-trailing-data")
+    raise GitInventoryError(display, "git-batch-framing")
+
+
+class GitBatch:
+    def __init__(self, repository: RepositoryBinding, process: subprocess.Popen[bytes]):
+        self.repository = repository
+        self.process = process
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        self.stdin = process.stdin
+        self.stdout = process.stdout
+        self.stderr = process.stderr
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.stdout, selectors.EVENT_READ, "stdout")
+        self.selector.register(self.stderr, selectors.EVENT_READ, "stderr")
+        self.output = bytearray()
+        self.errors = bytearray()
+        self.deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
+
+    def __enter__(self) -> GitBatch:
+        return self
+
+    def _pump(self, display: Path) -> None:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise GitInventoryError(display, "git-inventory-timeout")
+        ready = self.selector.select(remaining)
+        if not ready:
+            raise GitInventoryError(display, "git-inventory-timeout")
+        for key, _ in ready:
+            chunk = os.read(key.fd, 64 * 1024)
+            if not chunk:
+                self.selector.unregister(key.fileobj)
+                continue
+            target = self.output if key.data == "stdout" else self.errors
+            target.extend(chunk)
+            if key.data == "stderr" and len(target) > MAX_GIT_STDERR_BYTES:
+                raise GitInventoryError(display, "git-inventory-output-limit")
+
+    def _read_exact(self, size: int, display: Path) -> bytes:
+        while len(self.output) < size:
+            if self.stdout not in self.selector.get_map():
+                raise GitInventoryError(display, "git-batch-short-read")
+            self._pump(display)
+        value = bytes(self.output[:size])
+        del self.output[:size]
+        return value
+
+    def _readline(self, display: Path) -> bytes:
+        while b"\n" not in self.output:
+            if len(self.output) > 256:
+                raise GitInventoryError(display, "git-batch-framing")
+            if self.stdout not in self.selector.get_map():
+                raise GitInventoryError(display, "git-batch-short-read")
+            self._pump(display)
+        end = self.output.index(b"\n") + 1
+        value = bytes(self.output[:end])
+        del self.output[:end]
+        return value
+
+    def _copy_body(
+        self, destination, declared_size: int, display: Path, budget: ScanBudget,
+    ) -> None:
+        remaining = declared_size
+        while remaining:
+            chunk = self._read_exact(min(STREAM_CHUNK_BYTES, remaining), display)
+            destination.write(chunk)
+            remaining -= len(chunk)
+
+    @contextmanager
+    def blob(self, entry: IndexEntry, budget: ScanBudget):
+        display = Path("<git-index>") / Path(entry.path.as_posix())
+        self.deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
+        try:
+            self.stdin.write(entry.oid.encode("ascii") + b"\n")
+            self.stdin.flush()
+        except (BrokenPipeError, OSError) as error:
+            raise GitInventoryError(display, "git-inventory-failed") from error
+        declared_size = _parse_batch_header(self._readline(display), entry.oid, display)
+        if declared_size > MAX_RAW_FILE_BYTES:
+            raise ScanLimit(display, "raw-byte-limit")
+        budget.path_entry(display)
+        budget.file(display)
+        budget.input(display, declared_size)
+        with tempfile.TemporaryFile() as source:
+            self._copy_body(source, declared_size, display, budget)
+            _validate_batch_delimiter(self._read_exact(1, display), display)
+            source.seek(0)
+            yield FrozenFileView(source, declared_size), declared_size, display
+
+    def _finish(self) -> None:
+        self.stdin.close()
+        self.deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
+        while self.selector.get_map():
+            self._pump(self.repository.path)
+        if self.output:
+            raise GitInventoryError(self.repository.path, "git-batch-trailing-data")
+        if self.errors:
+            raise GitInventoryError(self.repository.path, "git-inventory-failed")
+        try:
+            returncode = self.process.wait(
+                timeout=max(0.0, self.deadline - time.monotonic()),
+            )
+        except subprocess.SubprocessError as error:
+            raise GitInventoryError(self.repository.path, "git-inventory-failed") from error
+        if returncode != 0:
+            raise GitInventoryError(self.repository.path, "git-inventory-failed")
+        self.repository.revalidate()
+
+    def _terminate(self) -> None:
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.wait()
+
+    def __exit__(self, exc_type, _exc, _traceback) -> bool:
+        try:
+            if exc_type is None:
+                self._finish()
+            else:
+                self._terminate()
+        finally:
+            self.selector.close()
+            if self.process.poll() is None:
+                self._terminate()
+        return False
+
+
+def _start_git_batch(repository: RepositoryBinding) -> GitBatch:
+    repository.revalidate()
+    process = subprocess.Popen(
+        _git_argv(repository, ("cat-file", "--batch")),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        env=_git_environment(),
+        pass_fds=(repository.fd,),
+    )
+    return GitBatch(repository, process)
+
+
 def _scan_index_blob(
-    repository: Path, entry: IndexEntry, budget: ScanBudget,
+    batch: GitBatch, entry: IndexEntry, budget: ScanBudget,
 ) -> list[Finding]:
-    display = Path("<git-index>") / Path(entry.path.as_posix())
-    data = _git_output(
-        repository, ("cat-file", "blob", entry.oid), max_bytes=MAX_RAW_FILE_BYTES,
-    )
-    budget.path_entry(display)
-    budget.file(display)
-    budget.input(display, len(data))
-    source = FrozenFileView(io.BytesIO(data), len(data))
-    prefix = source.read(512)
-    source.seek(0)
-    intent = _archive_intent(entry.path.name, prefix)
-    limit = MAX_COMPRESSED_ARCHIVE_BYTES if intent in {"zip", "compressed_tar"} else MAX_RAW_FILE_BYTES
-    if len(data) > limit:
-        reason = "compressed-byte-limit" if intent in {"zip", "compressed_tar"} else "raw-byte-limit"
-        return [Finding(display, reason)]
-    if intent is None:
-        return _patterns_stream(
-            display, source, expected_size=len(data), byte_limit=limit,
-            limit_reason="raw-byte-limit",
+    with batch.blob(entry, budget) as (source, declared_size, display):
+        prefix = source.read(512)
+        source.seek(0)
+        intent = _archive_intent(entry.path.name, prefix)
+        limit = (
+            MAX_COMPRESSED_ARCHIVE_BYTES
+            if intent in {"zip", "compressed_tar"}
+            else MAX_RAW_FILE_BYTES
         )
-    findings = _patterns_stream(
-        display, source, expected_size=len(data), byte_limit=limit,
-        limit_reason="compressed-byte-limit",
-    )
-    source.seek(0)
-    findings.extend(_scan_archive(source, intent, display, budget, 0))
-    return findings
+        if declared_size > limit:
+            reason = (
+                "compressed-byte-limit"
+                if intent in {"zip", "compressed_tar"}
+                else "raw-byte-limit"
+            )
+            return [Finding(display, reason)]
+        findings = _patterns_stream(
+            display, source, expected_size=declared_size, byte_limit=limit,
+            limit_reason=(
+                "compressed-byte-limit"
+                if intent in {"zip", "compressed_tar"}
+                else "raw-byte-limit"
+            ),
+        )
+        if intent is not None:
+            source.seek(0)
+            findings.extend(_scan_archive(source, intent, display, budget, 0))
+        return findings
 
 
 def _scan_source(
-    root: Path, classification: RootClassification, budget: ScanBudget,
+    root: RootBinding, classification: RootClassification, budget: ScanBudget,
 ) -> list[Finding]:
     repository = classification.repository
     scope = classification.scope
     assert repository is not None and scope is not None
-    opened_root = root.stat(follow_symlinks=False)
     first = _capture_source_snapshot(repository, scope)
     snapshot = _capture_source_snapshot(repository, scope)
     if first != snapshot:
-        return [Finding(root, "source-inventory-drift")]
+        return [Finding(root.path, "source-inventory-drift")]
+    _supplement_source_inventory(root, classification, snapshot, budget)
     findings = []
-    for entry in snapshot.index:
-        findings.extend(_scan_index_blob(repository, entry, budget))
+    if snapshot.index:
+        with _start_git_batch(repository) as batch:
+            for entry in snapshot.index:
+                findings.extend(_scan_index_blob(batch, entry, budget))
+                if _terminal_limit(findings):
+                    return findings
+    working = dict(snapshot.working)
+    for relative in (
+        *(entry.path for entry in snapshot.index),
+        *snapshot.untracked,
+    ):
+        expected_identity = working[relative.as_posix()]
+        if expected_identity is None:
+            continue
+        budget.path_entry(Path(relative.as_posix()))
+        for candidate in _open_relative_candidate(
+            repository.fd, repository.path, Path(relative.as_posix()), expected_identity,
+        ):
+            display = _source_display(root, repository, relative, index=False)
+            findings.extend(_scan_file(candidate.path, display, budget, candidate))
         if _terminal_limit(findings):
             return findings
-    working = dict(snapshot.working)
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    repository_fd = os.open(repository, flags)
-    try:
-        for relative in (
-            *(entry.path for entry in snapshot.index),
-            *snapshot.untracked,
-        ):
-            if working[relative.as_posix()] is None:
-                continue
-            budget.path_entry(Path(relative.as_posix()))
-            for candidate in _open_relative_candidate(
-                repository_fd, repository, Path(relative.as_posix()),
-            ):
-                display = _source_display(root, repository, relative, index=False)
-                findings.extend(_scan_file(candidate.path, display, budget, candidate))
-            if _terminal_limit(findings):
-                return findings
-    finally:
-        os.close(repository_fd)
     final = _capture_source_snapshot(repository, scope)
     final_classification = _classify_root(root)
-    if (
-        final != snapshot
-        or final_classification != classification
-        or _identity(root.stat(follow_symlinks=False)) != _identity(opened_root)
-    ):
-        findings.append(Finding(root, "source-inventory-drift"))
+    final_repository = final_classification.repository
+    try:
+        same_classification = (
+            final_repository is not None
+            and final_classification.scope == scope
+            and final_repository.root.identity == repository.root.identity
+            and final_repository.marker_identity == repository.marker_identity
+        )
+    finally:
+        if final_repository is not None:
+            final_repository.close()
+    root.revalidate()
+    repository.revalidate()
+    if final != snapshot or not same_classification:
+        findings.append(Finding(root.path, "source-inventory-drift"))
     return findings
 
 
@@ -2931,45 +3730,74 @@ def scan(roots: Path | Sequence[Path]) -> tuple[Finding, ...]:
     if not supplied:
         return (Finding(Path("."), "no-scan-roots"),)
     requested = tuple(Path(os.path.abspath(os.fspath(root))) for root in supplied)
-    findings: list[Finding] = []
-    budget=ScanBudget()
+    lexical = set()
+    for root in requested:
+        if root in lexical:
+            return (Finding(root, "duplicate-root"),)
+        lexical.add(root)
+    bindings = []
+    identities = set()
+    preflight_findings = []
     for root in requested:
         try:
-            metadata = root.stat(follow_symlinks=False)
+            binding = RootBinding.open(root)
         except FileNotFoundError:
-            findings.append(Finding(root, "missing-root"))
+            preflight_findings.append(Finding(root, "missing-root"))
+            continue
+        except ScanLimit as error:
+            preflight_findings.append(Finding(error.path, error.reason))
             continue
         except OSError:
-            findings.append(Finding(root, "unreadable-input"))
+            preflight_findings.append(Finding(root, "unreadable-input"))
             continue
-        if stat.S_ISLNK(metadata.st_mode):
-            findings.append(Finding(root,"filesystem-symlink")); continue
-        if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
-            findings.append(Finding(root,"filesystem-special")); continue
-        try:
-            classification = _classify_root(root)
-            if classification.source:
-                findings.extend(_scan_source(root, classification, budget))
-                if _terminal_limit(findings):
-                    return tuple(findings)
-                continue
-            if stat.S_ISREG(metadata.st_mode): candidates=(root,)
-            else: candidates=_walk(root,budget)
+        alias = (binding.identity[0], binding.identity[1], stat.S_IFMT(binding.identity[2]))
+        if alias in identities:
+            binding.close()
+            for opened in bindings:
+                opened.close()
+            return (Finding(root, "duplicate-root"),)
+        identities.add(alias)
+        bindings.append(binding)
+    findings: list[Finding] = preflight_findings
+    budget=ScanBudget()
+    try:
+        for root in bindings:
             try:
-                for value in candidates:
-                    candidate=value if isinstance(value,OpenedCandidate) else None
-                    path=value.path if candidate is not None else value
-                    display=path if stat.S_ISREG(metadata.st_mode) else path.relative_to(root)
-                    findings.extend(_scan_file(path,display,budget,candidate))
-                    if _terminal_limit(findings): return tuple(findings)
-            finally:
-                close=getattr(candidates,"close",None)
-                if close is not None: close()
-        except (GitInventoryError,ScanLimit) as error:
-            findings.append(Finding(error.path,error.reason)); return tuple(findings)
-        except OSError:
-            findings.append(Finding(root,"unreadable-input")); return tuple(findings)
-    return tuple(findings)
+                classification = _classify_root(root)
+                try:
+                    if classification.source:
+                        findings.extend(_scan_source(root, classification, budget))
+                        if _terminal_limit(findings):
+                            return tuple(findings)
+                        continue
+                    if root.directory:
+                        candidates = _walk(root, budget)
+                    else:
+                        candidates = (
+                            _opened_candidate(
+                                root.parent.fd, root.name, root.path, root.identity,
+                            ),
+                        )
+                    try:
+                        for candidate in candidates:
+                            path = candidate.path
+                            display = path.relative_to(root.path) if root.directory else path
+                            findings.extend(_scan_file(path, display, budget, candidate))
+                            if _terminal_limit(findings): return tuple(findings)
+                    finally:
+                        close=getattr(candidates,"close",None)
+                        if close is not None: close()
+                finally:
+                    if classification.repository is not None:
+                        classification.repository.close()
+            except (GitInventoryError,ScanLimit) as error:
+                findings.append(Finding(error.path,error.reason)); return tuple(findings)
+            except OSError:
+                findings.append(Finding(root.path,"unreadable-input")); return tuple(findings)
+        return tuple(findings)
+    finally:
+        for root in bindings:
+            root.close()
 
 
 def main() -> int:
@@ -3035,11 +3863,15 @@ Use `argparse` sub-free parsers with `allow_abbrev=False`; reject mutually combi
 
 Create `tests/fixtures/synthetic/README.md` stating that fixtures use generated UUIDs and roles only, never recorded media, real names, credentials, addresses, host identifiers, or provider bodies.
 
-Classify every lexical root independently before reading content. A verified Git worktree root, or a non-ignored descendant that is not itself a generated/evidence/candidate/archive root, is a **source root**. Source mode never physically walks the repository. It captures the same bounded inventory twice before scanning and once after scanning: complete stage-0 `git ls-files --stage -z` records, complete `git ls-files --others --exclude-standard -z` records, and nofollow working-tree identities for every inventoried path within the requested pathspec. It scans the immutable blob bytes named by every stage-0 index record, then the nofollow bytes of every present tracked working-tree file and every visible untracked/non-ignored file. Thus a staged-only leak is visible, a tracked file below an ignored directory remains visible through the index, and ordinary ignored pytest/Ruff/mypy caches, build outputs, and pnpm links are omitted only because Git does not place them in the source inventory. A nonzero stage, duplicate/malformed/non-UTF-8/non-canonical/out-of-scope path, invalid mode/object ID, failed/truncated/oversized/timed-out Git command, unreadable or changing input, or any before/after inventory or identity drift blocks. Git commands use fixed argument vectors, `shell=False`, a content-free environment, bounded stdout/stderr, and a ten-second deadline; inability to prove a discovered worktree's state is never reclassified as an artifact pass.
+Classify every lexical root independently before reading content. Open every absolute ancestor descriptor-relative from `/` with `O_DIRECTORY|O_NOFOLLOW`, retain that descriptor/identity chain through the scan, and reject a symlink or special ancestor. Reject duplicate lexical roots and device/inode aliases before scanning any root. A verified Git worktree root, or a non-ignored descendant that is not itself a generated/evidence/candidate/archive root, is a **source root**. A retained repository descriptor and `.git` identity bind classification, inventory, and candidate opens; Linux Git commands use the inherited descriptor path, while macOS path-based Git commands are bracketed by full retained-chain and marker revalidation because Darwin cannot `chdir` through an inherited `/dev/fd` directory. Every opened working candidate must equal the identity captured for that exact Git-relative path.
+
+Source mode captures the same bounded inventory twice before scanning and once after scanning: complete stage-0 `git ls-files --stage -z` records, visible untracked records using only repository `.gitignore` files, repository-`.gitignore` ignored records used as physical-prune boundaries, identities for every applicable `.gitignore`, and nofollow working-tree identities for every inventoried path within the requested pathspec. A descriptor-relative physical supplement walks the requested source subtree to prove that every unignored regular/symlink entry belongs to the Git inventory and to block unignored FIFOs, devices, sockets, or other omitted special entries; it skips only the bound worktree's `.git` marker and ignored entries proven by the captured repository `.gitignore` inventory. It is a completeness proof, not an artifact content scan. Ordinary ignored pytest/Ruff/mypy caches, build outputs, and pnpm links are therefore omitted only through source classification and the captured ignore inventory; an explicit ignored/generated/evidence/candidate/archive root always takes artifact mode, and ambiguity takes artifact mode or blocks.
+
+Source content scanning uses one bounded `git cat-file --batch` process for all stage-0 objects. For each response it validates the exact requested OID, `blob` type, canonical declared size, header/body delimiter, short read, missing object, and trailing output; charges the per-file and shared input budgets before reading the body; and streams exactly the declared bytes into bounded anonymous temporary storage before matching/archive parsing. It then scans the nofollow bytes of every present tracked working-tree file and every visible untracked/non-ignored file. Thus a staged-only leak is visible and a tracked file below an ignored directory remains visible through the index. A nonzero stage, duplicate/malformed/non-UTF-8/non-canonical/out-of-scope path, invalid mode/object ID, failed/truncated/oversized/timed-out Git command or batch response, unreadable/changing input, physical/Git disagreement, or any before/after inventory or identity drift blocks and terminates the batch process. Git commands use fixed argument vectors, `shell=False`, retained descriptors, bounded stdout/stderr, and a ten-second deadline. They disable system/global config, `core.excludesFile`, lazy fetching, credential prompts, and proxy access; `.git/info/exclude` and ambient exclude/config sources cannot hide source candidates. Inability to prove a discovered worktree's state is never reclassified as an artifact pass.
 
 An ignored root, a root whose relative path contains a generated/evidence/candidate component, an explicitly named archive, or any root outside Git is an **artifact root** and receives the existing complete physical nofollow walk. Explicit `dist`, `var`, nested generated names, evidence/candidate trees, and archives never inherit source exclusions, even when they are below a worktree or force-tracked. Missing, symlink, FIFO, device, socket, unreadable, or changing explicit roots block. CLI normalization remains lexical so an explicitly supplied symlink reaches the nofollow check. No matcher, suffix, credential/private-key rule, archive parser, race check, limit, or special-file rejection is weakened, and Task 3 adds no repository path allowlist.
 
-One mutable `ScanBudget` spans index blobs, tracked and untracked working-tree bytes, physical artifact walks, every explicit root, and every archive nesting level. It caps path entries, regular files, physical input bytes, archive members, and actual decompressed bytes rather than trusting declared member sizes. Raw ordinary files remain capped at 4 GiB, compressed ZIP/GZip inputs at 4 GiB, one expanded member at 2 GiB, total physical input at 16 GiB, and total actual expansion at 12 GiB across 50,000 members. Artifact-directory traversal opens the lexical root and every child through descriptor-relative `O_DIRECTORY|O_NOFOLLOW`, scans depth-first with at most 64 directory descriptors, opens each file relative to its still-open parent, and rechecks the first directory-entry metadata, opened descriptor, and final file/directory name against the same device/inode/type/size/change timestamps before attesting. New, removed, renamed, symlink-swapped, special-file-swapped, or changed queued paths therefore block instead of redirecting the walk. Each file's opened size is charged to the shared input budget, and all parsers receive a frozen view that cannot seek or read beyond that size. The descriptor-relative `os.scandir` walk charges an entry before yielding it and never materializes or sorts the complete tree.
+One mutable `ScanBudget` spans streamed index blobs, tracked and untracked working-tree bytes, the source completeness walk, physical artifact walks, every explicit root, and every archive nesting level. It caps path entries, regular files, physical input bytes, archive members, and actual decompressed bytes rather than trusting declared member sizes. Raw ordinary files remain capped at 4 GiB, compressed ZIP/GZip inputs at 4 GiB, one expanded member at 2 GiB, total physical input at 16 GiB, and total actual expansion at 12 GiB across 50,000 members. Artifact-directory traversal uses the retained lexical-root chain and opens every child through descriptor-relative `O_DIRECTORY|O_NOFOLLOW`, scans depth-first with at most 64 directory descriptors, opens each file relative to its still-open parent, and rechecks the first directory-entry metadata, opened descriptor, and final file/directory name against the same device/inode/type/size/change timestamps before attesting. New, removed, renamed, symlink-swapped, special-file-swapped, or changed queued paths therefore block instead of redirecting the walk. Each file's opened size is charged to the shared input budget, and all parsers receive a frozen view that cannot seek or read beyond that size. The descriptor-relative `os.scandir` walk charges an entry before yielding it and never materializes or sorts the complete tree.
 
 Before `ZipFile` may allocate its member list, the EOCD is found by its exact comment boundary, multi-disk/ZIP64 sentinels are blocked, and the central-directory size is capped at 64 MiB and required to end exactly at the EOCD. A bounded streaming header walk then proves every complete central record and requires its actual count to equal the capped EOCD count, so a forged small count cannot make `ZipFile` allocate an oversized list. ZIP virtual names must be unique, canonical, relative, and safe; a directory requires directory mode plus zero compressed/uncompressed size, while a directory-mode non-directory or payload-bearing trailing-slash entry blocks. TAR/GZip uses a bounded single-member deflate reader and a conservative streaming USTAR parser instead of `tarfile`: GZip optional headers, compressed padding, every decompressed TAR header/body/padding byte, member metadata, and trailing TAR padding are capped and charged before further parsing, and FHCRC is verified when present. Concatenated GZip, PAX/GNU long-name/extended metadata, sparse entries, links, devices, and every non-USTAR/special member are blocked before any declared special-member body is read; release archives are already required to be deterministic USTAR. Every bounded physical archive byte is pattern-scanned before parsing, in addition to each expanded regular member, so ZIP comments/extras, GZip names/comments/extra fields, TAR names/owner/reserved header bytes, and parser-ignored metadata cannot carry an unreported literal credential. Pattern matching retains a 256-byte overlap so a credential split across chunks is still found. A bounded file or member is read completely; exceeding any per-object or scan-wide bound is a blocking finding and stops traversal. Filesystem symlinks, FIFOs, devices, sockets, and archive symlink/hardlink/device/special members are blocking inputs. ZIP, wheel, TAR, GZip, and magic-identified regular members recurse through bounded anonymous temporary storage under the same depth/member/byte budget, so a secret inside the Reachy wheelhouse cannot hide in an archive-inside-archive. Archive paths remain virtual and nothing is extracted into the candidate or repository tree. An intended archive that cannot be parsed returns blocking `corrupt-archive`, never an ordinary passing file. Corrupt, changing, or unreadable explicit inputs also block.
 
