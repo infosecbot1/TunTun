@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
 from urllib.parse import quote
@@ -24,6 +25,7 @@ from tuntun_contracts.memory import (
 )
 from tuntun_contracts.provider import ProviderResponse, SanitizedProviderMessage
 from tuntun_contracts.speech import SpeechChunk, TranscriptResult
+from tuntun_core.config import logging as logging_config
 from tuntun_core.config.logging import (
     MAX_CONTAINER_ITEMS,
     MAX_LOG_DEPTH,
@@ -196,6 +198,47 @@ EXPECTED_STRUCTURAL_KEYS = frozenset(
     {"mapping", "list", "tuple", "payload", "items", "data", "context", "metadata"}
 )
 
+EXPECTED_PUBLIC_TEXT_VALUES = {
+    "event": frozenset({"test.probe"}),
+    "level": frozenset({"debug", "info", "warning", "error", "critical"}),
+    "logger": frozenset({"tuntun"}),
+    "method": frozenset({"debug", "info", "warning", "error", "critical"}),
+    "status": frozenset({"ready", "ok", "failed"}),
+    "kind": frozenset(
+        {"working", "episodic", "semantic", "preference", "procedural", "relational", "policy"}
+    ),
+    "code": frozenset({"ok"}),
+    "operation": frozenset({"probe"}),
+    "provider": frozenset({"openai", "qwen"}),
+    "model": frozenset({"registered-model"}),
+    "language": frozenset({"en"}),
+    "role": frozenset({"system", "user", "assistant"}),
+    "schema_version": frozenset(
+        {
+            "1.0",
+            "assistant-turn-v1",
+            "tuntun.provider-usage-receipt.v1",
+            "tuntun.reachy-stop-all-receipts.v1",
+        }
+    ),
+    "redacted": frozenset(
+        set(EXPECTED_PRIVATE_KEYS)
+        | {
+            "binary",
+            "cycle",
+            "invalid_mapping",
+            "invalid_root",
+            "limit",
+            "unclassified",
+            "unsupported",
+        }
+    ),
+}
+
+EXPECTED_PUBLIC_BOOLEAN_KEYS = frozenset({"ok", "enabled", "final"})
+EXPECTED_PUBLIC_INTEGER_KEYS = frozenset({"version", "count", "attempt", "sequence", "port"})
+EXPECTED_PUBLIC_LATENCY_KEYS = frozenset({"duration_ms", "elapsed_ms"})
+
 
 def _encoded_forms(value: str) -> frozenset[str]:
     raw = value.encode("utf-8")
@@ -229,12 +272,25 @@ def test_key_registries_are_exact_immutable_canonical_unique_and_disjoint() -> N
     assert PRIVATE_KEY_REGISTRY == EXPECTED_PRIVATE_KEYS
     assert PUBLIC_LOG_KEYS == EXPECTED_PUBLIC_KEYS
     assert STRUCTURAL_LOG_KEYS == EXPECTED_STRUCTURAL_KEYS
+    assert logging_config.PUBLIC_TEXT_VALUES == EXPECTED_PUBLIC_TEXT_VALUES
+    assert logging_config.PUBLIC_BOOLEAN_KEYS == EXPECTED_PUBLIC_BOOLEAN_KEYS
+    assert logging_config.PUBLIC_INTEGER_KEYS == EXPECTED_PUBLIC_INTEGER_KEYS
+    assert logging_config.PUBLIC_LATENCY_KEYS == EXPECTED_PUBLIC_LATENCY_KEYS
+    public_policy_keys = (
+        set(logging_config.PUBLIC_TEXT_VALUES)
+        | logging_config.PUBLIC_BOOLEAN_KEYS
+        | logging_config.PUBLIC_INTEGER_KEYS
+        | logging_config.PUBLIC_LATENCY_KEYS
+    )
+    assert public_policy_keys == PUBLIC_LOG_KEYS
     aliases = [alias for values in PRIVATE_KEY_REGISTRY.values() for alias in values]
     assert len(aliases) == len(set(aliases))
     assert all(normalize_private_key(alias) == alias for alias in aliases)
     assert not set(aliases) & (PUBLIC_LOG_KEYS | STRUCTURAL_LOG_KEYS)
     with pytest.raises(TypeError):
         cast(Any, PRIVATE_KEY_REGISTRY)["authorization"] = frozenset()
+    with pytest.raises(TypeError):
+        cast(Any, logging_config.PUBLIC_TEXT_VALUES)["event"] = frozenset()
 
 
 @pytest.mark.parametrize(
@@ -253,13 +309,13 @@ def test_every_private_alias_removes_literal_and_common_encoded_forms(
     rendered = _render(
         "log.probe",
         mapping={"list": [{"tuple": ({key: private_value},)}]},
-        ok=7,
+        ok=True,
     )
     for form in _encoded_forms(TEXT_SENTINEL):
         assert form not in rendered
     decoded = json.loads(rendered)
     assert decoded["mapping"]["list"][0]["tuple"][0][key] == {"redacted": category}
-    assert decoded["ok"] == 7
+    assert decoded["ok"] is True
 
 
 @pytest.mark.parametrize(
@@ -358,6 +414,64 @@ def test_public_scalar_keys_reject_container_smuggling() -> None:
     assert decoded["status"] == {"redacted": "unsupported"}
     assert decoded["code"] == {"redacted": "unsupported"}
     assert "private-sentinel" not in rendered
+
+
+@pytest.mark.parametrize("key", sorted(EXPECTED_PUBLIC_TEXT_VALUES))
+@pytest.mark.parametrize(
+    "value",
+    (
+        "sk-test-private-credential",
+        "0123456789abcdef0123456789abcdef",
+        "cHJpdmF0ZS1jcmVkZW50aWFs",
+        "https://private.example/credential",
+    ),
+)
+def test_every_textual_public_key_rejects_unregistered_token_shaped_values(
+    key: str,
+    value: str,
+) -> None:
+    redacted = redact_private_fields(None, "info", {key: value})
+    assert redacted[key] == {"redacted": "unclassified"}
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        (key, value)
+        for key in sorted(EXPECTED_PUBLIC_TEXT_VALUES)
+        for value in sorted(EXPECTED_PUBLIC_TEXT_VALUES[key])
+    ],
+)
+def test_every_registered_public_text_value_is_preserved(key: str, value: str) -> None:
+    assert redact_private_fields(None, "info", {key: value}) == {key: value}
+
+
+@pytest.mark.parametrize("key", sorted(EXPECTED_PUBLIC_BOOLEAN_KEYS))
+@pytest.mark.parametrize("value", (1, 1.0, "true", None))
+def test_boolean_public_keys_reject_wrong_scalar_types(key: str, value: object) -> None:
+    assert redact_private_fields(None, "info", {key: value})[key] == {"redacted": "unsupported"}
+
+
+@pytest.mark.parametrize("key", sorted(EXPECTED_PUBLIC_INTEGER_KEYS))
+@pytest.mark.parametrize("value", (True, 1.0, "1", None))
+def test_integer_public_keys_reject_wrong_scalar_types(key: str, value: object) -> None:
+    assert redact_private_fields(None, "info", {key: value})[key] == {"redacted": "unsupported"}
+
+
+@pytest.mark.parametrize("key", sorted(EXPECTED_PUBLIC_LATENCY_KEYS))
+@pytest.mark.parametrize("value", (True, "1", None))
+def test_latency_public_keys_reject_wrong_scalar_types(key: str, value: object) -> None:
+    assert redact_private_fields(None, "info", {key: value})[key] == {"redacted": "unsupported"}
+
+
+def test_exact_public_scalar_types_and_bounds_are_preserved() -> None:
+    event: dict[str, object] = {
+        **{key: True for key in EXPECTED_PUBLIC_BOOLEAN_KEYS},
+        **{key: 1 for key in EXPECTED_PUBLIC_INTEGER_KEYS},
+        "duration_ms": 1,
+        "elapsed_ms": 1.25,
+    }
+    assert redact_private_fields(None, "info", event) == event
 
 
 def _actual_private_contract_payloads() -> tuple[dict[str, object], ...]:
@@ -533,14 +647,45 @@ def test_cycles_depth_node_limits_and_unsupported_values_fail_closed() -> None:
 
 
 def test_hostile_mapping_and_sequence_iterators_fail_closed() -> None:
-    class HostileMapping(dict[str, object]):
+    effects: list[str] = []
+
+    class HostileDict(dict[str, object]):
         def items(self) -> Any:
-            raise RuntimeError("private-mapping-sentinel")
+            effects.append("dict-items")
+            return super().items()
+
+        def __iter__(self) -> Iterator[str]:
+            effects.append("dict-iter")
+            return super().__iter__()
+
+    class HostileMapping(Mapping[str, object]):
+        def __getitem__(self, key: str) -> object:
+            effects.append(f"getitem:{key}")
+            raise KeyError(key)
+
+        def __iter__(self) -> Iterator[str]:
+            effects.append("mapping-iter")
+            return iter(())
+
+        def __len__(self) -> int:
+            effects.append("mapping-len")
+            return 0
 
     class HostileList(list[object]):
-        def __iter__(self) -> Any:
-            raise RuntimeError("private-sequence-sentinel")
+        def __iter__(self) -> Iterator[object]:
+            effects.append("list-iter")
+            return super().__iter__()
 
+    class HostileTuple(tuple[object, ...]):
+        def __iter__(self) -> Iterator[object]:
+            effects.append("tuple-iter")
+            return super().__iter__()
+
+    dict_result = redact_private_fields(
+        None,
+        "info",
+        {"event": "hostile.dict", "payload": HostileDict(status="ready")},
+    )
     mapping_result = redact_private_fields(
         None,
         "info",
@@ -551,11 +696,16 @@ def test_hostile_mapping_and_sequence_iterators_fail_closed() -> None:
         "info",
         {"event": "hostile.sequence", "payload": HostileList([TEXT_SENTINEL])},
     )
+    tuple_result = redact_private_fields(
+        None,
+        "info",
+        {"event": "hostile.tuple", "payload": HostileTuple((TEXT_SENTINEL,))},
+    )
+    assert dict_result["payload"] == {"redacted": "unsupported"}
     assert mapping_result["payload"] == {"redacted": "unsupported"}
     assert sequence_result["payload"] == {"redacted": "unsupported"}
-    rendered = json.dumps((mapping_result, sequence_result), sort_keys=True)
-    assert "private-mapping-sentinel" not in rendered
-    assert "private-sequence-sentinel" not in rendered
+    assert tuple_result["payload"] == {"redacted": "unsupported"}
+    assert effects == []
 
 
 def test_redaction_does_not_mutate_input_and_invalid_root_is_safe() -> None:

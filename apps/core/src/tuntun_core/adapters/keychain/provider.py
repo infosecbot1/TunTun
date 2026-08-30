@@ -72,8 +72,8 @@ class InMemorySecretProvider:
         key = validate_secret_identifier(service, account)
         try:
             return self._values[key]
-        except KeyError as error:
-            raise RuntimeError(f"missing secret: {service}/{account}") from error
+        except KeyError:
+            raise RuntimeError("missing secret") from None
 
     def set(self, service: str, account: str, value: bytes) -> None:
         key = validate_secret_identifier(service, account)
@@ -95,9 +95,7 @@ def validate_production_secrets(provider: SecretProvider) -> None:
     for (service, account), required_length in REQUIRED_SECRET_LENGTHS.items():
         try:
             value = validate_secret_value(provider.get(service, account))
-        except (RuntimeError, ValueError) as error:
-            raise RuntimeError(
-                f"missing or invalid required secret: {service}/{account}"
-            ) from error
+        except Exception:
+            raise RuntimeError("missing or invalid required secret") from None
         if len(value) != required_length:
-            raise RuntimeError(f"invalid required secret length: {service}/{account}")
+            raise RuntimeError("invalid required secret length")

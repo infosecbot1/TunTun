@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import builtins
+import traceback
+from collections.abc import Callable
 from typing import Any, cast
 from uuid import UUID
 
@@ -82,6 +84,14 @@ def _complete_required_provider() -> InMemorySecretProvider:
     return provider
 
 
+def _format_runtime_error(action: Callable[[], object]) -> str:
+    try:
+        action()
+    except RuntimeError as error:
+        return "".join(traceback.format_exception(error))
+    raise AssertionError("expected RuntimeError")
+
+
 def test_secret_identifier_map_is_exact_immutable_and_collision_free() -> None:
     assert SECRET_IDS == EXPECTED_SECRET_IDS
     assert len(set(SECRET_IDS.values())) == len(SECRET_IDS)
@@ -105,6 +115,35 @@ def test_in_memory_provider_round_trip_delete_and_repr_are_content_free() -> Non
     assert not provider.exists("tuntun.database", "root-v1")
     with pytest.raises(RuntimeError, match="missing secret"):
         provider.get("tuntun.database", "root-v1")
+
+
+def test_provider_tracebacks_hide_dynamic_identifiers_and_provider_failures() -> None:
+    dynamic_service = "tuntun.private-sentinel"
+    dynamic_account = "private-sentinel"
+    missing_traceback = _format_runtime_error(
+        lambda: InMemorySecretProvider().get(dynamic_service, dynamic_account)
+    )
+
+    class FailingProvider:
+        def get(self, service: str, account: str) -> bytes:
+            raise RuntimeError(f"provider-private-sentinel-{service}-{account}")
+
+        def set(self, service: str, account: str, value: bytes) -> None:
+            raise AssertionError("not called")
+
+        def delete(self, service: str, account: str) -> None:
+            raise AssertionError("not called")
+
+        def exists(self, service: str, account: str) -> bool:
+            raise AssertionError("not called")
+
+    validation_traceback = _format_runtime_error(
+        lambda: validate_production_secrets(FailingProvider())
+    )
+    rendered = missing_traceback + validation_traceback
+    assert "private-sentinel" not in rendered
+    assert "tuntun.database" not in validation_traceback
+    assert "root-v1" not in validation_traceback
 
 
 @pytest.mark.parametrize(
@@ -306,6 +345,47 @@ def test_macos_provider_missing_and_backend_read_failures_are_content_free(
     assert "secret-sentinel" not in str(raised.value)
 
 
+def test_macos_boundary_tracebacks_hide_backend_text_and_dynamic_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "private-backend-sentinel"
+    dynamic_service = "tuntun.private-sentinel"
+    dynamic_account = "private-sentinel"
+
+    monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(macos, "_load_macos_keyring_type", lambda: FakeMacOSBackend)
+
+    def fail_discovery() -> FakeMacOSBackend:
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(macos.keyring, "get_keyring", fail_discovery)
+    rendered = _format_runtime_error(MacOSKeychainSecretProvider)
+
+    backend = FakeMacOSBackend()
+    provider = _mac_provider(monkeypatch, backend)
+    backend.get_error = RuntimeError(sentinel)
+    rendered += _format_runtime_error(lambda: provider.get(dynamic_service, dynamic_account))
+
+    backend.get_error = None
+    backend.set_error = RuntimeError(sentinel)
+    rendered += _format_runtime_error(
+        lambda: provider.set(dynamic_service, dynamic_account, b"value")
+    )
+
+    backend.set_error = None
+    provider.set(dynamic_service, dynamic_account, b"value")
+
+    def fail_delete(service: str, account: str) -> None:
+        raise RuntimeError(f"{sentinel}-{service}-{account}")
+
+    monkeypatch.setattr(backend, "delete_password", fail_delete)
+    rendered += _format_runtime_error(lambda: provider.delete(dynamic_service, dynamic_account))
+
+    assert sentinel not in rendered
+    assert dynamic_service not in rendered
+    assert dynamic_account not in rendered
+
+
 def test_macos_provider_rejects_empty_set_before_backend_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -424,14 +504,94 @@ def test_target_probe_cleans_up_a_partially_failed_write() -> None:
             raise RuntimeError("synthetic post-write failure")
 
     provider = PartialFailureProvider()
-    with pytest.raises(RuntimeError, match="synthetic post-write failure"):
-        probe_script.probe_keychain_round_trip(
+    rendered = _format_runtime_error(
+        lambda: probe_script.probe_keychain_round_trip(
             provider,
             "tuntun.probe",
             "slot-v1",
             b"probe",
         )
+    )
+    assert "Keychain probe operation failed" in rendered
+    assert "synthetic post-write failure" not in rendered
     assert not provider.exists("tuntun.probe", "slot-v1")
+
+
+def test_target_probe_partial_write_and_ineffective_delete_reports_cleanup_failure() -> None:
+    class PartialWriteNoDeleteProvider(InMemorySecretProvider):
+        def set(self, service: str, account: str, value: bytes) -> None:
+            super().set(service, account, value)
+            raise RuntimeError("private-partial-write-sentinel")
+
+        def delete(self, service: str, account: str) -> None:
+            return None
+
+    provider = PartialWriteNoDeleteProvider()
+    rendered = _format_runtime_error(
+        lambda: probe_script.probe_keychain_round_trip(
+            provider,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    )
+    assert "Keychain probe cleanup failed" in rendered
+    assert "private-partial-write-sentinel" not in rendered
+    assert provider.exists("tuntun.probe", "slot-v1")
+
+
+def test_target_probe_verifies_absence_after_delete_and_verification_exceptions() -> None:
+    class DeleteFailureProvider(InMemorySecretProvider):
+        def delete(self, service: str, account: str) -> None:
+            super().delete(service, account)
+            raise RuntimeError("private-delete-sentinel")
+
+    delete_failure = DeleteFailureProvider()
+    rendered = _format_runtime_error(
+        lambda: probe_script.probe_keychain_round_trip(
+            delete_failure,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    )
+    assert "Keychain probe cleanup failed" in rendered
+    assert "private-delete-sentinel" not in rendered
+    assert not delete_failure.exists("tuntun.probe", "slot-v1")
+
+    class VerificationFailureProvider(InMemorySecretProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.exists_calls = 0
+
+        def set(self, service: str, account: str, value: bytes) -> None:
+            super().set(service, account, value)
+            raise RuntimeError("private-partial-verification-sentinel")
+
+        def exists(self, service: str, account: str) -> bool:
+            self.exists_calls += 1
+            if self.exists_calls > 1:
+                raise RuntimeError("private-verification-sentinel")
+            return super().exists(service, account)
+
+    verification_failure = VerificationFailureProvider()
+    rendered = _format_runtime_error(
+        lambda: probe_script.probe_keychain_round_trip(
+            verification_failure,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    )
+    assert "Keychain probe cleanup could not be verified" in rendered
+    assert "private-verification-sentinel" not in rendered
+    assert "private-partial-verification-sentinel" not in rendered
+    assert verification_failure.exists_calls == 2
+    assert not InMemorySecretProvider.exists(
+        verification_failure,
+        "tuntun.probe",
+        "slot-v1",
+    )
 
 
 def test_target_probe_fails_closed_on_mismatch_or_unverified_cleanup() -> None:

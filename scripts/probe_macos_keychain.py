@@ -21,16 +21,35 @@ def probe_keychain_round_trip(
     account: str,
     value: bytes,
 ) -> None:
-    if provider.exists(service, account):
+    try:
+        occupied = provider.exists(service, account)
+    except Exception:
+        raise RuntimeError("Keychain probe preflight failed") from None
+    if occupied:
         raise RuntimeError("Keychain probe slot already exists")
+
+    operation_failure: str | None = None
     try:
         provider.set(service, account, value)
-        if not hmac.compare_digest(provider.get(service, account), value):
-            raise RuntimeError("Keychain probe readback mismatch")
-    finally:
+        readback = provider.get(service, account)
+        if not hmac.compare_digest(readback, value):
+            operation_failure = "Keychain probe readback mismatch"
+    except Exception:
+        operation_failure = "Keychain probe operation failed"
+
+    delete_failed = False
+    try:
         provider.delete(service, account)
-    if provider.exists(service, account):
-        raise RuntimeError("Keychain probe cleanup failed")
+    except Exception:
+        delete_failed = True
+    try:
+        present = provider.exists(service, account)
+    except Exception:
+        raise RuntimeError("Keychain probe cleanup could not be verified") from None
+    if present or delete_failed:
+        raise RuntimeError("Keychain probe cleanup failed") from None
+    if operation_failure is not None:
+        raise RuntimeError(operation_failure) from None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
