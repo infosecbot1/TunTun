@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, replace
-from threading import Barrier, Lock
+from threading import Event, Lock, local
 from typing import Any, cast
 from uuid import UUID
 
@@ -37,6 +37,35 @@ class _ScriptedNonces:
 
 class _DerivedUUID(UUID):
     pass
+
+
+class _PausingConcurrentNonces:
+    def __init__(self) -> None:
+        self.first_entered = Event()
+        self.release_first = Event()
+        self.second_entered = Event()
+        self._caller = local()
+
+    def bind_caller(self, name: str) -> None:
+        self._caller.name = name
+        self._caller.index = 0
+
+    def __call__(self) -> bytes:
+        name = cast(str, self._caller.name)
+        index = cast(int, self._caller.index) + 1
+        self._caller.index = index
+        if name == "first" and index == 1:
+            self.first_entered.set()
+            if not self.release_first.wait(timeout=5):
+                raise AssertionError("first nonce source was not released")
+        elif name == "second" and index == 1:
+            self.second_entered.set()
+        return {
+            ("first", 1): b"A" * 12,
+            ("first", 2): b"B" * 12,
+            ("second", 1): b"C" * 12,
+            ("second", 2): b"D" * 12,
+        }[(name, index)]
 
 
 def test_record_round_trip_and_every_context_identity_is_authenticated() -> None:
@@ -324,27 +353,83 @@ def test_both_nonces_stay_reserved_when_the_first_aes_call_fails(
     assert calls == [b"D" * 12]
 
 
-def test_nonce_reservations_are_atomic_across_concurrent_encryptions() -> None:
-    start = Barrier(2)
-    cipher = RecordCipher(
-        ROOT_KEY,
-        nonce_source=_ScriptedNonces(b"D" * 12, b"W" * 12, b"D" * 12, b"X" * 12),
-    )
+def test_nonce_reservation_critical_section_serializes_concurrent_sources() -> None:
+    nonces = _PausingConcurrentNonces()
+    second_started = Event()
+    cipher = RecordCipher(ROOT_KEY, nonce_source=nonces)
 
-    def attempt(value: bytes) -> EncryptedRecord | RuntimeError:
-        start.wait()
-        try:
-            return cipher.encrypt(value, CTX)
-        except RuntimeError as error:
-            return error
+    def encrypt_as(name: str, plaintext: bytes) -> EncryptedRecord:
+        nonces.bind_caller(name)
+        if name == "second":
+            second_started.set()
+        return cipher.encrypt(plaintext, CTX)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = tuple(executor.map(attempt, (b"one", b"two")))
-    records = tuple(result for result in results if isinstance(result, EncryptedRecord))
-    errors = tuple(result for result in results if isinstance(result, RuntimeError))
-    assert len(records) == 1
-    assert len(errors) == 1
-    assert str(errors[0]) == "nonce reuse detected"
+        first = executor.submit(encrypt_as, "first", b"one")
+        second = None
+        try:
+            assert nonces.first_entered.wait(timeout=2)
+            second = executor.submit(encrypt_as, "second", b"two")
+            assert second_started.wait(timeout=2)
+            assert not nonces.second_entered.wait(timeout=1)
+        finally:
+            nonces.release_first.set()
+        first_record = first.result(timeout=2)
+        assert second is not None
+        second_record = second.result(timeout=2)
+
+    assert nonces.second_entered.is_set()
+    assert cipher.decrypt(first_record, CTX) == b"one"
+    assert cipher.decrypt(second_record, CTX) == b"two"
+
+
+def test_root_aead_serializes_two_successful_concurrent_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_root_entered = Event()
+    release_first_root = Event()
+    second_data_entered = Event()
+    second_root_entered = Event()
+    original_encrypt = AESGCM.encrypt
+
+    def scheduled_encrypt(
+        self: AESGCM,
+        nonce: bytes,
+        data: bytes,
+        associated_data: bytes | None,
+    ) -> bytes:
+        if nonce == b"B" * 12:
+            first_root_entered.set()
+            if not release_first_root.wait(timeout=5):
+                raise AssertionError("first root encryption was not released")
+        elif nonce == b"C" * 12:
+            second_data_entered.set()
+        elif nonce == b"D" * 12:
+            second_root_entered.set()
+        return original_encrypt(self, nonce, data, associated_data)
+
+    monkeypatch.setattr(AESGCM, "encrypt", scheduled_encrypt)
+    cipher = RecordCipher(
+        ROOT_KEY,
+        nonce_source=_ScriptedNonces(b"A" * 12, b"B" * 12, b"C" * 12, b"D" * 12),
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(cipher.encrypt, b"one", CTX)
+        second = None
+        try:
+            assert first_root_entered.wait(timeout=2)
+            second = executor.submit(cipher.encrypt, b"two", CTX)
+            assert second_data_entered.wait(timeout=2)
+            assert not second_root_entered.wait(timeout=1)
+        finally:
+            release_first_root.set()
+        first_record = first.result(timeout=2)
+        assert second is not None
+        second_record = second.result(timeout=2)
+
+    assert second_root_entered.is_set()
+    assert cipher.decrypt(first_record, CTX) == b"one"
+    assert cipher.decrypt(second_record, CTX) == b"two"
 
 
 def test_nonce_history_capacity_fails_closed_without_growing_forever(

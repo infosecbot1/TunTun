@@ -778,6 +778,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "sqlcipher3" },
     { name = "structlog" },
+    { name = "tuntun-contracts" },
     { name = "typer" },
 ]
 
@@ -796,6 +797,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "sqlcipher3", specifier = "==0.6.2" },
     { name = "structlog", specifier = ">=25.4,<26" },
+    { name = "tuntun-contracts", editable = "packages/contracts" },
     { name = "tuntun-testing", marker = "extra == 'simulation'", editable = "packages/testing" },
     { name = "typer", specifier = ">=0.16,<1" },
 ]
