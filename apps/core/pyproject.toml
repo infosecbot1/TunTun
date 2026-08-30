@@ -14,6 +14,12 @@ dependencies = [
 [project.scripts]
 tuntunctl = "tuntun_core.cli.main:app"
 
+[project.optional-dependencies]
+simulation = ["tuntun-testing"]
+
+[tool.uv.sources]
+tuntun-testing = { workspace = true }
+
 [build-system]
 requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
