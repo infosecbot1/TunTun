@@ -18,7 +18,8 @@ EXPECTED_ARCHITECTURES = {
 ARCHITECTURE_CHECK_STEP_NAME = "Assert runner architecture"
 ARCHITECTURE_CHECK_SHELL = "/bin/bash --noprofile --norc -p -euo pipefail {0}"
 MAKE_CHECK_COMMAND = (
-    "PYTEST_ADDOPTS=--basetemp=/tmp/t7-${{ github.run_id }}-${{ github.run_attempt }} make check"
+    "PYTEST_ADDOPTS=--basetemp=/tmp/t7-${{ github.run_id }}-${{ github.run_attempt }} "
+    "/usr/bin/make check"
 )
 ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
   ubuntu-24.04)
@@ -41,6 +42,64 @@ if [ "$actual" != "$expected" ]; then
   exit 1
 fi
 """
+CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+SETUP_UV_ACTION = "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d"
+SETUP_PNPM_ACTION = "pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86"
+SETUP_NODE_ACTION = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+CONTRACT_STEPS = [
+    {"uses": CHECKOUT_ACTION},
+    {"uses": SETUP_UV_ACTION, "with": {"version": "0.8.13", "enable-cache": True}},
+    {"shell": ARCHITECTURE_CHECK_SHELL, "run": "uv python install 3.11"},
+    {
+        "shell": ARCHITECTURE_CHECK_SHELL,
+        "run": "uv build --package tuntun-contracts --wheel --out-dir dist-py311",
+    },
+    {
+        "shell": ARCHITECTURE_CHECK_SHELL,
+        "run": "uv venv --python 3.11 .venv-contracts-py311",
+    },
+    {
+        "shell": ARCHITECTURE_CHECK_SHELL,
+        "run": (
+            "uv pip install --python .venv-contracts-py311/bin/python "
+            'dist-py311/*.whl "pytest>=8.4,<9"'
+        ),
+    },
+    {
+        "shell": ARCHITECTURE_CHECK_SHELL,
+        "run": (
+            ".venv-contracts-py311/bin/python -m pytest "
+            "tests/contract/test_v1_types_and_ports.py "
+            "tests/contract/test_dependency_direction.py -q"
+        ),
+    },
+]
+CHECK_STEPS = [
+    {
+        "name": ARCHITECTURE_CHECK_STEP_NAME,
+        "shell": ARCHITECTURE_CHECK_SHELL,
+        "run": ARCHITECTURE_CHECK_SCRIPT,
+    },
+    {"uses": CHECKOUT_ACTION},
+    {"uses": SETUP_UV_ACTION, "with": {"version": "0.8.13", "enable-cache": True}},
+    {
+        "uses": SETUP_PNPM_ACTION,
+        "with": {"version": "10.15.0", "run_install": False},
+    },
+    {
+        "uses": SETUP_NODE_ACTION,
+        "with": {"node-version": "22", "cache": "pnpm"},
+    },
+    {
+        "shell": ARCHITECTURE_CHECK_SHELL,
+        "run": "uv sync --all-packages --locked",
+    },
+    {
+        "shell": ARCHITECTURE_CHECK_SHELL,
+        "run": "pnpm install --frozen-lockfile",
+    },
+    {"shell": ARCHITECTURE_CHECK_SHELL, "run": MAKE_CHECK_COMMAND},
+]
 WORKFLOW_ROOT = Path(".github/workflows")
 
 
@@ -139,39 +198,34 @@ def _assert_workflow_policy(path: Path) -> None:
         assert forbidden not in lowered, (path, forbidden)
     workflow = yaml.safe_load(raw)
     assert isinstance(workflow, dict) and isinstance(workflow.get("jobs"), dict)
-    assert "env" not in workflow
+    assert set(workflow) == {"name", True, "permissions", "jobs"}
+    assert workflow["name"] == "ci"
+    assert workflow[True] == ["push", "pull_request"]
     _assert_permissions(workflow, required=True)
     _assert_no_secret_channel(workflow)
-    for job in workflow["jobs"].values():
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"contracts-python311", "check"}
+    contract_job = jobs["contracts-python311"]
+    check_job = jobs["check"]
+    assert contract_job == {
+        "runs-on": "ubuntu-24.04",
+        "steps": CONTRACT_STEPS,
+    }
+    assert set(check_job) == {"strategy", "runs-on", "steps"}
+    assert check_job["runs-on"] == MATRIX_RUNNER
+    assert check_job["steps"] == CHECK_STEPS
+    _assert_strategy_matches_runner(check_job)
+    _assert_matrix_job_checks_expected_architecture(check_job)
+    for job in jobs.values():
         assert isinstance(job, dict)
-        assert "if" not in job
-        assert "continue-on-error" not in job
-        assert "env" not in job
-        _assert_permissions(job, required=False)
-        _assert_strategy_matches_runner(job)
-        if "uses" in job:
-            assert set(job) <= {
-                "name",
-                "needs",
-                "if",
-                "uses",
-                "with",
-                "permissions",
-            }
-            _assert_uses_is_immutable(job["uses"])
-            continue
-        runner = job["runs-on"]
-        if isinstance(runner, str) and runner.startswith("${{"):
-            assert runner == MATRIX_RUNNER
-        else:
-            assert runner in FIXED_RUNNERS
-        _assert_matrix_job_checks_expected_architecture(job)
-        for step in job.get("steps", []):
-            assert "if" not in step
-            assert "continue-on-error" not in step
-            assert "env" not in step
+        for step in job["steps"]:
             if "uses" in step:
                 _assert_uses_is_immutable(step["uses"])
+            else:
+                assert step["shell"] == ARCHITECTURE_CHECK_SHELL
+                run = step["run"]
+                assert "GITHUB_PATH" not in run
+                assert "GITHUB_ENV" not in run
 
 
 def test_every_yml_and_yaml_workflow_has_only_fixed_runners_and_full_sha_actions() -> None:
@@ -275,15 +329,7 @@ def test_ci_is_unprivileged_and_has_no_hardware_or_provider_secrets() -> None:
 def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path) -> None:
     root = tmp_path / ".github" / "workflows"
     root.mkdir(parents=True)
-    valid = {
-        "permissions": {"contents": "read"},
-        "jobs": {
-            "check": {
-                "runs-on": "ubuntu-24.04",
-                "steps": [{"uses": "actions/checkout@" + "a" * 40}],
-            }
-        },
-    }
+    valid = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
     (root / "security.yml").write_text(yaml.safe_dump(valid))
     (root / "release.yaml").write_text(yaml.safe_dump(valid))
     assert {path.name for path in workflow_paths(root)} == {"security.yml", "release.yaml"}
@@ -356,7 +402,13 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
             },
         ),
     ):
-        changed = {**valid, "jobs": {"check": {**valid["jobs"]["check"], **mutation}}}
+        changed = {
+            **valid,
+            "jobs": {
+                **valid["jobs"],
+                "check": {**valid["jobs"]["check"], **mutation},
+            },
+        }
         path = root / name
         path.write_text(yaml.safe_dump(changed))
         with pytest.raises(AssertionError):
@@ -396,5 +448,94 @@ def test_ci_check_uses_short_per_run_pytest_basetemp() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
 
     assert workflow["jobs"]["check"]["steps"][-1] == {
-        "run": MAKE_CHECK_COMMAND,
+        "run": (
+            "PYTEST_ADDOPTS=--basetemp=/tmp/t7-${{ github.run_id }}-"
+            "${{ github.run_attempt }} /usr/bin/make check"
+        ),
+        "shell": ARCHITECTURE_CHECK_SHELL,
     }
+
+
+def test_every_run_step_uses_the_fixed_hardened_shell() -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
+
+    for job in workflow["jobs"].values():
+        for step in job["steps"]:
+            if "run" in step:
+                assert step["shell"] == ARCHITECTURE_CHECK_SHELL
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "workflow_defaults",
+        "workflow_extra_key",
+        "extra_job",
+        "job_defaults",
+        "job_extra_key",
+        "run_shell_true",
+        "run_extra_key",
+        "action_extra_key",
+        "github_path_make_shim",
+        "github_env_bash_env",
+        "extra_action",
+        "reordered_steps",
+        "removed_step",
+        "duplicate_step",
+    ),
+)
+def test_ci_rejects_unreviewed_structure_and_environment_file_mutations(
+    mutation: str,
+    tmp_path: Path,
+) -> None:
+    workflow = deepcopy(yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text()))
+    check_job = workflow["jobs"]["check"]
+    steps = check_job["steps"]
+    if mutation == "workflow_defaults":
+        workflow["defaults"] = {"run": {"shell": "/bin/true"}}
+    elif mutation == "workflow_extra_key":
+        workflow["concurrency"] = {"cancel-in-progress": True}
+    elif mutation == "extra_job":
+        workflow["jobs"]["neutralize"] = {
+            "runs-on": "ubuntu-24.04",
+            "steps": [{"run": "/bin/true"}],
+        }
+    elif mutation == "job_defaults":
+        check_job["defaults"] = {"run": {"shell": "/bin/true"}}
+    elif mutation == "job_extra_key":
+        check_job["timeout-minutes"] = 1
+    elif mutation == "run_shell_true":
+        steps[-1]["shell"] = "/bin/true"
+    elif mutation == "run_extra_key":
+        steps[-1]["timeout-minutes"] = 1
+    elif mutation == "action_extra_key":
+        steps[1]["shell"] = "/bin/true"
+    elif mutation == "github_path_make_shim":
+        steps.insert(
+            -1,
+            {
+                "shell": ARCHITECTURE_CHECK_SHELL,
+                "run": 'echo "/tmp/make-shim" >> "$GITHUB_PATH"',
+            },
+        )
+    elif mutation == "github_env_bash_env":
+        steps.insert(
+            -1,
+            {
+                "shell": ARCHITECTURE_CHECK_SHELL,
+                "run": 'echo "BASH_ENV=/tmp/bootstrap" >> "$GITHUB_ENV"',
+            },
+        )
+    elif mutation == "extra_action":
+        steps.insert(1, {"uses": "actions/checkout@" + "a" * 40})
+    elif mutation == "reordered_steps":
+        steps[1], steps[2] = steps[2], steps[1]
+    elif mutation == "removed_step":
+        steps.pop(1)
+    else:
+        steps.insert(2, deepcopy(steps[1]))
+
+    path = tmp_path / "ci.yml"
+    path.write_text(yaml.safe_dump(workflow), encoding="utf-8")
+    with pytest.raises(AssertionError):
+        _assert_workflow_policy(path)

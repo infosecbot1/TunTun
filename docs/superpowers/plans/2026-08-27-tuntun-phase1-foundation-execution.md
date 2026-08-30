@@ -24292,15 +24292,25 @@ artifact diagnostic-only, requires Darwin `arm64`, and accepts evidence only wit
 `docs/evidence/phase1-host-probe-completion.schema.json` companion. The receipt contains a real
 canonical RFC 3339 UTC time and records a clean script-derived repository commit and probe-script
 digest. The implementation captures a bounded, content-safe source snapshot both before Keychain
-access and after cleanup immediately before finalization: exact HEAD and script digest, clean
-tracked/untracked status, stage-zero index, default assume-unchanged/skip-worktree/fsmonitor flags,
-and recursively initialized submodule commits/state must compare exactly. It never serializes the
+access and after cleanup immediately before finalization. Git is launched from the retained
+repository descriptor by a fixed current-Python `-I -S` helper that calls `fchdir` and immediately
+`execve`s `/usr/bin/git`; it never resolves `-C` through the mutable repository pathname or uses
+`preexec_fn`. Exact HEAD and script digest, clean tracked/untracked status, stage-zero index,
+default assume-unchanged/skip-worktree/fsmonitor flags, absence of local filters/attributes,
+recursively retained submodule commits/state, and the actual nofollow descriptor-read bytes and
+executable/symlink mode of every stage-zero object must compare exactly to locally computed Git
+blob OIDs under one shared count/byte/repository/deadline budget. Replacement refs and lazy fetch
+are disabled. It never serializes the
 generated account, generated value, username, hostname, serial, hardware UUID, provisioning UDID,
 environment, command output, absolute home path, repository path, tracked path, submodule path, or
 Keychain path. A failed cleanup, source re-proof, publication, rollback, or fsync cannot produce an
 acceptable pass.
 
-The receipt never authorizes commissioning: `validate_phase1_host_probe_receipt` is structural-only
+The content-free CLI admits intentional help only when `-h` or `--help` is the sole argument;
+mixed help/invalid invocations, every argparse error, and every escaped `BaseException` return
+nonzero with exactly `macOS Keychain probe: FAIL` on stderr and no traceback, argv, path,
+environment, or private text. The receipt never authorizes commissioning:
+`validate_phase1_host_probe_receipt` is structural-only
 and can never accept evidence, while `verify_phase1_host_probe_receipt` requires the completion
 companion and compares the externally expected run ID, attempt ID, owner-approval commitment,
 source commit, probe-script digest, receipt digest, and completion binding. Even success returns
@@ -24308,7 +24318,10 @@ diagnostic evidence only. An independent trusted verifier separately authenticat
 approval and supplies every expected binding. Unique physical-host identity is intentionally omitted
 for privacy; later commissioning binds its opaque host record and target-held public key independently
 rather than inferring identity from this receipt or host strings. The completion companion's exclusive
-publication plus parent-directory fsync is the operation commit point: a crash immediately afterward
+publication plus parent-directory fsync is the operation commit point. The winning invocation retains
+and revalidates the exact receipt and completion inodes through final path acceptance, so a matching
+foreign swap deterministically fails and restores the receipt claim while preserving the foreign file.
+A crash immediately afterward
 but before observed exit `0` can leave valid diagnostic evidence. Every deterministic `main()` return
 `1` rejects, including a durably completed failing receipt; a pre-commit exception has no acceptable
 completion. Removing that narrow crash boundary requires a separate trusted supervisor-signed exit

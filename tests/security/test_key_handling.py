@@ -4,8 +4,11 @@ import base64
 import builtins
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
+import sys
 import traceback
 from collections.abc import Callable
 from datetime import datetime
@@ -118,6 +121,35 @@ def _receipt_cli_arguments(path: Path) -> list[str]:
         "--owner-approval-commitment-sha256",
         OWNER_APPROVAL_COMMITMENT_SHA256,
     ]
+
+
+def _expected_host_probe_bindings() -> dict[str, str]:
+    return {
+        "expected_run_id": HOST_PROBE_RUN_ID,
+        "expected_attempt_id": HOST_PROBE_ATTEMPT_ID,
+        "expected_owner_approval_commitment_sha256": OWNER_APPROVAL_COMMITMENT_SHA256,
+        "expected_source_commit": "f" * 40,
+        "expected_probe_script_sha256": "a" * 64,
+    }
+
+
+def _write_host_probe_evidence_pair(
+    root: Path,
+    *,
+    receipt: dict[str, object] | None = None,
+    completion: dict[str, object] | None = None,
+) -> tuple[Path, Path]:
+    selected_receipt = _safe_host_receipt() if receipt is None else receipt
+    selected_completion = (
+        _safe_host_completion(selected_receipt) if completion is None else completion
+    )
+    receipt_path = root / "receipt.json"
+    completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
+    receipt_path.write_text(json.dumps(selected_receipt), encoding="utf-8")
+    completion_path.write_text(json.dumps(selected_completion), encoding="utf-8")
+    receipt_path.chmod(0o600)
+    completion_path.chmod(0o600)
+    return receipt_path, completion_path
 
 
 class ProbeControlFlow(BaseException):
@@ -1062,6 +1094,7 @@ def test_target_probe_fails_closed_on_mismatch_or_unverified_cleanup() -> None:
 )
 def test_target_probe_requires_both_acknowledgements_before_side_effects(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     arguments: list[str],
     environment_ack: str | None,
 ) -> None:
@@ -1069,23 +1102,28 @@ def test_target_probe_requires_both_acknowledgements_before_side_effects(
         monkeypatch.delenv(probe_script.PROBE_ENVIRONMENT_ACK, raising=False)
     else:
         monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, environment_ack)
+    side_effects: list[str] = []
     monkeypatch.setattr(
         probe_script,
         "MacOSKeychainSecretProvider",
-        lambda: pytest.fail("provider must not be constructed"),
+        lambda: side_effects.append("provider"),
     )
     monkeypatch.setattr(
         probe_script.secrets,
         "token_bytes",
-        lambda size: pytest.fail(f"must not generate {size} bytes"),
+        lambda size: side_effects.append(f"bytes:{size}"),
     )
     monkeypatch.setattr(
         probe_script,
         "uuid4",
-        lambda: pytest.fail("must not generate a UUID"),
+        lambda: side_effects.append("uuid"),
     )
-    with pytest.raises(RuntimeError, match="dual acknowledgement"):
-        probe_script.main(arguments)
+
+    assert probe_script.main(arguments) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "macOS Keychain probe: FAIL\n"
+    assert side_effects == []
 
 
 @pytest.mark.parametrize(
@@ -1131,21 +1169,112 @@ def test_target_probe_requires_both_acknowledgements_before_side_effects(
 )
 def test_target_probe_requires_closed_receipt_bindings_before_side_effects(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     arguments: list[str],
 ) -> None:
     monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
+    side_effects: list[str] = []
     monkeypatch.setattr(
         probe_script,
         "MacOSKeychainSecretProvider",
-        lambda: pytest.fail("provider must not be constructed"),
+        lambda: side_effects.append("provider"),
     )
     monkeypatch.setattr(
         probe_script,
         "uuid4",
-        lambda: pytest.fail("must not generate a UUID"),
+        lambda: side_effects.append("uuid"),
     )
-    with pytest.raises(RuntimeError):
-        probe_script.main(arguments)
+
+    assert probe_script.main(arguments) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "macOS Keychain probe: FAIL\n"
+    assert side_effects == []
+
+
+@pytest.mark.parametrize(
+    "arguments,environment_ack",
+    (
+        (["--private-argument-sentinel"], None),
+        (["--help", "--private-argument-sentinel"], None),
+        (["--private-argument-sentinel", "--help"], None),
+        (["-h", "private-positional-sentinel"], None),
+        (
+            [
+                "--acknowledge-keychain-write",
+                "--receipt",
+                "/private-path-sentinel/receipt.json",
+            ],
+            "1",
+        ),
+        (
+            [
+                "--acknowledge-keychain-write",
+                "--receipt",
+                "/private-path-sentinel/receipt.json",
+                "--run-id",
+                "private-run-id-sentinel",
+                "--attempt-id",
+                HOST_PROBE_ATTEMPT_ID,
+                "--owner-approval-commitment-sha256",
+                OWNER_APPROVAL_COMMITMENT_SHA256,
+            ],
+            "1",
+        ),
+        (["--acknowledge-keychain-write"], None),
+    ),
+)
+def test_target_probe_real_cli_invalid_invocations_are_content_free(
+    arguments: list[str],
+    environment_ack: str | None,
+) -> None:
+    environment = dict(os.environ)
+    environment["PRIVATE_ENV_SENTINEL"] = "private-environment-value-sentinel"
+    if environment_ack is None:
+        environment.pop(probe_script.PROBE_ENVIRONMENT_ACK, None)
+    else:
+        environment[probe_script.PROBE_ENVIRONMENT_ACK] = environment_ack
+
+    completed = subprocess.run(
+        (sys.executable, str(Path(probe_script.__file__).resolve()), *arguments),
+        cwd=probe_script.REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert completed.stderr == "macOS Keychain probe: FAIL\n"
+    combined = completed.stdout + completed.stderr
+    for forbidden in (
+        "private-argument-sentinel",
+        "private-path-sentinel",
+        "private-run-id-sentinel",
+        "private-environment-value-sentinel",
+        "Traceback",
+        str(probe_script.REPOSITORY_ROOT),
+    ):
+        assert forbidden not in combined
+
+
+def test_target_probe_real_cli_help_is_fixed_and_bounded() -> None:
+    completed = subprocess.run(
+        (sys.executable, str(Path(probe_script.__file__).resolve()), "--help"),
+        cwd=probe_script.REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stderr == ""
+    assert completed.stdout.startswith("usage: probe_macos_keychain ")
+    assert len(completed.stdout.encode("utf-8")) <= 2048
+    assert str(probe_script.REPOSITORY_ROOT) not in completed.stdout
 
 
 def test_target_probe_cli_emits_no_secret_or_identifier(
@@ -1490,17 +1619,19 @@ def test_phase1_host_probe_schema_and_runtime_agree_on_canonical_rfc3339_datetim
     assert runtime_accepts is accepted
 
 
-def test_phase1_host_probe_receipt_is_diagnostic_and_bound_to_trusted_expectations() -> None:
+def test_phase1_host_probe_receipt_is_diagnostic_and_bound_to_trusted_expectations(
+    tmp_path: Path,
+) -> None:
     receipt = _safe_host_receipt()
     probe_script.validate_phase1_host_probe_receipt(receipt)
+    receipt_path, completion_path = _write_host_probe_evidence_pair(
+        tmp_path,
+        receipt=receipt,
+    )
     probe_script.verify_phase1_host_probe_receipt(
-        receipt,
-        _safe_host_completion(receipt),
-        expected_run_id=HOST_PROBE_RUN_ID,
-        expected_attempt_id=HOST_PROBE_ATTEMPT_ID,
-        expected_owner_approval_commitment_sha256=OWNER_APPROVAL_COMMITMENT_SHA256,
-        expected_source_commit="f" * 40,
-        expected_probe_script_sha256="a" * 64,
+        receipt_path,
+        completion_path,
+        **_expected_host_probe_bindings(),
     )
 
     assert receipt == {
@@ -1546,7 +1677,141 @@ def test_phase1_host_probe_receipt_is_diagnostic_and_bound_to_trusted_expectatio
         assert forbidden not in rendered
 
 
-def test_phase1_host_probe_receipt_rejects_malformed_or_impossible_evidence() -> None:
+def test_phase1_host_probe_acceptance_loads_exact_paths_not_parsed_objects(
+    tmp_path: Path,
+) -> None:
+    receipt = _safe_host_receipt()
+    completion = _safe_host_completion(receipt)
+    receipt_path, completion_path = _write_host_probe_evidence_pair(
+        tmp_path,
+        receipt=receipt,
+        completion=completion,
+    )
+
+    probe_script.verify_phase1_host_probe_receipt(
+        receipt_path,
+        completion_path,
+        **_expected_host_probe_bindings(),
+    )
+    with pytest.raises((TypeError, RuntimeError)):
+        probe_script.verify_phase1_host_probe_receipt(
+            receipt,
+            completion,
+            **_expected_host_probe_bindings(),
+        )
+
+
+@pytest.mark.parametrize("artifact", ("receipt", "completion"))
+def test_phase1_host_probe_acceptance_rejects_duplicate_json_keys(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    receipt_path, completion_path = _write_host_probe_evidence_pair(tmp_path)
+    selected = receipt_path if artifact == "receipt" else completion_path
+    rendered = selected.read_text(encoding="utf-8")
+    duplicate = '"status":"pass"' if artifact == "receipt" else '"state":"complete"'
+    rendered = rendered.replace("{", "{" + duplicate + ",", 1)
+    selected.write_text(rendered, encoding="utf-8")
+    selected.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="invalid host probe receipt"):
+        probe_script.verify_phase1_host_probe_receipt(
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
+        )
+
+
+@pytest.mark.parametrize("artifact", ("receipt", "completion"))
+def test_phase1_host_probe_acceptance_rejects_oversized_artifacts(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    receipt_path, completion_path = _write_host_probe_evidence_pair(tmp_path)
+    selected = receipt_path if artifact == "receipt" else completion_path
+    selected.write_bytes(b"{" + b"x" * probe_script.MAX_EVIDENCE_ARTIFACT_BYTES)
+    selected.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="invalid host probe receipt") as caught:
+        probe_script.verify_phase1_host_probe_receipt(
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
+        )
+    assert str(selected) not in str(caught.value)
+
+
+@pytest.mark.parametrize("artifact", ("receipt", "completion"))
+@pytest.mark.parametrize("mutation", ("mode", "hardlink", "owner", "type"))
+def test_phase1_host_probe_acceptance_rejects_unsafe_artifact_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact: str,
+    mutation: str,
+) -> None:
+    receipt_path, completion_path = _write_host_probe_evidence_pair(tmp_path)
+    selected = receipt_path if artifact == "receipt" else completion_path
+    if mutation == "mode":
+        selected.chmod(0o640)
+    elif mutation == "hardlink":
+        os.link(selected, tmp_path / f"private-{artifact}-hardlink")
+    elif mutation == "owner":
+        actual_euid = os.geteuid()
+        monkeypatch.setattr(probe_script.os, "geteuid", lambda: actual_euid + 1)
+    else:
+        selected.unlink()
+        selected.mkdir()
+
+    with pytest.raises(RuntimeError, match="invalid host probe receipt") as caught:
+        probe_script.verify_phase1_host_probe_receipt(
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
+        )
+    assert "private-" not in str(caught.value)
+
+
+@pytest.mark.parametrize("artifact", ("receipt", "completion"))
+def test_phase1_host_probe_acceptance_holds_both_descriptors_against_path_swap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    receipt_path, completion_path = _write_host_probe_evidence_pair(tmp_path)
+    selected = receipt_path if artifact == "receipt" else completion_path
+    replacement = tmp_path / f"private-{artifact}-replacement"
+    replacement.write_bytes(selected.read_bytes())
+    replacement.chmod(0o600)
+    real_validate = probe_script.validate_phase1_host_probe_receipt
+    swapped = False
+
+    def swap_during_validation(value: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            selected.unlink()
+            replacement.rename(selected)
+            swapped = True
+        real_validate(value)
+
+    monkeypatch.setattr(
+        probe_script,
+        "validate_phase1_host_probe_receipt",
+        swap_during_validation,
+    )
+
+    with pytest.raises(RuntimeError, match="invalid host probe receipt") as caught:
+        probe_script.verify_phase1_host_probe_receipt(
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
+        )
+    assert swapped is True
+    assert "private-" not in str(caught.value)
+
+
+def test_phase1_host_probe_receipt_rejects_malformed_or_impossible_evidence(
+    tmp_path: Path,
+) -> None:
     for overrides in (
         {"system": "Linux"},
         {"machine": "x86_64"},
@@ -1575,15 +1840,15 @@ def test_phase1_host_probe_receipt_rejects_malformed_or_impossible_evidence() ->
     fail_without_cleanup["status"] = "fail"
     fail_without_cleanup["cleanup_verified"] = False
     probe_script.validate_phase1_host_probe_receipt(fail_without_cleanup)
+    receipt_path, completion_path = _write_host_probe_evidence_pair(
+        tmp_path,
+        receipt=fail_without_cleanup,
+    )
     with pytest.raises(RuntimeError, match="host probe receipt did not pass"):
         probe_script.verify_phase1_host_probe_receipt(
-            fail_without_cleanup,
-            _safe_host_completion(fail_without_cleanup),
-            expected_run_id=HOST_PROBE_RUN_ID,
-            expected_attempt_id=HOST_PROBE_ATTEMPT_ID,
-            expected_owner_approval_commitment_sha256=OWNER_APPROVAL_COMMITMENT_SHA256,
-            expected_source_commit="f" * 40,
-            expected_probe_script_sha256="a" * 64,
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
         )
 
 
@@ -1599,19 +1864,15 @@ def test_phase1_host_probe_receipt_rejects_malformed_or_impossible_evidence() ->
 )
 def test_phase1_host_probe_verifier_requires_every_trusted_binding(
     changed: dict[str, str],
+    tmp_path: Path,
 ) -> None:
-    expected = {
-        "expected_run_id": HOST_PROBE_RUN_ID,
-        "expected_attempt_id": HOST_PROBE_ATTEMPT_ID,
-        "expected_owner_approval_commitment_sha256": OWNER_APPROVAL_COMMITMENT_SHA256,
-        "expected_source_commit": "f" * 40,
-        "expected_probe_script_sha256": "a" * 64,
-    }
+    expected = _expected_host_probe_bindings()
     expected.update(changed)
+    receipt_path, completion_path = _write_host_probe_evidence_pair(tmp_path)
     with pytest.raises(RuntimeError, match="host probe receipt binding mismatch"):
         probe_script.verify_phase1_host_probe_receipt(
-            _safe_host_receipt(),
-            _safe_host_completion(),
+            receipt_path,
+            completion_path,
             **expected,
         )
 
@@ -1766,6 +2027,334 @@ def test_source_snapshot_is_bounded_and_ignores_caller_working_directory(
     assert len(snapshot.repository_state_sha256) == 64
 
 
+def test_source_snapshot_hashes_bytes_despite_restored_git_stat_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = _committed_probe_repository(tmp_path / "private-stat-source")
+    tracked = repository / "tracked.txt"
+    stable_time_ns = 1_600_000_000_000_000_000
+    os.utime(tracked, ns=(stable_time_ns, stable_time_ns))
+    _git(repository, "config", "core.trustctime", "false")
+    _git(repository, "config", "core.checkStat", "minimal")
+    _git(repository, "update-index", "--refresh")
+    original = tracked.stat()
+    tracked.write_bytes(b"mutated\n")
+    os.utime(tracked, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert _git(repository, "status", "--porcelain=v1").stdout == b""
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", repository)
+
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable") as caught:
+        probe_script._capture_source_snapshot()
+    assert "private-stat-source" not in str(caught.value)
+    assert "tracked.txt" not in str(caught.value)
+
+
+def test_source_snapshot_checks_executable_mode_when_git_filemode_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = _committed_probe_repository(tmp_path / "private-mode-source")
+    tracked = repository / "tracked.txt"
+    _git(repository, "config", "core.fileMode", "false")
+    tracked.chmod(0o755)
+    assert _git(repository, "status", "--porcelain=v1").stdout == b""
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", repository)
+
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable") as caught:
+        probe_script._capture_source_snapshot()
+    assert "private-mode-source" not in str(caught.value)
+    assert "tracked.txt" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("filter_config", "info_attributes", "tracked_attributes"),
+)
+def test_source_snapshot_rejects_local_filters_and_attributes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    repository = _committed_probe_repository(tmp_path / "private-filter-source")
+    if mutation == "filter_config":
+        _git(repository, "config", "filter.private.clean", "cat")
+        _git(repository, "config", "filter.private.smudge", "cat")
+    elif mutation == "info_attributes":
+        attributes = repository / ".git" / "info" / "attributes"
+        attributes.write_text("*.txt filter=private\n", encoding="utf-8")
+    else:
+        (repository / ".gitattributes").write_text(
+            "*.txt filter=private\n",
+            encoding="utf-8",
+        )
+        _git(repository, "add", ".gitattributes")
+        _git(repository, "commit", "-qm", "add attributes")
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", repository)
+
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable") as caught:
+        probe_script._capture_source_snapshot()
+    assert "private-filter-source" not in str(caught.value)
+    assert "filter.private" not in str(caught.value)
+
+
+def test_source_snapshot_rejects_symlinked_repository_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = _committed_probe_repository(tmp_path / "private-real-source")
+    linked_root = tmp_path / "private-linked-source"
+    linked_root.symlink_to(repository, target_is_directory=True)
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", linked_root)
+
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable") as caught:
+        probe_script._capture_source_snapshot()
+    assert "private-real-source" not in str(caught.value)
+    assert "private-linked-source" not in str(caught.value)
+
+
+def test_source_snapshot_rejects_hardlinked_tracked_file_even_when_bytes_match(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = _committed_probe_repository(tmp_path / "private-hardlink-source")
+    tracked = repository / "tracked.txt"
+    alternate = tmp_path / "private-hardlink-target"
+    alternate.write_bytes(tracked.read_bytes())
+    tracked.unlink()
+    os.link(alternate, tracked)
+    assert _git(repository, "status", "--porcelain=v1").stdout == b""
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", repository)
+
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable") as caught:
+        probe_script._capture_source_snapshot()
+    assert "private-hardlink-source" not in str(caught.value)
+    assert "private-hardlink-target" not in str(caught.value)
+
+
+def test_source_snapshot_hashes_symlink_target_despite_restored_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = _committed_probe_repository(tmp_path / "private-symlink-source")
+    tracked_link = repository / "tracked-link"
+    tracked_link.symlink_to("target-one")
+    _git(repository, "add", "tracked-link")
+    _git(repository, "commit", "-qm", "add symlink")
+    stable_time_ns = 1_600_000_000_000_000_000
+    os.utime(
+        tracked_link,
+        ns=(stable_time_ns, stable_time_ns),
+        follow_symlinks=False,
+    )
+    _git(repository, "config", "core.trustctime", "false")
+    _git(repository, "config", "core.checkStat", "minimal")
+    _git(repository, "update-index", "--refresh")
+    original = tracked_link.lstat()
+    tracked_link.unlink()
+    tracked_link.symlink_to("target-two")
+    os.utime(
+        tracked_link,
+        ns=(original.st_atime_ns, original.st_mtime_ns),
+        follow_symlinks=False,
+    )
+    assert _git(repository, "status", "--porcelain=v1").stdout == b""
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", repository)
+
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable") as caught:
+        probe_script._capture_source_snapshot()
+    assert "private-symlink-source" not in str(caught.value)
+    assert "tracked-link" not in str(caught.value)
+
+
+def test_source_snapshot_rejects_submodule_root_swap_during_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    origin = _committed_probe_repository(tmp_path / "private-submodule-origin")
+    repository = _committed_probe_repository(tmp_path / "private-submodule-parent")
+    _git(
+        repository,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        str(origin),
+        "vendor/private-submodule-path",
+    )
+    _git(repository, "commit", "-qam", "add submodule")
+    child = repository / "vendor" / "private-submodule-path"
+    replacement = tmp_path / "private-submodule-replacement"
+    subprocess.run(
+        (
+            probe_script.SYSTEM_GIT,
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "-q",
+            str(origin),
+            str(replacement),
+        ),
+        check=True,
+        capture_output=True,
+    )
+    retired = tmp_path / "private-submodule-retired"
+    real_command = probe_script._run_content_safe_command_bytes
+    swapped = False
+
+    def swap_before_child_command(
+        arguments: tuple[str, ...],
+        **keywords: object,
+    ) -> bytes:
+        nonlocal swapped
+        cwd_descriptor = keywords.get("cwd_descriptor")
+        descriptor_matches_child = isinstance(cwd_descriptor, int) and (
+            os.fstat(cwd_descriptor).st_dev,
+            os.fstat(cwd_descriptor).st_ino,
+        ) == (child.lstat().st_dev, child.lstat().st_ino)
+        if not swapped and descriptor_matches_child:
+            child.rename(retired)
+            replacement.rename(child)
+            swapped = True
+        return real_command(arguments, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", repository)
+    monkeypatch.setattr(
+        probe_script,
+        "_run_content_safe_command_bytes",
+        swap_before_child_command,
+    )
+
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable") as caught:
+        probe_script._capture_source_snapshot()
+    assert swapped is True
+    assert "private-submodule" not in str(caught.value)
+    shutil.rmtree(retired)
+
+
+def test_source_snapshot_git_commands_remain_bound_to_retained_root_during_aba_swap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = _committed_probe_repository(tmp_path / "private-source-root")
+    original_commit = _git(repository, "rev-parse", "HEAD").stdout.decode().strip()
+    replacement = tmp_path / "private-source-replacement"
+    subprocess.run(
+        (probe_script.SYSTEM_GIT, "clone", "-q", str(repository), str(replacement)),
+        check=True,
+        capture_output=True,
+    )
+    _git(replacement, "config", "user.name", "Host Probe Tests")
+    _git(replacement, "config", "user.email", "host-probe@example.invalid")
+    _git(replacement, "commit", "--allow-empty", "-qm", "alternate equivalent source")
+    replacement_commit = _git(replacement, "rev-parse", "HEAD").stdout.decode().strip()
+    assert replacement_commit != original_commit
+    retired = tmp_path / "private-source-retired"
+    real_command = probe_script._run_content_safe_command_bytes
+    swaps = 0
+
+    def aba_swap_around_git_command(
+        arguments: tuple[str, ...],
+        **keywords: object,
+    ) -> bytes:
+        nonlocal swaps
+        repository.rename(retired)
+        replacement.rename(repository)
+        swaps += 1
+        try:
+            return real_command(arguments, **keywords)  # type: ignore[arg-type]
+        finally:
+            repository.rename(replacement)
+            retired.rename(repository)
+
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", repository)
+    monkeypatch.setattr(
+        probe_script,
+        "_run_content_safe_command_bytes",
+        aba_swap_around_git_command,
+    )
+
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable") as caught:
+        probe_script._capture_source_snapshot()
+    assert swaps > 0
+    assert "private-source" not in str(caught.value)
+
+
+def test_source_snapshot_git_processes_use_isolated_descriptor_exec_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = _committed_probe_repository(tmp_path / "repository")
+    real_popen = probe_script.subprocess.Popen
+    launches: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def observe_launch(
+        arguments: tuple[str, ...],
+        **keywords: object,
+    ) -> subprocess.Popen[bytes]:
+        launches.append((arguments, keywords))
+        return real_popen(arguments, **keywords)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", repository)
+    monkeypatch.setattr(probe_script.subprocess, "Popen", observe_launch)
+
+    probe_script._capture_source_snapshot()
+
+    assert launches
+    for arguments, keywords in launches:
+        assert arguments[:5] == (
+            str(Path(sys.executable).resolve(strict=True)),
+            "-I",
+            "-S",
+            "-c",
+            probe_script._GIT_DESCRIPTOR_EXEC_SOURCE,
+        )
+        assert arguments[5].isdigit()
+        assert keywords["cwd"] is None
+        assert keywords["pass_fds"] == (int(arguments[5]),)
+        assert keywords["close_fds"] is True
+        assert "preexec_fn" not in keywords
+        assert "shell" not in keywords
+        assert keywords["env"] == {
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+
+
+def test_source_snapshot_rejects_dirty_index_hidden_by_git_replacement_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = _committed_probe_repository(tmp_path / "private-replacement-ref")
+    tracked = repository / "tracked.txt"
+    tracked.write_text("changed but replacement-hidden\n")
+    _git(repository, "add", "tracked.txt")
+    tree = _git(repository, "write-tree").stdout.decode().strip()
+    replacement_commit = _git(repository, "commit-tree", tree, "-m", "replacement").stdout
+    original_commit = _git(repository, "rev-parse", "HEAD").stdout
+    _git(
+        repository,
+        "replace",
+        original_commit.decode().strip(),
+        replacement_commit.decode().strip(),
+    )
+    assert _git(repository, "status", "--porcelain=v1").stdout == b""
+    monkeypatch.setattr(probe_script, "REPOSITORY_ROOT", repository)
+
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable") as caught:
+        probe_script._capture_source_snapshot()
+    assert "private-replacement-ref" not in str(caught.value)
+
+
 def test_target_probe_cli_writes_atomic_pass_receipt_without_extra_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1801,16 +2390,11 @@ def test_target_probe_cli_writes_atomic_pass_receipt_without_extra_output(
     assert output.err == ""
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
-    completion = json.loads(completion_path.read_text(encoding="utf-8"))
     probe_script.validate_phase1_host_probe_receipt(receipt)
     probe_script.verify_phase1_host_probe_receipt(
-        receipt,
-        completion,
-        expected_run_id=HOST_PROBE_RUN_ID,
-        expected_attempt_id=HOST_PROBE_ATTEMPT_ID,
-        expected_owner_approval_commitment_sha256=OWNER_APPROVAL_COMMITMENT_SHA256,
-        expected_source_commit="f" * 40,
-        expected_probe_script_sha256="a" * 64,
+        receipt_path,
+        completion_path,
+        **_expected_host_probe_bindings(),
     )
     assert receipt["status"] == "pass"
     assert receipt["cleanup_verified"] is True
@@ -1866,18 +2450,12 @@ def test_target_probe_cli_writes_fail_receipt_when_cleanup_is_not_verified(
     rendered = json.dumps(receipt, sort_keys=True)
     assert "round-trip-00000000-0000-4000-8000-000000000801" not in rendered
     assert "qqqq" not in rendered
-    completion = json.loads(
-        probe_script.phase1_host_probe_completion_path(receipt_path).read_text(encoding="utf-8")
-    )
+    completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
     with pytest.raises(RuntimeError, match="host probe receipt did not pass"):
         probe_script.verify_phase1_host_probe_receipt(
-            receipt,
-            completion,
-            expected_run_id=HOST_PROBE_RUN_ID,
-            expected_attempt_id=HOST_PROBE_ATTEMPT_ID,
-            expected_owner_approval_commitment_sha256=OWNER_APPROVAL_COMMITMENT_SHA256,
-            expected_source_commit="f" * 40,
-            expected_probe_script_sha256="a" * 64,
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
         )
 
 
@@ -1890,6 +2468,13 @@ def test_target_probe_cli_rejects_preexisting_receipt_before_keychain_access(
     old_receipt = _safe_host_receipt(run_id=OTHER_HOST_PROBE_RUN_ID)
     original = json.dumps(old_receipt, sort_keys=True).encode()
     receipt_path.write_bytes(original)
+    receipt_path.chmod(0o600)
+    completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
+    completion_path.write_text(
+        json.dumps(_safe_host_completion(old_receipt)),
+        encoding="utf-8",
+    )
+    completion_path.chmod(0o600)
     monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
     monkeypatch.setattr(
         probe_script,
@@ -1904,13 +2489,9 @@ def test_target_probe_cli_rejects_preexisting_receipt_before_keychain_access(
     assert receipt_path.read_bytes() == original
     with pytest.raises(RuntimeError, match="host probe receipt binding mismatch"):
         probe_script.verify_phase1_host_probe_receipt(
-            old_receipt,
-            _safe_host_completion(old_receipt),
-            expected_run_id=HOST_PROBE_RUN_ID,
-            expected_attempt_id=HOST_PROBE_ATTEMPT_ID,
-            expected_owner_approval_commitment_sha256=OWNER_APPROVAL_COMMITMENT_SHA256,
-            expected_source_commit="f" * 40,
-            expected_probe_script_sha256="a" * 64,
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
         )
 
 
@@ -2082,20 +2663,29 @@ def test_competing_matching_pass_cannot_replace_winning_claim(
         (_safe_source_snapshot(), _safe_source_snapshot()),
     )
     real_stage = probe_script._stage_claimed_receipt
+    competing_bytes: bytes | None = None
 
     def insert_competing_pass(claim: object, receipt: dict[str, object]) -> None:
+        nonlocal competing_bytes
+        competing_bytes = json.dumps(receipt).encode("utf-8")
         receipt_path.unlink()
-        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        receipt_path.write_bytes(competing_bytes)
+        receipt_path.chmod(0o600)
         real_stage(claim, receipt)
 
     monkeypatch.setattr(probe_script, "_stage_claimed_receipt", insert_competing_pass)
 
     assert probe_script.main(_receipt_cli_arguments(receipt_path)) == 1
+    assert competing_bytes is not None
+    assert receipt_path.read_bytes() == competing_bytes
+    completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
+    assert not completion_path.exists()
     with pytest.raises(RuntimeError, match="invalid host probe receipt"):
-        probe_script.validate_phase1_host_probe_receipt(
-            json.loads(receipt_path.read_text(encoding="utf-8"))
+        probe_script.verify_phase1_host_probe_receipt(
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
         )
-    assert not probe_script.phase1_host_probe_completion_path(receipt_path).exists()
 
 
 def test_competing_completion_is_not_unlinked_when_exclusive_publication_loses(
@@ -2130,6 +2720,152 @@ def test_competing_completion_is_not_unlinked_when_exclusive_publication_loses(
         probe_script.validate_phase1_host_probe_receipt(
             json.loads(receipt_path.read_text(encoding="utf-8"))
         )
+
+
+def test_matching_completion_swap_before_final_acceptance_cannot_win_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
+    provider = InMemorySecretProvider()
+    _configure_receipt_probe(
+        monkeypatch,
+        provider,
+        (_safe_source_snapshot(), _safe_source_snapshot()),
+    )
+    real_verify = probe_script.verify_phase1_host_probe_receipt
+    foreign_completion: bytes | None = None
+
+    def swap_matching_completion_before_acceptance(*args: object, **kwargs: object) -> None:
+        nonlocal foreign_completion
+        foreign_completion = completion_path.read_bytes()
+        completion_path.unlink()
+        completion_path.write_bytes(foreign_completion)
+        completion_path.chmod(0o600)
+        real_verify(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        probe_script,
+        "verify_phase1_host_probe_receipt",
+        swap_matching_completion_before_acceptance,
+    )
+
+    assert probe_script.main(_receipt_cli_arguments(receipt_path)) == 1
+    assert foreign_completion is not None
+    assert completion_path.read_bytes() == foreign_completion
+    with pytest.raises(RuntimeError, match="invalid host probe receipt"):
+        real_verify(
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
+        )
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ("truncate", "write", "file_fsync", "directory_fsync"),
+)
+def test_receipt_metadata_is_revalidated_at_every_publication_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    provider = InMemorySecretProvider()
+    _configure_receipt_probe(
+        monkeypatch,
+        provider,
+        (_safe_source_snapshot(), _safe_source_snapshot()),
+    )
+    real_operation = probe_script._receipt_stage_operation
+    mutated = False
+
+    def mutate_mode_after_stage(selected: str, *arguments: object) -> None:
+        nonlocal mutated
+        real_operation(selected, *arguments)
+        if selected == stage and not mutated:
+            receipt_path.chmod(0o640)
+            mutated = True
+
+    monkeypatch.setattr(
+        probe_script,
+        "_receipt_stage_operation",
+        mutate_mode_after_stage,
+    )
+
+    assert probe_script.main(_receipt_cli_arguments(receipt_path)) == 1
+    assert mutated is True
+    assert not probe_script.phase1_host_probe_completion_path(receipt_path).exists()
+
+
+@pytest.mark.parametrize("mutation", ("mode", "hardlink"))
+def test_completion_commit_revalidates_exact_artifact_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
+    provider = InMemorySecretProvider()
+    _configure_receipt_probe(
+        monkeypatch,
+        provider,
+        (_safe_source_snapshot(), _safe_source_snapshot()),
+    )
+    real_operation = probe_script._completion_stage_operation
+    mutated = False
+
+    def mutate_after_commit(stage: str, *arguments: object) -> None:
+        nonlocal mutated
+        real_operation(stage, *arguments)
+        if stage == "directory_fsync" and not mutated:
+            if mutation == "mode":
+                completion_path.chmod(0o640)
+            else:
+                os.link(completion_path, tmp_path / "private-completion-hardlink")
+            mutated = True
+
+    monkeypatch.setattr(
+        probe_script,
+        "_completion_stage_operation",
+        mutate_after_commit,
+    )
+
+    assert probe_script.main(_receipt_cli_arguments(receipt_path)) == 1
+    assert mutated is True
+    with pytest.raises(RuntimeError, match="invalid host probe receipt"):
+        probe_script.verify_phase1_host_probe_receipt(
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
+        )
+
+
+def test_receipt_claim_rejects_euid_mismatch_before_keychain_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    provider_opened = False
+    actual_euid = os.geteuid()
+    monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
+    monkeypatch.setattr(probe_script.os, "geteuid", lambda: actual_euid + 1)
+    monkeypatch.setattr(
+        probe_script,
+        "_capture_source_snapshot",
+        lambda: _safe_source_snapshot(),
+    )
+
+    def open_provider() -> InMemorySecretProvider:
+        nonlocal provider_opened
+        provider_opened = True
+        return InMemorySecretProvider()
+
+    monkeypatch.setattr(probe_script, "MacOSKeychainSecretProvider", open_provider)
+
+    assert probe_script.main(_receipt_cli_arguments(receipt_path)) == 1
+    assert provider_opened is False
 
 
 @pytest.mark.parametrize(
@@ -2231,24 +2967,35 @@ def test_failed_attempt_claim_blocks_same_run_retry_before_keychain_access(
     assert receipt_path.read_bytes() == claimed
 
 
-def test_completion_binding_rejects_missing_forged_or_mismatched_completion() -> None:
+def test_completion_binding_rejects_missing_forged_or_mismatched_completion(
+    tmp_path: Path,
+) -> None:
     receipt = _safe_host_receipt()
-    expected = {
-        "expected_run_id": HOST_PROBE_RUN_ID,
-        "expected_attempt_id": HOST_PROBE_ATTEMPT_ID,
-        "expected_owner_approval_commitment_sha256": OWNER_APPROVAL_COMMITMENT_SHA256,
-        "expected_source_commit": "f" * 40,
-        "expected_probe_script_sha256": "a" * 64,
-    }
-    for completion in (
-        None,
-        _safe_host_completion(receipt, receipt_sha256="e" * 64),
-        _safe_host_completion(receipt, attempt_id=OTHER_HOST_PROBE_ATTEMPT_ID),
-        _safe_host_completion(receipt, completion_binding_sha256="e" * 64),
-        {**_safe_host_completion(receipt), "extra": "not-closed"},
+    expected = _expected_host_probe_bindings()
+    for index, completion in enumerate(
+        (
+            None,
+            _safe_host_completion(receipt, receipt_sha256="e" * 64),
+            _safe_host_completion(receipt, attempt_id=OTHER_HOST_PROBE_ATTEMPT_ID),
+            _safe_host_completion(receipt, completion_binding_sha256="e" * 64),
+            {**_safe_host_completion(receipt), "extra": "not-closed"},
+        )
     ):
+        root = tmp_path / str(index)
+        root.mkdir()
+        receipt_path = root / "receipt.json"
+        completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        receipt_path.chmod(0o600)
+        if completion is not None:
+            completion_path.write_text(json.dumps(completion), encoding="utf-8")
+            completion_path.chmod(0o600)
         with pytest.raises(RuntimeError):
-            probe_script.verify_phase1_host_probe_receipt(receipt, completion, **expected)
+            probe_script.verify_phase1_host_probe_receipt(
+                receipt_path,
+                completion_path,
+                **expected,
+            )
 
 
 def test_completion_publication_fsync_rollback_failure_still_cannot_accept_receipt(
