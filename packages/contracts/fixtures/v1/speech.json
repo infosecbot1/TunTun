@@ -1,0 +1,119 @@
+{
+  "canonical_examples": {
+    "AudioFormat": "{\"channel_layout\":\"mono\",\"channels\":1,\"interleaved\":false,\"sample_format\":\"float32_le\",\"sample_rate_hz\":8000}",
+    "AuthorizedSynthesisRequest": "{\"dlp_receipt_id\":\"00000000-0000-0000-0000-00000000020e\",\"language\":\"en\",\"request_id\":\"00000000-0000-0000-0000-000000000203\",\"route\":{\"attempt_id\":\"00000000-0000-0000-0000-000000000204\",\"authorization_id\":\"00000000-0000-0000-0000-000000000202\",\"budget_reservation_id\":\"00000000-0000-0000-0000-00000000020b\",\"consent_receipt_ids\":[\"00000000-0000-0000-0000-00000000020a\"],\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-000000000205\",\"max_input_bytes\":1,\"max_input_units\":1,\"maximum_sensitivity\":\"public\",\"model\":\"fixture-tts\",\"privacy_receipt_id\":\"00000000-0000-0000-0000-000000000209\",\"provider\":\"openai\",\"purpose\":\"cloud_tts\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-000000000203\",\"session_id\":\"00000000-0000-0000-0000-000000000207\",\"subject_id\":\"00000000-0000-0000-0000-000000000206\",\"turn_id\":\"00000000-0000-0000-0000-000000000208\"},\"segment_count\":1,\"segment_index\":0,\"text\":\"x\",\"text_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"turn_id\":\"00000000-0000-0000-0000-000000000208\"}",
+    "AuthorizedTranscriptionRequest": "{\"audio_bytes\":1,\"audio_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"audio_format\":{\"channel_layout\":\"mono\",\"channels\":1,\"interleaved\":false,\"sample_format\":\"float32_le\",\"sample_rate_hz\":8000},\"duration_ms\":1,\"language_hints\":[\"en\",\"hi\"],\"request_id\":\"00000000-0000-0000-0000-00000000021a\",\"route\":{\"attempt_id\":\"00000000-0000-0000-0000-00000000021b\",\"authorization_id\":\"00000000-0000-0000-0000-000000000219\",\"budget_reservation_id\":\"00000000-0000-0000-0000-000000000222\",\"consent_receipt_ids\":[\"00000000-0000-0000-0000-000000000221\"],\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-00000000021c\",\"max_input_bytes\":1,\"max_input_units\":1,\"maximum_sensitivity\":\"public\",\"model\":\"fixture-stt\",\"privacy_receipt_id\":\"00000000-0000-0000-0000-000000000220\",\"provider\":\"openai\",\"purpose\":\"cloud_stt\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-00000000021a\",\"session_id\":\"00000000-0000-0000-0000-00000000021e\",\"subject_id\":\"00000000-0000-0000-0000-00000000021d\",\"turn_id\":\"00000000-0000-0000-0000-00000000021f\"},\"turn_id\":\"00000000-0000-0000-0000-00000000021f\"}",
+    "SpeechChunk": "{\"final\":false,\"pcm\":\"\",\"request_id\":\"00000000-0000-0000-0000-00000000022f\",\"sequence\":0}",
+    "TranscriptResult": "{\"duration_ms\":0,\"language\":\"en\",\"request_id\":\"00000000-0000-0000-0000-000000000230\",\"text\":\"x\"}"
+  },
+  "examples": {
+    "AudioFormat": {
+      "channel_layout": "mono",
+      "channels": 1,
+      "interleaved": false,
+      "sample_format": "float32_le",
+      "sample_rate_hz": 8000
+    },
+    "AuthorizedSynthesisRequest": {
+      "dlp_receipt_id": "00000000-0000-0000-0000-00000000020e",
+      "language": "en",
+      "request_id": "00000000-0000-0000-0000-000000000203",
+      "route": {
+        "attempt_id": "00000000-0000-0000-0000-000000000204",
+        "authorization_id": "00000000-0000-0000-0000-000000000202",
+        "budget_reservation_id": "00000000-0000-0000-0000-00000000020b",
+        "consent_receipt_ids": [
+          "00000000-0000-0000-0000-00000000020a"
+        ],
+        "expires_at": "2026-08-27T00:00:00Z",
+        "household_id": "00000000-0000-0000-0000-000000000205",
+        "max_input_bytes": 1,
+        "max_input_units": 1,
+        "maximum_sensitivity": "public",
+        "model": "fixture-tts",
+        "privacy_receipt_id": "00000000-0000-0000-0000-000000000209",
+        "provider": "openai",
+        "purpose": "cloud_tts",
+        "request_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "request_id": "00000000-0000-0000-0000-000000000203",
+        "session_id": "00000000-0000-0000-0000-000000000207",
+        "subject_id": "00000000-0000-0000-0000-000000000206",
+        "turn_id": "00000000-0000-0000-0000-000000000208"
+      },
+      "segment_count": 1,
+      "segment_index": 0,
+      "text": "x",
+      "text_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "turn_id": "00000000-0000-0000-0000-000000000208"
+    },
+    "AuthorizedTranscriptionRequest": {
+      "audio_bytes": 1,
+      "audio_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "audio_format": {
+        "channel_layout": "mono",
+        "channels": 1,
+        "interleaved": false,
+        "sample_format": "float32_le",
+        "sample_rate_hz": 8000
+      },
+      "duration_ms": 1,
+      "language_hints": [
+        "en",
+        "hi"
+      ],
+      "request_id": "00000000-0000-0000-0000-00000000021a",
+      "route": {
+        "attempt_id": "00000000-0000-0000-0000-00000000021b",
+        "authorization_id": "00000000-0000-0000-0000-000000000219",
+        "budget_reservation_id": "00000000-0000-0000-0000-000000000222",
+        "consent_receipt_ids": [
+          "00000000-0000-0000-0000-000000000221"
+        ],
+        "expires_at": "2026-08-27T00:00:00Z",
+        "household_id": "00000000-0000-0000-0000-00000000021c",
+        "max_input_bytes": 1,
+        "max_input_units": 1,
+        "maximum_sensitivity": "public",
+        "model": "fixture-stt",
+        "privacy_receipt_id": "00000000-0000-0000-0000-000000000220",
+        "provider": "openai",
+        "purpose": "cloud_stt",
+        "request_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "request_id": "00000000-0000-0000-0000-00000000021a",
+        "session_id": "00000000-0000-0000-0000-00000000021e",
+        "subject_id": "00000000-0000-0000-0000-00000000021d",
+        "turn_id": "00000000-0000-0000-0000-00000000021f"
+      },
+      "turn_id": "00000000-0000-0000-0000-00000000021f"
+    },
+    "SpeechChunk": {
+      "final": false,
+      "pcm": "",
+      "request_id": "00000000-0000-0000-0000-00000000022f",
+      "sequence": 0
+    },
+    "TranscriptResult": {
+      "duration_ms": 0,
+      "language": "en",
+      "request_id": "00000000-0000-0000-0000-000000000230",
+      "text": "x"
+    }
+  },
+  "schema_version": "1.0"
+}

@@ -1,0 +1,31 @@
+{
+  "canonical_examples": {
+    "AuditDraft": "{\"action_code\":\"x\",\"actor_pseudonym\":\"x\",\"correlation_id\":\"00000000-0000-0000-0000-0000000000eb\",\"event_id\":\"00000000-0000-0000-0000-0000000000ea\",\"occurred_at\":\"2026-08-27T00:00:00.000000Z\",\"outcome\":\"x\",\"payload_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"reason_code\":\"x\"}",
+    "AuditReceipt": "{\"hmac_b64\":\"x\",\"hmac_key_id\":\"x\",\"occurred_at\":\"2026-08-27T00:00:00.000000Z\",\"ordinal\":1,\"public_hash_hex\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"receipt_id\":\"00000000-0000-0000-0000-0000000000ec\"}"
+  },
+  "examples": {
+    "AuditDraft": {
+      "action_code": "x",
+      "actor_pseudonym": "x",
+      "correlation_id": "00000000-0000-0000-0000-0000000000eb",
+      "event_id": "00000000-0000-0000-0000-0000000000ea",
+      "occurred_at": "2026-08-27T00:00:00Z",
+      "outcome": "x",
+      "payload_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "reason_code": "x"
+    },
+    "AuditReceipt": {
+      "hmac_b64": "x",
+      "hmac_key_id": "x",
+      "occurred_at": "2026-08-27T00:00:00Z",
+      "ordinal": 1,
+      "public_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "receipt_id": "00000000-0000-0000-0000-0000000000ec"
+    }
+  },
+  "schema_version": "1.0"
+}

@@ -1,0 +1,79 @@
+{
+  "canonical_examples": {
+    "CameraWindowGrant": "{\"action_name\":\"identity.enroll\",\"device_id\":\"00000000-0000-0000-0000-0000000001f7\",\"expires_at\":\"2026-08-27T00:00:05.000000Z\",\"grant_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"grant_id\":\"00000000-0000-0000-0000-0000000001f5\",\"household_id\":\"00000000-0000-0000-0000-0000000001f6\",\"issued_at\":\"2026-08-27T00:00:00.000000Z\",\"max_frame_bytes\":1024,\"max_frames\":2,\"max_frames_per_second\":1,\"max_total_bytes\":2048,\"purpose\":\"explicit_enrollment\",\"session_id\":\"00000000-0000-0000-0000-0000000001f8\",\"subject_id\":\"00000000-0000-0000-0000-0000000001f4\",\"turn_id\":\"00000000-0000-0000-0000-0000000001f9\"}",
+    "ReachyCommand": "{\"command_id\":\"00000000-0000-0000-0000-0000000001fb\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"gesture_id\":null,\"kind\":\"state\",\"media_stream_id\":null,\"state\":\"idle\",\"turn_id\":\"00000000-0000-0000-0000-0000000001fc\"}",
+    "ReachyHealth": "{\"daemon_connected\":false,\"queue_depth\":0,\"state\":\"booting\"}",
+    "ReachyReceipt": "{\"accepted\":false,\"command_id\":\"00000000-0000-0000-0000-0000000001fd\",\"reason_code\":\"x\"}",
+    "SafetyReceipt": "{\"buffers_cleared\":false,\"motion_stopped\":false,\"playback_stopped\":false,\"turn_id\":\"00000000-0000-0000-0000-0000000001fe\"}",
+    "StopAllReceiptBundleV1": "{\"command_receipt\":{\"accepted\":false,\"command_id\":\"00000000-0000-0000-0000-0000000001ff\",\"reason_code\":\"x\"},\"safety_receipt\":{\"buffers_cleared\":false,\"motion_stopped\":false,\"playback_stopped\":false,\"turn_id\":\"00000000-0000-0000-0000-000000000200\"},\"schema_version\":\"tuntun.reachy-stop-all-receipts.v1\"}",
+    "StopSignal": "{\"occurred_at\":\"2026-08-27T00:00:00.000000Z\",\"signal_id\":\"00000000-0000-0000-0000-000000000201\",\"source\":\"edge_keyword\"}"
+  },
+  "examples": {
+    "CameraWindowGrant": {
+      "action_name": "identity.enroll",
+      "device_id": "00000000-0000-0000-0000-0000000001f7",
+      "expires_at": "2026-08-27T00:00:05Z",
+      "grant_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "grant_id": "00000000-0000-0000-0000-0000000001f5",
+      "household_id": "00000000-0000-0000-0000-0000000001f6",
+      "issued_at": "2026-08-27T00:00:00Z",
+      "max_frame_bytes": 1024,
+      "max_frames": 2,
+      "max_frames_per_second": 1,
+      "max_total_bytes": 2048,
+      "purpose": "explicit_enrollment",
+      "session_id": "00000000-0000-0000-0000-0000000001f8",
+      "subject_id": "00000000-0000-0000-0000-0000000001f4",
+      "turn_id": "00000000-0000-0000-0000-0000000001f9"
+    },
+    "ReachyCommand": {
+      "command_id": "00000000-0000-0000-0000-0000000001fb",
+      "expires_at": "2026-08-27T00:00:00Z",
+      "gesture_id": null,
+      "kind": "state",
+      "media_stream_id": null,
+      "state": "idle",
+      "turn_id": "00000000-0000-0000-0000-0000000001fc"
+    },
+    "ReachyHealth": {
+      "daemon_connected": false,
+      "queue_depth": 0,
+      "state": "booting"
+    },
+    "ReachyReceipt": {
+      "accepted": false,
+      "command_id": "00000000-0000-0000-0000-0000000001fd",
+      "reason_code": "x"
+    },
+    "SafetyReceipt": {
+      "buffers_cleared": false,
+      "motion_stopped": false,
+      "playback_stopped": false,
+      "turn_id": "00000000-0000-0000-0000-0000000001fe"
+    },
+    "StopAllReceiptBundleV1": {
+      "command_receipt": {
+        "accepted": false,
+        "command_id": "00000000-0000-0000-0000-0000000001ff",
+        "reason_code": "x"
+      },
+      "safety_receipt": {
+        "buffers_cleared": false,
+        "motion_stopped": false,
+        "playback_stopped": false,
+        "turn_id": "00000000-0000-0000-0000-000000000200"
+      },
+      "schema_version": "tuntun.reachy-stop-all-receipts.v1"
+    },
+    "StopSignal": {
+      "occurred_at": "2026-08-27T00:00:00Z",
+      "signal_id": "00000000-0000-0000-0000-000000000201",
+      "source": "edge_keyword"
+    }
+  },
+  "schema_version": "1.0"
+}

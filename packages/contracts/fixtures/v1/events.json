@@ -1,0 +1,88 @@
+{
+  "canonical_examples": {
+    "Commitment": "{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}",
+    "EventEnvelope": "{\"causation_id\":\"00000000-0000-0000-0000-000000000106\",\"correlation_id\":\"00000000-0000-0000-0000-000000000105\",\"device_id\":\"00000000-0000-0000-0000-000000000103\",\"device_sequence\":0,\"event_id\":\"00000000-0000-0000-0000-000000000101\",\"event_type\":\"speech.wake_detected\",\"household_id\":\"00000000-0000-0000-0000-000000000102\",\"occurred_at\":\"2026-08-27T00:00:00.000000Z\",\"payload\":{\"kind\":\"speech.wake_detected\",\"score_micros\":0,\"turn_id\":\"00000000-0000-0000-0000-000000000100\"},\"payload_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"schema_version\":\"1.0\",\"sensitivity\":\"public\",\"session_id\":\"00000000-0000-0000-0000-000000000104\"}",
+    "SignedEventEnvelope": "{\"envelope\":{\"causation_id\":\"00000000-0000-0000-0000-00000000010e\",\"correlation_id\":\"00000000-0000-0000-0000-00000000010d\",\"device_id\":\"00000000-0000-0000-0000-00000000010b\",\"device_sequence\":0,\"event_id\":\"00000000-0000-0000-0000-000000000109\",\"event_type\":\"speech.wake_detected\",\"household_id\":\"00000000-0000-0000-0000-00000000010a\",\"occurred_at\":\"2026-08-27T00:00:00.000000Z\",\"payload\":{\"kind\":\"speech.wake_detected\",\"score_micros\":0,\"turn_id\":\"00000000-0000-0000-0000-000000000108\"},\"payload_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"schema_version\":\"1.0\",\"sensitivity\":\"public\",\"session_id\":\"00000000-0000-0000-0000-00000000010c\"},\"signature_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\",\"signing_key_id\":\"ed25519:fixture:v1\"}",
+    "StopRequestedPayload": "{\"kind\":\"safety.stop_requested\",\"source\":\"edge_keyword\",\"turn_id\":\"00000000-0000-0000-0000-000000000118\"}",
+    "TurnInput": "{\"device_id\":\"00000000-0000-0000-0000-00000000011b\",\"household_id\":\"00000000-0000-0000-0000-00000000011a\",\"turn_id\":\"00000000-0000-0000-0000-000000000119\"}",
+    "TurnOutput": "{\"outcome\":\"completed\",\"turn_id\":\"00000000-0000-0000-0000-00000000011c\"}",
+    "WakeDetectedPayload": "{\"kind\":\"speech.wake_detected\",\"score_micros\":0,\"turn_id\":\"00000000-0000-0000-0000-00000000011d\"}"
+  },
+  "examples": {
+    "Commitment": {
+      "algorithm": "HMAC-SHA-256",
+      "key_id": "fixture-v1",
+      "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    },
+    "EventEnvelope": {
+      "causation_id": "00000000-0000-0000-0000-000000000106",
+      "correlation_id": "00000000-0000-0000-0000-000000000105",
+      "device_id": "00000000-0000-0000-0000-000000000103",
+      "device_sequence": 0,
+      "event_id": "00000000-0000-0000-0000-000000000101",
+      "event_type": "speech.wake_detected",
+      "household_id": "00000000-0000-0000-0000-000000000102",
+      "occurred_at": "2026-08-27T00:00:00Z",
+      "payload": {
+        "kind": "speech.wake_detected",
+        "score_micros": 0,
+        "turn_id": "00000000-0000-0000-0000-000000000100"
+      },
+      "payload_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "schema_version": "1.0",
+      "sensitivity": "public",
+      "session_id": "00000000-0000-0000-0000-000000000104"
+    },
+    "SignedEventEnvelope": {
+      "envelope": {
+        "causation_id": "00000000-0000-0000-0000-00000000010e",
+        "correlation_id": "00000000-0000-0000-0000-00000000010d",
+        "device_id": "00000000-0000-0000-0000-00000000010b",
+        "device_sequence": 0,
+        "event_id": "00000000-0000-0000-0000-000000000109",
+        "event_type": "speech.wake_detected",
+        "household_id": "00000000-0000-0000-0000-00000000010a",
+        "occurred_at": "2026-08-27T00:00:00Z",
+        "payload": {
+          "kind": "speech.wake_detected",
+          "score_micros": 0,
+          "turn_id": "00000000-0000-0000-0000-000000000108"
+        },
+        "payload_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "schema_version": "1.0",
+        "sensitivity": "public",
+        "session_id": "00000000-0000-0000-0000-00000000010c"
+      },
+      "signature_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "signing_key_id": "ed25519:fixture:v1"
+    },
+    "StopRequestedPayload": {
+      "kind": "safety.stop_requested",
+      "source": "edge_keyword",
+      "turn_id": "00000000-0000-0000-0000-000000000118"
+    },
+    "TurnInput": {
+      "device_id": "00000000-0000-0000-0000-00000000011b",
+      "household_id": "00000000-0000-0000-0000-00000000011a",
+      "turn_id": "00000000-0000-0000-0000-000000000119"
+    },
+    "TurnOutput": {
+      "outcome": "completed",
+      "turn_id": "00000000-0000-0000-0000-00000000011c"
+    },
+    "WakeDetectedPayload": {
+      "kind": "speech.wake_detected",
+      "score_micros": 0,
+      "turn_id": "00000000-0000-0000-0000-00000000011d"
+    }
+  },
+  "schema_version": "1.0"
+}

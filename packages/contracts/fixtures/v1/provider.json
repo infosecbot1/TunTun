@@ -1,0 +1,185 @@
+{
+  "canonical_examples": {
+    "ProviderResponse": "{\"language\":\"en\",\"provider_usage_receipt_id\":\"00000000-0000-0000-0000-0000000001bb\",\"request_id\":\"00000000-0000-0000-0000-0000000001ba\",\"text\":\"x\"}",
+    "ProviderResponseReceipt": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000001be\",\"authorization_id\":\"00000000-0000-0000-0000-0000000001bf\",\"household_id\":\"00000000-0000-0000-0000-0000000001c0\",\"model\":\"x\",\"output_schema_version\":\"assistant-turn-v1\",\"produced_at\":\"2026-08-27T00:00:00.000000Z\",\"provider\":\"openai\",\"receipt_hmac_b64\":\"x\",\"receipt_hmac_key_id\":\"x\",\"receipt_id\":\"00000000-0000-0000-0000-0000000001bc\",\"request_id\":\"00000000-0000-0000-0000-0000000001bd\",\"response_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"session_id\":\"00000000-0000-0000-0000-0000000001c2\",\"subject_id\":\"00000000-0000-0000-0000-0000000001c1\",\"turn_id\":\"00000000-0000-0000-0000-0000000001c3\"}",
+    "RedactionReceipt": "{\"input_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"maximum_sensitivity\":\"public\",\"output_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"policy_version\":\"x\",\"purpose\":\"cloud_reasoning\",\"receipt_id\":\"00000000-0000-0000-0000-0000000001c4\",\"removed_categories\":[],\"removed_count\":0}",
+    "RouteAuthorization": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000001c7\",\"authorization_id\":\"00000000-0000-0000-0000-0000000001c5\",\"budget_reservation_id\":\"00000000-0000-0000-0000-0000000001ce\",\"consent_receipt_ids\":[\"00000000-0000-0000-0000-0000000001cd\"],\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-0000000001c8\",\"max_input_bytes\":1,\"max_input_units\":1,\"maximum_sensitivity\":\"public\",\"model\":\"x\",\"privacy_receipt_id\":\"00000000-0000-0000-0000-0000000001cc\",\"provider\":\"openai\",\"purpose\":\"cloud_stt\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-0000000001c6\",\"session_id\":\"00000000-0000-0000-0000-0000000001ca\",\"subject_id\":\"00000000-0000-0000-0000-0000000001c9\",\"turn_id\":\"00000000-0000-0000-0000-0000000001cb\"}",
+    "RouteAuthorizationRequest": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000001d0\",\"budget_reservation_id\":\"00000000-0000-0000-0000-0000000001d7\",\"consent_receipt_ids\":[\"00000000-0000-0000-0000-0000000001d6\"],\"household_id\":\"00000000-0000-0000-0000-0000000001d1\",\"max_input_bytes\":1,\"max_input_units\":1,\"maximum_sensitivity\":\"public\",\"model\":\"x\",\"privacy_receipt_id\":\"00000000-0000-0000-0000-0000000001d5\",\"provider\":\"openai\",\"purpose\":\"cloud_stt\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-0000000001cf\",\"session_id\":\"00000000-0000-0000-0000-0000000001d3\",\"subject_id\":\"00000000-0000-0000-0000-0000000001d2\",\"turn_id\":\"00000000-0000-0000-0000-0000000001d4\"}",
+    "RouteConsumption": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000001d9\",\"consumed_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-0000000001da\",\"input_bytes\":0,\"input_units\":0,\"model\":\"x\",\"provider\":\"openai\",\"purpose\":\"cloud_stt\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-0000000001d8\",\"session_id\":\"00000000-0000-0000-0000-0000000001dc\",\"subject_id\":\"00000000-0000-0000-0000-0000000001db\",\"turn_id\":\"00000000-0000-0000-0000-0000000001dd\"}",
+    "SanitizedProviderMessage": "{\"content\":\"x\",\"role\":\"system\"}",
+    "SanitizedProviderRequest": "{\"allowed_tools\":[],\"max_output_tokens\":1,\"messages\":[{\"content\":\"x\",\"role\":\"system\"}],\"model\":\"fixture-model\",\"provider\":\"openai\",\"redaction_receipt_id\":\"00000000-0000-0000-0000-0000000001e9\",\"request_id\":\"00000000-0000-0000-0000-0000000001df\",\"route\":{\"attempt_id\":\"00000000-0000-0000-0000-0000000001e0\",\"authorization_id\":\"00000000-0000-0000-0000-0000000001de\",\"budget_reservation_id\":\"00000000-0000-0000-0000-0000000001e7\",\"consent_receipt_ids\":[\"00000000-0000-0000-0000-0000000001e6\"],\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-0000000001e1\",\"max_input_bytes\":1,\"max_input_units\":1,\"maximum_sensitivity\":\"public\",\"model\":\"fixture-model\",\"privacy_receipt_id\":\"00000000-0000-0000-0000-0000000001e5\",\"provider\":\"openai\",\"purpose\":\"cloud_reasoning\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-0000000001df\",\"session_id\":\"00000000-0000-0000-0000-0000000001e3\",\"subject_id\":\"00000000-0000-0000-0000-0000000001e2\",\"turn_id\":\"00000000-0000-0000-0000-0000000001e4\"},\"store\":false,\"timeout_ms\":1000}",
+    "SanitizedToolReference": "{\"registered_name\":\"fixture.item\",\"schema_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"schema_version\":\"1.0\"}"
+  },
+  "examples": {
+    "ProviderResponse": {
+      "language": "en",
+      "provider_usage_receipt_id": "00000000-0000-0000-0000-0000000001bb",
+      "request_id": "00000000-0000-0000-0000-0000000001ba",
+      "text": "x"
+    },
+    "ProviderResponseReceipt": {
+      "attempt_id": "00000000-0000-0000-0000-0000000001be",
+      "authorization_id": "00000000-0000-0000-0000-0000000001bf",
+      "household_id": "00000000-0000-0000-0000-0000000001c0",
+      "model": "x",
+      "output_schema_version": "assistant-turn-v1",
+      "produced_at": "2026-08-27T00:00:00Z",
+      "provider": "openai",
+      "receipt_hmac_b64": "x",
+      "receipt_hmac_key_id": "x",
+      "receipt_id": "00000000-0000-0000-0000-0000000001bc",
+      "request_id": "00000000-0000-0000-0000-0000000001bd",
+      "response_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "session_id": "00000000-0000-0000-0000-0000000001c2",
+      "subject_id": "00000000-0000-0000-0000-0000000001c1",
+      "turn_id": "00000000-0000-0000-0000-0000000001c3"
+    },
+    "RedactionReceipt": {
+      "input_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "maximum_sensitivity": "public",
+      "output_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "policy_version": "x",
+      "purpose": "cloud_reasoning",
+      "receipt_id": "00000000-0000-0000-0000-0000000001c4",
+      "removed_categories": [],
+      "removed_count": 0
+    },
+    "RouteAuthorization": {
+      "attempt_id": "00000000-0000-0000-0000-0000000001c7",
+      "authorization_id": "00000000-0000-0000-0000-0000000001c5",
+      "budget_reservation_id": "00000000-0000-0000-0000-0000000001ce",
+      "consent_receipt_ids": [
+        "00000000-0000-0000-0000-0000000001cd"
+      ],
+      "expires_at": "2026-08-27T00:00:00Z",
+      "household_id": "00000000-0000-0000-0000-0000000001c8",
+      "max_input_bytes": 1,
+      "max_input_units": 1,
+      "maximum_sensitivity": "public",
+      "model": "x",
+      "privacy_receipt_id": "00000000-0000-0000-0000-0000000001cc",
+      "provider": "openai",
+      "purpose": "cloud_stt",
+      "request_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "request_id": "00000000-0000-0000-0000-0000000001c6",
+      "session_id": "00000000-0000-0000-0000-0000000001ca",
+      "subject_id": "00000000-0000-0000-0000-0000000001c9",
+      "turn_id": "00000000-0000-0000-0000-0000000001cb"
+    },
+    "RouteAuthorizationRequest": {
+      "attempt_id": "00000000-0000-0000-0000-0000000001d0",
+      "budget_reservation_id": "00000000-0000-0000-0000-0000000001d7",
+      "consent_receipt_ids": [
+        "00000000-0000-0000-0000-0000000001d6"
+      ],
+      "household_id": "00000000-0000-0000-0000-0000000001d1",
+      "max_input_bytes": 1,
+      "max_input_units": 1,
+      "maximum_sensitivity": "public",
+      "model": "x",
+      "privacy_receipt_id": "00000000-0000-0000-0000-0000000001d5",
+      "provider": "openai",
+      "purpose": "cloud_stt",
+      "request_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "request_id": "00000000-0000-0000-0000-0000000001cf",
+      "session_id": "00000000-0000-0000-0000-0000000001d3",
+      "subject_id": "00000000-0000-0000-0000-0000000001d2",
+      "turn_id": "00000000-0000-0000-0000-0000000001d4"
+    },
+    "RouteConsumption": {
+      "attempt_id": "00000000-0000-0000-0000-0000000001d9",
+      "consumed_at": "2026-08-27T00:00:00Z",
+      "household_id": "00000000-0000-0000-0000-0000000001da",
+      "input_bytes": 0,
+      "input_units": 0,
+      "model": "x",
+      "provider": "openai",
+      "purpose": "cloud_stt",
+      "request_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "request_id": "00000000-0000-0000-0000-0000000001d8",
+      "session_id": "00000000-0000-0000-0000-0000000001dc",
+      "subject_id": "00000000-0000-0000-0000-0000000001db",
+      "turn_id": "00000000-0000-0000-0000-0000000001dd"
+    },
+    "SanitizedProviderMessage": {
+      "content": "x",
+      "role": "system"
+    },
+    "SanitizedProviderRequest": {
+      "allowed_tools": [],
+      "max_output_tokens": 1,
+      "messages": [
+        {
+          "content": "x",
+          "role": "system"
+        }
+      ],
+      "model": "fixture-model",
+      "provider": "openai",
+      "redaction_receipt_id": "00000000-0000-0000-0000-0000000001e9",
+      "request_id": "00000000-0000-0000-0000-0000000001df",
+      "route": {
+        "attempt_id": "00000000-0000-0000-0000-0000000001e0",
+        "authorization_id": "00000000-0000-0000-0000-0000000001de",
+        "budget_reservation_id": "00000000-0000-0000-0000-0000000001e7",
+        "consent_receipt_ids": [
+          "00000000-0000-0000-0000-0000000001e6"
+        ],
+        "expires_at": "2026-08-27T00:00:00Z",
+        "household_id": "00000000-0000-0000-0000-0000000001e1",
+        "max_input_bytes": 1,
+        "max_input_units": 1,
+        "maximum_sensitivity": "public",
+        "model": "fixture-model",
+        "privacy_receipt_id": "00000000-0000-0000-0000-0000000001e5",
+        "provider": "openai",
+        "purpose": "cloud_reasoning",
+        "request_commitment": {
+          "algorithm": "HMAC-SHA-256",
+          "key_id": "fixture-v1",
+          "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        },
+        "request_id": "00000000-0000-0000-0000-0000000001df",
+        "session_id": "00000000-0000-0000-0000-0000000001e3",
+        "subject_id": "00000000-0000-0000-0000-0000000001e2",
+        "turn_id": "00000000-0000-0000-0000-0000000001e4"
+      },
+      "store": false,
+      "timeout_ms": 1000
+    },
+    "SanitizedToolReference": {
+      "registered_name": "fixture.item",
+      "schema_commitment": {
+        "algorithm": "HMAC-SHA-256",
+        "key_id": "fixture-v1",
+        "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      },
+      "schema_version": "1.0"
+    }
+  },
+  "schema_version": "1.0"
+}
