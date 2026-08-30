@@ -6,7 +6,9 @@ import os
 import socket
 import subprocess
 import sys
+import sysconfig
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -87,6 +89,235 @@ def test_testing_is_an_optional_core_extra_and_imports_are_lazy() -> None:
         tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
         imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
         assert all("tuntun_testing" not in ast.unparse(node) for node in imports)
+
+
+def test_child_cleanup_has_no_unbounded_wait() -> None:
+    for relative in (
+        "scripts/run_scenarios.py",
+        "apps/core/src/tuntun_core/cli/commands/simulate.py",
+    ):
+        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+        cleanup = next(
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_terminate_process_group"
+        )
+        waits = [
+            node
+            for node in ast.walk(cleanup)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "wait"
+        ]
+        assert waits
+        assert all(
+            call.args or any(item.arg == "timeout" for item in call.keywords)
+            for call in waits
+        )
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_child_startup_ignores_sitecustomize_and_executable_pth(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        try:
+            listener.bind(("127.0.0.1", 0))
+        except PermissionError as error:
+            pytest.skip(f"loopback sockets unavailable: {error}")
+        listener.listen(4)
+        listener.settimeout(0.2)
+        port = listener.getsockname()[1]
+        shadow = tmp_path / "shadow"
+        shadow.mkdir()
+        site_marker = tmp_path / "sitecustomize-ran"
+        pth_marker = tmp_path / "executable-pth-ran"
+        activation = (
+            "any(len(item) == 64 and all(character in '0123456789abcdef' "
+            "for character in item) for item in sys.argv[1:])"
+        )
+        (shadow / "sitecustomize.py").write_text(
+            (
+                "import os\n"
+                "import socket\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                f"if {activation}:\n"
+                f"    Path({str(site_marker)!r}).write_text('executed', encoding='utf-8')\n"
+                f"    socket.create_connection(('127.0.0.1', {port}), timeout=1).close()\n"
+            ),
+            encoding="utf-8",
+        )
+        site_packages = Path(sysconfig.get_path("purelib"))
+        hook = site_packages / f"_tuntun_task9_{tmp_path.name}_{target}.pth"
+        hook.write_text(
+            (
+                "import os,pathlib,socket,sys; "
+                f"active={activation}; "
+                f"active and pathlib.Path({str(pth_marker)!r}).write_text('executed'); "
+                f"active and socket.create_connection(('127.0.0.1',{port}),timeout=1).close()\n"
+            ),
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join((str(shadow), PYTHON_PATH))
+        try:
+            if target == "runner":
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
+                    cwd=ROOT,
+                    env=environment,
+                    capture_output=True,
+                    check=False,
+                    timeout=20,
+                )
+            else:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "from typer.testing import CliRunner; "
+                            "from tuntun_core.cli.main import app; "
+                            "r=CliRunner().invoke(app,['simulate','--scenario',"
+                            "'tests/fixtures/scenarios/guest-hinglish.yaml','--json']); "
+                            "raise SystemExit(r.exit_code)"
+                        ),
+                    ],
+                    cwd=ROOT,
+                    env=environment,
+                    capture_output=True,
+                    check=False,
+                    timeout=20,
+                )
+        finally:
+            hook.unlink(missing_ok=True)
+
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+        assert not site_marker.exists()
+        assert not pth_marker.exists()
+        with pytest.raises(TimeoutError):
+            listener.accept()
+    finally:
+        listener.close()
+
+
+def _run_supervised_target(
+    target: str,
+    environment: Mapping[str, str],
+) -> subprocess.CompletedProcess[bytes]:
+    if target == "runner":
+        command = [sys.executable, str(SCRIPT), "--turns", "1", "--json"]
+    else:
+        command = [
+            sys.executable,
+            "-c",
+            (
+                "from typer.testing import CliRunner; "
+                "from tuntun_core.cli.main import app; "
+                "r=CliRunner().invoke(app,['simulate','--scenario',"
+                "'tests/fixtures/scenarios/guest-hinglish.yaml','--json']); "
+                "raise SystemExit(r.exit_code)"
+            ),
+        ]
+    return subprocess.run(
+        command,
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_parent_does_not_execute_ambient_scenario_io(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        try:
+            listener.bind(("127.0.0.1", 0))
+        except PermissionError as error:
+            pytest.skip(f"loopback sockets unavailable: {error}")
+        listener.listen(2)
+        listener.settimeout(0.2)
+        marker = tmp_path / "ambient-scenario-io-ran"
+        package = tmp_path / "shadow/tuntun_testing"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "scenario_io.py").write_text(
+            (
+                "import socket\n"
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('executed', encoding='utf-8')\n"
+                "socket.create_connection("
+                f"('127.0.0.1', {listener.getsockname()[1]}), timeout=1"
+                ").close()\n"
+            ),
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join((str(tmp_path / "shadow"), PYTHON_PATH))
+
+        result = _run_supervised_target(target, environment)
+
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+        assert not marker.exists()
+        with pytest.raises(TimeoutError):
+            listener.accept()
+    finally:
+        listener.close()
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_workspace_packages_precede_exact_venv_site_packages(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    site_packages = Path(sysconfig.get_path("purelib"))
+    hostile_module = site_packages / "tuntun_testing.py"
+    marker = tmp_path / "stale-site-package-ran"
+    assert not hostile_module.exists()
+    hostile_module.write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    try:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = PYTHON_PATH
+        result = _run_supervised_target(target, environment)
+    finally:
+        hostile_module.unlink(missing_ok=True)
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert not marker.exists()
+
+
+def test_supervisor_startup_structure_is_isolated_and_workspace_first() -> None:
+    for relative in (
+        "scripts/run_scenarios.py",
+        "apps/core/src/tuntun_core/cli/commands/simulate.py",
+    ):
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        assert '"-I"' in source
+        assert '"-S"' in source
+        assert "site.main" not in source
+        assert "addsitedir" not in source
+        assert "os.environ.copy" not in source
+        assert "for _path in (*expected_workspace_roots, expected_site_packages):" in source
+    runner_tree = ast.parse((ROOT / "scripts/run_scenarios.py").read_text(encoding="utf-8"))
+    prepare = next(
+        node
+        for node in runner_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_prepare_gate_invocation"
+    )
+    assert "scenario_io" not in ast.unparse(prepare)
+    assert "importlib" not in ast.unparse(prepare)
 
 
 def test_core_wheel_smoke_uses_private_cache_and_highest_current_ranges(
@@ -216,10 +447,10 @@ raise RuntimeError("private-import-sentinel")
         check=False,
         timeout=20,
     )
-    assert marker.read_text(encoding="utf-8") == "guarded"
-    assert result.returncode == 1
-    assert result.stdout == b""
-    assert result.stderr == b"scenario-gate: failed\n"
+    assert not marker.exists()
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["schema_version"] == "scenario_gate.v1"
+    assert result.stderr == b""
     assert b"traceback" not in result.stderr.lower()
     assert b"private-import-sentinel" not in result.stdout + result.stderr
 
@@ -243,9 +474,9 @@ def test_guard_import_baseexception_is_content_free(tmp_path: Path) -> None:
         check=False,
         timeout=20,
     )
-    assert result.returncode == 1
-    assert result.stdout == b""
-    assert result.stderr == b"scenario-gate: failed\n"
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["schema_version"] == "scenario_gate.v1"
+    assert result.stderr == b""
     assert b"private-guard-sentinel" not in result.stdout + result.stderr
 
 
@@ -283,10 +514,10 @@ raise SystemExit("private-import-sentinel")
         check=False,
         timeout=20,
     )
-    assert marker.read_text(encoding="utf-8") == "guarded"
-    assert result.returncode == 1
-    assert result.stdout == b""
-    assert result.stderr == b"scenario-gate: failed\n"
+    assert not marker.exists()
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["schema_version"] == "scenario_gate.v1"
+    assert result.stderr == b""
     assert b"private-import-sentinel" not in result.stdout + result.stderr
 
 
@@ -338,9 +569,9 @@ raise RuntimeError("private-import-sentinel")
                     received = server.recv(4096)
                 except TimeoutError:
                     received = b""
-                assert result.returncode == 1
-                assert result.stdout == b""
-                assert result.stderr == b"scenario-gate: failed\n"
+                assert result.returncode == 0
+                assert json.loads(result.stdout)["schema_version"] == "scenario_gate.v1"
+                assert result.stderr == b""
                 assert b"private-import-sentinel" not in result.stdout + result.stderr
                 assert received == b""
             finally:

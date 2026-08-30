@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import fcntl
 import importlib
 import importlib.util
+import io
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
+from contextlib import suppress
+from hashlib import sha256
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 from tuntun_contracts.base import canonical_mapping_bytes
@@ -84,11 +92,67 @@ def _yaml(name: str = "case") -> bytes:
     ).encode()
 
 
+def _canonical_line(value: object) -> bytes:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8") + b"\n"
+
+
+def _gate_document(names: list[str], *, turns: int = 1) -> dict[str, object]:
+    return {
+        "b2": {
+            "duplicate_effect_count": None,
+            "peak_rss_growth_bytes": None,
+            "privacy_block_p95_ms": None,
+            "private_sentinel_count": None,
+            "status": "not_measured",
+            "terminal_rss_growth_bytes": None,
+            "warmup_turns": None,
+        },
+        "foundation_resources": {
+            "fd_after": None,
+            "fd_baseline": None,
+            "fd_delta": None,
+            "pending_tasks_after": None,
+            "pending_tasks_baseline": None,
+            "pending_tasks_delta": None,
+            "status": "not_measured",
+        },
+        "scenarios": [
+            {"name": name, "result_chain_sha256": "0" * 64, "turns": turns}
+            for name in names
+        ],
+        "schema_version": "scenario_gate.v1",
+        "status": "pass",
+    }
+
+
+def _gate_child_bytes(configuration: dict[str, object], names: list[str]) -> bytes:
+    document = _gate_document(names)
+    invocation = configuration.get("invocation")
+    if type(invocation) is not dict:
+        return _canonical_line(document)
+    return _canonical_line(
+        {
+            "document": document,
+            "input_references": invocation["inputs"],
+            "invocation_commitment": configuration["invocation_commitment"],
+            "nonce": configuration["nonce"],
+            "schema_version": "scenario_supervisor_envelope.v1",
+        }
+    )
+
+
 def _load_runner_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("_tuntun_task9_run_scenarios", SCRIPT)
     if spec is None or spec.loader is None:
         raise AssertionError("runner-load-failed")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -282,6 +346,77 @@ def test_core_simulate_requires_exact_schema_and_canonical_json(
         assert result.exit_code == 2
         assert result.stdout == ""
         assert result.stderr == "simulation-invalid-input\n"
+
+
+def test_core_simulate_rejects_bound_envelope_with_substituted_scenario(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    app = importlib.import_module("tuntun_core.cli.main").app
+    arguments = [
+        "simulate",
+        "--scenario",
+        "tests/fixtures/scenarios/guest-hinglish.yaml",
+        "--json",
+    ]
+    valid = CliRunner().invoke(app, arguments)
+    assert valid.exit_code == 0
+    document = json.loads(valid.stdout)
+    document["scenario"] = "substituted"
+    public_line = _canonical_line(document)
+    monkeypatch.setattr(
+        module,
+        "_SIMULATE_CHILD_CODE",
+        f"""
+import json
+import os
+import signal
+import sys
+
+raw = sys.stdin.buffer.readline()
+if not raw:
+    os.write(1, bytes.fromhex("{public_line.hex()}"))
+else:
+    configuration = json.loads(raw)
+    envelope = {{
+        "document": {document!r},
+        "input_reference": configuration["invocation"]["input"],
+        "invocation_commitment": configuration["invocation_commitment"],
+        "nonce": configuration["nonce"],
+        "schema_version": "simulation_supervisor_envelope.v1",
+    }}
+    sys.stdout.write(json.dumps(envelope, separators=(",", ":"), sort_keys=True) + "\\n")
+    sys.stdout.flush()
+    signal.pause()
+""",
+    )
+
+    result = CliRunner().invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr == "simulation-invalid-input\n"
+
+
+def test_core_simulate_rejects_forged_plain_text_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    app = importlib.import_module("tuntun_core.cli.main").app
+    monkeypatch.setattr(module, "_SIMULATE_CHILD_CODE", "print('simulation: PASS')")
+
+    result = CliRunner().invoke(
+        app,
+        ["simulate", "--scenario", "tests/fixtures/scenarios/guest-hinglish.yaml"],
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr == "simulation-invalid-input\n"
 
 
 def test_core_simulate_runtime_deadline_is_bounded_and_content_free(
@@ -518,6 +653,331 @@ def test_child_argument_without_matching_environment_is_normal_invalid_input() -
     assert result.stderr == b"scenario-gate: invalid-input\n"
 
 
+@pytest.mark.parametrize("mutation", ["omission", "substitution", "reordering"])
+def test_scenario_supervisor_binds_records_to_exact_requested_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mutation: str,
+) -> None:
+    (tmp_path / "first.yaml").write_bytes(_yaml("first"))
+    (tmp_path / "second.yaml").write_bytes(_yaml("second"))
+    runner = _load_runner_module()
+
+    def fake_process(
+        command: Sequence[str],
+        *,
+        payload: bytes,
+        cwd: Path,
+        environment: dict[str, str],
+    ) -> subprocess.CompletedProcess[bytes]:
+        del cwd, environment
+        configuration = json.loads(payload)
+        names = ["first", "second"]
+        if mutation == "omission":
+            names = names[:1]
+        elif mutation == "substitution":
+            names[0] = "substituted"
+        else:
+            names.reverse()
+        return subprocess.CompletedProcess(command, 0, _gate_child_bytes(configuration, names), b"")
+
+    monkeypatch.setattr(runner, "_run_bounded_process", fake_process)
+    result = runner._run_gate_child(
+        (
+            "--scenario",
+            "first.yaml",
+            "--scenario",
+            "second.yaml",
+            "--turns",
+            "1",
+            "--json",
+        ),
+        tmp_path,
+    )
+    captured = capsys.readouterr()
+
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "scenario-gate: failed\n"
+
+
+def test_scenario_supervisor_rejects_replayed_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "case.yaml").write_bytes(_yaml("case"))
+    runner = _load_runner_module()
+    saved: list[bytes] = []
+
+    def replaying_process(
+        command: Sequence[str],
+        *,
+        payload: bytes,
+        cwd: Path,
+        environment: dict[str, str],
+    ) -> subprocess.CompletedProcess[bytes]:
+        del cwd, environment
+        if not saved:
+            saved.append(_gate_child_bytes(json.loads(payload), ["case"]))
+        return subprocess.CompletedProcess(command, 0, saved[0], b"")
+
+    monkeypatch.setattr(runner, "_run_bounded_process", replaying_process)
+    arguments = ("--scenario", "case.yaml", "--turns", "1", "--json")
+
+    first = runner._run_gate_child(arguments, tmp_path)
+    first_output = capsys.readouterr()
+    second = runner._run_gate_child(arguments, tmp_path)
+    second_output = capsys.readouterr()
+
+    assert first == 0
+    assert json.loads(first_output.out)["schema_version"] == "scenario_gate.v1"
+    assert first_output.err == ""
+    assert second == 1
+    assert second_output.out == ""
+    assert second_output.err == "scenario-gate: failed\n"
+
+
+def test_scenario_supervisor_rejects_forged_plain_text_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "case.yaml").write_bytes(_yaml("case"))
+    runner = _load_runner_module()
+    monkeypatch.setattr(
+        runner,
+        "_run_bounded_process",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            b"scenario-gate: PASS\n",
+            b"",
+        ),
+    )
+
+    result = runner._run_gate_child(("--scenario", "case.yaml", "--turns", "1"), tmp_path)
+    captured = capsys.readouterr()
+
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "scenario-gate: failed\n"
+
+
+def test_maximum_declared_scenario_set_fits_bounded_child_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = _load_runner_module()
+    for index in range(32):
+        name = f"case-{index:02d}"
+        prefix = _yaml(name)
+        raw = prefix + b"#" + (b"x" * (65_536 - len(prefix) - 2)) + b"\n"
+        assert len(raw) == 65_536
+        (tmp_path / f"{name}.yaml").write_bytes(raw)
+    captured_payloads: list[bytes] = []
+
+    def fake_process(
+        command: Sequence[str],
+        *,
+        payload: bytes,
+        cwd: Path,
+        environment: dict[str, str],
+    ) -> subprocess.CompletedProcess[bytes]:
+        del cwd
+        assert environment == {}
+        captured_payloads.append(payload)
+        return subprocess.CompletedProcess(command, 1, b"", b"")
+
+    monkeypatch.setattr(runner, "_run_bounded_process", fake_process)
+    arguments = [
+        item
+        for index in range(32)
+        for item in ("--scenario", f"case-{index:02d}.yaml")
+    ]
+    result = runner._run_gate_child((*arguments, "--turns", "1", "--json"), tmp_path)
+    captured = capsys.readouterr()
+
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "scenario-gate: failed\n"
+    assert len(captured_payloads) == 1
+    assert 1_048_576 < len(captured_payloads[0]) <= runner._MAX_CHILD_CONFIGURATION_BYTES
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["nonce-type", "commitment-type", "path-escape", "digest-type", "raw-type"],
+)
+def test_gate_child_configuration_validates_exact_field_types_and_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    runner = _load_runner_module()
+    (tmp_path / "case.yaml").write_bytes(_yaml("case"))
+    prepared = runner._prepare_gate_invocation(
+        ("--scenario", "case.yaml", "--turns", "1", "--json"),
+        tmp_path,
+    )
+    nonce = "a" * 64
+    configuration: dict[str, Any] = {
+        "inputs": [
+            {
+                **prepared.input_references[0],
+                "raw_b64": base64.b64encode(prepared.inputs[0].raw).decode("ascii"),
+            }
+        ],
+        "invocation": prepared.invocation,
+        "invocation_commitment": prepared.invocation_commitment,
+        "nonce": nonce,
+        "schema_version": "scenario_child_config.v1",
+    }
+    if mutation == "nonce-type":
+        configuration["nonce"] = 7
+    elif mutation == "commitment-type":
+        configuration["invocation_commitment"] = [prepared.invocation_commitment]
+    elif mutation == "path-escape":
+        reference = configuration["invocation"]["inputs"][0]
+        reference["path"] = "../case.yaml"
+        configuration["inputs"][0]["path"] = "../case.yaml"
+        configuration["invocation_commitment"] = sha256(
+            runner._canonical_bytes(configuration["invocation"])
+        ).hexdigest()
+    elif mutation == "digest-type":
+        configuration["invocation"]["inputs"][0]["content_sha256"] = 7
+        configuration["inputs"][0]["content_sha256"] = 7
+        configuration["invocation_commitment"] = sha256(
+            runner._canonical_bytes(configuration["invocation"])
+        ).hexdigest()
+    else:
+        configuration["inputs"][0]["raw_b64"] = 7
+    stream = io.TextIOWrapper(io.BytesIO(_canonical_line(configuration)))
+    monkeypatch.setattr(runner.sys, "stdin", stream)
+
+    assert runner._child_main_from_stdin(nonce) == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["nonce-type", "commitment-type", "path-escape", "digest-type", "raw-type"],
+)
+def test_simulation_child_configuration_validates_exact_field_types_and_bounds(
+    mutation: str,
+) -> None:
+    module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    scenario = Path("tests/fixtures/scenarios/guest-hinglish.yaml")
+    prepared = module._prepare_simulation_invocation(
+        scenario,
+        json_output=True,
+        repository_root=ROOT,
+    )
+    nonce = "a" * 64
+    configuration: dict[str, Any] = {
+        "input": {
+            **prepared.input_reference,
+            "raw_b64": base64.b64encode(prepared.raw).decode("ascii"),
+        },
+        "invocation": prepared.invocation,
+        "invocation_commitment": prepared.invocation_commitment,
+        "nonce": nonce,
+        "schema_version": "simulation_child_config.v1",
+    }
+    if mutation == "nonce-type":
+        configuration["nonce"] = 7
+    elif mutation == "commitment-type":
+        configuration["invocation_commitment"] = [prepared.invocation_commitment]
+    elif mutation == "path-escape":
+        reference = configuration["invocation"]["input"]
+        reference["path"] = "../guest-hinglish.yaml"
+        configuration["input"]["path"] = "../guest-hinglish.yaml"
+        configuration["invocation_commitment"] = sha256(
+            module._canonical_bytes(configuration["invocation"])
+        ).hexdigest()
+    elif mutation == "digest-type":
+        configuration["invocation"]["input"]["content_sha256"] = 7
+        configuration["input"]["content_sha256"] = 7
+        configuration["invocation_commitment"] = sha256(
+            module._canonical_bytes(configuration["invocation"])
+        ).hexdigest()
+    else:
+        configuration["input"]["raw_b64"] = 7
+
+    if mutation == "nonce-type":
+        with pytest.raises(ValueError, match="invalid-child-configuration"):
+            module._run_simulation_child(
+                repository_root=ROOT,
+                configuration=module._canonical_bytes(configuration),
+            )
+        return
+    result = module._run_simulation_child(
+        repository_root=ROOT,
+        configuration=module._canonical_bytes(configuration),
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b"simulation-invalid-input\n"
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_success_path_terminates_descendants_holding_flock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    lock_path = tmp_path / f"{target}.lock"
+    pid_path = tmp_path / f"{target}.pid"
+    child_code = f"""
+import fcntl
+import os
+import time
+from pathlib import Path
+
+pid = os.fork()
+if pid == 0:
+    handle = open({str(lock_path)!r}, "w")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
+    time.sleep(30)
+    os._exit(0)
+while not Path({str(pid_path)!r}).exists():
+    time.sleep(0.01)
+os.write(1, b"complete\\n")
+"""
+    runner = _load_runner_module()
+    module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    try:
+        if target == "runner":
+            runner._run_bounded_process(
+                (sys.executable, "-I", "-S", "-c", child_code),
+                payload=b"{}",
+                cwd=ROOT,
+                environment={},
+            )
+        else:
+            monkeypatch.setattr(module, "_SIMULATE_CHILD_CODE", child_code)
+            parameters = importlib.import_module("inspect").signature(
+                module._run_simulation_child
+            ).parameters
+            kwargs: dict[str, object] = {"repository_root": ROOT}
+            if "configuration" in parameters:
+                kwargs["configuration"] = _canonical_line({"nonce": "a" * 64})[:-1]
+            else:
+                kwargs["environment"] = {}
+            module._run_simulation_child(**kwargs)
+
+        with lock_path.open("a") as probe:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(probe, fcntl.LOCK_UN)
+    finally:
+        if pid_path.exists():
+            with suppress(ProcessLookupError):
+                os.kill(int(pid_path.read_text(encoding="utf-8")), signal.SIGKILL)
+
+
 @pytest.mark.parametrize(
     "startup_code",
     [
@@ -527,86 +987,74 @@ def test_child_argument_without_matching_environment_is_normal_invalid_input() -
     ],
 )
 def test_scenario_supervisor_rejects_malformed_or_oversized_child_output(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     startup_code: str,
 ) -> None:
-    shadow = tmp_path / "shadow"
-    shadow.mkdir()
-    (shadow / "sitecustomize.py").write_text(
-        (f"import os\nif os.environ.get('TUNTUN_SCENARIO_CHILD'):\n    {startup_code}\n"),
-        encoding="utf-8",
-    )
-    environment = _environment()
-    environment["PYTHONPATH"] = os.pathsep.join((str(shadow), PYTHON_PATH))
+    runner = _load_runner_module()
+    monkeypatch.setattr(runner, "_CHILD_BOOTSTRAP", startup_code)
+    result = runner._run_gate_child(("--turns", "1", "--json"), ROOT)
+    captured = capsys.readouterr()
 
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        check=False,
-        timeout=20,
-    )
-
-    assert result.returncode == 1
-    assert result.stdout == b""
-    assert result.stderr == b"scenario-gate: failed\n"
-    assert b"private-output-sentinel" not in result.stdout + result.stderr
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "scenario-gate: failed\n"
+    assert "private-output-sentinel" not in captured.out + captured.err
 
 
-def test_scenario_supervisor_requires_exact_schema_and_canonical_json(tmp_path: Path) -> None:
+def test_scenario_supervisor_requires_exact_schema_and_canonical_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     valid = _run("--turns", "1", "--json")
     assert valid.returncode == 0
     document = json.loads(valid.stdout)
     wrong_schema = dict(document)
     wrong_schema["schema_version"] = "scenario_gate.v2"
-    payloads = (
-        canonical_mapping_bytes(wrong_schema) + b"\n",
-        json.dumps(document, ensure_ascii=False, indent=1, sort_keys=True).encode("utf-8") + b"\n",
-    )
+    runner = _load_runner_module()
+    responses = ((wrong_schema, True), (document, False))
 
-    for index, payload in enumerate(payloads):
-        shadow = tmp_path / f"shadow-{index}"
-        shadow.mkdir()
-        (shadow / "sitecustomize.py").write_text(
-            (
-                "import os\n"
-                "if os.environ.get('TUNTUN_SCENARIO_CHILD'):\n"
-                f"    os.write(1, bytes.fromhex('{payload.hex()}'))\n"
-                "    os._exit(0)\n"
-            ),
-            encoding="utf-8",
-        )
-        environment = _environment()
-        environment["PYTHONPATH"] = os.pathsep.join((str(shadow), PYTHON_PATH))
+    for child_document, canonical in responses:
+        def fake_process(
+            command: Sequence[str],
+            *,
+            payload: bytes,
+            cwd: Path,
+            environment: dict[str, str],
+            _child_document: object = child_document,
+            _canonical: bool = canonical,
+        ) -> subprocess.CompletedProcess[bytes]:
+            del cwd, environment
+            configuration = json.loads(payload)
+            envelope = {
+                "document": _child_document,
+                "input_references": configuration["invocation"]["inputs"],
+                "invocation_commitment": configuration["invocation_commitment"],
+                "nonce": configuration["nonce"],
+                "schema_version": "scenario_supervisor_envelope.v1",
+            }
+            output = (
+                _canonical_line(envelope)
+                if _canonical
+                else json.dumps(envelope, indent=1, sort_keys=True).encode("utf-8") + b"\n"
+            )
+            return subprocess.CompletedProcess(command, 0, output, b"")
 
-        result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
-            cwd=ROOT,
-            env=environment,
-            capture_output=True,
-            check=False,
-            timeout=20,
-        )
+        monkeypatch.setattr(runner, "_run_bounded_process", fake_process)
+        result = runner._run_gate_child(("--turns", "1", "--json"), ROOT)
+        captured = capsys.readouterr()
 
-        assert result.returncode == 1
-        assert result.stdout == b""
-        assert result.stderr == b"scenario-gate: failed\n"
+        assert result == 1
+        assert captured.out == ""
+        assert captured.err == "scenario-gate: failed\n"
 
 
 def test_scenario_supervisor_runtime_deadline_is_bounded(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    shadow = tmp_path / "shadow"
-    shadow.mkdir()
-    (shadow / "sitecustomize.py").write_text(
-        "import os, time\nif os.environ.get('TUNTUN_SCENARIO_CHILD'):\n    time.sleep(2)\n",
-        encoding="utf-8",
-    )
     runner = _load_runner_module()
-    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(shadow), PYTHON_PATH)))
+    monkeypatch.setattr(runner, "_CHILD_BOOTSTRAP", "import time; time.sleep(2)")
     monkeypatch.setattr(runner, "_CHILD_TIMEOUT_SECONDS", 0.05, raising=False)
 
     started = time.monotonic()
