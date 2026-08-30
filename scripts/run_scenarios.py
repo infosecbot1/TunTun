@@ -916,12 +916,18 @@ def _open_runtime_relative(
             if not terminal or directory:
                 flags |= os.O_DIRECTORY
             next_descriptor = os.open(part, flags, dir_fd=descriptor)
-            _require_runtime_node(
-                os.fstat(next_descriptor),
-                directory=not terminal or directory,
-            )
-            os.close(descriptor)
+            try:
+                _require_runtime_node(
+                    os.fstat(next_descriptor),
+                    directory=not terminal or directory,
+                )
+            except BaseException:
+                with suppress(OSError):
+                    os.close(next_descriptor)
+                raise
+            previous_descriptor = descriptor
             descriptor = next_descriptor
+            os.close(previous_descriptor)
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -961,11 +967,20 @@ def _open_runtime_layout(
     script_relative: str | None,
 ) -> _RuntimeLayout:
     descriptors: list[int] = []
+
+    def remember(descriptor: int) -> int:
+        try:
+            descriptors.append(descriptor)
+        except BaseException:
+            with suppress(OSError):
+                os.close(descriptor)
+            raise
+        return descriptor
+
     try:
         if not code_root.is_absolute():
             raise ValueError("invalid-runtime-path")
-        root_descriptor = _open_snapshot_root(code_root)
-        descriptors.append(root_descriptor)
+        root_descriptor = remember(_open_snapshot_root(code_root))
         _require_runtime_node(os.fstat(root_descriptor), directory=True)
         executable_path, executable_identity = _validate_runtime_executable(
             code_root,
@@ -977,26 +992,24 @@ def _open_runtime_layout(
             "apps/core/src",
         )
         workspace_descriptors = tuple(
-            _open_runtime_relative(root_descriptor, relative, directory=True)
+            remember(_open_runtime_relative(root_descriptor, relative, directory=True))
             for relative in workspace_relative
         )
-        descriptors.extend(workspace_descriptors)
         site_relative = (
             f".venv/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
         )
-        site_packages_descriptor = _open_runtime_relative(
-            root_descriptor,
-            site_relative,
-            directory=True,
+        site_packages_descriptor = remember(
+            _open_runtime_relative(
+                root_descriptor,
+                site_relative,
+                directory=True,
+            )
         )
-        descriptors.append(site_packages_descriptor)
         script_descriptor = (
             None
             if script_relative is None
-            else _open_runtime_relative(root_descriptor, script_relative, directory=False)
+            else remember(_open_runtime_relative(root_descriptor, script_relative, directory=False))
         )
-        if script_descriptor is not None:
-            descriptors.append(script_descriptor)
         manifest: dict[str, Any] = {
             "root": {
                 "fd": root_descriptor,

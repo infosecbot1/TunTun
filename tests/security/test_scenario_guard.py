@@ -34,6 +34,18 @@ def _python(code: str) -> subprocess.CompletedProcess[bytes]:
     )
 
 
+def _descriptor_count() -> int:
+    directory = next((path for path in ("/proc/self/fd", "/dev/fd") if os.path.isdir(path)), None)
+    if directory is None:
+        pytest.skip("descriptor inventory unavailable")
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        entries = tuple(name for name in os.listdir(descriptor) if name.isdecimal())
+        return len(entries) - (1 if str(descriptor) in entries else 0)
+    finally:
+        os.close(descriptor)
+
+
 def test_guard_import_is_stdlib_only_and_allows_asyncio_local_wakeup() -> None:
     code = """
 import asyncio
@@ -421,6 +433,76 @@ def test_runtime_layout_rejects_untrusted_symlink_mode_or_interpreter_prefix(
 
 
 @pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_open_runtime_relative_closes_a_descriptor_rejected_by_validation(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    if target == "runner":
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_runtime_runner_rejected_fd", SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    else:
+        import importlib
+
+        module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    root = tmp_path / "runtime"
+    root.mkdir()
+    rejected = root / "rejected"
+    rejected.mkdir()
+    rejected.chmod(0o777)
+    root_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        before = _descriptor_count()
+        with pytest.raises(ValueError, match="invalid-runtime-path"):
+            module._open_runtime_relative(
+                root_descriptor,
+                "rejected",
+                directory=True,
+            )
+        assert _descriptor_count() == before
+    finally:
+        os.close(root_descriptor)
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_runtime_layout_closes_earlier_workspace_descriptor_when_a_later_open_fails(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    if target == "runner":
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_runtime_runner_partial_layout", SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        script_relative = "scripts/run_scenarios.py"
+    else:
+        import importlib
+
+        module = importlib.import_module("tuntun_core.cli.commands.simulate")
+        script_relative = None
+    root = tmp_path / "runtime"
+    root.mkdir()
+    executable = _runtime_tree(root)
+    (root / "packages/contracts/src").rmdir()
+
+    before = _descriptor_count()
+    with pytest.raises(ValueError, match="invalid-runtime-path"):
+        module._open_runtime_layout(
+            root,
+            str(executable),
+            script_relative=script_relative,
+        )
+    assert _descriptor_count() == before
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
 def test_runtime_layout_descriptors_survive_root_rename_and_replacement(
     tmp_path: Path,
     target: str,
@@ -724,6 +806,94 @@ def test_make_scenario_gate_uses_offline_no_sync_isolated_python(
     arguments = uv_log.read_text(encoding="utf-8").splitlines()
     assert arguments[:3] == ["run", "--offline", "--no-sync"]
     assert "-I" in arguments and "-S" in arguments
+
+
+def test_isolated_module_retains_validated_site_root_through_package_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib.util
+
+    launcher = ROOT / "scripts/run_isolated_module.py"
+    spec = importlib.util.spec_from_file_location("_isolated_module_retained_site", launcher)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    repository = tmp_path / "repository"
+    fake_launcher = repository / "scripts/run_isolated_module.py"
+    fake_launcher.parent.mkdir(parents=True)
+    fake_launcher.write_text("# synthetic launcher location\n", encoding="utf-8")
+    executable = repository / ".venv/bin/python"
+    executable.parent.mkdir(parents=True)
+    executable.symlink_to(sys.executable)
+    site_packages = (
+        repository
+        / ".venv/lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    package = site_packages / "mypy"
+    package.mkdir(parents=True)
+    marker = tmp_path / "loaded-package"
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "submodule.py").write_text("VALUE = 'original'\n", encoding="utf-8")
+    (package / "main.py").write_text(
+        "def get_search_dirs(_python_executable):\n    return ([], [])\n",
+        encoding="utf-8",
+    )
+    (package / "modulefinder.py").write_text(
+        "def get_search_dirs(_python_executable):\n    return ([], [])\n",
+        encoding="utf-8",
+    )
+    (package / "__main__.py").write_text(
+        "from pathlib import Path\n"
+        "from .submodule import VALUE\n"
+        "def console_entry():\n"
+        f"    Path({str(marker)!r}).write_text(VALUE, encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    safe_path = [item for item in sys.path if "site-packages" not in item and str(ROOT) not in item]
+    monkeypatch.setattr(module, "__file__", str(fake_launcher))
+    monkeypatch.setattr(module.sys, "executable", str(executable))
+    monkeypatch.setattr(module.sys, "argv", [str(fake_launcher), "mypy"])
+    monkeypatch.setattr(module.sys, "path", safe_path)
+    real_import_module = module.importlib.import_module
+    moved_site = site_packages.with_name("site-packages.original")
+    replaced = False
+
+    def replace_then_import(name: str, package_name: str | None = None) -> object:
+        nonlocal replaced
+        if name == "mypy.__main__" and not replaced:
+            replaced = True
+            site_packages.rename(moved_site)
+            replacement = site_packages / "mypy"
+            replacement.mkdir(parents=True)
+            (replacement / "__init__.py").write_text("", encoding="utf-8")
+            (replacement / "__main__.py").write_text(
+                "from pathlib import Path\n"
+                "def console_entry():\n"
+                f"    Path({str(marker)!r}).write_text('replacement', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+        return real_import_module(name, package_name)
+
+    monkeypatch.setattr(module.importlib, "import_module", replace_then_import)
+    saved_modules = {
+        name: value
+        for name, value in tuple(sys.modules.items())
+        if name == "mypy" or name.startswith("mypy.")
+    }
+    for name in saved_modules:
+        sys.modules.pop(name)
+    try:
+        assert module.main() == 0
+        assert marker.read_text(encoding="utf-8") == "original"
+    finally:
+        for name in tuple(sys.modules):
+            if name == "mypy" or name.startswith("mypy."):
+                sys.modules.pop(name)
+        sys.modules.update(saved_modules)
 
 
 def test_installed_tuntunctl_discloses_trusted_python_startup_boundary(
