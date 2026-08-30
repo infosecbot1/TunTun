@@ -2,7 +2,7 @@
 name = "tuntun-testing"
 version = "0.1.0.dev0"
 requires-python = "==3.12.*"
-dependencies = ["tuntun-contracts"]
+dependencies = ["PyYAML>=6.0,<7", "tuntun-contracts"]
 
 [tool.uv.sources]
 tuntun-contracts = { workspace = true }

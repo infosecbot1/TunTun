@@ -679,6 +679,11 @@ dependencies = [
     { name = "typer" },
 ]
 
+[package.optional-dependencies]
+simulation = [
+    { name = "tuntun-testing" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "keyring", specifier = ">=25.6,<26" },
@@ -686,8 +691,10 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "structlog", specifier = ">=25.4,<26" },
+    { name = "tuntun-testing", marker = "extra == 'simulation'", editable = "packages/testing" },
     { name = "typer", specifier = ">=0.16,<1" },
 ]
+provides-extras = ["simulation"]
 
 [[package]]
 name = "tuntun-edge"
@@ -699,11 +706,15 @@ name = "tuntun-testing"
 version = "0.1.0.dev0"
 source = { editable = "packages/testing" }
 dependencies = [
+    { name = "pyyaml" },
     { name = "tuntun-contracts" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "tuntun-contracts", editable = "packages/contracts" }]
+requires-dist = [
+    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "tuntun-contracts", editable = "packages/contracts" },
+]
 
 [[package]]
 name = "tuntun-workspace"

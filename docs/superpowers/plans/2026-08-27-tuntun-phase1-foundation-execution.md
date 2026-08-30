@@ -11,7 +11,7 @@
 ## Global Constraints
 
 1. The normative specification is `docs/superpowers/specs/2026-08-27-tuntun-phase1-anchor-design.md`; changing a locked decision requires a specification update and ADR before implementation.
-2. The repository runner and Mac core are exactly Python 3.12. The pure-Python `tuntun-edge` and `tuntun-contracts` distributions declare `>=3.11,<3.13`, avoid 3.12-only syntax, and are installed only for the exact delivered Reachy interpreter/version/ABI/platform combination accepted by the later hardware gate; every other combination blocks packaging. `sqlcipher3==0.6.2` is the Mac-core storage compatibility candidate: its path/WAL behavior, metadata-only multi-connection guard, and subprocess lock regression must pass the exact Ubuntu and hosted Intel-macOS CI jobs, and it is accepted only after the real target Intel Mac encrypted probe passes.
+2. The repository runner and Mac core are exactly Python 3.12. The pure-Python `tuntun-edge` and `tuntun-contracts` distributions declare `>=3.11,<3.13`, avoid 3.12-only syntax, and are installed only for the exact delivered Reachy interpreter/version/ABI/platform combination accepted by the later hardware gate; every other combination blocks packaging. `sqlcipher3==0.6.2` is the Mac-core storage compatibility candidate: its path/WAL behavior, metadata-only multi-connection guard, and subprocess lock regression must pass Ubuntu plus hosted macOS arm64 and Intel CI jobs, and it is accepted for household use only after the active approved Darwin arm64 host probe passes. Intel household deployment requires fresh real-host qualification.
 3. No real family name, audio, transcript, image, embedding, credential, memory, provider response, database, backup, key, certificate, local username, hostname, IP, MAC address, or serial number may enter source control, test reports, CI artifacts, or public issues.
 4. All Pydantic trust-boundary models are frozen, reject unknown fields, use aware UTC timestamps, bounded text/bytes, random UUIDs, integer confidence/money, and explicit schema version `1.0`.
 5. RFC 8785/JCS canonical bytes normalize Unicode to NFC and serialize UTC timestamps with exactly six fractional digits. Private or low-entropy values use purpose-separated HMAC-SHA-256 commitments, never bare hashes.
@@ -20,7 +20,7 @@
 8. Unknown configuration, wildcard/public production binds, absent production keys, wrong database keys, missing cipher support, invalid manifests, unsafe model serialization, and schema/audit failures fail closed. There is no plaintext database fallback.
 9. The owner API defaults to `127.0.0.1:8787`; the edge gateway defaults to port `7443`; household timezone is exactly `Asia/Singapore`; active conversation limit is exactly one.
 10. Cloud-budget defaults are S$100 soft (`100_000_000` micro-SGD) and S$150 hard (`150_000_000` micro-SGD). Qwen is disabled by default. This foundation plan performs no paid or hardware call.
-11. Ordinary tests never access hardware, macOS Keychain, or paid APIs. Keychain and clock tests use in-memory fakes; target-Mac probes are explicit and separately recorded.
+11. Ordinary tests never access hardware, macOS Keychain, or paid APIs. Keychain and clock tests use in-memory fakes; active-host probes are explicit, separately recorded, and bound to ADR 0001.
 12. Project-wide branch coverage is at least 85%; audit-integrity code is at least 95%. Every task follows red → green → refactor → affected suite → static checks → documentation → exact-path commit.
 13. Before every commit, `git status --short` must contain only paths listed by that task. Stage only the explicit pathspecs, inspect `git diff --cached --name-only` and `git diff --cached`, and abort if any unrelated path appears.
 
@@ -370,9 +370,36 @@ import yaml
 
 
 FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
-FIXED_RUNNERS = {"ubuntu-24.04", "macos-15-intel"}
+FIXED_RUNNERS = {"ubuntu-24.04", "macos-26", "macos-15-intel"}
 MATRIX_RUNNER = "${{ matrix.os }}"
-APPROVED_MATRIX = {"os": ["ubuntu-24.04", "macos-15-intel"]}
+APPROVED_MATRIX = {"os": ["ubuntu-24.04", "macos-26", "macos-15-intel"]}
+EXPECTED_ARCHITECTURES = {
+    "ubuntu-24.04": "x86_64",
+    "macos-26": "arm64",
+    "macos-15-intel": "x86_64",
+}
+ARCHITECTURE_CHECK_STEP_NAME = "Assert runner architecture"
+ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
+  ubuntu-24.04)
+    expected="x86_64"
+    ;;
+  macos-26)
+    expected="arm64"
+    ;;
+  macos-15-intel)
+    expected="x86_64"
+    ;;
+  *)
+    echo "unsupported runner label: ${{ matrix.os }}" >&2
+    exit 1
+    ;;
+esac
+actual="$(/usr/bin/uname -m)"
+if [ "$actual" != "$expected" ]; then
+  echo "runner architecture mismatch: expected $expected, got $actual" >&2
+  exit 1
+fi
+"""
 WORKFLOW_ROOT = Path(".github/workflows")
 
 
@@ -422,6 +449,21 @@ def _assert_strategy_matches_runner(job: Mapping[str, object]) -> None:
     assert strategy["matrix"] == APPROVED_MATRIX
 
 
+def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -> None:
+    if job.get("runs-on") != MATRIX_RUNNER:
+        return
+    steps = job.get("steps")
+    assert isinstance(steps, Sequence)
+    architecture_steps = [
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, Mapping) and step.get("name") == ARCHITECTURE_CHECK_STEP_NAME
+    ]
+    assert architecture_steps == [0]
+    run = steps[architecture_steps[0]].get("run")
+    assert run == ARCHITECTURE_CHECK_SCRIPT
+
+
 def _assert_workflow_policy(path: Path) -> None:
     assert path.is_file() and not path.is_symlink()
     raw = path.read_text()
@@ -451,6 +493,7 @@ def _assert_workflow_policy(path: Path) -> None:
             assert runner == MATRIX_RUNNER
         else:
             assert runner in FIXED_RUNNERS
+        _assert_matrix_job_checks_expected_architecture(job)
         for step in job.get("steps", []):
             if "uses" in step:
                 _assert_uses_is_immutable(step["uses"])
@@ -464,7 +507,7 @@ def test_every_yml_and_yaml_workflow_has_only_fixed_runners_and_full_sha_actions
 def test_ci_matrix_remains_exact() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
     assert workflow["jobs"]["check"]["strategy"]["matrix"] == {
-        "os": ["ubuntu-24.04", "macos-15-intel"],
+        "os": ["ubuntu-24.04", "macos-26", "macos-15-intel"],
     }
 
 
@@ -1029,9 +1072,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15-intel]
+        os: [ubuntu-24.04, macos-26, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Assert runner architecture
+        shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-24.04)
+              expected="x86_64"
+              ;;
+            macos-26)
+              expected="arm64"
+              ;;
+            macos-15-intel)
+              expected="x86_64"
+              ;;
+            *)
+              echo "unsupported runner label: ${{ matrix.os }}" >&2
+              exit 1
+              ;;
+          esac
+          actual="$(/usr/bin/uname -m)"
+          if [ "$actual" != "$expected" ]; then
+            echo "runner architecture mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with: {version: "0.8.13", enable-cache: true}
@@ -1044,13 +1110,13 @@ jobs:
       - run: make lint typecheck test test-security test-contract web-test web-build
 ```
 
-The four action revisions are full reviewed commit SHAs and the comments are informational only. The policy test enumerates the union of `.github/workflows/*.yml` and `.github/workflows/*.yaml` on every run, so later security/release workflows cannot escape review by using the other suffix. It checks strategy before any job-kind branch: fixed-runner and reusable jobs carry no strategy; only `${{ matrix.os }}` may carry strategy, whose keys are limited to `fail-fast` and `matrix`, and whose literal matrix is exactly the ordered `os` pair shown above. Therefore `include`, `exclude`, another axis, or another runner label is rejected everywhere. It checks job-level reusable workflows and every step-level third-party `uses`, while allowing only repository-local `./` actions, and validates every literal runner against the fixed set. Dependabot may propose an update, but CI rejects a tag, branch, abbreviated SHA, `*-latest` runner, unreviewed runner label, secret reference, or hardware/provider job. Linux remains the portable gate; `macos-15-intel` proves hosted Intel compatibility only. It is not evidence for the household Mac, Reachy, network, reboot, thermal, firewall, or lifecycle qualification gates.
+The four action revisions are full reviewed commit SHAs and the comments are informational only. The policy test enumerates the union of `.github/workflows/*.yml` and `.github/workflows/*.yaml` on every run, so later security/release workflows cannot escape review by using the other suffix. It checks strategy before any job-kind branch: fixed-runner and reusable jobs carry no strategy; only `${{ matrix.os }}` may carry strategy, whose keys are limited to `fail-fast` and `matrix`, and whose literal matrix is exactly the ordered three-row `os` list shown above. Therefore `include`, `exclude`, another axis, or another runner label is rejected everywhere. It checks job-level reusable workflows and every step-level third-party `uses`, while allowing only repository-local `./` actions, and validates every literal runner against the fixed set. Dependabot may propose an update, but CI rejects a tag, branch, abbreviated SHA, `*-latest` runner, unreviewed runner label, secret reference, hardware/provider job, missing architecture assertion, or runner/architecture mismatch. Linux remains the portable gate; `macos-26` proves hosted arm64 compatibility and `macos-15-intel` proves hosted Intel compatibility only. Neither is evidence for the household Mac, Reachy, network, reboot, thermal, firewall, or lifecycle qualification gates.
 
 - [ ] **Step 4: Run the green web/build gate**
 
 Run: `uv lock && uv sync --all-packages --locked && pnpm install && pnpm --filter @tuntun/admin --fail-if-no-match test && pnpm --filter @tuntun/admin lint && pnpm --filter @tuntun/admin typecheck && pnpm --filter @tuntun/admin build && pnpm --filter @tuntun/admin e2e --list && uv run python -c "import coverage, pytest_cov, yaml" && uv run pytest tests/unit/test_package_smoke.py tests/unit/test_cli.py tests/ci/test_workflow_policy.py tests/ci/test_web_command_contract.py -q && make test && make test-security test-contract && make lint && make typecheck && sh -c 'make verify-private-data; code=$?; test "$code" -eq 2' && sh -c 'make check; code=$?; test "$code" -eq 2'`
 
-Expected: PASS on Linux and Intel macOS; `uv.lock` contains resolved `PyYAML` and `pytest-cov`, `uv sync --locked` accepts it as current, the direct import probe exits 0, the CLI test prints exactly `0.1.0.dev0` and `make test` meets the 85% branch-coverage gate, and both Python policy modules reject root/job write permissions, reusable-job secret forwarding, dot/index secret expressions, fixed/reusable strategy bypasses, and matrix `include`/`exclude` or extra-axis runner expansion. `test-security` and `test-contract` print an explicit zero-file count now and automatically execute every matching future file once its owning directory exists. `verify-private-data` and `check` exit exactly 2 until Task 3 installs the scanner, so Task 2 CI runs only the complete current gates. The app-local/root-unit Vitest sentinels pass, Playwright's `--list` output contains the `testDir`-relative paths `e2e/admin-smoke.spec.ts` and `ui/admin-accessibility.spec.ts` with a nonzero discovery total, the executable empty-workspace contract proves `web-test` fails nonzero with `No projects found`, all `.ts`/`.tsx` app, root-unit, e2e, and UI trees are in ESLint and TypeScript scopes with repository-root `basePath: "../.."`, the Vite build succeeds, and static checks report zero errors. `git diff -- .gitignore` retains `.worktrees/` and `.superpowers/sdd/` and adds every listed runtime/build/Python-cache ignore.
+Expected: PASS on Linux, hosted macOS arm64, and hosted Intel macOS; `uv.lock` contains resolved `PyYAML` and `pytest-cov`, `uv sync --locked` accepts it as current, the direct import probe exits 0, the CLI test prints exactly `0.1.0.dev0` and `make test` meets the 85% branch-coverage gate, and both Python policy modules reject root/job write permissions, reusable-job secret forwarding, dot/index secret expressions, fixed/reusable strategy bypasses, missing architecture assertions, runner/architecture mismatches, and matrix `include`/`exclude` or extra-axis runner expansion. `test-security` and `test-contract` print an explicit zero-file count now and automatically execute every matching future file once its owning directory exists. `verify-private-data` and `check` exit exactly 2 until Task 3 installs the scanner, so Task 2 CI runs only the complete current gates. The app-local/root-unit Vitest sentinels pass, Playwright's `--list` output contains the `testDir`-relative paths `e2e/admin-smoke.spec.ts` and `ui/admin-accessibility.spec.ts` with a nonzero discovery total, the executable empty-workspace contract proves `web-test` fails nonzero with `No projects found`, all `.ts`/`.tsx` app, root-unit, e2e, and UI trees are in ESLint and TypeScript scopes with repository-root `basePath: "../.."`, the Vite build succeeds, and static checks report zero errors. `git diff -- .gitignore` retains `.worktrees/` and `.superpowers/sdd/` and adds every listed runtime/build/Python-cache ignore.
 
 - [ ] **Step 5: Commit exact Task 2 paths**
 
@@ -18365,14 +18431,14 @@ git diff --check
 
 Expected on macOS: both direct/package checks return 0 with no output; pytest reports exactly `133 passed, 3 skipped` (106 shared-generator nodes plus 30 fixture/privacy nodes; the three Linux-only nodes skip). Expected on the ACL-capable Ubuntu hosted runner: pytest reports exactly `134 passed, 2 skipped` (the two Darwin-only nodes skip). A Linux filesystem that cannot establish either native ACL regression may report an explicit additional platform skip, but the exact hosted Ubuntu gate requires ACL-capable storage. Ruff format/check and Python-3.11 mypy report zero issues; the private-data scan reports PASS; and a second render leaves the ten files byte-identical. Review the generated fixture diff before staging.
 
-The same commit must then pass the real native nodes without xfail or emulation in both exact Task 2 hosted jobs. Run the first selected command on `macos-15-intel` and the second on `ubuntu-24.04`, then run the complete two-file pytest command above on both:
+The same commit must then pass the real native nodes without xfail or emulation in all three exact Task 2 hosted jobs. Run the first selected command on `macos-26` and `macos-15-intel`, run the second on `ubuntu-24.04`, then run the complete two-file pytest command above on all three:
 
 ```bash
 uv run pytest tests/contract/test_contract_generators.py -q -k test_darwin_native_swap_exclusive_and_parent_flock_gate
 uv run pytest tests/contract/test_contract_generators.py -q -k test_linux_native_exchange_noreplace_and_parent_flock_gate
 ```
 
-Each selected command reports exactly `1 passed, 105 deselected`. The complete two-file command reports exactly `133 passed, 3 skipped` on `macos-15-intel` and `134 passed, 2 skipped` on the ACL-capable `ubuntu-24.04` runner. A local run on one platform is not evidence for the other platform.
+Each selected command reports exactly `1 passed, 105 deselected`. The complete two-file command reports exactly `133 passed, 3 skipped` on `macos-26` and `macos-15-intel`, and `134 passed, 2 skipped` on the ACL-capable `ubuntu-24.04` runner. A local run on one platform is not evidence for the other platforms.
 
 ```bash
 git status --short
@@ -18388,7 +18454,7 @@ git commit -m "test(contracts): freeze version-one fixtures and privacy inventor
 ### Task 7: Implement strict settings and owner-only filesystem paths
 
 **Master package:** 03
-**Depends on:** Tasks 1, 2, and 3. Task 2 owns the dual-host workflow that this
+**Depends on:** Tasks 1, 2, and 3. Task 2 owns the three-row fixed workflow that this
 task amends and must remain byte-for-byte unchanged outside the final check
 step's pytest environment.
 **Estimated effort:** 1.5 person-days.
@@ -18487,7 +18553,7 @@ step's pytest environment.
   syntax-compatible with Python 3.11, but Task 7 does not widen core package
   metadata or claim a Python 3.11 core runtime. Tasks 4-6 retain their separate
   Python 3.11 shared-contract boundary.
-- The existing dual-host check job supplies one short, per-run pytest base
+- The existing three-row fixed check job supplies one short, per-run pytest base
   beneath root-owned sticky /tmp. This keeps Task 3's AF_UNIX inventory fixture
   below Darwin's sockaddr path limit without skipping or changing that test.
 - The native ACL regression has no Task 7 skip/xfail branch. On hosted Intel
@@ -20531,9 +20597,36 @@ import pytest
 import yaml
 
 FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
-FIXED_RUNNERS = {"ubuntu-24.04", "macos-15-intel"}
+FIXED_RUNNERS = {"ubuntu-24.04", "macos-26", "macos-15-intel"}
 MATRIX_RUNNER = "${{ matrix.os }}"
-APPROVED_MATRIX = {"os": ["ubuntu-24.04", "macos-15-intel"]}
+APPROVED_MATRIX = {"os": ["ubuntu-24.04", "macos-26", "macos-15-intel"]}
+EXPECTED_ARCHITECTURES = {
+    "ubuntu-24.04": "x86_64",
+    "macos-26": "arm64",
+    "macos-15-intel": "x86_64",
+}
+ARCHITECTURE_CHECK_STEP_NAME = "Assert runner architecture"
+ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
+  ubuntu-24.04)
+    expected="x86_64"
+    ;;
+  macos-26)
+    expected="arm64"
+    ;;
+  macos-15-intel)
+    expected="x86_64"
+    ;;
+  *)
+    echo "unsupported runner label: ${{ matrix.os }}" >&2
+    exit 1
+    ;;
+esac
+actual="$(/usr/bin/uname -m)"
+if [ "$actual" != "$expected" ]; then
+  echo "runner architecture mismatch: expected $expected, got $actual" >&2
+  exit 1
+fi
+"""
 WORKFLOW_ROOT = Path(".github/workflows")
 
 
@@ -20583,6 +20676,28 @@ def _assert_strategy_matches_runner(job: Mapping[str, object]) -> None:
     assert strategy["matrix"] == APPROVED_MATRIX
 
 
+def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -> None:
+    if job.get("runs-on") != MATRIX_RUNNER:
+        return
+    steps = job.get("steps")
+    assert isinstance(steps, Sequence)
+    architecture_steps = [
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, Mapping) and step.get("name") == ARCHITECTURE_CHECK_STEP_NAME
+    ]
+    assert architecture_steps == [0]
+    architecture_step = steps[architecture_steps[0]]
+    assert isinstance(architecture_step, Mapping)
+    assert architecture_step.get("shell") == (
+        "/bin/bash --noprofile --norc -p -euo pipefail {0}"
+    )
+    run = architecture_step.get("run")
+    assert run == ARCHITECTURE_CHECK_SCRIPT
+    for runner, machine in EXPECTED_ARCHITECTURES.items():
+        assert runner in run and machine in run
+
+
 def _assert_workflow_policy(path: Path) -> None:
     assert path.is_file() and not path.is_symlink()
     raw = path.read_text()
@@ -20623,6 +20738,7 @@ def _assert_workflow_policy(path: Path) -> None:
             assert runner == MATRIX_RUNNER
         else:
             assert runner in FIXED_RUNNERS
+        _assert_matrix_job_checks_expected_architecture(job)
         for step in job.get("steps", []):
             if "uses" in step:
                 _assert_uses_is_immutable(step["uses"])
@@ -20636,7 +20752,7 @@ def test_every_yml_and_yaml_workflow_has_only_fixed_runners_and_full_sha_actions
 def test_ci_matrix_remains_exact() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
     assert workflow["jobs"]["check"]["strategy"]["matrix"] == {
-        "os": ["ubuntu-24.04", "macos-15-intel"],
+        "os": ["ubuntu-24.04", "macos-26", "macos-15-intel"],
     }
 
 
@@ -22101,9 +22217,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15-intel]
+        os: [ubuntu-24.04, macos-26, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Assert runner architecture
+        shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-24.04)
+              expected="x86_64"
+              ;;
+            macos-26)
+              expected="arm64"
+              ;;
+            macos-15-intel)
+              expected="x86_64"
+              ;;
+            *)
+              echo "unsupported runner label: ${{ matrix.os }}" >&2
+              exit 1
+              ;;
+          esac
+          actual="$(/usr/bin/uname -m)"
+          if [ "$actual" != "$expected" ]; then
+            echo "runner architecture mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with: {version: "0.8.13", enable-cache: true}
@@ -22249,28 +22388,32 @@ This is the exact 16-entry Files closure; no other path is staged. Generated
 schema, OpenAPI, privacy-inventory path, local coverage fragment, cache, or
 generated wheel may be staged.
 
-- [ ] **Step 8: Require the committed dual-host acceptance matrix**
+- [ ] **Step 8: Require the committed three-row acceptance matrix**
 
 Push the exact Task 7 commit through the Task 2 GitHub Actions workflow amended
-only with the short per-run pytest base. Require both check (ubuntu-24.04) and
-check (macos-15-intel) for the same commit SHA.
+only with the short per-run pytest base. Require all three mandatory rows for
+the same commit SHA: Ubuntu x86_64 (`check (ubuntu-24.04)`), Darwin arm64
+(`check (macos-26)`), and Darwin Intel x86_64 (`check (macos-15-intel)`).
 
-Expected: both jobs pass `uv sync --all-packages --locked` and `make check`
-without xfail, emulation, or a skipped Task 7 case. The check step's short
-unique base keeps every AF_UNIX fixture below Darwin's path limit. Hosted Linux
-exercises the root-owned sticky `/tmp` ancestor, the reviewed filesystem/xattr
-inspection, and a real mode-preserving POSIX ACL rejection. Hosted Intel macOS
-exercises the trusted temporary-directory alias to its `/private/...` target,
+Expected: each mandatory row passes `uv sync --all-packages --locked` and
+`make check` without xfail, emulation, or a skipped Task 7 case. The check
+step's short unique base keeps every AF_UNIX fixture below Darwin's path limit.
+Hosted Linux exercises the root-owned sticky `/tmp` ancestor, the reviewed
+filesystem/xattr inspection, and a real mode-preserving POSIX ACL rejection.
+Hosted Intel macOS exercises the trusted temporary-directory alias to its `/private/...` target,
 accepts a real deny-only extended ACL, and rejects a real granting ACL. Each
 fixture proves the installed raw ACL and mode are unchanged before teardown and
 restores the exact original state. A local run, container, emulation, or result
-from only one operating system is not evidence for the other. Task 8 may not
-begin until both hosted checks are green for the same committed SHA.
+from only one row is not evidence for either of the other two mandatory rows.
+Darwin Intel x86_64 remains mandatory distribution CI only; the active
+household/development target remains the verified Darwin arm64 host. Task 8 may
+not begin until the Ubuntu x86_64, Darwin arm64, and Darwin Intel x86_64 `check`
+rows are green for the same committed SHA.
 
 ### Task 8: Implement secret providers and recursive log redaction
 
 **Master package:** 03
-**Depends on:** Tasks 5 and 7, including Task 7's committed dual-host acceptance matrix. Do not begin this task from an unaccepted Task 7 SHA.
+**Depends on:** Tasks 5 and 7, including Task 7's committed three-row acceptance matrix. Do not begin this task from an unaccepted Task 7 SHA.
 **Estimated effort:** 2 person-days.
 
 **Files:**
@@ -22279,6 +22422,8 @@ begin until both hosted checks are green for the same committed SHA.
 - Create: `apps/core/src/tuntun_core/adapters/keychain/provider.py`
 - Create: `apps/core/src/tuntun_core/adapters/keychain/macos.py`
 - Create: `apps/core/src/tuntun_core/config/logging.py`
+- Create: `docs/evidence/phase1-host-probe.schema.json`
+- Create: `docs/evidence/phase1-host-probe-completion.schema.json`
 - Create: `scripts/probe_macos_keychain.py`
 - Test: `tests/security/test_key_handling.py`
 - Test: `tests/security/test_log_redaction.py`
@@ -22289,7 +22434,7 @@ begin until both hosted checks are green for the same committed SHA.
 - `MacOSKeychainSecretProvider` accepts only Darwin's exact `keyring.backends.macOS.Keyring` type with a finite exact-numeric priority of at least 1, captures that validated backend once, and never follows later global-keyring drift. Reads require bounded canonical strict Base64 and reject empty, oversized, noncanonical, malformed, or non-string values. Writes verify readback. Delete is a no-op only after a proved absence, accepts a concurrent delete only after re-proving absence, and otherwise surfaces or verifies every failure.
 - Produces: immutable, canonical, unique, disjoint private/public/structural log-key registries; `normalize_private_key(key: str) -> str`; and a real Structlog processor `redact_private_fields(logger: object, method: str, event: MutableMapping[str, object]) -> MutableMapping[str, object]`.
 - Redaction is closed, bounded, cycle-safe, non-mutating, and JSON-serializable. It recursively converts only exact structural-wrapper mappings/lists/tuples to JSON-safe structures; bounds depth, nodes, container items, keys, public strings, and integers; canonicalizes emitted recognized keys; rejects normalized-key collisions; redacts all known private DTO fields and common literal/JSON/Base64/URL-safe-Base64/hex/URL encodings; permits only the exact public scalar allowlist; and replaces unknown keys and their whole values, binary values, unsupported objects, invalid mappings, non-finite numbers, cycles, and exhausted budgets with typed content-free markers.
-- Ordinary unit, security, `make check`, and dual-host CI runs use only deterministic fake backends and perform no real Keychain I/O. The one real Keychain round trip is a separately acknowledged, cleanup-verifying gate on the owner's target 2020 Intel Mac.
+- Ordinary unit, security, `make check`, and three-row CI runs use only deterministic fake backends and perform no real Keychain I/O. The one real Keychain round trip is a separately acknowledged, cleanup-verifying diagnostic gate on the independently owner-approved active Core target, currently verified as Darwin arm64, and writes only the content-safe receipt/completion pair allowed by `docs/evidence/phase1-host-probe.schema.json` and `docs/evidence/phase1-host-probe-completion.schema.json`. This v1 receipt is arm64-specific and never commissions a target. Moving household deployment to Intel requires a new reviewed versioned Intel-capable probe plus fresh trusted approval and full real-host lifecycle qualification; hosted Intel CI remains mandatory distribution evidence only.
 
 - [ ] **Step 1: Write the complete red secret/keychain and logging tests**
 
@@ -24144,6 +24289,55 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
+The tracked probe implementation must extend the bootstrap code above with the optional
+`--receipt PATH --run-id UUID4 --attempt-id UUID4 --owner-approval-commitment-sha256 DIGEST` path
+from ADR 0001. Before any Keychain side effect, receipt mode exclusively creates and fsyncs a
+fail-closed claim at the exact previously absent destination; a failed attempt keeps that path
+occupied. It writes only the closed `docs/evidence/phase1-host-probe.schema.json` fields, labels the
+artifact diagnostic-only, requires Darwin `arm64`, and accepts evidence only with the closed
+`docs/evidence/phase1-host-probe-completion.schema.json` companion. The receipt contains a real
+canonical RFC 3339 UTC time and records a clean script-derived repository commit and probe-script
+digest. The implementation captures a bounded, content-safe source snapshot both before Keychain
+access and after cleanup immediately before finalization. Git is launched from the retained
+repository descriptor by a fixed current-Python `-I -S` helper that calls `fchdir` and immediately
+`execve`s `/usr/bin/git`; it never resolves `-C` through the mutable repository pathname or uses
+`preexec_fn`. Exact HEAD and script digest, clean tracked/untracked status, stage-zero index,
+default assume-unchanged/skip-worktree/fsmonitor flags, absence of local filters/attributes,
+recursively retained submodule commits/state, and the actual nofollow descriptor-read bytes and
+executable/symlink mode of every stage-zero object must compare exactly to locally computed Git
+blob OIDs under one shared count/byte/repository/deadline budget. Replacement refs and lazy fetch
+are disabled. It never serializes the
+generated account, generated value, username, hostname, serial, hardware UUID, provisioning UDID,
+environment, command output, absolute home path, repository path, tracked path, submodule path, or
+Keychain path. A failed cleanup, source re-proof, publication, rollback, or fsync cannot produce an
+acceptable pass.
+
+The content-free CLI admits intentional help only when `-h` or `--help` is the sole argument;
+mixed help/invalid invocations, every argparse error, and every escaped `BaseException` return
+nonzero with exactly `macOS Keychain probe: FAIL` on stderr and no traceback, argv, path,
+environment, or private text. The receipt never authorizes commissioning:
+`validate_phase1_host_probe_receipt` is structural-only
+and can never accept evidence, while `verify_phase1_host_probe_receipt` requires the completion
+companion and compares the externally expected run ID, attempt ID, owner-approval commitment,
+source commit, probe-script digest, receipt digest, and completion binding. Even success returns
+diagnostic evidence only. An independent trusted verifier separately authenticates the external
+approval and supplies every expected binding. Unique physical-host identity is intentionally omitted
+for privacy; later commissioning binds its opaque host record and target-held public key independently
+rather than inferring identity from this receipt or host strings. The completion companion's exclusive
+publication plus parent-directory fsync is the operation commit point. The winning invocation retains
+and revalidates the exact receipt and completion inodes through final path acceptance, so a matching
+single-name foreign swap deterministically fails and restores the owned receipt claim or retires the
+owned completion while preserving unrelated foreign data. If both names are replaced with a matching,
+independently acceptable copy of the exact invocation, failure cleanup uses the private expected-binding
+verifier and invalidates only the currently named matching companion before re-proving that the pair
+rejects; a cleanup error is not suppressed. An active same-user replacement after the final bounded
+observation remains part of the separately supervised exit boundary.
+A crash immediately afterward
+but before observed exit `0` can leave valid diagnostic evidence. Every deterministic `main()` return
+`1` rejects, including a durably completed failing receipt; a pre-commit exception has no acceptable
+completion. Removing that narrow crash boundary requires a separate trusted supervisor-signed exit
+receipt and is not claimed here.
+
 - [ ] **Step 5: Run the local green and full regression gate without real Keychain I/O**
 
 Run:
@@ -24159,42 +24353,43 @@ PYTEST_ADDOPTS="--basetemp=/tmp/t8-$$" make check
 git diff --check
 ```
 
-Expected: the focused suite reports exactly 172 passed. The tests cover the immutable exact secret map and root sizes; every provider operation and testable failure boundary; exact backend binding and drift resistance; bounded canonical storage encoding; verified write/delete semantics; probe dual acknowledgement, collision, mismatch, partial-write, cleanup, and content-free CLI failures; exact log registries; every private alias plus common encodings; all seven Task 5 memory-content shapes plus the provider, transcript, speech, and search shapes; canonical and invalid keys; public-scalar/container smuggling; hostile iterators; non-mutation; JSON rendering; and cycle/depth/node/container/type limits. The combined private-data scan reports `private-data scan: PASS`; Ruff format/check and strict Python-3.12 mypy report zero issues; and `make check` passes all predecessor plus these 172 nodes without losing any accepted node. None of these commands instantiates the real macOS backend.
+Expected: the focused suite reports exactly 438 passed. The tests cover the immutable exact secret map and root sizes; every provider operation and testable failure boundary; exact backend binding and drift resistance; bounded canonical storage encoding; verified write/delete semantics; probe dual acknowledgement, collision, mismatch, partial-write, cleanup, source/index/submodule mutation, fail-closed claim/publication, closed completion binding, RFC 3339 schema/runtime equivalence, and content-free CLI failures; exact log registries; every private alias plus common encodings; all seven Task 5 memory-content shapes plus the provider, transcript, speech, and search shapes; canonical and invalid keys; public-scalar/container smuggling; hostile iterators; non-mutation; JSON rendering; and cycle/depth/node/container/type limits. The combined private-data scan reports `private-data scan: PASS`; Ruff format/check and strict Python-3.12 mypy report zero issues; and `make check` passes all predecessor plus these 438 focused nodes without losing any accepted node. None of these commands instantiates the real macOS backend.
 
 - [ ] **Step 6: Commit exactly the complete Task 8 closure**
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/adapters/keychain/provider.py apps/core/src/tuntun_core/adapters/keychain/macos.py apps/core/src/tuntun_core/config/logging.py scripts/probe_macos_keychain.py tests/security/test_key_handling.py tests/security/test_log_redaction.py
+git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/adapters/keychain/provider.py apps/core/src/tuntun_core/adapters/keychain/macos.py apps/core/src/tuntun_core/config/logging.py docs/evidence/phase1-host-probe.schema.json docs/evidence/phase1-host-probe-completion.schema.json scripts/probe_macos_keychain.py tests/security/test_key_handling.py tests/security/test_log_redaction.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
 git commit -m "feat(core): add Keychain boundary and log redaction"
 ```
 
-`git diff --cached --name-only` must equal the eight-entry Files list exactly. Generated `uv.lock` is reviewed but never hand-edited. No Task 7 configuration/path file, Task 4-6 contract/schema artifact, private-data matcher fixture, real credential, probe evidence, or Task 9 path may be staged.
+`git diff --cached --name-only` must equal the ten-entry Files list exactly. Generated `uv.lock` is reviewed but never hand-edited. No Task 7 configuration/path file, Task 4-6 contract/schema artifact, private-data matcher fixture, real credential, probe evidence, or Task 9 path may be staged.
 
-- [ ] **Step 7: Require the committed dual-host and target-Mac acceptance gates**
+- [ ] **Step 7: Require the committed three-row CI and active-host acceptance gates**
 
-Push the exact Task 8 commit through the Task 2 GitHub Actions matrix and require both `check (ubuntu-24.04)` and `check (macos-15-intel)` for that same SHA. Both jobs must complete `uv sync --all-packages --locked` and `make check`; they use the fake backend tests and must not access a host Keychain.
+Push the exact Task 8 commit through the Task 2 GitHub Actions matrix and require `check (ubuntu-24.04)`, `check (macos-26)`, and `check (macos-15-intel)` for that same SHA. All three jobs must complete `uv sync --all-packages --locked` and `make check`; they use the fake backend tests and must not access a host Keychain.
 
-Then, from that exact committed checkout on the owner's target 2020 Intel Mac, after reviewing the fixed probe service and confirming Keychain Access is available, run the deliberately dual-acknowledged write/read/delete smoke gate:
+Then, from that exact committed checkout on the independently owner-approved active Core inventory target, currently verified as Darwin arm64, after reviewing the fixed probe service and confirming Keychain Access is available, run the deliberately dual-acknowledged write/read/delete diagnostic gate:
 
 ```bash
-TUNTUN_ALLOW_KEYCHAIN_PROBE=1 uv run python scripts/probe_macos_keychain.py --acknowledge-keychain-write
+TUNTUN_ALLOW_KEYCHAIN_PROBE=1 uv run python scripts/probe_macos_keychain.py --acknowledge-keychain-write --receipt ".superpowers/sdd/phase1-host-keychain-probe-${TUNTUN_HOST_PROBE_RUN_ID}-${TUNTUN_HOST_PROBE_ATTEMPT_ID}.json" --run-id "$TUNTUN_HOST_PROBE_RUN_ID" --attempt-id "$TUNTUN_HOST_PROBE_ATTEMPT_ID" --owner-approval-commitment-sha256 "$TUNTUN_OWNER_APPROVAL_COMMITMENT_SHA256"
 ```
 
-Expected stdout is exactly one line: `macOS Keychain probe: PASS`. The probe generates a fresh random 32-byte value and UUID account, first proves the slot absent, verifies the write/readback, always attempts deletion even after a partial write failure, and finally proves absence. It never prints the value or generated account on success or failure; a handled probe/backend failure instead exits 1 with exactly `macOS Keychain probe: FAIL` on stderr. Missing either acknowledgement must fail before randomness or provider construction.
+Before the command, an independent trusted owner workflow creates fresh UUIDv4 values in `TUNTUN_HOST_PROBE_RUN_ID` and `TUNTUN_HOST_PROBE_ATTEMPT_ID`, computes the opaque SHA-256 commitment to its private approval record in `TUNTUN_OWNER_APPROVAL_COMMITMENT_SHA256`, records the expected clean commit and script digest, and proves the exact attempt destination and completion-companion path absent. Expected stdout is exactly one line: `macOS Keychain probe: PASS`. The probe generates a fresh random 32-byte value and UUID account, first proves the slot absent, verifies the write/readback, always attempts deletion even after a partial write failure, and finally proves absence. It never prints the value or generated account on success or failure; a handled probe/backend/publication failure instead exits 1 with exactly `macOS Keychain probe: FAIL` on stderr. Missing either acknowledgement or any evidence binding must fail before randomness or provider construction. A trusted acceptance verifier must open both artifacts, compare all five externally supplied expected bindings plus the receipt/completion cross-bindings, and authenticate the external approval record; the diagnostic receipt cannot commission a host. The earlier temporary pass remains baseline-selection evidence only.
 
-Record only the commit SHA, UTC timestamp, OS/Python/keyring versions, the content-free invocation, both CI conclusions, and PASS in owner-only encrypted notes outside the repository; record no secret, generated account, backend payload, household path, or Keychain export. Any non-PASS result, CI mismatch, or cleanup result that cannot be proved blocks Task 8 and therefore Task 9. If cleanup cannot be proved, stop automation and use Keychain Access to inspect and remove only entries with service `tuntun.probe.keychain` created at the probe time before retrying.
+Record only the content-safe receipt, commit SHA, UTC timestamp, OS/Python/keyring versions, the content-free invocation, all three CI conclusions, and PASS in owner-only encrypted notes outside the repository; record no secret, generated account, backend payload, household path, or Keychain export. Any non-PASS result, CI mismatch, or cleanup result that cannot be proved blocks Task 8 and therefore Task 9. If cleanup cannot be proved, stop automation and use Keychain Access to inspect and remove only entries with service `tuntun.probe.keychain` created at the probe time before retrying.
 
 ### Task 9: Build deterministic fakes and a network-free scenario runner
 
 **Master package:** 04
-**Depends on:** Tasks 5–8. Begin only from the accepted Task 8 SHA with a clean worktree; the Task 7 dual-host matrix and Task 8 secret/logging tests must already pass.
+**Depends on:** Tasks 5–8. Begin only from the accepted Task 8 SHA with a clean worktree; the Task 7 three-row matrix and Task 8 secret/logging tests must already pass.
 **Estimated effort:** 3 person-days.
 
 **Files:**
+- Modify: `.github/workflows/ci.yml`
 - Modify: `Makefile`
 - Modify: `apps/core/pyproject.toml`
 - Modify: `packages/testing/pyproject.toml`
@@ -24215,9 +24410,10 @@ Record only the commit SHA, UTC timestamp, OS/Python/keyring versions, the conte
 - Test: `tests/unit/testing/test_scenario_cli.py`
 - Test: `tests/integration/test_deterministic_turn.py`
 - Test: `tests/security/test_scenario_guard.py`
+- Modify: `tests/ci/test_workflow_policy.py`
 
 **Interfaces:**
-- Consumes the frozen Task 5 DTOs/ports, Task 6 canonical JCS function, Task 7 dual-host gate, and Task 8 fail-closed logging/secret baseline. Scenario audio is exactly one canonical UUID encoded as 16 synthetic bytes; it is never PCM, recorded speech, or household media.
+- Consumes the frozen Task 5 DTOs/ports, Task 6 canonical JCS function, Task 7 three-row CI gate, and Task 8 fail-closed logging/secret baseline. Scenario audio is exactly one canonical UUID encoded as 16 synthetic bytes; it is never PCM, recorded speech, or household media.
 - Produces a callback-capable `FakeClock`; immutable `ExpectedCall`/`ObservedCall`; exact-signature scripted STT, TTS, LLM, identity, memory, proposal, policy, authentication, action, audit, budget, route-authorizer, and Reachy fakes; immediate unexpected-call rejection; injected return/raise/malformed outcomes; and `assert_exhausted()` including abandoned TTS streams.
 - Produces descriptor-relative `read_scenario_input`/`load_scenario_inputs`, strict bounded YAML, `ScenarioRunner.run(...)` plus `run_async(...)`, canonical-JCS `ScenarioResult`, and `guest_hinglish_scenario()` with stable `.ports`, `.wav_bytes`, mutable shared `.events`, and async `.context_provider` seams. The Guest workflow ports implement both Task 07's `generate(transcript, identity)` path and Task 14/16's `prepare(turn_id, transcript)` then `generate(context)` path with the exact later event vocabulary.
 - `scripts/run_scenarios.py [--scenario PATH ...] --turns N [--assert-resource-bounds] [--json]` interprets `N` as turns per sorted scenario and accepts exactly `1 <= N <= 10_000`, at most 32 selected scenarios, and at most 10,000 aggregate measured scenario-turns. It installs the socket/DNS guard before importing YAML, contracts, scenario, or application modules; uses one new runner/fake container per warm-up or measured turn; and emits exactly one `scenario_gate.v1` JCS document to stdout in JSON mode. Invalid arguments/input exit `2`; assertion, network, unexpected-call, exhaustion, FD, or task failures exit `1`; diagnostics are bounded content-free reason codes on stderr.
@@ -27395,7 +27591,7 @@ zero. C23 must fill the already-owned B2 fields—including exactly 50 warm-up t
 measurements, privacy-block P95, private-sentinel count, and duplicate-effect count—rather than
 introducing a schema or CLI fork.
 
-- [ ] **Step 5: Wire the optional package, lazy CLI, synthetic policy, and repository/dual-host gates**
+- [ ] **Step 5: Wire the optional package, lazy CLI, synthetic policy, and repository/three-row gates**
 
 Do not add `tuntun-testing` to normal Core dependencies. Add these exact tables to the accepted
 Task 8 `apps/core/pyproject.toml`, preserving its complete existing runtime dependency list:
@@ -27472,7 +27668,15 @@ scenario.
 recursive removal, builds exactly one Core wheel, installs it without the `simulation` extra in an
 isolated venv, proves `tuntun_testing` absent, imports the lazy command module, runs `version`, and
 proves invoking `simulate` fails with exit 2. All three are dependencies of `check`, so the
-existing Task 7 matrix executes them natively on `ubuntu-24.04` and `macos-15-intel`.
+existing Task 7 matrix executes them natively on `ubuntu-24.04`, `macos-26`, and `macos-15-intel`.
+
+Hosted-runtime correction (2026-08-30): the final Task 9 matrix command is exactly
+`uv sync --all-packages --locked --managed-python`. Every row must create its project environment
+from a uv-managed CPython rather than falling back to a shared system/tool-cache interpreter. The
+resolved virtual-environment executable must still satisfy Task 9's strict regular-file,
+owner/root, executable, and no-group/world-write checks. Do not weaken those checks to accommodate
+a hosted image whose shared Python is group-writable; such an image must instead use the managed
+runtime path. `tests/ci/test_workflow_policy.py` closes this command and ordering requirement.
 
 ```make
 # Makefile
@@ -27589,22 +27793,27 @@ FD/task deltas, and all six C23/B2 metric values null with `status="not_measured
 
 ```bash
 git status --short
-git add Makefile apps/core/pyproject.toml packages/testing/pyproject.toml uv.lock packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/network_guard.py packages/testing/src/tuntun_testing/scenario_io.py packages/testing/src/tuntun_testing/scenario.py packages/testing/src/tuntun_testing/__init__.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/fixtures/scenarios/guest-hinglish.yaml tests/fixtures/synthetic/README.md tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py
+git add .github/workflows/ci.yml Makefile apps/core/pyproject.toml packages/testing/pyproject.toml uv.lock packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/network_guard.py packages/testing/src/tuntun_testing/scenario_io.py packages/testing/src/tuntun_testing/scenario.py packages/testing/src/tuntun_testing/__init__.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/fixtures/scenarios/guest-hinglish.yaml tests/fixtures/synthetic/README.md tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py tests/ci/test_workflow_policy.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
 git commit -m "test: add deterministic foundation scenario"
 ```
 
-`git diff --cached --name-only` must equal the 20-entry **Files** list exactly, including generated
+`git diff --cached --name-only` must equal the 22-entry **Files** list exactly, including generated
 `uv.lock`. No Task 7 configuration fixture, Task 8 Keychain/logging file, generated scenario gate,
 wheel, venv, private temp directory, cache, real audio/transcript, or Task 10 path may be staged.
 
-- [ ] **Step 8: Require same-SHA dual-host acceptance**
+- [ ] **Step 8: Require same-SHA three-row acceptance**
 
-Push the exact Task 9 commit through the unchanged Task 7 GitHub Actions matrix. Require both
-`check (ubuntu-24.04)` and `check (macos-15-intel)` for that same SHA. Each job must complete
-`uv sync --all-packages --locked` and `make check`; therefore each independently executes the
+Push the exact Task 9 commit through the Task 7 runner matrix with the hosted-runtime correction
+above.
+Require all three mandatory rows for that same SHA:
+Ubuntu x86_64 (`check (ubuntu-24.04)`), Darwin arm64 (`check (macos-26)`), and
+Darwin Intel x86_64 (`check (macos-15-intel)`). Darwin Intel x86_64 remains
+mandatory distribution CI only; the active household/development target
+remains the verified Darwin arm64 host. Each job must complete
+`uv sync --all-packages --locked --managed-python` and `make check`; therefore each independently executes the
 actual scenario chain, strict runner/test mypy target, FD/task measurement, network/DNS subprocess
 tests, 32-scenario and 10,000 aggregate-turn boundaries, private-data scan, and
 production-wheel-without-extra smoke. On each host, repeated same-host executions must be
@@ -29162,7 +29371,7 @@ def test_probe_is_sanitized_and_records_driver_runtime(tmp_path:Path) -> None:
 
 Run: `uv run pytest tests/security/test_sqlcipher.py -q`
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_core.adapters.sqlcipher.connection'`. If dependency installation itself fails on the target Intel Mac, stop and record the build error; do not implement a SQLite fallback.
+Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_core.adapters.sqlcipher.connection'`. If dependency installation itself fails on the active approved Core Mac or either hosted Mac CI row, stop and record the build error; do not implement a SQLite fallback.
 
 - [ ] **Step 3: Implement the key-first connection and sanitized probe**
 
@@ -29580,17 +29789,17 @@ def probe_storage(path: Path, key: bytes) -> StorageProbe:
 
 Implement the Typer command so `--json` prints `json.dumps(probe.as_dict(), sort_keys=True)` and never prints the path or key. It obtains the key from `MacOSKeychainSecretProvider.get("tuntun.database", "root-v1")`; tests call `probe_storage` directly with a synthetic key.
 
-- [ ] **Step 4: Run the green SQLCipher gate and target-Mac probe**
+- [ ] **Step 4: Run the green SQLCipher gate and active-host probe**
 
 Run: `uv run pytest tests/security/test_sqlcipher.py -q && uv run tuntunctl storage probe --path var/probe/foundation.db --json`
 
-Expected: PASS in both exact Task 2 CI jobs, `ubuntu-24.04` and `macos-15-intel`, against the pinned wheel and its bundled SQLite, with no platform skip. The behavior gate proves the ordinary absolute database name and exact `READWRITE|FULLMUTEX|PRIVATECACHE|NOFOLLOW` flags, omission of `CREATE`/URI/custom VFS, and key as the first SQL statement; a direct pinned-driver test also proves those flags reject both ancestor and final symlinks on each runner. Every ancestor/final symlink; main or pre-existing WAL/SHM special file, wrong owner/mode, hard link, or device mismatch; and one-way database/parent replacement fails closed. Unsafe sidecar cases begin with a fresh, never-opened exclusive empty main and assert absent sidecars plus the intended malicious entry before calling the adapter. Newly materialized WAL/SHM are exact metadata-qualified siblings; only the parent-directory FD survives initialization; immutable main/sidecar identities back revalidation; and opening/closing a second connection performs no adapter open/close of the main/WAL/SHM inodes. Tests prove the creation FD closes before reservation/connect; base-close → registry release/rollback → parent-close ordering; an initialization-cleanup close failure retains its initializing reservation/parent until retry while preserving the healthy peer; an explicit active close failure likewise retains its lease and blocks new return; a barrier-paused failing close cannot race a newly returned connection before the failed state is published; healthy-peer usability after each injected initialization failure; successful open and all five cleanup checkpoints finish inside a subprocess deadline without recursive-lock deadlock; positive close/reopen without deleting or assuming deletion of legitimate sidecars; two-connection WAL concurrency; and the subprocess lock regression while one connection holds `BEGIN IMMEDIATE`. The same lock regression and all other tests run on both hosted platforms. The minimum bundled-SQLite check is necessary but does not replace these behavior tests. Probe JSON has `"driver":"sqlcipher3==0.6.2"`, the exact bundled `sqlite`, non-empty `cipher`, exact numeric `open_flags`, `"integrity_ok":true`, and `"mode":"0o600"`; it contains no username, absolute path, or key material.
+Expected: PASS in all exact Task 2 CI jobs, `ubuntu-24.04`, `macos-26`, and `macos-15-intel`, against the pinned wheel and its bundled SQLite, with no platform skip. The behavior gate proves the ordinary absolute database name and exact `READWRITE|FULLMUTEX|PRIVATECACHE|NOFOLLOW` flags, omission of `CREATE`/URI/custom VFS, and key as the first SQL statement; a direct pinned-driver test also proves those flags reject both ancestor and final symlinks on each runner. Every ancestor/final symlink; main or pre-existing WAL/SHM special file, wrong owner/mode, hard link, or device mismatch; and one-way database/parent replacement fails closed. Unsafe sidecar cases begin with a fresh, never-opened exclusive empty main and assert absent sidecars plus the intended malicious entry before calling the adapter. Newly materialized WAL/SHM are exact metadata-qualified siblings; only the parent-directory FD survives initialization; immutable main/sidecar identities back revalidation; and opening/closing a second connection performs no adapter open/close of the main/WAL/SHM inodes. Tests prove the creation FD closes before reservation/connect; base-close -> registry release/rollback -> parent-close ordering; an initialization-cleanup close failure retains its initializing reservation/parent until retry while preserving the healthy peer; an explicit active close failure likewise retains its lease and blocks new return; a barrier-paused failing close cannot race a newly returned connection before the failed state is published; healthy-peer usability after each injected initialization failure; successful open and all five cleanup checkpoints finish inside a subprocess deadline without recursive-lock deadlock; positive close/reopen without deleting or assuming deletion of legitimate sidecars; two-connection WAL concurrency; and the subprocess lock regression while one connection holds `BEGIN IMMEDIATE`. The same lock regression and all other tests run on both hosted Mac architectures where applicable. The minimum bundled-SQLite check is necessary but does not replace these behavior tests. Probe JSON has `"driver":"sqlcipher3==0.6.2"`, the exact bundled `sqlite`, non-empty `cipher`, exact numeric `open_flags`, `"integrity_ok":true`, and `"mode":"0o600"`; it contains no username, absolute path, or key material.
 
-Run the shown encrypted CLI probe again on the actual household Intel Mac before accepting the stop/go checkpoint. Record its exact sanitized JSON, macOS/Intel architecture, Python, `sqlcipher3==0.6.2`, bundled SQLite and cipher versions, numeric flags, `uv.lock` SHA-256, date, and PASS decision in `docs/operations/sqlcipher-compatibility.md`; record the Ubuntu CI result beside it. Also document that WAL/SHM are SQLCipher-managed same-directory sidecars, maintenance checkpoints WAL before backup, startup refuses missing/wrong keys or failed cipher integrity, and the local open lock prevents only cooperative races inside one process. Production startup must acquire the application's later lifecycle-owned singleton-instance lock before storage open, but that later lock is not invented or claimed by this Foundation task.
+Run the shown encrypted CLI probe again on the active approved Darwin arm64 Core Mac before accepting the stop/go checkpoint. Record its exact sanitized JSON, macOS arm64 architecture, Python, `sqlcipher3==0.6.2`, bundled SQLite and cipher versions, numeric flags, `uv.lock` SHA-256, date, and PASS decision in `docs/operations/sqlcipher-compatibility.md`; record the Ubuntu, hosted arm64 macOS, and hosted Intel macOS CI results beside it. Also document that WAL/SHM are SQLCipher-managed same-directory sidecars, maintenance checkpoints WAL before backup, startup refuses missing/wrong keys or failed cipher integrity, and the local open lock prevents only cooperative races inside one process. Production startup must acquire the application's later lifecycle-owned singleton-instance lock before storage open, but that later lock is not invented or claimed by this Foundation task. Moving household deployment back to Intel repeats this real-host probe.
 
 The compatibility document must state the residual exactly: the DB-API receives a pathname, not a qualified main-file FD. The retained parent-directory FD, immutable no-follow metadata identities, registry, and bracket checks detect stale entries and one-way/non-ABA substitutions, while SQLite `NOFOLLOW` rejects symlink components. They do not defeat a hostile same-EUID/root process that can perform an undetectable swap-and-restore between checks or access process memory/key material. The document must also state that SQLCipher alone owns lock-bearing main/WAL/SHM descriptors and that adapter close ordering prevents external descriptor closes from canceling a healthy peer's POSIX locks. Do not claim descriptor-relative SQLite open or perfect inode binding. If protection from that attacker becomes mandatory, stop and require a native registered VFS/driver with an actual file-handle API.
 
-- [ ] **Step 5: Commit exact Task 11 paths after the target-Mac gate passes**
+- [ ] **Step 5: Commit exact Task 11 paths after the active-host gate passes**
 
 ```bash
 git status --short
@@ -31013,7 +31222,7 @@ git commit -m "feat(storage): add tamper-evident foundation audit"
 
 ## Foundation Completion Checkpoint
 
-Run from a clean checkout on the target Intel Mac:
+Run from a clean checkout on the active approved Core Mac:
 
 ```bash
 make bootstrap
@@ -31029,4 +31238,4 @@ Expected: every test and static gate passes; the five shared assurance commands 
 
 ## Execution Handoff
 
-Plan complete at master work package 06. Continue only after the target-Mac SQLCipher checkpoint and the encrypted schema/audit verification are accepted. The next master task is Task 07; no conversation, provider, Reachy transport, profile, biometric, auth, memory, API, or UI feature beyond the bootstrap shell belongs in this subplan.
+Plan complete at master work package 06. Continue only after the active-host SQLCipher checkpoint and the encrypted schema/audit verification are accepted. The next master task is Task 07; no conversation, provider, Reachy transport, profile, biometric, auth, memory, API, or UI feature beyond the bootstrap shell belongs in this subplan.

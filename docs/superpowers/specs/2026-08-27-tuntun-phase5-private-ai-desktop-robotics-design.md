@@ -8,9 +8,9 @@
 
 ## 1. Outcome
 
-Phase 5 moves suitable AI workloads toward private local execution without moving trust into a model server. The 2020 Intel MacBook Pro with 16 GB RAM remains Tuntun’s orchestration and control host. It continues to own canonical identity, family policy, authorization, the seven memory kinds, audit, cloud budget, and final routing decisions. A future inference appliance is a replaceable, model-independent compute worker behind the existing Tuntun gateway; it never becomes the household authority.
+Phase 5 moves suitable AI workloads toward private local execution without moving trust into a model server. The independently owner-approved opaque inventory target recorded in `docs/architecture/decisions/0001-phase1-host-baseline.md`, currently verified as Darwin arm64, is the current Tuntun orchestration and control host. Architecture/model/product/year strings are descriptive and never host authority. It continues to own canonical identity, family policy, authorization, the seven memory kinds, audit, cloud budget, and final routing decisions. A future inference appliance is a replaceable, model-independent compute worker behind the existing Tuntun gateway; it never becomes the household authority.
 
-Migration is staged. The existing cloud route remains the measured quality baseline. The Intel Mac may run bounded small offline classifiers, embedding models, and deterministic support functions when resource tests pass, but it is not represented as capable of high-quality frontier-scale local conversation. No inference appliance is purchased merely because a large model can load. Purchase and route activation require task-specific quality, bilingual behavior, safety, latency, power, maintenance, privacy, and total-cost evidence.
+Migration is staged. The existing cloud route remains the measured quality baseline. The active control host may run bounded small offline classifiers, embedding models, and deterministic support functions when resource tests pass, but it is not represented as capable of high-quality frontier-scale local conversation. Intel macOS remains a mandatory distribution target, not active household performance evidence. No inference appliance is purchased merely because a large model can load. Purchase and route activation require task-specific quality, bilingual behavior, safety, latency, power, maintenance, privacy, and total-cost evidence.
 
 Phase 5 also introduces a local document and knowledge corpus that is deliberately separate from conversational memory. The corpus combines relational provenance and access metadata, encrypted object storage, full-text retrieval, and optional rebuildable vector indexes. It can answer cited questions from owner-approved material without turning every document into a personal memory or silently uploading the corpus.
 
@@ -23,8 +23,8 @@ Raspbot V2 is a later supervised endpoint, not an autonomous household agent. It
 | Area | Decision |
 |---|---|
 | Migration strategy | **Staged local migration**; cloud remains the initial quality baseline and safe fallback only where consent, privacy, and budget permit |
-| Control host | Existing 2020 Intel MacBook Pro, 16 GB RAM; owns orchestration and every canonical trust decision |
-| Intel Mac inference | Bounded small offline models only after resource gates; never assumed sufficient for frontier-quality local conversation or sustained local vision |
+| Control host | Independently owner-approved opaque inventory target, currently verified as Darwin arm64; owns orchestration and every canonical trust decision |
+| Control-host inference | Bounded small offline models only after active-host resource gates; never assumed sufficient for frontier-quality local conversation or sustained local vision |
 | Inference appliance | Replaceable worker behind `InferenceGatewayPort`; no canonical memory, family policy, action authority, or direct endpoint access |
 | Model serving | Adapter-compatible `llama.cpp`, vLLM, MLX-compatible, or future runtime; runtime compatibility never defines Tuntun’s public contract |
 | Cloud/VPS | Outbound-only through the same privacy, consent, redaction, budget, audit, and routing gateway; an owner-operated VPS is still cloud processing |
@@ -32,7 +32,7 @@ Raspbot V2 is a later supervised endpoint, not an autonomous household agent. It
 | Knowledge corpus | Separate SQLCipher relational catalog plus application-encrypted object store under one configured canonical storage binding; FTS baseline and vector retrieval only where measured useful |
 | Camera vision | Phase 3 may issue bounded, selected-frame local leases only; no continuous cloud video and no Reolink-derived identity |
 | Desktop posture | Risk-tiered and low-friction; D3 executes only pinned non-code inspection utilities, while every repository code/test/lint/build/format operation is D4 and runs only in a proved sandbox |
-| Desktop scope | Initial production pilot is loopback/Unix-domain transport on the one 2020 Intel Mac that is both office-use machine and Tuntun Core; no second office laptop or ambient cross-network helper exists |
+| Desktop scope | Initial production pilot is loopback/Unix-domain transport on the active approved Core Mac; no second office laptop or ambient cross-network helper exists |
 | Desktop model egress | Selected files, excerpts, repository material, and command/workflow output are local-only by default; one exact owner-approved cloud exception is single-use, expiring, revocable, and bound to the current `DesktopGrantV1` plus content/output, provider, model, purpose, sensitivity, disclosure, and provider-policy commitments |
 | Owner HTTP entry point | Phase 3 `tuntun-owner-ingress` remains the sole owner-facing HTTP process/LAN listener; Phase 5 adds no listener and reaches Core only through the existing authenticated Core Unix-domain socket |
 | Route composition | Phase 5 route modules are pure injected factories; each installed owner-flow checkpoint atomically updates Core/owner-ingress composition, signed route manifest, and refreshed owner-ingress row before physical/elapsed evidence, with a final repeat at Phase 5 release |
@@ -70,7 +70,7 @@ The following Phase 1 and Phase 2 controls remain unchanged:
 
 - A model-independent local/remote inference request and response contract behind the Phase 1 provider gateway.
 - Governed model artefact registry, evaluation evidence, task routing, shadow evaluation, rollback, cost, and power accounting.
-- Bounded small-model experiments on the Intel Mac and evidence-gated appliance candidates.
+- Bounded small-model experiments on the active control host and evidence-gated appliance candidates.
 - A separate encrypted document/knowledge corpus with provenance, versioning, access policy, parsing isolation, FTS, optional embeddings, citation, export, deletion, backup, and restore.
 - Local selected-frame vision requests consumed from the Phase 3 frame-lease boundary and separate advisory observations returned to Phase 3 policy without creating a security event or presence transition.
 - An owner desktop companion with expiring read grants, exact command proposals, patch proposals, safe-command confirmation, sandboxed workflow manifests, resource bounds, audit, and cancellation.
@@ -82,14 +82,14 @@ The following Phase 1 and Phase 2 controls remain unchanged:
 
 - Replacing the Mac as canonical identity, policy, memory, audit, budget, recovery, or action-signing authority.
 - Treating a local model as trusted, self-authorizing, inherently private, or quality-equivalent to the approved cloud baseline without evidence.
-- Hosting a high-quality frontier-scale LLM on the 16 GB Intel Mac as a Phase 5 requirement.
+- Hosting a high-quality frontier-scale LLM on the active Phase 1 control host as a Phase 5 requirement.
 - Continuous camera decoding by a VLM, raw camera media in prompts or memory, cloud camera-frame analysis, face recognition from Reolink, or correlation of Reolink tracks with Reachy identities.
 - Automatic document ingestion from entire drives, mailboxes, browser histories, cloud accounts, network shares, or Home Assistant.
 - A non-owner adult file picker or desktop-content grant in the Phase 5 household profile; adding one requires a fully subject-scoped authority and UI design rather than reuse of the owner route.
 - Allowing retrieved documents, source-code instructions, command output, or model text to execute a tool, change policy, write memory, or move a robot directly.
 - Ambient screen capture, keylogging, clipboard history, Accessibility control, password-manager access, browser cookies, SSH-agent access, arbitrary shell strings, arbitrary package installation, or unrestricted full-disk access.
 - Sending desktop-selected content or command/workflow output to a cloud/VPS model because a workflow has network access; model egress and workflow network authority are separate grants.
-- Reconnecting the Core Mac's direct BE800 link or representing a second office laptop/helper as part of the family-ready baseline. The baseline single-homes the one Mac on inner ASUS/AiMesh; an optional dual-home mode is separately qualified and adds no ambient cross-network helper or authority.
+- Reconnecting the Core Mac's direct BE800 link or representing a second office laptop/helper as part of the family-ready baseline. The baseline single-homes the active approved Mac on inner ASUS/AiMesh; an optional dual-home mode is separately qualified and adds no ambient cross-network helper or authority.
 - Autonomous Raspbot mapping, exploration, room-to-room navigation, person following, child supervision, fall detection, deliveries, object carrying, stair operation, operation near water/heat, or internet telepresence.
 - Representing the Raspbot’s vendor face recognition, large-model package, or prebuilt image as Tuntun identity or authorization.
 - Using the LILYGO as a far-field room voice node, primary e-stop, unattended credential vault, or reason to expand scope.
@@ -135,7 +135,7 @@ flowchart LR
     HA[Home Assistant Green\ndevice authority]
   end
 
-  subgraph MAC[2020 Intel MacBook Pro · trusted control plane]
+  subgraph MAC[Approved Darwin arm64 Mac · trusted control plane]
     INGRESS[Phase 3 owner ingress\nsole HTTP listener]
     COREAPI[Canonical Core app\nauthenticated UDS]
     TURN[Conversation workflow]
@@ -399,9 +399,11 @@ Hard policy beats availability. A `local_only` document or selected camera frame
 
 Migration is per task cell, not a global “local AI on” switch. A stronger new model version re-enters `M2`; it does not inherit approval from a name or model family.
 
-### 7.6 Intel Mac resource envelope
+### 7.6 Control-host resource envelope
 
-The Intel Mac can enable an `M1` model only when all of these hold under simultaneous Tuntun service load:
+The numeric limits below are provisional conservative planning ceilings, not copied performance evidence and not an accepted envelope for the current host. Before any `M1` promotion, a clean committed benchmark on the independently approved opaque active-Core target must derive and sign a safe operating envelope from simultaneous household-service load, baseline variance, memory pressure, thermal behavior, and stop/privacy/voice reserve. The effective gate uses the stricter of that measured envelope and every provisional ceiling below; measurements may tighten these numbers but cannot silently widen them. Until that receipt binds the approved target, OS, runtime, model, and exact candidate, no `M1` capability is promoted.
+
+The active control host can enable an `M1` model only when all of these effective gates hold:
 
 - model process resident memory is at most 4 GiB and system memory pressure remains green with at least 6 GiB available before launch;
 - the artefact is at most 3.5 GiB and its configured context does not push the process above the memory cap;
@@ -760,7 +762,7 @@ Command output may contain prompt injection, terminal escapes, secrets, or hosti
 
 ### 9.6 Initial device and network boundary
 
-The initial desktop helper runs on the same one inventoried 2020 Intel Mac as Tuntun Core and communicates over an owner-only Unix-domain socket. That Mac is also the office-use machine; there is no second office laptop/helper. It does not bind a LAN port. The family-ready baseline single-homes the Mac on inner ASUS/AiMesh and disconnects its direct BE800 link. A separately qualified optional dual-home mode must prove no forwarding, bridging, Internet Sharing, proxy, outer ingress, or route/DNS/firewall drift, and it still creates no remote helper authority. A distinct future remote client must use the Phase 6 paired VPN/application-session design and re-run identity, data-flow, grant, remote-session, and recovery gates.
+The initial desktop helper runs on the same active approved Core Mac as Tuntun Core and communicates over an owner-only Unix-domain socket. There is no second office laptop/helper. It does not bind a LAN port. The family-ready baseline single-homes the Mac on inner ASUS/AiMesh and disconnects any direct BE800 link. A separately qualified optional dual-home mode must prove no forwarding, bridging, Internet Sharing, proxy, outer ingress, or route/DNS/firewall drift, and it still creates no remote helper authority. A distinct future remote client must use the Phase 6 paired VPN/application-session design and re-run identity, data-flow, grant, remote-session, and recovery gates.
 
 ## 10. Phase 3 selected-frame local vision
 
@@ -1082,9 +1084,9 @@ No failure may cause an automatic retry through a more permissive model, provide
 - A fourteen-day live-shadow/low-risk soak precedes a route promotion; rollback to the prior route is one owner action and loses no canonical state.
 - Packet capture proves the appliance receives only Mac-authorized inference traffic and initiates no internet, Home Assistant, Reolink, Reachy, desktop-helper, robot, database, or owner-console connection.
 
-### 15.2 Intel Mac resource gate
+### 15.2 Control-host resource gate
 
-- Baseline and candidate runs measure CPU, resident memory, swap, thermal pressure, fan/noise, power, disk I/O, model-load time, p50/p95 latency, cancellation, and cold/restart behavior on the actual 2020 Intel Mac.
+- Baseline and candidate runs measure CPU, resident memory, swap, thermal pressure, fan/noise, power, disk I/O, model-load time, p50/p95 latency, cancellation, and cold/restart behavior on the active approved Darwin arm64 Core Mac. Moving the household target to Intel requires repeating this gate on that physical Intel host.
 - Under one worst-case 90-second voice turn plus the candidate workload, no out-of-memory termination occurs, swap remains below the owner-approved threshold, and Phase 1 first-audio/stop/privacy deadlines remain inside their existing gates.
 - Background embedding/index jobs pause behind an active voice turn and keep at least 4 GiB of physical-memory headroom or the greater measured safe reserve.
 - A seven-day mixed workload has no thermal shutdown, uncontrolled queue growth, recording gap attributable to Phase 5, Green-backup failure, or more than 10% regression in the accepted voice p95 without explicit owner review.
@@ -1159,13 +1161,13 @@ No failure may cause an automatic retry through a more permissive model, provide
 ### P5-0 — Contracts, inventory, simulators, and threat baseline
 
 - Freeze inference, model artefact, knowledge, desktop grant/job, selected-frame request/observation, robot session/lease/state, and optional LILYGO contracts.
-- Inventory the actual Intel Mac, Raspbot, LILYGO, storage, network, and candidate sandbox/runtime capabilities.
+- Inventory the active approved Core Mac, Raspbot, LILYGO, storage, network, and candidate sandbox/runtime capabilities; record Intel only as supported-distribution and future-transition evidence unless physical requalification passes.
 - Build synthetic inference, corpus, desktop-helper, camera-frame, robot-edge, sensor, and safety simulators.
 - Register every production feature as absent.
 
 **Gate:** contract/property/negative-reachability tests and threat-model amendments pass without a model, document, desktop permission, camera, or moving robot.
 
-### P5-1 — Intel Mac local-support baseline
+### P5-1 — Control-host local-support baseline
 
 - Benchmark local deterministic classifiers, one embedding model, and one small offline-support model against the exact cloud/offline baselines.
 - Establish resource/power/thermal envelopes and pause/preemption behavior.
@@ -1250,7 +1252,8 @@ These owner-console modules remain pure injected factories but are promoted incr
 
 | Item | Phase 5 use | Incremental purchase |
 |---|---|---:|
-| 2020 Intel MacBook Pro, 16 GB | Canonical control plane, bounded local support models, corpus, desktop helper | S$0 |
+| Owner-approved Darwin arm64 Core Mac | Canonical control plane, bounded local support models, corpus, desktop helper | S$0 |
+| 2020 Intel MacBook Pro, 16 GB | Supported-distribution and future-transition hardware only; not active household evidence until fresh real-host qualification passes | S$0 |
 | Existing encrypted external SSD | Either an explicitly separate `TUNTUN_KNOWLEDGE` canonical volume/quota or a recovery destination after identity/health/failure-domain gates; never the `TUNTUN_VIDEO` root and never both canonical and its own recovery copy | S$0 |
 | Yahboom Raspbot V2 | Bench/supervised manual and telepresence endpoint after physical-safety gate | S$0 device cost; safety parts may be required |
 | LILYGO T-Dongle-S3 | Optional two-week status/secondary-stop/provisioning experiment | S$0 device cost |
@@ -1296,7 +1299,7 @@ Phase 5 is estimated at **130–210 engineering person-days**, exactly **26–42
 | Work package | Estimated person-days |
 |---|---:|
 | Contracts, registries, simulators, routing/evaluation foundation | 14–22 |
-| Intel Mac benchmark and optional appliance isolation | 12–22 |
+| Control-host benchmark and optional appliance isolation | 12–22 |
 | Knowledge catalog/object/FTS/citation/deletion/backup | 22–32 |
 | Optional embeddings/vector evaluation | 6–12 |
 | Desktop D0–D2 grants/read/proposal | 14–20 |
@@ -1309,8 +1312,8 @@ The Phase 5 planning allocation for steady-state owner work is **two to four hou
 
 ## 20. Operations and residual assumptions
 
-- The Mac stays the trusted always-home control plane. Local model and corpus work yields to voice, recording, backups, privacy, and safety paths.
-- The exact 2020 Intel CPU/GPU, macOS version, free disk, thermal condition, battery/power policy, and virtualization/sandbox options require P5-0 capture.
+- The approved Mac stays the trusted always-home control plane. Local model and corpus work yields to voice, recording, backups, privacy, and safety paths.
+- The exact active-host CPU/GPU, macOS version, free disk, thermal condition, battery/power policy, and virtualization/sandbox options require P5-0 capture; Intel household deployment requires a separate transition capture.
 - The internal encrypted root is the default canonical knowledge binding. An external root requires the separately named `TUNTUN_KNOWLEDGE` encrypted volume/quota and can never reuse `TUNTUN_VIDEO` or `HA_BACKUPS`; a separately bound recovery copy on another encrypted failure domain is mandatory before corpus production use.
 - The exact Raspbot kit revision, Raspberry Pi memory, motor/sensor board, battery/charger, camera/indicator, encoders, safety inputs, vendor image, and physical e-stop feasibility remain commissioning facts, not assumed capabilities.
 - Mecanum wheels can slip and odometry may be unreliable; physical barriers and local obstacle/cliff safety remain necessary even if a map looks correct.

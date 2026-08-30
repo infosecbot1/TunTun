@@ -14,7 +14,7 @@
 - `P1R0` and `P1R1` are Phase 1-only standalone-preview gates. `P1R0` follows the family-ready FB0 private beta; `P1R1` may publish an explicitly labelled Phase 1 preview. Neither gate satisfies, aliases, or makes claims for the whole-program Phase 6 `C0/C1` gates.
 - Candidate version is exactly `0.1.0-beta.1`; release tag is exactly `v0.1.0-beta.1`.
 - Effort is preserved: WP31 `6` person-days, WP32 `7`, WP33 `8` plus two elapsed eight-hour runs and a four-calendar-day staged trial, WP34 `5`; total `26` engineering days.
-- Production requires native Intel `x86_64` macOS, FileVault on, macOS Keychain available, owner-only `0700` roots, installed launchd core limit zero, and no content-bearing crash diagnostic.
+- Production household validation requires the independently owner-approved opaque Core inventory target from ADR 0001, currently verified as native Darwin `arm64`, plus FileVault on, macOS Keychain available, owner-only `0700` roots, installed launchd core limit zero, and no content-bearing crash diagnostic. Architecture/model/product/year observations cannot authorize a target. Intel macOS remains a mandatory supported-distribution target; moving household deployment back to Intel requires fresh trusted owner approval and real-host probes before any live-household claim.
 - Listener policy is exact: `127.0.0.1:8787`, resolved RFC1918 interface address on `7443`, and optional passkey console on that same address at `8443`. Wildcard, public, unresolved-interface, and other Tuntun listeners fail.
 - Every upgrade invokes Privacy Shield, disables new provider attempts, drains in-flight calls to zero, creates/verifies an encrypted backup, verifies DB/audit/model/protocol compatibility, then switches runtime.
 - Failed install/upgrade restores the prior symlink and compatible encrypted DB before restart. Uninstall removes runtime/service only; data, models, backups, and Keychain items remain.
@@ -23,7 +23,7 @@
 - Acceptance includes 240+ bilingual/persona cases, 1,000 cross-profile cases, 500 mixed turns, two distinct eight-hour runs, then owner 48 hours followed by second-adult 48 hours. Simulation never replaces elapsed gates.
 - P1R0 is an explicit owner approve/reject artifact bound to version, commit, acceptance hash, evidence hashes, and a fresh action-bound owner passkey receipt.
 - Tasks 5–10 commit and test evidence tooling only with synthetic fixtures. After Task 10, one clean frozen commit is qualified by two byte-identical builds; a clean target is locally commissioned and evidence-pending-installed from those exact bytes. Official security, acceptance, elapsed soak/trial, P1R0, candidate assembly without rebuild, accepted installation, and tag outputs are then generated once, in that order; no tracked change may occur during the ceremony.
-- `Clean target` does not assume a second Mac. For this household it is the same single 2020 Intel Mac, entered through an owner-approved maintenance window only after a verified encrypted backup and recovery-key check. The clean-target probe means no installed Tuntun runtime, core leaf/private key, launchd registration, listener, or unfinished lifecycle journal remains; it does not require erasing unrelated office data. Qualified bytes are retained on owner-controlled immutable storage while the managed Tuntun namespace is cleaned, and rollback restores the previously verified backup/runtime if commissioning or evidence-pending installation fails. A VM, hosted runner, or synthetic receipt cannot replace this real-host lifecycle evidence.
+- `Clean target` does not assume a second Mac. For this household it is the same independently owner-approved opaque Core inventory target, whose current Darwin `arm64` observation is a compatibility gate rather than authority, entered through an owner-approved maintenance window only after a verified encrypted backup and recovery-key check. The clean-target probe means no installed Tuntun runtime, core leaf/private key, launchd registration, listener, or unfinished lifecycle journal remains; it does not require erasing unrelated office data. Qualified bytes are retained on owner-controlled immutable storage while the managed Tuntun namespace is cleaned, and rollback restores the previously verified backup/runtime if commissioning or evidence-pending installation fails. A VM, hosted runner, synthetic receipt, or diagnostic Keychain receipt cannot replace the independent trusted owner-approval binding and real-host lifecycle evidence. Intel distribution receipts remain separate and do not promote Intel to household target without new real-host qualification.
 - Apache-2.0 is added only after owner license approval. Incompatible/non-commercial weights stay outside artifacts.
 - `.github/workflows/release.yml` has `contents: read`, never tags or publishes, and only builds/attests/uploads a workflow artifact. Final publication is manual.
 - Every task uses red → green → affected/static checks → exact staging → one reviewable commit.
@@ -46,31 +46,90 @@
 **Estimated effort:** 2 person-days
 
 **Files:**
+- Create: `packages/contracts/src/tuntun_contracts/host_approval.py`
+- Create: `packages/contracts/src/tuntun_contracts/bootstrap_authorization.py`
+- Create: `packages/contracts/src/tuntun_contracts/preflight_runtime.py`
+- Create: `docs/evidence/trusted-host-approval.schema.json`
+- Create: `docs/evidence/bootstrap-authorization.schema.json`
+- Create: `docs/evidence/preflight-runtime-manifest.schema.json`
+- Create: `security/phase1-preflight-source-policy-v1.json`
+- Create: `security/schemas/phase1-preflight-source-policy.schema.json`
+- Create: `scripts/build_preflight_runtime.py`
+- Create: `native/preflight-bootstrap/main.c`
+- Create: `native/preflight-spawn/preflight_spawn.c`
 - Create: `apps/core/src/tuntun_core/deploy/__init__.py`
+- Create: `apps/core/src/tuntun_core/deploy/bootstrap_preflight.py`
+- Create: `apps/core/src/tuntun_core/deploy/host_approval.py`
+- Create: `apps/core/src/tuntun_core/deploy/native_bootstrap.py`
+- Create: `apps/core/src/tuntun_core/deploy/native_spawn.py`
+- Create: `apps/core/src/tuntun_core/deploy/runtime_materialization.py`
+- Create: `apps/core/src/tuntun_core/deploy/trusted_commands.py`
 - Create: `apps/core/src/tuntun_core/deploy/preflight.py`
-- Create: `deploy/macos/preflight.sh`
 - Create: `apps/core/src/tuntun_core/cli/commands/doctor.py`
+- Modify: `apps/core/pyproject.toml`
 - Modify: `apps/core/src/tuntun_core/cli/main.py`
+- Test: `tests/contract/test_host_approval_contract.py`
+- Test: `tests/contract/test_bootstrap_authorization_contract.py`
+- Test: `tests/contract/test_preflight_runtime_contract.py`
+- Test: `tests/integration/deploy/test_clean_bootstrap_preflight.py`
+- Test: `tests/integration/deploy/test_descriptor_stable_spawn.py`
+- Test: `tests/integration/deploy/test_preflight_runtime_build.py`
+- Test: `tests/unit/deploy/test_host_approval.py`
+- Test: `tests/unit/deploy/test_trusted_commands.py`
 - Test: `tests/unit/deploy/test_preflight.py`
 - Test: `tests/security/test_listener_allowlist.py`
 
 **Interfaces:**
-- Consumes: installed LaunchAgent, application roots, `route`, `ipconfig`, `fdesetup`, `security`, `stat`, `plutil`, `lsof`, crash probe, Privacy Shield, and provider drain commands.
-- Produces: `CommandRunner.run(argv) -> CommandResult`; `resolve_private_interface(runner) -> ResolvedInterface`; `verify_listeners(rows, interface, lan_console) -> tuple[str,...]`; `run_preflight(mode, home, runner, lan_console) -> PreflightReport`; JSON exit `0` or `78`. `install` is host-only and never assumes application roots, Keychain items, a plist, process, database, CA, backup recipient, or recovery record already exists. `verify-installed` checks those initialized assets and the live process. `upgrade` adds Privacy Shield/provider drain to the installed checks.
+- Clean bootstrap consumes only the candidate's signed, closed bootstrap manifest, a prior owner-present `SignedBootstrapAuthorization`, the separately ceremony-pinned owner public key, a fresh proof from the authorization-bound target-held P-256 key, secure time, and the fixed system executables. The authorization purpose is exactly `phase1.household-core.bootstrap.v1`, is valid for at most 15 minutes, is one-use, and binds the opaque target ID, target public-key digest, candidate-manifest digest, source-policy digest, selected-platform runtime-manifest and runtime-tar digests, owner-approval commitment, positive generation, and random nonce. The prior ceremony exports the authorization, public key, and its owner-passkey/WebAuthn authentication receipt to an owner-controlled read-only bootstrap kit; the verifier validates that receipt against the already enrolled external owner credential before trusting the supplied key. The bootstrap path requires no Tuntun managed root, Tuntun Keychain item, installed manifest, installed CLI, LaunchAgent, database, CA, backup record, or `tuntunctl`.
+- Installed `verify-installed`, `upgrade`, and `repair` consume only the closed `TrustedHostAuthorityRecord`, the commissioned Keychain owner-authority pin at service/account `tuntun.trust.owner-authority/current-v1`, a fresh target-key proof, and the installed signed release/runtime manifests. They reject bootstrap authorizations. After clean host checks pass, lifecycle initialization creates the managed roots and target Keychain key, then atomically publishes and reopens the installed authority record and Keychain pin before any installed preflight or service start.
+- Produces: `SignedBootstrapAuthorization.signing_bytes() -> bytes`; `BootstrapAuthorizationVerifier.verify_candidate_target(...) -> VerifiedBootstrapApproval`; `production_clean_bootstrap_preflight(...) -> VerifiedBootstrapPreflight`; `SignedTrustedHostAuthorityRecord.signing_bytes() -> bytes`; `SignedTrustedHostApprovalVerifier.verify_current_target(expected_target_id=...) -> VerifiedHostApproval`; `TrustedCommandRegistry.open(...) -> TrustedCommandRegistry`; `TrustedCommandRegistry.prepare(argv) -> PreparedCommand`; `CommandRunner.run(argv) -> CommandResult`; `run_clean_bootstrap_preflight(...) -> PreflightReport`; `run_installed_preflight(mode, ...) -> PreflightReport`; JSON exit `0` or `78`. `VerifiedBootstrapPreflight` is one closed exact-type result containing both the successful `PreflightReport` and the full `VerifiedBootstrapApproval`; it is passed unchanged into `Installer.install_verified` and is never reduced to a nonce or tuple.
+- Authority is executable rather than structural. The candidate's signed release manifest names the exact nofollow descriptor-verified native bootstrap launcher, deterministic platform runtime tar, and closed runtime manifest. Before any Python import, the native launcher verifies the candidate signature and manifest, safely materializes the exact tar inventory into a fresh root-owned non-writable ephemeral runtime tree outside every Tuntun managed root, reopens every entry nofollow, and retains the tree/entry descriptors. Production clean install then constructs `BootstrapAuthorizationVerifier` directly from descriptor-held artifacts inside that tree; production installed preflight constructs `SignedTrustedHostApprovalVerifier` directly from the exact owner-only installed authority path, Keychain pin, `MacOSTargetKeySampler`, secure clock, and CSPRNG. No `Protocol`, arbitrary string, architecture/model/product/year observation, diagnostic receipt, caller-created approval object, environment variable, or CLI override can satisfy either production path.
+- Both authority records bind `source_policy_sha256` and a platform-specific signed `TrustedExecutionClosure`: exact system-binary content/execution identities, the materialized Python identity/digest, native spawn bridge digest, deterministic runtime-tar digest, and closed runtime-manifest digest. The source policy contains exactly three command inventories: Darwin arm64 and Darwin x86_64 each bind the nine macOS preflight binaries, while Linux x86_64 binds only `/usr/bin/uname`, `/usr/bin/id`, and `/usr/bin/stat` for the distribution-CI registry/native-runtime exercise. A signed `platform_id` selects exactly one inventory. A caller/platform or expected-command-key mismatch fails before any system-command descriptor is opened; the descriptor-held closure loader then rejects missing, extra, cross-platform, nonexistent, or wrong-content policy paths before spawn or import. Linux never opens a Darwin path and the Linux inventory cannot authorize household commissioning or macOS host checks. The runtime inventory contains the complete Tuntun and third-party closure, including the selected platform's CPython standard library, `pydantic_core` extension, `cryptography` native extension and every linked non-system library; native/dynamic modules are required to match their platform tag and manifest entry rather than being rejected. The registry exact-compares the actual policy digest and every closure field and retains the root and all executable/runtime descriptors.
+- `TrustedCommandRegistry.prepare` returns an opaque `PreparedCommand`, never a pathname. On Linux the C bridge executes the retained executable descriptor with `execveat(..., AT_EMPTY_PATH)` in a new process group. Darwin has no `fexecve`; there the bridge uses `posix_spawn` with `POSIX_SPAWN_START_SUSPENDED`, compares the suspended child's `csops` CodeDirectory hash and executable-vnode identity with the retained manifest-bound executable, kills on mismatch before any child instruction can run, and only then sends `SIGCONT`. The same bridge governs the materialized Python and fixed system binaries. A resolve-to-exec pathname replacement therefore either runs the retained Linux descriptor or is rejected while suspended on Darwin; replacement bytes never execute.
+- `install` performs host-only checks and never assumes initialized state. `verify-installed` checks initialized assets and the live process. `upgrade` and `repair` add Privacy Shield/provider drain and cannot fall back to the bootstrap path.
 
 - [ ] **Step 1: Write the failing invocation and listener tests**
 
 ```python
 # tests/unit/deploy/test_preflight.py
 from pathlib import Path
-from tuntun_core.deploy.preflight import CommandResult, run_preflight
+
+import pytest
+from tuntun_contracts.host_approval import (
+    DarwinTrustedExecutionClosure,LinuxTrustedExecutionClosure,
+)
+from tuntun_core.deploy.bootstrap_preflight import VerifiedBootstrapApproval
+from tuntun_core.deploy.host_approval import VerifiedHostApproval
+from tuntun_core.deploy.preflight import (
+    CommandResult, required, run_clean_bootstrap_preflight, run_installed_preflight,
+)
+
+SYSTEM_DIGESTS={name:"c"*64 for name in (
+    "uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof",
+)}
+CLOSURE=DarwinTrustedExecutionClosure(
+    platform_id="darwin-arm64",
+    system_executable_sha256=SYSTEM_DIGESTS,python_sha256="c"*64,
+    runtime_manifest_sha256="d"*64,
+    preflight_runtime_tar_sha256="e"*64,native_spawn_bridge_sha256="f"*64,
+)
+APPROVAL=VerifiedHostApproval("target:opaque-01","a"*64,"b"*64,CLOSURE)
+BOOTSTRAP=VerifiedBootstrapApproval(
+    "target:opaque-01","a"*64,"b"*64,CLOSURE,"nonce:opaque-01",
+)
+LINUX_CLOSURE=LinuxTrustedExecutionClosure(
+    platform_id="linux-x86_64",
+    system_executable_sha256={name:"c"*64 for name in ("uname","id","stat")},
+    python_sha256="c"*64,runtime_manifest_sha256="d"*64,
+    preflight_runtime_tar_sha256="e"*64,native_spawn_bridge_sha256="f"*64,
+)
 
 class Runner:
     def __init__(self): self.calls=[]
     def run(self, argv):
         self.calls.append(argv)
         values={
-          ("uname","-m"):"x86_64\n", ("uv","run","python","-c","import platform; print(platform.machine())"):"x86_64\n",
+          ("uname","-m"):"arm64\n", ("tuntunctl","system","architecture","--json"):'{"machine":"arm64"}\n',
           ("id","-un"):"test\n", ("fdesetup","status"):"FileVault is On.\n",
           ("security","list-keychains","-d","user"):'    "/Users/test/Library/Keychains/login.keychain-db"\n',
           ("security","find-generic-password","-s","tuntun.database","-a","root-v1"):"ok\n",
@@ -88,16 +147,16 @@ class Runner:
         return CommandResult(0,values[argv],"")
 
 def test_upgrade_invokes_every_check():
-    runner=Runner(); report=run_preflight("upgrade",Path("/Users/test"),runner,False)
+    runner=Runner(); report=run_installed_preflight("upgrade",Path("/Users/test"),runner,False,APPROVAL)
     assert report.ok
-    assert {check.check_id for check in report.checks}=={"architecture","filevault","keychain_available","resolved_interface","database_key","owner_paths","launchd_core_limit","crash_diagnostics","listeners","privacy","provider_drain"}
+    assert {check.check_id for check in report.checks}=={"trusted_owner_target","architecture","filevault","keychain_available","resolved_interface","database_key","owner_paths","launchd_core_limit","crash_diagnostics","listeners","privacy","provider_drain"}
     assert ("tuntunctl","providers","drain","--timeout-seconds","30","--json") in runner.calls
 
 def test_clean_install_runs_host_checks_without_assuming_initialized_state():
-    runner=Runner(); report=run_preflight("install",Path("/Users/test"),runner,False)
+    runner=Runner(); report=run_clean_bootstrap_preflight(Path("/Users/test"),runner,BOOTSTRAP)
     assert report.ok
     assert {check.check_id for check in report.checks}=={
-        "architecture","filevault","keychain_available","resolved_interface","existing_runtime_absent","ports_available",
+        "trusted_owner_target","architecture","filevault","keychain_available","resolved_interface","existing_runtime_absent","ports_available",
     }
     forbidden={"find-generic-password","stat","plutil","crash-probe","service"}
     assert all(not forbidden.intersection(call) for call in runner.calls)
@@ -107,7 +166,7 @@ def test_clean_install_preflight_rejects_existing_or_broken_current_link(tmp_pat
     current=tmp_path/"Library/Application Support/Tuntun/runtime/current"
     current.parent.mkdir(parents=True)
     current.symlink_to(current.parent/"releases/0.1.0-alpha.1")
-    report=run_preflight("install",tmp_path,Runner(),False)
+    report=run_clean_bootstrap_preflight(tmp_path,Runner(),BOOTSTRAP)
     check=next(item for item in report.checks if item.check_id=="existing_runtime_absent")
     assert report.ok is False
     assert check.reason=="existing_runtime_detected_use_upgrade"
@@ -118,9 +177,463 @@ def test_lan_listener_allowance_requires_current_commissioning_receipt():
         CommandResult(0,'{"verified":false,"private_dns":false,"certificate_match":false,"all_admin_devices":false,"drift":true}\n',"")
         if argv==("tuntunctl","lan","verify-commissioning","--json") else Runner().run(argv)
     )
-    report=run_preflight("verify-installed",Path("/Users/test"),runner,True)
+    report=run_installed_preflight("verify-installed",Path("/Users/test"),runner,True,APPROVAL)
     assert not report.ok
     assert next(item for item in report.checks if item.check_id=="lan_commissioning").passed is False
+
+def test_architecture_match_cannot_replace_trusted_owner_target():
+    with pytest.raises(RuntimeError, match="trusted owner target unavailable"):
+        run_clean_bootstrap_preflight(Path("/Users/test"),Runner(),object())
+    with pytest.raises(RuntimeError, match="trusted owner target unavailable"):
+        run_installed_preflight("upgrade",Path("/Users/test"),Runner(),False,object())
+
+def test_linux_distribution_ci_closure_cannot_authorize_macos_host_preflight():
+    linux_bootstrap=VerifiedBootstrapApproval(
+        "target:opaque-01","a"*64,"b"*64,LINUX_CLOSURE,"nonce:opaque-01",
+    )
+    with pytest.raises(RuntimeError,match="^trusted owner target unavailable$"):
+        run_clean_bootstrap_preflight(Path("/Users/test"),Runner(),linux_bootstrap)
+
+def test_command_failure_does_not_disclose_arguments_or_output():
+    class Failing:
+        def run(self,argv): return CommandResult(1,"private-stdout","private-stderr")
+    with pytest.raises(RuntimeError,match="^preflight command failed$") as caught:
+        required(Failing(),("stat","-f","%Su:%Lp","/Users/private-path-sentinel"))
+    assert "private" not in str(caught.value) and "/Users" not in str(caught.value)
+```
+
+```python
+# tests/unit/deploy/test_host_approval.py
+import base64
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from tuntun_contracts.base import canonical_bytes
+from tuntun_contracts.host_approval import SignedTrustedHostAuthorityRecord, TrustedHostAuthorityRecord
+from tuntun_core.deploy.host_approval import SignedTrustedHostApprovalVerifier, TargetKeySample
+
+NOW=datetime(2026,8,30,12,0,tzinfo=UTC)
+OWNER_PRIVATE=Ed25519PrivateKey.generate()
+OWNER_PUBLIC=OWNER_PRIVATE.public_key()
+TARGET_DER=b"sampled-target-public-key-der"
+
+class Sampler:
+    def __init__(self, *, present=True, public_key_der=TARGET_DER, valid=True):
+        self.present=present; self.public_key_der=public_key_der; self.valid=valid
+    def sample(self, challenge):
+        if not self.present: raise RuntimeError("trusted target key unavailable")
+        return TargetKeySample(self.public_key_der,challenge,b"signature",self.valid)
+
+def signed_record(*, target_id="target:opaque-01", target_key_sha256=sha256(TARGET_DER).hexdigest(),
+                  generation=7, valid_from=NOW-timedelta(minutes=1),
+                  valid_until=NOW+timedelta(days=30)):
+    record=TrustedHostAuthorityRecord(
+        schema_version="1.0",purpose="phase1.household-core.preflight.v1",
+        authority_generation=generation,
+        target_id=target_id,approval_commitment_sha256="a"*64,
+        target_public_key_sha256=target_key_sha256,valid_from=valid_from,
+        valid_until=valid_until,source_policy_sha256="b"*64,
+        execution_closure={
+            "platform_id":"darwin-arm64",
+            "system_executable_sha256":{name:"c"*64 for name in (
+                "uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof",
+            )},
+            "python_sha256":"c"*64,"runtime_manifest_sha256":"d"*64,
+            "preflight_runtime_tar_sha256":"e"*64,
+            "native_spawn_bridge_sha256":"f"*64,
+        },
+    )
+    signature=OWNER_PRIVATE.sign(b"tuntun:trusted-host-authority:v1\0"+canonical_bytes(record))
+    return SignedTrustedHostAuthorityRecord(record=record,owner_key_id="owner:authority:v7",
+        signature_b64=base64.b64encode(signature).decode("ascii"))
+
+def verifier(envelope, sampler=None):
+    return SignedTrustedHostApprovalVerifier(
+        envelope=envelope,pinned_owner_public_key=OWNER_PUBLIC,
+        expected_owner_key_id="owner:authority:v7",expected_generation=7,
+        target_sampler=sampler or Sampler(),now=lambda:NOW,random_bytes=lambda size:b"r"*size,
+    )
+
+def test_signed_current_target_is_bound_to_sampled_target_key():
+    approval=verifier(signed_record()).verify_current_target(expected_target_id="target:opaque-01")
+    assert approval.target_id=="target:opaque-01"
+    assert approval.approval_commitment_sha256=="a"*64
+
+@pytest.mark.parametrize("case",("forged","stale","target_mismatch","wrong_key","no_target","purpose","generation"))
+def test_forged_stale_mismatched_wrong_key_or_missing_target_is_rejected(case):
+    envelope=signed_record()
+    sampler=Sampler()
+    if case=="forged": envelope=envelope.model_copy(update={"signature_b64":base64.b64encode(b"x"*64).decode("ascii")})
+    elif case=="stale": envelope=signed_record(valid_from=NOW-timedelta(days=31),valid_until=NOW)
+    elif case=="target_mismatch": envelope=signed_record(target_id="target:opaque-02")
+    elif case=="wrong_key": sampler=Sampler(public_key_der=b"different-target-key")
+    elif case=="no_target": sampler=Sampler(present=False)
+    elif case=="purpose":
+        record=envelope.record.model_copy(update={"purpose":"diagnostic.host-probe"})
+        signature=OWNER_PRIVATE.sign(b"tuntun:trusted-host-authority:v1\0"+canonical_bytes(record))
+        envelope=envelope.model_copy(update={"record":record,"signature_b64":base64.b64encode(signature).decode("ascii")})
+    else: envelope=signed_record(generation=6)
+    with pytest.raises(RuntimeError,match="trusted owner target unavailable"):
+        verifier(envelope,sampler).verify_current_target(expected_target_id="target:opaque-01")
+
+def test_diagnostic_probe_receipt_is_rejected_before_authority_verification(tmp_path):
+    path=tmp_path/"authority.json"
+    path.write_text('{"$schema":"https://tuntun.local/schemas/evidence/phase1-host-probe.schema.json"}'); path.chmod(0o600)
+    with pytest.raises(RuntimeError,match="trusted host authority schema rejected"):
+        SignedTrustedHostApprovalVerifier.load_envelope(path)
+```
+
+```python
+# tests/integration/deploy/test_clean_bootstrap_preflight.py
+import pytest
+from tuntun_core.deploy.bootstrap_preflight import (
+    VerifiedBootstrapPreflight,production_clean_bootstrap_preflight,
+)
+from tuntun_core.deploy.host_approval import production_installed_approval
+
+class ProtocolApprovalFake:
+    target_id="target:opaque-01"
+    approval_commitment_sha256="a"*64
+
+def test_clean_home_uses_descriptor_verified_candidate_and_external_owner_kit(
+    clean_home, signed_candidate, fresh_owner_bootstrap_kit,
+):
+    assert clean_home.managed_roots == ()
+    assert clean_home.tuntun_keychain_items == ()
+    assert clean_home.installed_manifest is None
+    assert clean_home.command_exists("tuntunctl") is False
+    with signed_candidate.real_native_bootstrap_context(
+        fresh_owner_bootstrap_kit,
+    ):
+        verified=production_clean_bootstrap_preflight(
+            candidate_dir=signed_candidate.path,
+            authorization_path=fresh_owner_bootstrap_kit.authorization_path,
+            owner_trust_path=fresh_owner_bootstrap_kit.external_owner_trust_path,
+            owner_presence_receipt_path=fresh_owner_bootstrap_kit.presence_receipt_path,
+            home=clean_home.path,
+        )
+    assert type(verified) is VerifiedBootstrapPreflight
+    assert verified.report.ok
+    assert verified.authority_kind=="one_use_bootstrap"
+    assert verified.approval.one_use_nonce==fresh_owner_bootstrap_kit.one_use_nonce
+
+@pytest.mark.parametrize("mutation",(
+    "forged","stale","future","replayed_nonce","wrong_generation","wrong_purpose",
+    "wrong_target","wrong_target_key","no_target","wrong_candidate","wrong_source_policy",
+    "wrong_bootstrap_runtime","untrusted_owner_credential","bad_owner_presence",
+    "authorization_swap","candidate_manifest_swap","candidate_runtime_swap",
+))
+def test_clean_bootstrap_rejects_every_unbound_or_changed_input_before_mutation(
+    clean_home, mutated_bootstrap_case, mutation,
+):
+    case=mutated_bootstrap_case(mutation)
+    with pytest.raises(RuntimeError,match="^trusted bootstrap unavailable$"):
+        with case.real_native_bootstrap_context():
+            production_clean_bootstrap_preflight(**case.production_kwargs)
+    assert clean_home.mutations == ()
+
+@pytest.mark.parametrize("fake",("target:opaque-01",object(),ProtocolApprovalFake()))
+def test_production_bootstrap_does_not_accept_strings_objects_or_protocol_fakes(
+    signed_candidate, clean_home, fake,
+):
+    with pytest.raises(TypeError):
+        production_clean_bootstrap_preflight(
+            candidate_dir=signed_candidate.path,verified_approval=fake,home=clean_home.path,
+        )
+    with pytest.raises(TypeError):
+        production_clean_bootstrap_preflight(
+            candidate_dir=signed_candidate.path,target_sampler=fake,home=clean_home.path,
+        )
+
+def test_restart_upgrade_and_repair_reject_bootstrap_authority(
+    initialized_home, fresh_owner_bootstrap_kit,
+):
+    for mode in ("verify-installed","upgrade","repair"):
+        with pytest.raises(RuntimeError,match="^trusted owner target unavailable$"):
+            production_installed_approval(
+                mode=mode,home=initialized_home.path,
+                authority_path=fresh_owner_bootstrap_kit.authorization_path,
+            )
+
+def test_upgrade_requires_reopened_installed_record_pin_and_current_target_key(
+    initialized_home,
+):
+    initialized_home.remove_owner_authority_pin()
+    with pytest.raises(RuntimeError,match="^trusted owner target unavailable$"):
+        production_installed_approval(mode="upgrade",home=initialized_home.path)
+```
+
+`tests/contract/test_bootstrap_authorization_contract.py` generates `bootstrap-authorization.schema.json` byte-for-byte and rejects extra/missing fields, validity intervals over 15 minutes, a nonpositive or mismatched generation, noncanonical timestamps/signature/nonce, the installed or diagnostic purpose, and malformed target/candidate/source/runtime digests. The fixture ceremony signs the domain-separated canonical record with the externally enrolled owner credential only after an owner-presence assertion and a fresh challenge to a purpose-separated external hardware target credential; its private key never enters the kit or a Mac Keychain. `BootstrapAuthorizationVerifier` opens the authorization, external-owner/target credential trust record, owner-presence receipt, signed candidate manifest, source-policy file, runtime tar, and runtime manifest through retained nofollow descriptors with owner/type/mode/link/count/byte/deadline bounds; the concrete production wiring opens the authorization-bound CTAP2 credential directly and validates its fresh proof, the external credential chain, exact candidate/policy/runtime hashes, one-use nonce ledger, and descriptor/path identity before and after verification. No schema validator returns authority: the native-launched production entry constructs `VerifiedBootstrapApproval` only inside this concrete verifier and wraps it with the successful report and native one-use seal as `VerifiedBootstrapPreflight`. Tests obtain a capability only from the real verifier under a signed synthetic ceremony/native-context harness; they do not construct or inject one through a fixture-only production seam.
+
+```python
+# tests/unit/deploy/test_trusted_commands.py
+import platform
+
+import pytest
+from tuntun_core.deploy import trusted_commands
+from tuntun_core.deploy.trusted_commands import (
+    CLOSED_COMMAND_ENV,CommandResult,CommandRunner,PreparedCommand,
+    PLATFORM_FIXED_EXECUTABLES,TrustedCommandRegistry,bounded_wait,
+)
+
+CI_PLATFORM_IDS={
+    ("Linux","x86_64"):"linux-x86_64",
+    ("Darwin","arm64"):"darwin-arm64",
+    ("Darwin","x86_64"):"darwin-x86_64",
+}
+EXPECTED_PLATFORM_COMMANDS={
+    "linux-x86_64":{
+        "uname":"/usr/bin/uname","id":"/usr/bin/id","stat":"/usr/bin/stat",
+    },
+    "darwin-arm64":{
+        "uname":"/usr/bin/uname","id":"/usr/bin/id","fdesetup":"/usr/bin/fdesetup",
+        "security":"/usr/bin/security","route":"/sbin/route","ipconfig":"/usr/sbin/ipconfig",
+        "stat":"/usr/bin/stat","plutil":"/usr/bin/plutil","lsof":"/usr/sbin/lsof",
+    },
+    "darwin-x86_64":{
+        "uname":"/usr/bin/uname","id":"/usr/bin/id","fdesetup":"/usr/bin/fdesetup",
+        "security":"/usr/bin/security","route":"/sbin/route","ipconfig":"/usr/sbin/ipconfig",
+        "stat":"/usr/bin/stat","plutil":"/usr/bin/plutil","lsof":"/usr/sbin/lsof",
+    },
+}
+
+def registry_fixture(materialized_runtime):
+    return TrustedCommandRegistry.open(
+        materialized_runtime.expected_closure,
+        materialized_runtime.root_path,
+        materialized_runtime.manifest_path,
+        expected_source_policy_sha256=materialized_runtime.source_policy_sha256,
+    )
+
+def test_every_fixed_ci_row_opens_exact_platform_registry_and_native_runtime(
+    materialized_runtime,
+):
+    platform_id=CI_PLATFORM_IDS[(platform.system(),platform.machine())]
+    assert materialized_runtime.platform_id==platform_id
+    assert set(PLATFORM_FIXED_EXECUTABLES)==set(EXPECTED_PLATFORM_COMMANDS)
+    assert {
+        name:str(path) for name,path in PLATFORM_FIXED_EXECUTABLES[platform_id].items()
+    }==EXPECTED_PLATFORM_COMMANDS[platform_id]
+    assert all(path.is_absolute() and path.is_file()
+               for path in PLATFORM_FIXED_EXECUTABLES[platform_id].values())
+    registry=registry_fixture(materialized_runtime)
+    try:
+        assert registry.command_names==tuple(sorted(EXPECTED_PLATFORM_COMMANDS[platform_id]))
+        assert CommandRunner(registry).run(("uname","-m")).returncode==0
+        result=CommandRunner(registry).run(("tuntunctl","diagnostics","runtime-imports"))
+        assert result.returncode==0
+        assert materialized_runtime.assert_closed_import_receipt(result.stdout)
+    finally:
+        registry.close()
+
+@pytest.mark.parametrize("mutation",(
+    "unknown_platform","missing_platform","extra_platform","missing_command",
+    "extra_command","cross_platform_command","closure_platform_mismatch",
+))
+def test_platform_command_inventory_mutations_fail_closed(
+    mutation,materialized_runtime,
+):
+    mutated=materialized_runtime.with_platform_command_mutation(mutation)
+    with pytest.raises(RuntimeError,match="^trusted executable unavailable$"):
+        TrustedCommandRegistry.open(
+            mutated.expected_closure,mutated.root_path,mutated.manifest_path,
+            expected_source_policy_sha256=mutated.source_policy_sha256,
+        )
+
+def test_path_bash_env_pythonpath_and_shims_cannot_redirect_commands(
+    monkeypatch,tmp_path,materialized_runtime,
+):
+    registry=registry_fixture(materialized_runtime)
+    shim=tmp_path/"uname"; shim.write_text("#!/bin/sh\nexit 99\n"); shim.chmod(0o755)
+    monkeypatch.setenv("PATH",str(tmp_path)); monkeypatch.setenv("BASH_ENV",str(shim))
+    monkeypatch.setenv("ENV",str(shim)); monkeypatch.setenv("PYTHONPATH",str(tmp_path))
+    observed={}
+    def spawn(prepared,*,environment,output_limit,timeout_seconds):
+        observed.update(prepared=prepared,environment=environment,
+                        output_limit=output_limit,timeout_seconds=timeout_seconds)
+        return CommandResult(0,"arm64\n","")
+    monkeypatch.setattr(trusted_commands.native_spawn,"spawn_verified",spawn)
+    result=CommandRunner(registry).run(("uname","-m"))
+    assert result.returncode==0
+    assert type(observed["prepared"]) is PreparedCommand
+    assert observed["environment"]==CLOSED_COMMAND_ENV
+    assert "BASH_ENV" not in observed["environment"] and "PYTHONPATH" not in observed["environment"]
+
+@pytest.mark.parametrize("mutation",(
+    "system_executable","python","project_module","pydantic_core",
+    "cryptography_native","linked_library","policy","runtime_tar","manifest",
+))
+def test_post_registry_closure_or_source_policy_swap_fails_before_spawn(
+    mutation,materialized_runtime,monkeypatch,
+):
+    registry=registry_fixture(materialized_runtime)
+    materialized_runtime.replace_selected_entry(mutation)
+    spawned=[]
+    monkeypatch.setattr(
+        trusted_commands.native_spawn,"spawn_verified",
+        lambda *a,**k:spawned.append((a,k)),
+    )
+    with pytest.raises(RuntimeError,match="trusted executable unavailable"):
+        CommandRunner(registry).run(("uname","-m") if mutation=="system_executable" else ("tuntunctl","system","architecture","--json"))
+    assert spawned==[]
+
+def test_wrong_source_policy_digest_is_rejected_at_registry_open(materialized_runtime):
+    with pytest.raises(RuntimeError,match="trusted executable unavailable"):
+        TrustedCommandRegistry.open(
+            materialized_runtime.expected_closure,
+            materialized_runtime.root_path,
+            materialized_runtime.manifest_path,
+            expected_source_policy_sha256="0"*64,
+        )
+
+def test_timeout_kills_process_group_with_finite_term_and_kill_deadlines_preserving_primary_error(fake_process):
+    fake_process.timeout_error=TimeoutError("primary-timeout")
+    with pytest.raises(TimeoutError,match="primary-timeout"):
+        bounded_wait(fake_process,65_536,30,terminate_seconds=1,kill_seconds=1)
+    assert fake_process.events==[
+        "killpg:TERM","wait:1","killpg:KILL","wait:1","record_cleanup_failure",
+    ]
+
+@pytest.mark.parametrize("cleanup_failure",("term","term_wait","kill","kill_wait","audit"))
+def test_cleanup_failure_never_replaces_the_primary_error(fake_process,cleanup_failure):
+    fake_process.timeout_error=TimeoutError("primary-timeout")
+    fake_process.cleanup_failure=cleanup_failure
+    with pytest.raises(TimeoutError,match="^primary-timeout$"):
+        bounded_wait(fake_process,65_536,30,terminate_seconds=1,kill_seconds=1)
+
+def test_registry_open_failure_closes_every_held_descriptor(
+    materialized_runtime,monkeypatch,
+):
+    held=materialized_runtime.held_with_wrong_source_policy()
+    monkeypatch.setattr(trusted_commands,"open_runtime_closure",lambda *a,**k:held)
+    with pytest.raises(RuntimeError,match="^trusted executable unavailable$"):
+        TrustedCommandRegistry.open(
+            Expected(held.expected),held.release_root,held.manifest_path,
+            expected_source_policy_sha256="0"*64,
+        )
+    assert held.close_calls==1 and held.open_descriptors==()
+```
+
+```python
+# tests/integration/deploy/test_descriptor_stable_spawn.py
+import platform
+import pytest
+from tuntun_core.deploy import native_spawn
+from tuntun_core.deploy.trusted_commands import CommandRunner,TrustedCommandRegistry
+
+def test_resolve_to_exec_replacement_bytes_never_run(
+    descriptor_spawn_runtime,tmp_path,monkeypatch,
+):
+    original=descriptor_spawn_runtime.materialized_python_path
+    sentinel=tmp_path/"replacement-ran"
+    replacement=descriptor_spawn_runtime.compile_replacement(sentinel)
+    registry=TrustedCommandRegistry.open(
+        descriptor_spawn_runtime.expected_closure,
+        descriptor_spawn_runtime.root_path,
+        descriptor_spawn_runtime.manifest_path,
+        expected_source_policy_sha256=descriptor_spawn_runtime.source_policy_sha256,
+    )
+    real_spawn=native_spawn.spawn_verified
+    observed=[]
+    def replace_after_final_registry_check(prepared,**kwargs):
+        replacement.replace(original)
+        result=real_spawn(prepared,**kwargs)
+        observed.append(result)
+        return result
+    monkeypatch.setattr(native_spawn,"spawn_verified",replace_after_final_registry_check)
+    try:
+        with pytest.raises(RuntimeError,match="^trusted executable unavailable$"):
+            CommandRunner(registry).run(
+                ("tuntunctl","diagnostics","spawn-identity"),
+            )
+    finally:
+        registry.close()
+    if platform.system()=="Linux":
+        assert len(observed)==1
+        assert observed[0].returncode==0 and observed[0].stdout=="original\n"
+    else:
+        assert observed==[]
+    assert not sentinel.exists()
+
+def test_darwin_replacement_is_killed_while_still_suspended(
+    darwin_spawn_probe,
+):
+    if platform.system()!="Darwin": pytest.skip("Darwin-only suspended-spawn proof")
+    result=darwin_spawn_probe.replace_after_prepare()
+    assert result.child_user_instruction_count==0
+    assert result.signal_sent=="SIGKILL"
+    assert result.reason=="execution_identity_mismatch"
+```
+
+```python
+# tests/integration/deploy/test_preflight_runtime_build.py
+import importlib.machinery
+import json
+import platform
+from pathlib import Path
+from scripts.build_preflight_runtime import build_preflight_runtime
+from tuntun_core.deploy.runtime_materialization import materialize_verified_runtime
+from tuntun_core.deploy.trusted_commands import (
+    CommandRunner,PLATFORM_FIXED_EXECUTABLES,TrustedCommandRegistry,
+)
+
+CI_PLATFORM_IDS={
+    ("Linux","x86_64"):"linux-x86_64",
+    ("Darwin","arm64"):"darwin-arm64",
+    ("Darwin","x86_64"):"darwin-x86_64",
+}
+
+def test_two_builds_are_identical_and_production_runtime_imports_native_modules(
+    tmp_path,locked_runtime_input,root_owned_runtime_parent,
+):
+    first=build_preflight_runtime(locked_runtime_input,tmp_path/"first")
+    second=build_preflight_runtime(locked_runtime_input,tmp_path/"second")
+    assert first.manifest_bytes==second.manifest_bytes
+    assert first.tar_bytes==second.tar_bytes
+    runtime=materialize_verified_runtime(
+        first.runtime_tar,first.runtime_manifest,
+        destination_parent=root_owned_runtime_parent,
+    )
+    registry=TrustedCommandRegistry.open(
+        first.expected_closure,runtime.root,runtime.manifest,
+        expected_source_policy_sha256=first.source_policy_sha256,
+    )
+    try:
+        platform_id=CI_PLATFORM_IDS[(platform.system(),platform.machine())]
+        assert first.platform_id==platform_id
+        assert registry.command_names==tuple(sorted(PLATFORM_FIXED_EXECUTABLES[platform_id]))
+        assert CommandRunner(registry).run(("uname","-m")).returncode==0
+        result=CommandRunner(registry).run(
+            ("tuntunctl","diagnostics","runtime-imports","--json"),
+        )
+    finally:
+        registry.close()
+    assert result.returncode==0
+    probe=json.loads(result.stdout)
+    assert set(probe)=={"imported","module_paths","native_module_paths","sys_path"}
+    assert set(probe["imported"])=={
+        "pydantic","pydantic_core._pydantic_core","cryptography",
+        "cryptography.hazmat.bindings._rust",
+    }
+    assert all(Path(path).is_relative_to(runtime.root) for path in probe["module_paths"])
+    assert all(
+        any(path.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)
+        for path in probe["native_module_paths"]
+    )
+    assert all(Path(path).is_relative_to(runtime.root) for path in probe["sys_path"])
+
+@pytest.mark.parametrize("mutation",(
+    "wrong_platform","wrong_abi","missing_pydantic_core","missing_cryptography_rust",
+    "extra_native_module","unlisted_linked_library","post_open_native_swap",
+))
+def test_native_runtime_mutations_fail_before_import_or_spawn(
+    mutation,mutated_runtime_case,
+):
+    with pytest.raises(RuntimeError,match="^trusted runtime unavailable$"):
+        materialize_verified_runtime(*mutated_runtime_case(mutation))
 ```
 
 ```python
@@ -134,50 +647,465 @@ def test_wildcard_public_and_wrong_interface_fail():
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q`
+Run: `uv run pytest tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q`
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_core.deploy'`.
+Expected: FAIL during collection because the bootstrap/installed authority contracts, closed schemas, source policy, and `tuntun_core.deploy` production modules do not exist yet.
 
 - [ ] **Step 3: Implement the command-backed preflight**
 
 ```python
-# apps/core/src/tuntun_core/deploy/preflight.py
-import os,re,selectors,subprocess,time
+# packages/contracts/src/tuntun_contracts/bootstrap_authorization.py
+from datetime import timedelta
+from typing import Annotated, Literal, Self
+from pydantic import AwareDatetime, Field, model_validator
+from .base import ContractModel,canonical_bytes,validate_canonical_base64
+
+Digest=Annotated[str,Field(pattern=r"^[0-9a-f]{64}$")]
+class BootstrapAuthorizationRecord(ContractModel):
+    schema_version:Literal["1.0"]
+    purpose:Literal["phase1.household-core.bootstrap.v1"]
+    authority_generation:Annotated[int,Field(ge=1,le=2**31-1)]
+    target_id:Annotated[str,Field(pattern=r"^target:[A-Za-z0-9_-]{8,64}$")]
+    target_public_key_sha256:Digest
+    candidate_manifest_sha256:Digest
+    source_policy_sha256:Digest
+    preflight_runtime_manifest_sha256:Digest
+    preflight_runtime_tar_sha256:Digest
+    approval_commitment_sha256:Digest
+    one_use_nonce:Annotated[str,Field(pattern=r"^nonce:[A-Za-z0-9_-]{16,86}$")]
+    valid_from:AwareDatetime
+    valid_until:AwareDatetime
+    @model_validator(mode="after")
+    def short_lived(self)->Self:
+        if self.valid_until<=self.valid_from or self.valid_until-self.valid_from>timedelta(minutes=15):
+            raise ValueError("bootstrap validity invalid")
+        return self
+class SignedBootstrapAuthorization(ContractModel):
+    record:BootstrapAuthorizationRecord
+    owner_credential_id:Annotated[str,Field(pattern=r"^owner:external:v[1-9][0-9]{0,8}$")]
+    owner_presence_receipt_sha256:Digest
+    signature_b64:Annotated[str,Field(pattern=r"^[A-Za-z0-9+/]{86}==$")]
+    def signing_bytes(self)->bytes:
+        return b"tuntun:bootstrap-authorization:v1\0"+canonical_bytes(self.record)
+```
+
+`docs/evidence/bootstrap-authorization.schema.json` is generated byte-for-byte from this contract, carries `$schema: https://json-schema.org/draft/2020-12/schema`, `$id: https://tuntun.local/schemas/evidence/bootstrap-authorization.schema.json`, and sets `additionalProperties:false` on the envelope and record. It has exactly the fields above, RFC 3339 `date-time` formats with runtime format assertion, the literal purpose/version, the positive bounded generation, and the exact digest/target/nonce/signature patterns. The model validator and JSON Schema tests additionally assert the half-open validity interval is no longer than 15 minutes. The concrete `apps/core/src/tuntun_core/deploy/bootstrap_preflight.py` verifier consumes paths, not parsed models; production constructs its exact-type return capability only after cryptographic verification, while unit-only fixtures can construct it directly without becoming a production authority path.
+
+`packages/contracts/src/tuntun_contracts/preflight_runtime.py` defines the closed `PreflightRuntimeManifestV1`: exact schema/version/runtime ID, one literal platform ID (`darwin-arm64`, `darwin-x86_64`, or `linux-x86_64`), CPython ABI/tag, source commit, source-policy digest, deterministic runtime-tar digest, relative materialized Python/native-spawn paths and digests, aggregate inventory digest, required native-module records for `pydantic_core._pydantic_core` and `cryptography.hazmat.bindings._rust`, linked-library identities, and a sorted 1..50,000 tuple of `RuntimeFileV1(path, kind="regular"|"directory", mode=0o444|0o555, size<=268435456, sha256)`. Paths are canonical relative POSIX paths with no empty/dot/dot-dot/backslash/control component, casefold/NFC collision, duplicate, or link/special type. `docs/evidence/preflight-runtime-manifest.schema.json` is generated byte-for-byte with recursive `additionalProperties:false`. `security/schemas/phase1-preflight-source-policy.schema.json` closes the exact source policy fields: schema/version/policy ID, native bootstrap/spawn source digests, entrypoint `tuntun_core.cli`, isolation flags exactly `["-I","-S"]`, exact environment-key/value map, output/deadline/count/byte bounds, and `platform_fixed_system_executables` with exactly the three platform keys and the exact absolute-path command maps shown below. The checked-in `security/phase1-preflight-source-policy-v1.json` validates canonically against it; schema and runtime validators reject unknown/missing platforms, missing/extra command names, relative paths, a command mapped to a different path, a host/platform mismatch, and any closure whose discriminated command-digest type disagrees with its signed platform ID.
+
+`scripts/build_preflight_runtime.py` is the sole deterministic per-platform builder. From the locked distribution set for the current CI row it builds a relocatable CPython layout, places the complete Tuntun and third-party import roots under that layout's isolated versioned library root, enumerates every importable file, package metadata file, CPython file, native extension, and non-system linked library, and normalizes native-loader references to manifest-listed `$ORIGIN`/`@loader_path` locations. On Darwin it requires a valid final Mach-O code signature for every executable image and records its CodeDirectory hash; the two-build check proves the chosen signing procedure is reproducible. It rejects an ABI/platform mismatch or an unlisted/missing/extra dependency; hashes final descriptor-read bytes/modes into the runtime manifest; then creates a canonical USTAR `preflight-runtime.tar` without links, devices, sparse/PAX/GNU records, ambient ownership, or nondeterministic timestamps. It reopens the tar and manifest to prove the complete member inventory and aggregate digest exactly. The tar is never imported or executed: the native bootstrap launcher extracts only verified entries into a fresh root-owned `0555` directory with `0444|0555` children outside managed Tuntun roots, fsyncs/reopens the tree, and passes retained descriptors to the registry. `tests/integration/deploy/test_preflight_runtime_build.py` performs two byte-identical builds on each fixed CI platform, maps only `(Linux,x86_64)`, `(Darwin,arm64)`, and `(Darwin,x86_64)` to their signed platform IDs, materializes that platform's exact command inventory, and uses the production materializer and `TrustedCommandRegistry`/native spawn bridge with `-I -S`. Each row opens the registry, executes its retained `/usr/bin/uname` descriptor, and invokes the real closed diagnostic entry; the Linux row therefore exercises the production `execveat` registry/runtime path without opening any macOS-only command. The subprocess must import Pydantic v2, `pydantic_core._pydantic_core`, `cryptography`, and `cryptography.hazmat.bindings._rust` from the materialized root and show that every effective `sys.path` entry remains under that root. The test uses the runner's scoped privileged fixture to create the same root-owned/non-writable layout; it does not relax ownership or use an alternate importer. It also rejects an unknown or mismatched platform, missing/extra/cross-platform command, wrong ABI/tag, missing/extra/duplicate module or linked library, path collision, lock/policy/bootstrap mismatch, and module/native-library/tar/manifest mutation before and after registry open. Candidate assembly and Task 2 package every platform artifact without rebuilding; the selected target authorization and installed authority bind the one exact platform closure.
+
+```python
+# packages/contracts/src/tuntun_contracts/host_approval.py
+from datetime import timedelta
+from typing import Annotated, Literal, Self
+
+from pydantic import AwareDatetime, Field, field_validator, model_validator
+
+from .base import ContractModel, canonical_bytes, validate_canonical_base64
+
+Digest=Annotated[str,Field(pattern=r"^[0-9a-f]{64}$")]
+
+class DarwinTrustedSystemExecutableDigests(ContractModel):
+    uname:Digest; id:Digest; fdesetup:Digest; security:Digest; route:Digest
+    ipconfig:Digest; stat:Digest; plutil:Digest; lsof:Digest
+
+class LinuxTrustedSystemExecutableDigests(ContractModel):
+    uname:Digest; id:Digest; stat:Digest
+
+class _TrustedExecutionClosureBase(ContractModel):
+    python_sha256:Digest
+    runtime_manifest_sha256:Digest
+    preflight_runtime_tar_sha256:Digest
+    native_spawn_bridge_sha256:Digest
+
+class DarwinTrustedExecutionClosure(_TrustedExecutionClosureBase):
+    platform_id:Literal["darwin-arm64","darwin-x86_64"]
+    system_executable_sha256:DarwinTrustedSystemExecutableDigests
+
+class LinuxTrustedExecutionClosure(_TrustedExecutionClosureBase):
+    platform_id:Literal["linux-x86_64"]
+    system_executable_sha256:LinuxTrustedSystemExecutableDigests
+
+TrustedExecutionClosure=Annotated[
+    DarwinTrustedExecutionClosure|LinuxTrustedExecutionClosure,
+    Field(discriminator="platform_id"),
+]
+
+class TrustedHostAuthorityRecord(ContractModel):
+    schema_version:Literal["1.0"]
+    purpose:Literal["phase1.household-core.preflight.v1"]
+    authority_generation:Annotated[int,Field(ge=1,le=2**31-1)]
+    target_id:Annotated[str,Field(pattern=r"^target:[A-Za-z0-9_-]{8,64}$")]
+    approval_commitment_sha256:Digest
+    target_public_key_sha256:Digest
+    valid_from:AwareDatetime
+    valid_until:AwareDatetime
+    source_policy_sha256:Digest
+    execution_closure:TrustedExecutionClosure
+
+    @model_validator(mode="after")
+    def bounded_validity(self)->Self:
+        if self.valid_until<=self.valid_from or self.valid_until-self.valid_from>timedelta(days=90):
+            raise ValueError("trusted host authority validity invalid")
+        return self
+
+class SignedTrustedHostAuthorityRecord(ContractModel):
+    record:TrustedHostAuthorityRecord
+    owner_key_id:Annotated[str,Field(pattern=r"^owner:authority:v[1-9][0-9]{0,8}$")]
+    signature_b64:Annotated[str,Field(pattern=r"^[A-Za-z0-9+/]{86}==$")]
+
+    @field_validator("signature_b64")
+    @classmethod
+    def canonical_signature(cls,value:str)->str:
+        return validate_canonical_base64(value,expected_bytes=64,label="signature")
+
+    def signing_bytes(self)->bytes:
+        return b"tuntun:trusted-host-authority:v1\0"+canonical_bytes(self.record)
+```
+
+The exact checked-in `docs/evidence/trusted-host-approval.schema.json` artifact is:
+
+```json
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://tuntun.local/schemas/evidence/trusted-host-approval.schema.json",
+  "type":"object","additionalProperties":false,
+  "required":["record","owner_key_id","signature_b64"],
+  "properties":{
+    "record":{"$ref":"#/$defs/record"},
+    "owner_key_id":{"type":"string","pattern":"^owner:authority:v[1-9][0-9]{0,8}$"},
+    "signature_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{86}==$"}
+  },
+  "$defs":{
+    "digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "darwin_system_executables":{"type":"object","additionalProperties":false,
+      "required":["uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof"],
+      "properties":{"uname":{"$ref":"#/$defs/digest"},"id":{"$ref":"#/$defs/digest"},"fdesetup":{"$ref":"#/$defs/digest"},"security":{"$ref":"#/$defs/digest"},"route":{"$ref":"#/$defs/digest"},"ipconfig":{"$ref":"#/$defs/digest"},"stat":{"$ref":"#/$defs/digest"},"plutil":{"$ref":"#/$defs/digest"},"lsof":{"$ref":"#/$defs/digest"}}},
+    "linux_system_executables":{"type":"object","additionalProperties":false,
+      "required":["uname","id","stat"],
+      "properties":{"uname":{"$ref":"#/$defs/digest"},"id":{"$ref":"#/$defs/digest"},"stat":{"$ref":"#/$defs/digest"}}},
+    "darwin_execution_closure":{"type":"object","additionalProperties":false,
+      "required":["platform_id","system_executable_sha256","python_sha256","runtime_manifest_sha256","preflight_runtime_tar_sha256","native_spawn_bridge_sha256"],
+      "properties":{"platform_id":{"enum":["darwin-arm64","darwin-x86_64"]},"system_executable_sha256":{"$ref":"#/$defs/darwin_system_executables"},"python_sha256":{"$ref":"#/$defs/digest"},"runtime_manifest_sha256":{"$ref":"#/$defs/digest"},"preflight_runtime_tar_sha256":{"$ref":"#/$defs/digest"},"native_spawn_bridge_sha256":{"$ref":"#/$defs/digest"}}},
+    "linux_execution_closure":{"type":"object","additionalProperties":false,
+      "required":["platform_id","system_executable_sha256","python_sha256","runtime_manifest_sha256","preflight_runtime_tar_sha256","native_spawn_bridge_sha256"],
+      "properties":{"platform_id":{"const":"linux-x86_64"},"system_executable_sha256":{"$ref":"#/$defs/linux_system_executables"},"python_sha256":{"$ref":"#/$defs/digest"},"runtime_manifest_sha256":{"$ref":"#/$defs/digest"},"preflight_runtime_tar_sha256":{"$ref":"#/$defs/digest"},"native_spawn_bridge_sha256":{"$ref":"#/$defs/digest"}}},
+    "record":{"type":"object","additionalProperties":false,
+      "required":["schema_version","purpose","authority_generation","target_id","approval_commitment_sha256","target_public_key_sha256","valid_from","valid_until","source_policy_sha256","execution_closure"],
+      "properties":{"schema_version":{"const":"1.0"},"purpose":{"const":"phase1.household-core.preflight.v1"},"authority_generation":{"type":"integer","minimum":1,"maximum":2147483647},"target_id":{"type":"string","pattern":"^target:[A-Za-z0-9_-]{8,64}$"},"approval_commitment_sha256":{"$ref":"#/$defs/digest"},"target_public_key_sha256":{"$ref":"#/$defs/digest"},"valid_from":{"type":"string","format":"date-time"},"valid_until":{"type":"string","format":"date-time"},"source_policy_sha256":{"$ref":"#/$defs/digest"},"execution_closure":{"discriminator":{"propertyName":"platform_id","mapping":{"darwin-arm64":"#/$defs/darwin_execution_closure","darwin-x86_64":"#/$defs/darwin_execution_closure","linux-x86_64":"#/$defs/linux_execution_closure"}},"oneOf":[{"$ref":"#/$defs/darwin_execution_closure"},{"$ref":"#/$defs/linux_execution_closure"}]}}}
+  }
+}
+```
+
+`tests/contract/test_host_approval_contract.py` generates this schema from the contract, requires byte-for-byte equality with the checked-in artifact, enables RFC 3339 format assertion, and rejects every missing/extra field, noncanonical signature, validity interval over 90 days, wrong purpose, zero/negative generation, descriptive/invalid target ID, unknown platform ID, a Linux command set paired with Darwin (or the reverse), and every missing/extra executable key.
+
+```python
+# apps/core/src/tuntun_core/deploy/host_approval.py
+import base64,hashlib,os,secrets,stat
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC,timedelta
 from pathlib import Path
-from tuntun_contracts.base import parse_bounded_json_value
+from typing import Protocol
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes,serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from tuntun_contracts.base import parse_contract_json
+from tuntun_contracts.host_approval import SignedTrustedHostAuthorityRecord,TrustedExecutionClosure
+from tuntun_core.config.secure_paths import absolute_lexical_path,open_trusted_directory,_require_no_unsafe_acl
+
+TARGET_CHALLENGE_DOMAIN=b"tuntun:trusted-host-target-key:v1\0"
+@dataclass(frozen=True,slots=True)
+class TargetKeySample:
+    public_key_der:bytes; challenge:bytes; signature:bytes; proof_verified:bool
+@dataclass(frozen=True,slots=True)
+class VerifiedHostApproval:
+    target_id:str; approval_commitment_sha256:str; source_policy_sha256:str
+    execution_closure:TrustedExecutionClosure
+class TargetKeySampler(Protocol):
+    def sample(self,challenge:bytes)->TargetKeySample: ...
+
+def read_owner_only_nofollow_bounded(path:Path,max_bytes:int)->bytes:
+    absolute=absolute_lexical_path(path)
+    with open_trusted_directory(absolute.parent) as parent:
+        parent.revalidate()
+        fd=os.open(absolute.name,os.O_RDONLY|os.O_NONBLOCK|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=parent.fd)
+        try:
+            before=os.fstat(fd); named=os.stat(absolute.name,dir_fd=parent.fd,follow_symlinks=False)
+            if (not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(named.st_mode)
+                or (before.st_dev,before.st_ino)!=(named.st_dev,named.st_ino)
+                or before.st_dev!=parent.device or before.st_nlink!=1
+                or before.st_uid!=os.geteuid() or stat.S_IMODE(before.st_mode)!=0o600
+                or before.st_size>max_bytes): raise PermissionError("unsafe trusted authority file")
+            _require_no_unsafe_acl(fd,"unsafe trusted authority file")
+            chunks=[]; total=0
+            while True:
+                chunk=os.read(fd,min(65_536,max_bytes+1-total))
+                if not chunk: break
+                chunks.append(chunk); total+=len(chunk)
+                if total>max_bytes: raise PermissionError("unsafe trusted authority file")
+            raw=b"".join(chunks)
+            if len(raw)!=before.st_size: raise PermissionError("unsafe trusted authority file")
+            after=os.fstat(fd); named_after=os.stat(absolute.name,dir_fd=parent.fd,follow_symlinks=False)
+            parent.revalidate()
+            stable=lambda row:(row.st_dev,row.st_ino,row.st_size,row.st_mtime_ns,row.st_ctime_ns)
+            if stable(before)!=stable(after) or stable(after)!=stable(named_after):
+                raise PermissionError("unsafe trusted authority file")
+            return raw
+        finally: os.close(fd)
+
+class MacOSTargetKeySampler:
+    KEY_ID="tuntun.local-presence.target-signing.v1"
+    def __init__(self,keychain_signer): self._signer=keychain_signer
+    def sample(self,challenge):
+        if type(challenge) is not bytes or len(challenge)!=32: raise RuntimeError("trusted target key unavailable")
+        public_der=self._signer.public_key_der(self.KEY_ID)
+        signature=self._signer.sign(self.KEY_ID,TARGET_CHALLENGE_DOMAIN+challenge)
+        public=serialization.load_der_public_key(public_der)
+        if not isinstance(public,ec.EllipticCurvePublicKey) or not isinstance(public.curve,ec.SECP256R1):
+            raise RuntimeError("trusted target key unavailable")
+        try: public.verify(signature,TARGET_CHALLENGE_DOMAIN+challenge,ec.ECDSA(hashes.SHA256()))
+        except InvalidSignature: raise RuntimeError("trusted target key unavailable") from None
+        return TargetKeySample(public_der,challenge,signature,True)
+
+class SignedTrustedHostApprovalVerifier:
+    MAX_BYTES=65_536
+    def __init__(self,*,envelope,pinned_owner_public_key,expected_owner_key_id,
+                 expected_generation,target_sampler,now,random_bytes):
+        self._envelope=envelope; self._owner_key=pinned_owner_public_key
+        self._owner_key_id=expected_owner_key_id; self._generation=expected_generation
+        self._sampler=target_sampler; self._now=now; self._random=random_bytes
+    @classmethod
+    def load_envelope(cls,path:Path):
+        try:
+            raw=read_owner_only_nofollow_bounded(path,cls.MAX_BYTES)
+            value=parse_contract_json(SignedTrustedHostAuthorityRecord,raw,max_bytes=cls.MAX_BYTES)
+            if value.record.purpose!="phase1.household-core.preflight.v1": raise RuntimeError
+            return value
+        except BaseException:
+            raise RuntimeError("trusted host authority schema rejected") from None
+    def verify_current_target(self,*,expected_target_id):
+        try:
+            signed=self._envelope; record=signed.record; now=self._now().astimezone(UTC)
+            if signed.owner_key_id!=self._owner_key_id or record.authority_generation!=self._generation:
+                raise RuntimeError
+            if record.purpose!="phase1.household-core.preflight.v1" or record.target_id!=expected_target_id:
+                raise RuntimeError
+            if not record.valid_from<=now<record.valid_until or record.valid_until-record.valid_from>timedelta(days=90):
+                raise RuntimeError
+            self._owner_key.verify(base64.b64decode(signed.signature_b64,validate=True),signed.signing_bytes())
+            challenge=self._random(32)
+            if type(challenge) is not bytes or len(challenge)!=32: raise RuntimeError
+            sample=self._sampler.sample(challenge)
+            if type(sample) is not TargetKeySample or sample.proof_verified is not True:
+                raise RuntimeError
+            if sample.challenge!=challenge or not 33<=len(sample.public_key_der)<=512:
+                raise RuntimeError
+            if not secrets.compare_digest(hashlib.sha256(sample.public_key_der).hexdigest(),record.target_public_key_sha256):
+                raise RuntimeError
+            return VerifiedHostApproval(record.target_id,record.approval_commitment_sha256,
+                                        record.source_policy_sha256,record.execution_closure)
+        except BaseException:
+            raise RuntimeError("trusted owner target unavailable") from None
+```
+
+`read_owner_only_nofollow_bounded` is a concrete function in this file: it opens through the existing secure-path descriptor API with `O_RDONLY|O_NOFOLLOW|O_CLOEXEC`, requires an owner-only regular file, reads to the exact asserted size through one descriptor with a 65,536-byte cap, rechecks device/inode/type/size/change timestamps, and returns bytes. A missing record, diagnostic host-probe receipt, symlink, ownership/mode failure, parse error, signature error, stale interval, wrong generation/purpose/target, absent target key, wrong sampled public key, invalid challenge proof, or changed file maps to the one content-free error above. `MacOSTargetKeySampler` consumes the same target-held Keychain P-256 signing key created by the local-presence implementation; it never exports private material.
+
+```python
+# apps/core/src/tuntun_core/deploy/trusted_commands.py
+import os,selectors,signal,subprocess,time
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+
+from tuntun_core.deploy import native_spawn
+
+DARWIN_FIXED_EXECUTABLES=MappingProxyType({
+ "uname":Path("/usr/bin/uname"),"id":Path("/usr/bin/id"),
+ "fdesetup":Path("/usr/bin/fdesetup"),"security":Path("/usr/bin/security"),
+ "route":Path("/sbin/route"),"ipconfig":Path("/usr/sbin/ipconfig"),
+ "stat":Path("/usr/bin/stat"),"plutil":Path("/usr/bin/plutil"),"lsof":Path("/usr/sbin/lsof"),
+})
+LINUX_FIXED_EXECUTABLES=MappingProxyType({
+ "uname":Path("/usr/bin/uname"),"id":Path("/usr/bin/id"),"stat":Path("/usr/bin/stat"),
+})
+PLATFORM_FIXED_EXECUTABLES=MappingProxyType({
+ "darwin-arm64":DARWIN_FIXED_EXECUTABLES,
+ "darwin-x86_64":DARWIN_FIXED_EXECUTABLES,
+ "linux-x86_64":LINUX_FIXED_EXECUTABLES,
+})
+HOST_PLATFORM_IDS=MappingProxyType({
+ ("Darwin","arm64"):"darwin-arm64",
+ ("Darwin","x86_64"):"darwin-x86_64",
+ ("Linux","x86_64"):"linux-x86_64",
+})
+CLOSED_COMMAND_ENV={"LANG":"C","LC_ALL":"C","PATH":"/usr/bin:/bin:/usr/sbin:/sbin"}
 MAX_COMMAND_OUTPUT_BYTES=65_536
 @dataclass(frozen=True,slots=True)
 class CommandResult: returncode:int; stdout:str; stderr:str
-class CommandRunner:
-    def run(self,argv):
-        process=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,shell=False)
-        captured={"stdout":bytearray(),"stderr":bytearray()}; deadline=time.monotonic()+30
+
+# Re-export the exact non-serializable C-extension capability. Its constructor is
+# not exposed; it owns the executable/runtime descriptors, argv, and policy digest
+# and deliberately exposes no executable pathname or raw descriptor integer.
+PreparedCommand=native_spawn.PreparedCommand
+
+def terminate_process_group_bounded(process,*,terminate_seconds,kill_seconds):
+    cleanup_failed=False
+    for selected_signal,timeout in (
+        (signal.SIGTERM,terminate_seconds),(signal.SIGKILL,kill_seconds),
+    ):
+        try: os.killpg(process.pid,selected_signal)
+        except ProcessLookupError: return cleanup_failed
+        except BaseException: cleanup_failed=True
         try:
-            with selectors.DefaultSelector() as selector:
-                for stream,name in ((process.stdout,"stdout"),(process.stderr,"stderr")):
-                    os.set_blocking(stream.fileno(),False)
-                    selector.register(stream,selectors.EVENT_READ,name)
-                while selector.get_map():
-                    remaining=deadline-time.monotonic()
-                    if remaining<=0: raise TimeoutError("preflight command timeout")
-                    events=selector.select(remaining)
-                    if not events: raise TimeoutError("preflight command timeout")
-                    for key,_ in events:
-                        chunk=os.read(key.fileobj.fileno(),16_384)
-                        if not chunk: selector.unregister(key.fileobj); continue
-                        value=captured[key.data]
-                        value.extend(chunk[:MAX_COMMAND_OUTPUT_BYTES+1-len(value)])
-                        if len(value)>MAX_COMMAND_OUTPUT_BYTES:
-                            raise RuntimeError("preflight command output too large")
-            returncode=process.wait(timeout=max(.001,deadline-time.monotonic()))
-            return CommandResult(
-                returncode,captured["stdout"].decode("utf-8",errors="strict"),
-                captured["stderr"].decode("utf-8",errors="strict"),
-            )
+            process.wait(timeout=timeout)
+            return cleanup_failed
+        except subprocess.TimeoutExpired:
+            continue
         except BaseException:
-            process.kill(); process.wait(); raise
+            cleanup_failed=True
+    return True
+
+def record_cleanup_failure_without_raising():
+    with suppress(BaseException):
+        record_content_free_cleanup_failure()
+
+def bounded_wait(process,limit,seconds,*,terminate_seconds=1,kill_seconds=1):
+    captured={"stdout":bytearray(),"stderr":bytearray()}; deadline=time.monotonic()+seconds
+    try:
+        with selectors.DefaultSelector() as selector:
+            for stream,name in ((process.stdout,"stdout"),(process.stderr,"stderr")):
+                if stream is None: raise RuntimeError("preflight command pipe unavailable")
+                os.set_blocking(stream.fileno(),False); selector.register(stream,selectors.EVENT_READ,name)
+            while selector.get_map():
+                remaining=deadline-time.monotonic()
+                if remaining<=0: raise TimeoutError("preflight command timeout")
+                events=selector.select(remaining)
+                if not events: raise TimeoutError("preflight command timeout")
+                for key,_ in events:
+                    chunk=os.read(key.fileobj.fileno(),16_384)
+                    if not chunk: selector.unregister(key.fileobj); continue
+                    captured[key.data].extend(chunk)
+                    if len(captured["stdout"])+len(captured["stderr"])>limit:
+                        raise RuntimeError("preflight command output too large")
+        code=process.wait(timeout=max(.001,deadline-time.monotonic()))
+        return CommandResult(code,captured["stdout"].decode("utf-8","strict"),captured["stderr"].decode("utf-8","strict"))
+    except BaseException:
+        # This helper never raises; the active exception remains the public failure.
+        if terminate_process_group_bounded(
+            process,terminate_seconds=terminate_seconds,kill_seconds=kill_seconds,
+        ):
+            record_cleanup_failure_without_raising()
+        raise
+
+class TrustedCommandRegistry:
+    @classmethod
+    def open(cls,expected,release_root,manifest_path,*,expected_source_policy_sha256):
+        # open_runtime_closure retains the release-root, manifest, policy, Python,
+        # every materialized inventory entry, linked library, and fixed-binary
+        # descriptor. It never imports or executes the runtime tar.
+        # It verifies closed canonical JSON, duplicate keys, owner/type/mode/nlink,
+        # shared count/byte/time bounds, descriptor/path identity and every digest.
+        try:
+            platform_id=expected.platform_id
+            current_platform_id=HOST_PLATFORM_IDS[(os.uname().sysname,os.uname().machine)]
+            if type(platform_id) is not str or platform_id!=current_platform_id:
+                raise RuntimeError
+            fixed_executables=PLATFORM_FIXED_EXECUTABLES[platform_id]
+            if set(expected.system_executable_sha256.model_dump())!=set(fixed_executables):
+                raise RuntimeError
+        except BaseException:
+            raise RuntimeError("trusted executable unavailable") from None
+        held=open_runtime_closure(
+            release_root,manifest_path,fixed_executables,
+            expected_platform_id=platform_id,
+        )
+        try:
+            if held.manifest.platform_id!=platform_id:
+                raise RuntimeError("trusted executable unavailable")
+            expected_policy_commands={
+                selected:{name:str(path) for name,path in commands.items()}
+                for selected,commands in PLATFORM_FIXED_EXECUTABLES.items()
+            }
+            if held.source_policy.platform_fixed_system_executables!=expected_policy_commands:
+                raise RuntimeError("trusted executable unavailable")
+            if held.manifest.source_policy_sha256!=expected_source_policy_sha256:
+                raise RuntimeError("trusted executable unavailable")
+            if held.policy_sha256!=expected_source_policy_sha256:
+                raise RuntimeError("trusted executable unavailable")
+            if held.execution_closure!=expected.model_dump():
+                raise RuntimeError("trusted executable unavailable")
+            return cls(held,expected,fixed_executables)
+        except BaseException:
+            with suppress(BaseException): held.close_all()
+            raise
+    def __init__(self,held,expected,fixed_executables):
+        self._held=held; self._expected=expected; self._fixed_executables=fixed_executables
+    @property
+    def release_root(self): return self._held.release_root
+    @property
+    def expected_closure(self): return self._expected
+    @property
+    def command_names(self): return tuple(sorted(self._fixed_executables))
+    def close(self): self._held.close_all()
+    def _revalidate(self):
+        if not self._held.revalidate_every_identity_and_digest():
+            raise RuntimeError("trusted executable unavailable")
+    def prepare(self,argv):
+        self._revalidate()
+        name,*tail=argv
+        if name=="tuntunctl":
+            executable=self._held.open_python_handle()
+            child_argv=("python","-I","-S","-m","tuntun_core.cli",*tail)
+        elif name in self._fixed_executables:
+            executable=self._held.open_system_handle(name)
+            child_argv=(name,*tail)
+        else:
+            raise RuntimeError("trusted executable unavailable")
+        self._revalidate()
+        return native_spawn.prepare_verified_command(
+            executable=executable,argv=tuple(child_argv),
+            runtime=self._held.native_runtime_handle(),
+            source_policy_sha256=self._held.policy_sha256,
+        )
+
+class CommandRunner:
+    def __init__(self,registry): self._registry=registry
+    def run(self,argv):
+        return self.run_prepared(self._registry.prepare(argv))
+    def run_prepared(self,prepared):
+        try:
+            self._registry._revalidate()
+            result=native_spawn.spawn_verified(
+                prepared,environment=CLOSED_COMMAND_ENV,
+                output_limit=MAX_COMMAND_OUTPUT_BYTES,timeout_seconds=30,
+            )
+            self._registry._revalidate()
+            return result
+        except BaseException:
+            # spawn_verified never raises until any child it created has undergone
+            # finite process-group termination and reap; cleanup cannot replace the
+            # primary exception.
+            raise
+```
+
+`open_runtime_closure`, `terminate_process_group_bounded`, and every `HeldRuntimeClosure` method are implemented in full, not left as `Protocol`s. The canonical runtime manifest is a closed, sorted inventory of every project, standard-library, third-party, native-extension, and non-system linked-library byte loaded from the already materialized runtime tree; it binds the exact runtime tar, manifest, Python, native spawn bridge, fixed system executables, and source policy. The registry retains and revalidates the runtime-root descriptor, every inventory descriptor, and every executable descriptor through child completion. It returns only the exact non-constructible C-extension `PreparedCommand`, which binds the executable handle, argv, runtime handles, and source-policy digest; neither the registry nor `CommandRunner` returns an executable path/raw descriptor or calls `subprocess.Popen` on a mutable name. The bridge rejects subclasses, deserialized objects, altered argv/environment, reused handles, or a capability from another registry.
+
+`native/preflight-spawn/preflight_spawn.c` and its thin `native_spawn.py` wrapper are production code, not an interface sketch. On Linux, the bridge creates the pipes and process group, then executes the retained descriptor with `execveat(fd, "", argv, envp, AT_EMPTY_PATH)`. On Darwin, where descriptor execution is unavailable, it calls `posix_spawn` with `POSIX_SPAWN_START_SUSPENDED`; while the child is still suspended it obtains and compares the child's `csops` CodeDirectory hash and executable-vnode identity with the retained manifest-bound descriptor, sends `SIGKILL` and reaps on any mismatch, and sends `SIGCONT` only after both match. A pathname is used only inside that Darwin bridge to ask the kernel to create the suspended image; it is never returned to Python, and replacement bytes cannot execute before attestation. The same bridge governs the materialized Python and fixed system binaries. The materialized tree is root-owned and non-writable for the invoking account, so Python's native-module and shared-library loads cannot be redirected after verification. The bridge rejects an unexpected platform/ABI, missing `execveat`/suspended-spawn guarantee, descriptor/root change, wrong code identity, or unsupported command instead of falling back to path execution.
+
+The environment is exactly `CLOSED_COMMAND_ENV`; inherited `PATH`, `BASH_ENV`, `ENV`, `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV`, shell functions, Git/Python startup variables, and `GITHUB_ENV`/`GITHUB_PATH` are absent. The native bridge owns the child from creation through bounded output collection and reap. Every spawn, timeout, output, decode, attestation, and registry-revalidation failure runs finite process-group TERM then KILL waits, records a content-free cleanup failure without replacing the primary exception, and has no unbounded `wait()`. Tests compile and execute real original/replacement binaries and import the real native runtime closure; they do not use `find_spec`, a pathname-returning fake, or post-execution attestation.
+
+```python
+# apps/core/src/tuntun_core/deploy/preflight.py
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from tuntun_contracts.base import parse_bounded_json_value
+from .bootstrap_preflight import VerifiedBootstrapApproval
+from .host_approval import VerifiedHostApproval
+from .trusted_commands import MAX_COMMAND_OUTPUT_BYTES,CommandResult,CommandRunner
 @dataclass(frozen=True,slots=True)
 class ResolvedInterface: name:str; address:str
 @dataclass(frozen=True,slots=True)
@@ -186,7 +1114,7 @@ class Check: check_id:str; passed:bool; reason:str
 class PreflightReport: schema_version:str; mode:str; ok:bool; checks:tuple[Check,...]
 def required(runner,argv):
     result=runner.run(argv)
-    if result.returncode: raise RuntimeError("command failed: "+" ".join(argv))
+    if result.returncode: raise RuntimeError("preflight command failed")
     if len(result.stdout.encode("utf-8"))>MAX_COMMAND_OUTPUT_BYTES:
         raise RuntimeError("preflight command output too large")
     return result.stdout
@@ -209,50 +1137,74 @@ def verify_listeners(rows,interface,lan_console):
     allowed={("127.0.0.1",8787),(interface.address,7443)}
     if lan_console: allowed.add((interface.address,8443))
     return tuple(f"listener:{host}:{port}" for host,port in rows if (host,port) not in allowed)
-def run_preflight(mode,home,runner,lan_console):
-    if mode not in {"install","upgrade","verify-installed"}: raise ValueError("invalid mode")
-    interface=resolve_private_interface(runner); plist=home/"Library/LaunchAgents/com.tuntun.core.plist"
-    current=home/"Library/Application Support/Tuntun/runtime/current"
-    roots=[home/path for path in ("Library/Application Support/Tuntun/runtime","Library/Application Support/Tuntun/data","Library/Application Support/Tuntun/models","Library/Application Support/Tuntun/backups","Library/Logs/Tuntun")]
-    owner=required(runner,("id","-un")).strip()
-    native=required(runner,("uname","-m")).strip()=="x86_64" and required(runner,("uv","run","python","-c","import platform; print(platform.machine())")).strip()=="x86_64"
-    values={
-        "architecture":native,
+def _approval_fields_are_closed(approval):
+    return (re.fullmatch(r"target:[A-Za-z0-9_-]{8,64}",approval.target_id) is not None
+        and re.fullmatch(r"[0-9a-f]{64}",approval.approval_commitment_sha256) is not None
+        and re.fullmatch(r"[0-9a-f]{64}",approval.source_policy_sha256) is not None)
+
+def _darwin_machine(approval):
+    try: return {"darwin-arm64":"arm64","darwin-x86_64":"x86_64"}[
+        approval.execution_closure.platform_id
+    ]
+    except (AttributeError,KeyError):
+        raise RuntimeError("trusted owner target unavailable") from None
+
+def _base_host_values(runner,expected_machine):
+    interface=resolve_private_interface(runner)
+    return interface,{
+        "trusted_owner_target":True,
+        "architecture":required(runner,("uname","-m")).strip()==expected_machine,
         "filevault":"FileVault is On." in required(runner,("fdesetup","status")),
         "keychain_available":bool(required(runner,("security","list-keychains","-d","user")).strip()),
         "resolved_interface":True,
     }
-    if mode=="install":
-        values["existing_runtime_absent"]=not (current.exists() or current.is_symlink())
-        ports=runner.run(("lsof","-nP","-iTCP:8787","-iTCP:7443","-iTCP:8443","-sTCP:LISTEN"))
-        if ports.returncode not in {0,1}: raise RuntimeError("port probe failed")
-        values["ports_available"]=not ports.stdout.strip()
-    else:
-        lan_commissioned=False
-        if lan_console:
-            lan_receipt=command_json(runner,("tuntunctl","lan","verify-commissioning","--json"),{
-                "verified","private_dns","certificate_match","all_admin_devices","drift",
-            })
-            lan_commissioned=all(lan_receipt[name] is expected for name,expected in {
-                "verified":True,"private_dns":True,"certificate_match":True,
-                "all_admin_devices":True,"drift":False,
-            }.items())
-            values["lan_commissioning"]=lan_commissioned
-        pid_value=command_json(runner,("tuntunctl","service","pid","--json"),{"pid"})["pid"]
-        if isinstance(pid_value,bool) or not isinstance(pid_value,int) or not 1<=pid_value<=4_194_304:
-            raise RuntimeError("invalid service pid receipt")
-        pid=str(pid_value)
-        rows=tuple((host,int(port)) for host,port in re.findall(r"TCP\s+(\[[^\]]+\]|[^\s:]+):(\d+)\s+\(LISTEN\)",required(runner,("lsof","-nP","-a","-p",pid,"-iTCP","-sTCP:LISTEN"))))
-        crash=command_json(runner,("tuntunctl","service","crash-probe","--json"),{"core_files","content_diagnostics"})
-        crash_clean=all(type(crash[name]) is int and crash[name]==0 for name in crash)
-        values.update({
-            "database_key":bool(required(runner,("security","find-generic-password","-s","tuntun.database","-a","root-v1"))),
-            "owner_paths":all(required(runner,("stat","-f","%Su:%Lp",str(path))).strip()==f"{owner}:700" for path in roots),
-            "launchd_core_limit":required(runner,("plutil","-extract","SoftResourceLimits.Core","raw",str(plist))).strip()=="0",
-            "crash_diagnostics":crash_clean,
-            "listeners":not verify_listeners(rows,interface,lan_commissioned),
+
+def run_clean_bootstrap_preflight(home,runner,verified_bootstrap_approval):
+    approval=verified_bootstrap_approval
+    if type(approval) is not VerifiedBootstrapApproval or not _approval_fields_are_closed(approval):
+        raise RuntimeError("trusted owner target unavailable")
+    interface,values=_base_host_values(runner,_darwin_machine(approval)); del interface
+    current=home/"Library/Application Support/Tuntun/runtime/current"
+    values["existing_runtime_absent"]=not (current.exists() or current.is_symlink())
+    ports=runner.run(("lsof","-nP","-iTCP:8787","-iTCP:7443","-iTCP:8443","-sTCP:LISTEN"))
+    if ports.returncode not in {0,1}: raise RuntimeError("port probe failed")
+    values["ports_available"]=not ports.stdout.strip()
+    checks=tuple(Check(name,bool(value),("existing_runtime_detected_use_upgrade" if name=="existing_runtime_absent" and not value else name+"_failed")) for name,value in values.items())
+    return PreflightReport("tuntun.preflight.v1","install",all(item.passed for item in checks),checks)
+
+def run_installed_preflight(mode,home,runner,lan_console,verified_host_approval):
+    if mode not in {"upgrade","repair","verify-installed"}: raise ValueError("invalid mode")
+    approval=verified_host_approval
+    if type(approval) is not VerifiedHostApproval or not _approval_fields_are_closed(approval):
+        raise RuntimeError("trusted owner target unavailable")
+    expected_machine=_darwin_machine(approval)
+    interface,values=_base_host_values(runner,expected_machine); plist=home/"Library/LaunchAgents/com.tuntun.core.plist"
+    roots=[home/path for path in ("Library/Application Support/Tuntun/runtime","Library/Application Support/Tuntun/data","Library/Application Support/Tuntun/models","Library/Application Support/Tuntun/backups","Library/Logs/Tuntun")]
+    owner=required(runner,("id","-un")).strip()
+    python_arch=command_json(runner,("tuntunctl","system","architecture","--json"),{"machine"})
+    values["architecture"]=values["architecture"] and python_arch["machine"]==expected_machine
+    lan_commissioned=False
+    if lan_console:
+        lan_receipt=command_json(runner,("tuntunctl","lan","verify-commissioning","--json"),{
+            "verified","private_dns","certificate_match","all_admin_devices","drift",
         })
-    if mode=="upgrade":
+        lan_commissioned=all(lan_receipt[name] is expected for name,expected in {
+            "verified":True,"private_dns":True,"certificate_match":True,
+            "all_admin_devices":True,"drift":False,
+        }.items()); values["lan_commissioning"]=lan_commissioned
+    pid_value=command_json(runner,("tuntunctl","service","pid","--json"),{"pid"})["pid"]
+    if isinstance(pid_value,bool) or not isinstance(pid_value,int) or not 1<=pid_value<=4_194_304:
+        raise RuntimeError("invalid service pid receipt")
+    rows=tuple((host,int(port)) for host,port in re.findall(r"TCP\s+(\[[^\]]+\]|[^\s:]+):(\d+)\s+\(LISTEN\)",required(runner,("lsof","-nP","-a","-p",str(pid_value),"-iTCP","-sTCP:LISTEN"))))
+    crash=command_json(runner,("tuntunctl","service","crash-probe","--json"),{"core_files","content_diagnostics"})
+    values.update({
+        "database_key":bool(required(runner,("security","find-generic-password","-s","tuntun.database","-a","root-v1"))),
+        "owner_paths":all(required(runner,("stat","-f","%Su:%Lp",str(path))).strip()==f"{owner}:700" for path in roots),
+        "launchd_core_limit":required(runner,("plutil","-extract","SoftResourceLimits.Core","raw",str(plist))).strip()=="0",
+        "crash_diagnostics":all(type(crash[name]) is int and crash[name]==0 for name in crash),
+        "listeners":not verify_listeners(rows,interface,lan_commissioned),
+    })
+    if mode in {"upgrade","repair"}:
         values["privacy"]=command_json(runner,("tuntunctl","privacy","activate","--reason","packaging","--json"),{"egress_closed"})["egress_closed"] is True
         if command_json(runner,("tuntunctl","providers","disable-new","--json"),{"disabled"})["disabled"] is not True:
             raise RuntimeError("provider disable receipt invalid")
@@ -262,27 +1214,130 @@ def run_preflight(mode,home,runner,lan_console):
     return PreflightReport("tuntun.preflight.v1",mode,all(item.passed for item in checks),checks)
 ```
 
-```sh
-# deploy/macos/preflight.sh
-#!/bin/sh
-set -eu
-uv run tuntunctl doctor preflight --mode "${1:-verify-installed}" --json \
-  | uv run python -c 'import sys; from tuntun_contracts.base import parse_bounded_json_value; raw=sys.stdin.buffer.read(65537); value=parse_bounded_json_value(raw,max_bytes=65536,max_depth=8,max_containers=128,max_structure_tokens=512); sys.stdout.buffer.write(raw+b"\n"); raise SystemExit(0 if isinstance(value,dict) and value.get("ok") is True else 78)'
+```python
+# apps/core/src/tuntun_core/deploy/bootstrap_preflight.py (clean production path)
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+from tuntun_core.deploy import native_bootstrap
+
+@dataclass(frozen=True,slots=True,init=False)
+class VerifiedBootstrapPreflight:
+    report:"PreflightReport"
+    approval:VerifiedBootstrapApproval
+    authority_kind:Literal["one_use_bootstrap"]
+    _seal:native_bootstrap.VerificationSeal
+
+def _verified_result(report,approval,seal):
+    value=object.__new__(VerifiedBootstrapPreflight)
+    object.__setattr__(value,"report",report)
+    object.__setattr__(value,"approval",approval)
+    object.__setattr__(value,"authority_kind","one_use_bootstrap")
+    object.__setattr__(value,"_seal",seal)
+    return value
+
+def production_clean_bootstrap_preflight(*,candidate_dir,authorization_path,
+        owner_trust_path,owner_presence_receipt_path,home):
+    from tuntun_core.deploy.preflight import run_clean_bootstrap_preflight
+
+    # Only the signed native bootstrap launcher can establish this descriptor-held
+    # context. Direct Python invocation or a caller-created object fails closed.
+    context=native_bootstrap.claim_verified_candidate_context(candidate_dir)
+    authorization=context.open_owner_kit_file(authorization_path)
+    owner_trust=context.open_owner_kit_file(owner_trust_path)
+    owner_presence=context.open_owner_kit_file(owner_presence_receipt_path)
+    target_sampler=ExternalHardwareBootstrapTargetKeySampler.open_bound_credential(
+        owner_trust,
+    )
+    verifier=BootstrapAuthorizationVerifier.from_descriptors(
+        authorization=authorization,owner_trust=owner_trust,
+        owner_presence_receipt=owner_presence,
+        candidate_manifest=context.candidate_manifest,
+        source_policy=context.source_policy,
+        runtime_tar=context.runtime_tar,runtime_manifest=context.runtime_manifest,
+        target_sampler=target_sampler,now=secure_utc_now,random_bytes=secrets.token_bytes,
+    )
+    approval=verifier.verify_candidate_target()
+    registry=TrustedCommandRegistry.open(
+        approval.execution_closure,context.materialized_runtime.root,
+        context.materialized_runtime.manifest,
+        expected_source_policy_sha256=approval.source_policy_sha256,
+    )
+    try:
+        report=run_clean_bootstrap_preflight(home,CommandRunner(registry),approval)
+    finally:
+        registry.close()
+    if not report.ok:
+        raise RuntimeError("clean bootstrap preflight failed")
+    seal=context.issue_one_use_preflight_seal(
+        approval=approval,report=report,candidate_identity=context.candidate_identity,
+    )
+    return _verified_result(report,approval,seal)
 ```
 
-`doctor.py` serializes the report without secrets/absolute paths; `service crash-probe` deliberately crashes a content-free helper and compares `/cores` plus `~/Library/Logs/DiagnosticReports` before/after. Port 8443 is allowed only when the strict LAN commissioning verifier reopens a current receipt proving the exact private-DNS mapping, matching local-CA certificate/SAN, every admin-device trust receipt, and no drift. The flag alone never widens loopback, and failure returns the service to loopback-only. No production bypass environment variable is accepted.
+The external clean-install entry is the candidate's exact signed `preflight-bootstrap` native executable, not a Python console script. `install.sh` passes it only the four path arguments above. Before Python starts, the launcher nofollow-opens and verifies the signed candidate manifest, source policy, selected-platform runtime tar and manifest, safely materializes the complete runtime into a fresh root-owned non-writable directory, reopens every entry, and establishes a one-use descriptor context in the native extension. `production_clean_bootstrap_preflight` rejects a process without that context; it has no `verified_approval`, target-sampler, dependency-injection, `Protocol`, environment, installed-container, or materialized-runtime path argument. It constructs the exact external-hardware sampler internally and validates that the sampled credential ID is the one signed into the owner kit.
+
+The successful API result is exactly `VerifiedBootstrapPreflight`, containing the complete successful `PreflightReport`, the complete `VerifiedBootstrapApproval`, literal `authority_kind="one_use_bootstrap"`, and a native, non-serializable, one-use seal bound to candidate identity, nonce, target, report, and retained context. A tuple, nonce, parsed JSON value, subclass, arbitrary strings, or a caller-created dataclass cannot satisfy the lifecycle consumer. The result never crosses a process or JSON boundary: the same native-launched production process passes it unchanged to `Installer.install_verified`. That method consumes the seal while atomically creating the first owner-only managed trust/journal root, exclusively publishes the fail-closed nonce-consumption claim, reopens it, and only then generates the installed target Keychain item. A replay or interrupted prior attempt therefore cannot initialize twice. It derives and atomically publishes the installed-purpose authority and Keychain pin, fsyncs and reopens both, then runs `production_installed_preflight("verify-installed", ...)`. A bootstrap record is never copied into the installed authority location.
+
+```python
+# apps/core/src/tuntun_core/cli/commands/doctor.py (production construction path)
+import base64,secrets
+from datetime import UTC,datetime
+from pathlib import Path
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from tuntun_core.deploy.host_approval import MacOSTargetKeySampler,SignedTrustedHostApprovalVerifier
+from tuntun_core.deploy.preflight import run_installed_preflight
+from tuntun_core.deploy.trusted_commands import CommandRunner,TrustedCommandRegistry
+
+AUTHORITY_RELATIVE_PATH=Path("Library/Application Support/Tuntun/data/trust/trusted-host-authority.json")
+OWNER_PIN_SERVICE="tuntun.trust.owner-authority"
+OWNER_PIN_ACCOUNT="current-v1"
+
+def production_preflight(mode,home,lan_console,container):
+    if mode not in {"verify-installed","upgrade","repair"}: raise ValueError("invalid installed mode")
+    authority_path=home/AUTHORITY_RELATIVE_PATH
+    trust=container.commissioning_trust_store.open_current(
+        service=OWNER_PIN_SERVICE,account=OWNER_PIN_ACCOUNT,
+    )
+    envelope=SignedTrustedHostApprovalVerifier.load_envelope(authority_path)
+    verifier=SignedTrustedHostApprovalVerifier(
+        envelope=envelope,
+        pinned_owner_public_key=Ed25519PublicKey.from_public_bytes(
+            base64.b64decode(trust.owner_public_key_b64,validate=True)
+        ),
+        expected_owner_key_id=trust.owner_key_id,
+        expected_generation=trust.authority_generation,
+        target_sampler=MacOSTargetKeySampler(container.local_presence_keychain_signer),
+        now=lambda:datetime.now(UTC),random_bytes=secrets.token_bytes,
+    )
+    approval=verifier.verify_current_target(expected_target_id=trust.opaque_target_id)
+    manifest=container.installed_release_manifest.current_descriptor_verified_path()
+    registry=TrustedCommandRegistry.open(
+        approval.execution_closure,manifest.release_root,manifest.path,
+        expected_source_policy_sha256=approval.source_policy_sha256,
+    )
+    try:
+        report=run_installed_preflight(mode,home,CommandRunner(registry),lan_console,approval)
+    finally:
+        registry.close()
+    return serialize_content_safe_report(report),0 if report.ok else 78
+```
+
+The Typer `doctor preflight` command has exactly one installed production registration and calls `production_preflight`; it cannot dispatch `install`. Clean install calls only the exact signed native candidate entry, which establishes the descriptor context and calls `production_clean_install`; no standalone Python preflight command is registered. Dependency override is available only through unit-test-only factories that are unreachable from registered CLI paths. The installed launcher invokes the descriptor-stable materialized runtime; no shell, `uv`, console-script shim, ambient package, archive importer, or loose installed module is loaded. `doctor.py` serializes the report without secrets/absolute paths; `service crash-probe` deliberately crashes a content-free helper and compares `/cores` plus `~/Library/Logs/DiagnosticReports` before/after. Port 8443 is allowed only when the strict LAN commissioning verifier reopens a current receipt proving the exact private-DNS mapping, matching local-CA certificate/SAN, every admin-device trust receipt, and no drift. The flag alone never widens loopback, and failure returns the service to loopback-only. No production bypass environment variable is accepted.
 
 - [ ] **Step 4: Run green**
 
-Run: `chmod +x deploy/macos/preflight.sh && shellcheck deploy/macos/preflight.sh && uv run pytest tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q && uv run ruff check apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py tests/unit/deploy tests/security/test_listener_allowlist.py && uv run mypy apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py`
+Run: `uv run pytest tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q && uv run ruff check packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py scripts/build_preflight_runtime.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy tests/security/test_listener_allowlist.py && uv run mypy packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py scripts/build_preflight_runtime.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py`
 
-Expected: PASS; every required command is observed, exact listeners pass, deliberate bad checks fail with exit `78`, and static checks exit `0`.
+Expected: PASS on `ubuntu-24.04` x86_64, `macos-26` arm64, and `macos-15-intel` x86_64; each row constructs the registry from its one exact command inventory and executes the descriptor-stable `uname` plus native-runtime import probe, and Ubuntu never opens a Darwin path. Clean home works without installed state; forged/stale/mismatched/replayed bootstrap artifacts, wrong/cross-platform command sets, wrong source/runtime/dependency closures, post-open swaps, and bootstrap use for restart/upgrade/repair fail before mutation/spawn; a Linux CI closure cannot authorize macOS host preflight; every required installed command is observed; exact listeners pass; timeout cleanup is finite and preserves the primary error; static checks exit `0`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git status --short
-git add apps/core/src/tuntun_core/deploy/__init__.py apps/core/src/tuntun_core/deploy/preflight.py deploy/macos/preflight.sh apps/core/src/tuntun_core/cli/commands/doctor.py apps/core/src/tuntun_core/cli/main.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py
+git add packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py docs/evidence/bootstrap-authorization.schema.json docs/evidence/preflight-runtime-manifest.schema.json docs/evidence/trusted-host-approval.schema.json security/phase1-preflight-source-policy-v1.json security/schemas/phase1-preflight-source-policy.schema.json scripts/build_preflight_runtime.py native/preflight-bootstrap/main.c native/preflight-spawn/preflight_spawn.c apps/core/pyproject.toml apps/core/src/tuntun_core/deploy/__init__.py apps/core/src/tuntun_core/deploy/bootstrap_preflight.py apps/core/src/tuntun_core/deploy/host_approval.py apps/core/src/tuntun_core/deploy/native_bootstrap.py apps/core/src/tuntun_core/deploy/native_spawn.py apps/core/src/tuntun_core/deploy/runtime_materialization.py apps/core/src/tuntun_core/deploy/trusted_commands.py apps/core/src/tuntun_core/deploy/preflight.py apps/core/src/tuntun_core/cli/commands/doctor.py apps/core/src/tuntun_core/cli/main.py tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
@@ -313,20 +1368,81 @@ git commit -m "build(deploy): enforce complete production preflight"
 - Create: `docs/operations/upgrade-rollback.md`
 - Create: `docs/operations/uninstall.md`
 
-**Interfaces:** `ReleaseLayout.for_home(home: Path) -> ReleaseLayout`; public `Installer.install(bundle: Path, version: str) -> Path`; public `UpgradeCoordinator.apply(bundle: Path, version: str) -> str`; `RecoveryCoordinator.resume(record_id: UUID) -> None`; `Installer.uninstall_preserving_state() -> tuple[Path,Path,Path]`. There is no public preflight/initialization/activation bypass flag. Private `_stage_verified` is callable only inside an active durable lifecycle record. `LifecycleOps.run_recorded_step(record, name, operation, inverse)` fsyncs a `started` record plus the idempotent inverse before invoking the operation, then fsyncs `completed|failed`; `attempt_all_and_record` never raises, attempts every applicable inverse, records every outcome, and finishes `recovered|needs_owner_recovery`. Its owner-only journal is sufficient to resume after a crash between an operation and its completion record. It consumes host-only preflight, hash/SBOM verification, purpose-root/Keychain/SQLCipher/audit-genesis/household-CA/backup-recipient/recovery initialization, encrypted backup, storage/audit/model/protocol verification, migration, readiness; rollback exit `70`. The newly started candidate must pass Privacy Shield, listener, storage, outbound-network, and commissioned-device probes inside the try/rollback boundary; readiness is evaluated only afterward.
+**Interfaces:** `ReleaseLayout.for_home(home: Path) -> ReleaseLayout`; signed-candidate public `install.sh --candidate PATH --bootstrap-authorization PATH --owner-trust PATH --owner-presence-receipt PATH`; same-process `production_clean_install(...) -> Path`; internal `Installer.install_verified(bundle: Path, version: str, preflight: VerifiedBootstrapPreflight) -> Path`; installed-only public `UpgradeCoordinator.apply(bundle: Path, version: str) -> str`; `RecoveryCoordinator.resume(record_id: UUID) -> None`; `Installer.uninstall_preserving_state() -> tuple[Path,Path,Path]`. There is no public preflight/initialization/activation bypass flag and no clean-install `tuntunctl` route. The exact signed native candidate entry establishes Task 1's descriptor context and calls `production_clean_install`; that function obtains one `VerifiedBootstrapPreflight` and passes that same object unchanged to `Installer.install_verified` before the context can close. The installer exact-type/read-only checks reject any unsuccessful report or existing runtime and never rerun preflight or reduce the approval to a nonce. `claim_bootstrap_and_begin_record` then verifies the native seal against the candidate/report without consuming it, creates and fsyncs the exclusive full-binding nonce claim as the first filesystem/Keychain mutation, and only after that durable claim exists atomically consumes the seal and returns the exact approval plus durable install record. A crash before claim publication has made no managed mutation and may retry; a crash or returned failure at/after publication leaves the fail-closed claim, so no second process or restart can reuse the authorization. The owner-only claim binds the full approval nonce, target, candidate, source/runtime closure and report digest; the adjacent journal record is fsynced/reopened and the claim is never removed on failure. Private `_stage_verified` is callable only inside that active record. `LifecycleOps.run_recorded_step(record, name, operation, inverse)` fsyncs a `started` record plus the idempotent inverse before invoking the operation, then fsyncs `completed|failed`; `attempt_all_and_record` never raises, attempts every applicable inverse, records every outcome, and finishes `recovered|needs_owner_recovery`. Its owner-only journal is sufficient to resume after a crash between an operation and its completion record. It consumes host-only bootstrap preflight, hash/SBOM verification, purpose-root/Keychain/installed-authority/SQLCipher/audit-genesis/household-CA/backup-recipient/recovery initialization, encrypted backup, storage/audit/model/protocol verification, migration, readiness; rollback exit `70`. The newly started candidate must pass Privacy Shield, listener, storage, outbound-network, and commissioned-device probes inside the try/rollback boundary; readiness is evaluated only afterward.
 
 - [ ] **Step 1: Write separate failing install, upgrade, rollback, and uninstall tests**
 
 ```python
 # tests/integration/deploy/test_atomic_install.py
 import pytest
-from tuntun_core.deploy.lifecycle import Installer,ReleaseLayout
+from tuntun_core.deploy.lifecycle import Installer,ReleaseLayout,production_clean_install
+
+def test_production_clean_install_composes_one_native_verified_result(
+    clean_home,signed_candidate,fresh_owner_bootstrap_kit,
+):
+    with signed_candidate.real_native_bootstrap_context(
+        fresh_owner_bootstrap_kit,
+    ) as trace:
+        installed=production_clean_install(
+            candidate_dir=signed_candidate.path,
+            authorization_path=fresh_owner_bootstrap_kit.authorization_path,
+            owner_trust_path=fresh_owner_bootstrap_kit.external_owner_trust_path,
+            owner_presence_receipt_path=fresh_owner_bootstrap_kit.presence_receipt_path,
+            home=clean_home.path,
+        )
+    record=clean_home.reopen_install_record()
+    assert installed==clean_home.current.resolve()
+    assert trace.events.count("bootstrap:cryptographic_verify")==1
+    assert trace.events.index("bootstrap:result_issued")+1==trace.events.index(
+        "bootstrap:result_consumed"
+    )
+    assert record.bootstrap_authority_kind=="one_use_bootstrap"
+    assert record.bootstrap_nonce==fresh_owner_bootstrap_kit.one_use_nonce
+    assert record.target_id==fresh_owner_bootstrap_kit.target_id
+    assert record.candidate_manifest_sha256==signed_candidate.manifest_sha256
+    assert record.preflight_result_sha256==trace.preflight_result_sha256
+
+@pytest.mark.parametrize("forged",(
+    "nonce:caller-string",("report","nonce"),object(),
+))
+def test_installer_rejects_noncapability_results_without_mutation(
+    tmp_path,fake_lifecycle_ops,forged,
+):
+    layout=ReleaseLayout.for_home(tmp_path)
+    with pytest.raises(RuntimeError,match="^trusted bootstrap unavailable$"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",forged,
+        )
+    assert fake_lifecycle_ops.mutations==[]
+
+def test_preflight_capability_is_bound_to_candidate_and_consumed_once(
+    tmp_path,fake_lifecycle_ops,
+):
+    layout=ReleaseLayout.for_home(tmp_path)
+    verified=fake_lifecycle_ops.verified_bootstrap_preflight
+    with pytest.raises(RuntimeError,match="trusted bootstrap unavailable"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"different-candidate.tar.zst","0.1.0-beta.1",verified,
+        )
+    fake_lifecycle_ops.fail_at="roots:init"
+    with pytest.raises(RuntimeError,match="injected roots:init"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",verified,
+        )
+    fake_lifecycle_ops.fail_at=None
+    assert not layout.current.exists()
+    with pytest.raises(RuntimeError,match="trusted bootstrap unavailable"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",verified,
+        )
+
 def test_clean_install_switches_only_after_verified_unpack(tmp_path,fake_lifecycle_ops):
     layout=ReleaseLayout.for_home(tmp_path)
-    installed=Installer(layout,fake_lifecycle_ops).install(tmp_path/"candidate.tar.zst","0.1.0-beta.1")
+    installed=Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert layout.current.resolve()==installed
     assert fake_lifecycle_ops.events==[
-        "recovery:begin:install","preflight:install","roots:init","bundle:verify","bundle:unpack","keychain:init",
+        "bootstrap_nonce:claim","bootstrap_result:consume","recovery:begin:install","roots:init","bundle:verify","bundle:unpack","keychain:init",
+        "installed_authority:publish","installed_authority:reopen",
         "sqlcipher:init","database:head:verify","audit_genesis:init","household_ca:init","backup_recipient:init",
         "recovery:ceremony","launch_agent:install","service:load","candidate:privacy_probe",
         "candidate:listener_probe","candidate:storage_probe","candidate:network_probe",
@@ -334,8 +1450,32 @@ def test_clean_install_switches_only_after_verified_unpack(tmp_path,fake_lifecyc
     ]
 def test_failed_clean_install_leaves_no_current_runtime(tmp_path,fake_lifecycle_ops):
     layout=ReleaseLayout.for_home(tmp_path); fake_lifecycle_ops.ready_result=False
-    with pytest.raises(RuntimeError,match="installed service readiness failed"): Installer(layout,fake_lifecycle_ops).install(tmp_path/"candidate.tar.zst","0.1.0-beta.1")
+    with pytest.raises(RuntimeError,match="installed service readiness failed"): Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert not layout.current.exists() and layout.data.exists() and layout.models.exists()
+
+def test_installed_authority_and_pin_are_reopened_before_any_installed_command_or_service(
+    tmp_path,fake_lifecycle_ops,
+):
+    layout=ReleaseLayout.for_home(tmp_path)
+    Installer(layout,fake_lifecycle_ops).install_verified(
+        tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
+    )
+    events=fake_lifecycle_ops.events
+    assert events.index("keychain:init") < events.index("installed_authority:publish")
+    assert events.index("installed_authority:reopen") < events.index("service:load")
+    assert events.index("installed_authority:reopen") < events.index("preflight:verify-installed")
+
+def test_interrupted_authority_publication_leaves_nonce_claim_and_never_starts_service(
+    tmp_path,fake_lifecycle_ops,
+):
+    fake_lifecycle_ops.fail_at="installed_authority:publish"
+    layout=ReleaseLayout.for_home(tmp_path)
+    with pytest.raises(RuntimeError):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
+        )
+    assert fake_lifecycle_ops.bootstrap_nonce_claim_exists is True
+    assert fake_lifecycle_ops.service_load_count==0
 
 def test_clean_install_accepts_exact_independent_search_namespace(
     tmp_path,fake_lifecycle_ops,
@@ -348,8 +1488,8 @@ def test_clean_install_accepts_exact_independent_search_namespace(
     fake_lifecycle_ops.optional_search_revision_present=True
     fake_lifecycle_ops.optional_search_down_revision=None
     layout=ReleaseLayout.for_home(tmp_path)
-    installed=Installer(layout,fake_lifecycle_ops).install(
-        tmp_path/"candidate.tar.zst","0.1.0-beta.1",
+    installed=Installer(layout,fake_lifecycle_ops).install_verified(
+        tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
     )
     assert layout.current.resolve()==installed
     assert fake_lifecycle_ops.observed_database_heads==("0008_prepared_mutations",)
@@ -357,9 +1497,23 @@ def test_clean_install_accepts_exact_independent_search_namespace(
         "search_0001_experimental_search",
     )
 
+def test_bootstrap_claim_failure_never_initializes_or_publishes_readiness(
+    tmp_path,fake_lifecycle_ops,
+):
+    fake_lifecycle_ops.fail_before_side_effect="bootstrap_nonce:claim"
+    layout=ReleaseLayout.for_home(tmp_path)
+    with pytest.raises(RuntimeError):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",
+            fake_lifecycle_ops.verified_bootstrap_preflight,
+        )
+    assert fake_lifecycle_ops.managed_mutations==[]
+    assert fake_lifecycle_ops.readiness_published is False
+
 @pytest.mark.parametrize("failed_step", [
-    "preflight:install", "roots:init", "bundle:verify", "bundle:unpack",
-    "keychain:init", "sqlcipher:init", "database:head:verify", "audit_genesis:init", "household_ca:init",
+    "roots:init", "bundle:verify", "bundle:unpack",
+    "keychain:init", "installed_authority:publish", "installed_authority:reopen",
+    "sqlcipher:init", "database:head:verify", "audit_genesis:init", "household_ca:init",
     "backup_recipient:init", "recovery:ceremony", "launch_agent:install",
     "service:load", "candidate:privacy_probe", "readiness:check",
 ])
@@ -369,7 +1523,7 @@ def test_clean_install_never_becomes_ready_with_incomplete_security_initializati
     fake_lifecycle_ops.fail_at=failed_step
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError):
-        Installer(layout,fake_lifecycle_ops).install(tmp_path/"candidate.tar.zst","0.1.0-beta.1")
+        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert not layout.current.exists()
     assert fake_lifecycle_ops.readiness_published is False
     assert fake_lifecycle_ops.recovery_record.completed_steps
@@ -389,8 +1543,8 @@ def test_clean_install_blocks_wrong_or_multiple_core_migration_heads(
     fake_lifecycle_ops.database_heads=database_heads
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration head mismatch"):
-        Installer(layout,fake_lifecycle_ops).install(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.facade_registration_count==0
     assert fake_lifecycle_ops.handler_composition_count==0
@@ -422,8 +1576,8 @@ def test_clean_install_blocks_mismatched_search_migration_namespace(
     fake_lifecycle_ops.optional_search_down_revision=down_revision
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
-        Installer(layout,fake_lifecycle_ops).install(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.facade_registration_count==0
     assert fake_lifecycle_ops.handler_composition_count==0
@@ -451,8 +1605,8 @@ def test_clean_install_blocks_wrong_search_version_table_or_head(
     fake_lifecycle_ops.optional_search_down_revision=None
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration head mismatch"):
-        Installer(layout,fake_lifecycle_ops).install(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.facade_registration_count==0
     assert fake_lifecycle_ops.handler_composition_count==0
@@ -477,8 +1631,8 @@ def test_clean_install_blocks_nonexact_search_feature_graph(
     fake_lifecycle_ops.optional_search_graph_mutation=mutation
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
-        Installer(layout,fake_lifecycle_ops).install(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.service_load_count==0
     assert not layout.current.exists()
@@ -498,8 +1652,8 @@ def test_clean_install_blocks_forked_mandatory_migration_tail(
     fake_lifecycle_ops.privacy_jobs_down_revision=privacy_down_revision
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
-        Installer(layout,fake_lifecycle_ops).install(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.service_load_count==0
     assert not layout.current.exists()
@@ -517,8 +1671,8 @@ def test_clean_install_blocks_nonexact_packaged_migration_graph(
     fake_lifecycle_ops.migration_graph_mutation=mutation
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
-        Installer(layout,fake_lifecycle_ops).install(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.service_load_count==0
     assert not layout.current.exists()
@@ -526,16 +1680,17 @@ def test_clean_install_blocks_nonexact_packaged_migration_graph(
 
 def test_public_install_has_no_security_bypass_flags():
     import inspect
-    assert tuple(inspect.signature(Installer.install).parameters) == (
-        "self","bundle","version",
+    assert tuple(inspect.signature(Installer.install_verified).parameters) == (
+        "self","bundle","version","preflight",
     )
 
-def test_preflight_failure_never_unlinks_an_existing_runtime(tmp_path,fake_lifecycle_ops):
+def test_forged_preflight_result_never_unlinks_an_existing_runtime(tmp_path,fake_lifecycle_ops):
     layout=ReleaseLayout.for_home(tmp_path)
     fake_lifecycle_ops.seed(layout,"0.1.0-alpha.1",b"encrypted-old")
-    fake_lifecycle_ops.fail_at="preflight:install"
-    with pytest.raises(RuntimeError):
-        Installer(layout,fake_lifecycle_ops).install(tmp_path/"candidate.tar.zst","0.1.0-beta.1")
+    with pytest.raises(RuntimeError,match="trusted bootstrap unavailable"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",object(),
+        )
     assert layout.current.resolve().name=="0.1.0-alpha.1"
 
 
@@ -544,7 +1699,7 @@ def test_clean_install_rejects_existing_runtime_without_overwrite(tmp_path,fake_
     fake_lifecycle_ops.seed(layout,"0.1.0-alpha.1",b"encrypted-old")
     prior_link=layout.current.readlink()
     with pytest.raises(RuntimeError,match="existing_runtime_detected_use_upgrade"):
-        Installer(layout,fake_lifecycle_ops).install(tmp_path/"candidate.tar.zst","0.1.0-beta.1")
+        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert layout.current.readlink()==prior_link
     assert layout.current.resolve().name=="0.1.0-alpha.1"
     assert fake_lifecycle_ops.bundle_unpack_calls==0
@@ -556,7 +1711,7 @@ def test_partial_initialization_failure_attempts_every_recorded_inverse_and_keep
     fake_lifecycle_ops.fail_after_side_effect="sqlcipher:init"
     fake_lifecycle_ops.cleanup_fault="keychain:rollback"
     with pytest.raises(RuntimeError,match="injected sqlcipher:init") as caught:
-        Installer(layout,fake_lifecycle_ops).install(tmp_path/"candidate.tar.zst","0.1.0-beta.1")
+        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert str(caught.value)=="injected sqlcipher:init"
     assert set(fake_lifecycle_ops.recovery_record.attempted_recovery_steps) >= {
         "staging:remove","initialization:rollback","current:restore","service:unload",
@@ -858,6 +2013,10 @@ import os,shutil
 from dataclasses import dataclass
 from pathlib import Path
 from tuntun_core.bootstrap.container import require_final_phase1_migration_state
+from tuntun_core.deploy import native_bootstrap
+from tuntun_core.deploy.bootstrap_preflight import (
+    VerifiedBootstrapPreflight,production_clean_bootstrap_preflight,
+)
 @dataclass(frozen=True,slots=True)
 class ReleaseLayout:
     runtime:Path; releases:Path; current:Path; data:Path; database:Path; models:Path; backups:Path; logs:Path; launch_agent:Path
@@ -901,16 +2060,27 @@ class Installer:
             ("launch_agent:remove",lambda:self.ops.remove_owned_launch_agent(self.layout.launch_agent,record) if self.ops.was_started(record,"launch_agent") else None),
         )
         self.ops.attempt_all_and_record(record,steps)
-    def install(self,bundle,version):
-        record=self.ops.begin_record("install",bundle=bundle,version=version)
+    def install_verified(self,bundle,version,preflight):
+        if (type(preflight) is not VerifiedBootstrapPreflight
+            or preflight.authority_kind!="one_use_bootstrap"
+            or preflight.report.ok is not True):
+            raise RuntimeError("trusted bootstrap unavailable")
+        native_bootstrap.verify_one_use_preflight_seal_read_only(
+            preflight._seal,approval=preflight.approval,report=preflight.report,
+            candidate_bundle=bundle,
+        )
+        if self.layout.current.exists() or self.layout.current.is_symlink():
+            raise RuntimeError("existing_runtime_detected_use_upgrade")
+        approval,record=self.ops.claim_bootstrap_and_begin_record(
+            preflight=preflight,
+            mode="install",bundle=bundle,version=version,
+        )
         destination=self.layout.releases/version
         try:
-            _recorded(self.ops,record,"preflight",lambda:self.ops.preflight("install"),{"action":"none"})
-            if self.layout.current.exists() or self.layout.current.is_symlink():
-                raise RuntimeError("existing_runtime_detected_use_upgrade")
             _recorded(self.ops,record,"purpose_roots",lambda:self.ops.initialize_purpose_roots(self.layout,mode=0o700),{"action":"rollback_initialized_roots"})
             destination=self._stage_verified(bundle,version,record)
             _recorded(self.ops,record,"keychain",self.ops.initialize_keychain_items,{"action":"delete_record_owned_keychain_items"})
+            _recorded(self.ops,record,"installed_authority",lambda:self.ops.publish_and_reopen_installed_authority(approval,destination),{"action":"remove_record_owned_installed_authority_and_pin"})
             _recorded(self.ops,record,"sqlcipher",lambda:self.ops.initialize_sqlcipher_and_migrate(self.layout.database),{"action":"restore_or_remove_record_owned_database"})
             _recorded(self.ops,record,"migration_head_verified",lambda:require_release_database_head(self.ops,self.layout.database),{"action":"none"})
             _recorded(self.ops,record,"audit_genesis",self.ops.initialize_and_verify_audit_genesis,{"action":"rollback_record_owned_audit_genesis"})
@@ -935,6 +2105,22 @@ class Installer:
         self.ops.unload(self.layout.launch_agent); self.layout.launch_agent.unlink(missing_ok=True)
         if self.layout.runtime.exists(): shutil.rmtree(self.layout.runtime)
         return self.layout.data,self.layout.models,self.layout.backups
+
+def production_clean_install(*,candidate_dir,authorization_path,owner_trust_path,
+        owner_presence_receipt_path,home):
+    # The native bootstrap context supplies the signed bundle/version identity;
+    # neither value is accepted from a caller or environment variable.
+    preflight=production_clean_bootstrap_preflight(
+        candidate_dir=candidate_dir,authorization_path=authorization_path,
+        owner_trust_path=owner_trust_path,
+        owner_presence_receipt_path=owner_presence_receipt_path,home=home,
+    )
+    bundle,version=native_bootstrap.bound_install_inputs(preflight._seal)
+    layout=ReleaseLayout.for_home(home)
+    return Installer(layout,ProductionLifecycleOps.for_native_context()).install_verified(
+        bundle,version,preflight,
+    )
+
 class UpgradeCoordinator:
     def __init__(self,layout,ops): self.layout,self.ops=layout,ops
     def apply(self,bundle,version):
@@ -999,7 +2185,7 @@ class UpgradeCoordinator:
             raise primary.with_traceback(primary.__traceback__)
 ```
 
-Shell files expose only `tuntunctl update install|apply|resume-recovery|uninstall`; they do not accept `--skip-preflight`, `--skip-init`, `--stage-only`, `--no-activate`, or equivalent environment variables. The plist sets explicit current/config/log paths, `KeepAlive`, throttle 10, `SoftResourceLimits/Core=0`, files `1024`, processes `128`, and no secret environment. Clean install opens its durable record before host preflight, creates owner-only purpose-separated roots, provisions and migrates the SQLCipher database, then queries the actual core and feature-version rows and enumerates both packaged migration namespaces before any facade, handler, service load, or readiness side effect. Every build packages exactly the linear core revisions `0001_foundation` through sole `alembic_version` head `0008_prepared_mutations`, with every frozen parent edge and no branch label, dependency, extra base, fork, merge, or orphan. An absent-search build omits the search migration namespace and `alembic_version_experimental_search` table. An enabled build adds the independent one-revision namespace `search_0001_experimental_search` (`down_revision=None`) and that exact sole feature-table head; it never extends or forks the core graph. Any inventory, edge, metadata, feature-state, version-table, or head mismatch blocks. Only then does install append and reopen audit genesis, create the household CA, configure the age backup recipient, and complete a restore/recovery ceremony before linking or readiness. Every completed initialization boundary is fsync-recorded and has an idempotent inverse. Upgrade verifies an encrypted backup and stages the candidate. For enabled-to-absent search it stops the prior service, obtains fresh local owner proof, and invokes the still-installed feature manager to withdraw dispatch, revoke unconsumed children, drain/cancel and conservatively settle begun attempts once, downgrade/remove both feature tables and its version table, and issue a signed content-minimal removal receipt. The deployer verifies that receipt and namespace absence, and records database restoration as the inverse, all before switching the artifact link; a failure during removal or any later candidate step restores the backup and prior runtime. Other transitions migrate only after switching to scripts that actually package their namespace. The same core/feature packaging/head gate runs before starting the candidate, followed by Privacy Shield generation/ack truth, exact listeners, SQLCipher/audit/roots, observed outbound DNS/socket policy, and commissioned Reachy identity/transport probes before readiness and protocol verification. Failure recovery attempts every step even when an earlier step fails, persists each outcome, retains the original exception as the public failure, and ends `needs_owner_recovery` rather than claiming rollback when any inverse failed. `resume-recovery` accepts only the opaque durable record ID and repeats remaining idempotent inverses; it cannot stage or activate a candidate. Docs contain exact commands and preserving semantics.
+The signed candidate shell exposes clean `install` only with the four explicit bootstrap-kit/candidate paths above; installed `tuntunctl update` exposes only `apply|repair|resume-recovery|uninstall`. Neither accepts `--skip-preflight`, `--skip-init`, `--stage-only`, `--no-activate`, direct approval strings, serialized preflight results, or equivalent environment variables. The plist sets explicit current/config/log paths, `KeepAlive`, throttle 10, `SoftResourceLimits/Core=0`, files `1024`, processes `128`, and no secret environment. Clean install completes descriptor-verified bootstrap preflight before managed-state mutation and passes the one sealed `VerifiedBootstrapPreflight` unchanged through the same process. The lifecycle consumer verifies it read-only, then its first managed mutation exclusively publishes/fsyncs the full approval/report claim and only afterward consumes the seal and opens its durable record. It never reruns preflight or treats a nonce as sufficient authority; pre-claim crashes may safely retry and post-claim failures can never reuse the authorization. It creates owner-only purpose-separated roots and the target Keychain item, derives/publishes/reopens the installed-purpose authority plus owner pin, and only then provisions and migrates SQLCipher. It queries the actual core and feature-version rows and enumerates both packaged migration namespaces before any facade, handler, service load, installed command, or readiness side effect. Every build packages exactly the linear core revisions `0001_foundation` through sole `alembic_version` head `0008_prepared_mutations`, with every frozen parent edge and no branch label, dependency, extra base, fork, merge, or orphan. An absent-search build omits the search migration namespace and `alembic_version_experimental_search` table. An enabled build adds the independent one-revision namespace `search_0001_experimental_search` (`down_revision=None`) and that exact sole feature-table head; it never extends or forks the core graph. Any inventory, edge, metadata, feature-state, version-table, or head mismatch blocks. Only then does install append and reopen audit genesis, create the household CA, configure the age backup recipient, and complete a restore/recovery ceremony before linking or readiness. Every completed initialization boundary is fsync-recorded and has an idempotent inverse; the nonce claim intentionally survives every failure so the same authorization cannot restart. Upgrade/repair require the reopened installed authority and Keychain pin, invoke Privacy Shield/provider drain, verify an encrypted backup, and stage the candidate; they never invoke bootstrap verification. For enabled-to-absent search they stop the prior service, obtain fresh local owner proof, and invoke the still-installed feature manager to withdraw dispatch, revoke unconsumed children, drain/cancel and conservatively settle begun attempts once, downgrade/remove both feature tables and its version table, and issue a signed content-minimal removal receipt. The deployer verifies that receipt and namespace absence, and records database restoration as the inverse, all before switching the artifact link; a failure during removal or any later candidate step restores the backup and prior runtime. Other transitions migrate only after switching to scripts that actually package their namespace. The same core/feature packaging/head gate runs before starting the candidate, followed by Privacy Shield generation/ack truth, exact listeners, SQLCipher/audit/roots, observed outbound DNS/socket policy, and commissioned Reachy identity/transport probes before readiness and protocol verification. Failure recovery attempts every step even when an earlier step fails, persists each outcome, retains the original exception as the public failure, and ends `needs_owner_recovery` rather than claiming rollback when any inverse failed. `resume-recovery` accepts only the opaque durable record ID and repeats remaining idempotent inverses; it cannot stage or activate a candidate. Docs contain exact commands and preserving semantics.
 
 - [ ] **Step 4: Run green**
 
@@ -1563,7 +2749,8 @@ def test_installer_and_recovery_are_serialized_by_one_process_wide_lock(
     held=reachy_install_shell.pause_with_lock(first,state="wheels_installed")
     competing=reachy_install_shell.start_contender(contender,first,timeout_seconds=30)
     assert competing.has_not_mutated_journal_current_or_releases
-    held.release(); first_result=held.wait(); contender_result=competing.wait()
+    held.release(); first_result=held.wait(timeout_seconds=35)
+    contender_result=competing.wait(timeout_seconds=35)
     assert first_result.exit_code==0
     assert contender_result.exit_code in {0,65,70}
     assert reachy_install_shell.maximum_simultaneous_lock_holders==1
@@ -1806,7 +2993,7 @@ def test_uninstall_serializes_with_install_and_boot_recovery(
     held=reachy_install_shell.pause_uninstall_with_global_lock()
     competing=reachy_install_shell.start_contender(contender,archive,timeout_seconds=30)
     assert competing.has_not_mutated_journal_current_or_releases
-    held.release(); held.wait(); competing.wait()
+    held.release(); held.wait(timeout_seconds=35); competing.wait(timeout_seconds=35)
     assert reachy_install_shell.maximum_simultaneous_lock_holders==1
 
 
@@ -7128,7 +8315,7 @@ Tasks 5–10 commit implementation and synthetic fixtures only. After Task 10, f
 
 ### Ceremony A: qualify exact bytes, commission a clean target, then collect evidence
 
-For the initial household release, this ceremony runs on the one physical Intel Mac during the declared maintenance window above. Before the first command, verify the encrypted backup and recovery key, stop ordinary office use, and record the prior managed-runtime state (normally absent on first install). After qualification, preserve the exact signed role bytes outside the Tuntun managed runtime roots before the clean-target check. A later upgrade that cannot prove a clean evidence target on this same Mac remains an upgrade candidate only; it cannot mint fresh clean-install evidence from a VM or CI runner.
+For the initial household release, this ceremony runs on the independently owner-approved opaque Core inventory target, currently verified as Darwin `arm64`, during the declared maintenance window above. The trusted preflight must authenticate that approval and match the current target before architecture compatibility is considered. Before the first command, verify the encrypted backup and recovery key, stop ordinary office use, and record the prior managed-runtime state (normally absent on first install). After qualification, preserve the exact signed role bytes outside the Tuntun managed runtime roots before the clean-target check. A later upgrade that cannot prove a clean evidence target on this same Mac remains an upgrade candidate only; it cannot mint fresh clean-install evidence from a VM or CI runner. Hosted or physical Intel macOS evidence remains a supported-distribution row until the owner supplies a new trusted target approval and repeats the household real-host probes for an Intel target.
 
 ```bash
 test -z "$(git status --porcelain)"

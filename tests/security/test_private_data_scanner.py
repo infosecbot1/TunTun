@@ -298,6 +298,7 @@ def test_opened_working_candidate_must_match_snapshot_identity(
 @pytest.mark.parametrize("kind", ("fifo", "socket"))
 def test_unignored_special_entry_missing_from_git_inventory_blocks(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     kind: str,
 ) -> None:
     root = _source_repository(tmp_path)
@@ -307,7 +308,8 @@ def test_unignored_special_entry_missing_from_git_inventory_blocks(
         os.mkfifo(special)
     else:
         listener = socket.socket(socket.AF_UNIX)
-        listener.bind(str(special))
+        monkeypatch.chdir(root)
+        listener.bind(special.name)
     try:
         assert any(
             item.path == special and item.reason == "filesystem-special" for item in scan(root)

@@ -1,4 +1,5 @@
 import typer
+from tuntun_core.cli.commands.simulate import simulate
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -12,3 +13,6 @@ def main() -> None:
 def version() -> None:
     """Print the application version without reading configuration or secrets."""
     typer.echo("0.1.0.dev0")
+
+
+app.command("simulate")(simulate)

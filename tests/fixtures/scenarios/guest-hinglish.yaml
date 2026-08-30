@@ -1,0 +1,7 @@
+schema_version: "1.0"
+name: guest-hinglish
+identity: guest
+transcript: synthetic-namaste-hello
+response: synthetic-namaste-welcome
+language: hinglish
+outcome: completed

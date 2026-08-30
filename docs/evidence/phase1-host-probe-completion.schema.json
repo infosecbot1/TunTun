@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tuntun.local/schemas/evidence/phase1-host-probe-completion.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "completion_id",
+    "run_id",
+    "attempt_id",
+    "receipt_sha256",
+    "completion_binding_sha256",
+    "state"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://tuntun.local/schemas/evidence/phase1-host-probe-completion.schema.json"
+    },
+    "completion_id": {
+      "const": "phase1.macos-keychain.host-probe-completion.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "receipt_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "completion_binding_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "state": {
+      "const": "complete"
+    }
+  }
+}

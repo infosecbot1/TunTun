@@ -1,0 +1,7 @@
+# Scenario execution boundary
+
+The repository security gate is `make scenario-check`. It starts `uv` with `--offline --no-sync` and starts the supervisor with Python `-I -S`; ambient `PYTHONPATH`, `sitecustomize`, and executable `.pth` startup hooks therefore do not run before the supervisor installs its worker guards.
+
+The wheel-installed `tuntunctl` entry point is a Python console script. Python processes `sitecustomize` and executable `.pth` files before that script can run, so `tuntunctl simulate` requires an owner-controlled, non-writable-to-others virtual environment and makes no claim to contain hostile interpreter startup customization. Use the isolated repository Make gate when verifying a checkout. A portable installed command with the same pre-startup boundary would require a separately packaged native or POSIX launcher and is outside the current Python wheel contract.
+
+Inside either supervised worker, Tuntun denies the supported Python process/session APIs and their Python audit events before loading workspace or site packages. Workspace modules are read from retained, nofollow directory descriptors. This is application-level containment, not an operating-system sandbox: reviewed workspace code, native extension modules, the Python interpreter, and the exact virtual-environment packages are trusted. Native code that invokes process syscalls directly can bypass Python wrappers and audit hooks and must not be installed from an untrusted source.
