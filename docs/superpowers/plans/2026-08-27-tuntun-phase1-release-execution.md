@@ -84,7 +84,7 @@
 - Installed `verify-installed`, `upgrade`, and `repair` consume only the closed `TrustedHostAuthorityRecord`, the commissioned Keychain owner-authority pin at service/account `tuntun.trust.owner-authority/current-v1`, a fresh target-key proof, and the installed signed release/runtime manifests. They reject bootstrap authorizations. After clean host checks pass, lifecycle initialization creates the managed roots and target Keychain key, then atomically publishes and reopens the installed authority record and Keychain pin before any installed preflight or service start.
 - Produces: `SignedBootstrapAuthorization.signing_bytes() -> bytes`; `BootstrapAuthorizationVerifier.verify_candidate_target(...) -> VerifiedBootstrapApproval`; `production_clean_bootstrap_preflight(...) -> VerifiedBootstrapPreflight`; `SignedTrustedHostAuthorityRecord.signing_bytes() -> bytes`; `SignedTrustedHostApprovalVerifier.verify_current_target(expected_target_id=...) -> VerifiedHostApproval`; `TrustedCommandRegistry.open(...) -> TrustedCommandRegistry`; `TrustedCommandRegistry.prepare(argv) -> PreparedCommand`; `CommandRunner.run(argv) -> CommandResult`; `run_clean_bootstrap_preflight(...) -> PreflightReport`; `run_installed_preflight(mode, ...) -> PreflightReport`; JSON exit `0` or `78`. `VerifiedBootstrapPreflight` is one closed exact-type result containing both the successful `PreflightReport` and the full `VerifiedBootstrapApproval`; it is passed unchanged into `Installer.install_verified` and is never reduced to a nonce or tuple.
 - Authority is executable rather than structural. The candidate's signed release manifest names the exact nofollow descriptor-verified native bootstrap launcher, deterministic platform runtime tar, and closed runtime manifest. Before any Python import, the native launcher verifies the candidate signature and manifest, safely materializes the exact tar inventory into a fresh root-owned non-writable ephemeral runtime tree outside every Tuntun managed root, reopens every entry nofollow, and retains the tree/entry descriptors. Production clean install then constructs `BootstrapAuthorizationVerifier` directly from descriptor-held artifacts inside that tree; production installed preflight constructs `SignedTrustedHostApprovalVerifier` directly from the exact owner-only installed authority path, Keychain pin, `MacOSTargetKeySampler`, secure clock, and CSPRNG. No `Protocol`, arbitrary string, architecture/model/product/year observation, diagnostic receipt, caller-created approval object, environment variable, or CLI override can satisfy either production path.
-- Both authority records bind `source_policy_sha256` and a platform-specific signed `TrustedExecutionClosure`: exact system-binary content/execution identities, the materialized Python identity/digest, native spawn bridge digest, deterministic runtime-tar digest, and closed runtime-manifest digest. The runtime inventory contains the complete Tuntun and third-party closure, including the selected platform's CPython standard library, `pydantic_core` extension, `cryptography` native extension and every linked non-system library; native/dynamic modules are required to match their platform tag and manifest entry rather than being rejected. The registry exact-compares the actual policy digest and every closure field and retains the root and all executable/runtime descriptors.
+- Both authority records bind `source_policy_sha256` and a platform-specific signed `TrustedExecutionClosure`: exact system-binary content/execution identities, the materialized Python identity/digest, native spawn bridge digest, deterministic runtime-tar digest, and closed runtime-manifest digest. The source policy contains exactly three command inventories: Darwin arm64 and Darwin x86_64 each bind the nine macOS preflight binaries, while Linux x86_64 binds only `/usr/bin/uname`, `/usr/bin/id`, and `/usr/bin/stat` for the distribution-CI registry/native-runtime exercise. A signed `platform_id` selects exactly one inventory. A caller/platform or expected-command-key mismatch fails before any system-command descriptor is opened; the descriptor-held closure loader then rejects missing, extra, cross-platform, nonexistent, or wrong-content policy paths before spawn or import. Linux never opens a Darwin path and the Linux inventory cannot authorize household commissioning or macOS host checks. The runtime inventory contains the complete Tuntun and third-party closure, including the selected platform's CPython standard library, `pydantic_core` extension, `cryptography` native extension and every linked non-system library; native/dynamic modules are required to match their platform tag and manifest entry rather than being rejected. The registry exact-compares the actual policy digest and every closure field and retains the root and all executable/runtime descriptors.
 - `TrustedCommandRegistry.prepare` returns an opaque `PreparedCommand`, never a pathname. On Linux the C bridge executes the retained executable descriptor with `execveat(..., AT_EMPTY_PATH)` in a new process group. Darwin has no `fexecve`; there the bridge uses `posix_spawn` with `POSIX_SPAWN_START_SUSPENDED`, compares the suspended child's `csops` CodeDirectory hash and executable-vnode identity with the retained manifest-bound executable, kills on mismatch before any child instruction can run, and only then sends `SIGCONT`. The same bridge governs the materialized Python and fixed system binaries. A resolve-to-exec pathname replacement therefore either runs the retained Linux descriptor or is rejected while suspended on Darwin; replacement bytes never execute.
 - `install` performs host-only checks and never assumes initialized state. `verify-installed` checks initialized assets and the live process. `upgrade` and `repair` add Privacy Shield/provider drain and cannot fall back to the bootstrap path.
 
@@ -95,7 +95,9 @@
 from pathlib import Path
 
 import pytest
-from tuntun_contracts.host_approval import TrustedExecutionClosure
+from tuntun_contracts.host_approval import (
+    DarwinTrustedExecutionClosure,LinuxTrustedExecutionClosure,
+)
 from tuntun_core.deploy.bootstrap_preflight import VerifiedBootstrapApproval
 from tuntun_core.deploy.host_approval import VerifiedHostApproval
 from tuntun_core.deploy.preflight import (
@@ -105,7 +107,8 @@ from tuntun_core.deploy.preflight import (
 SYSTEM_DIGESTS={name:"c"*64 for name in (
     "uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof",
 )}
-CLOSURE=TrustedExecutionClosure(
+CLOSURE=DarwinTrustedExecutionClosure(
+    platform_id="darwin-arm64",
     system_executable_sha256=SYSTEM_DIGESTS,python_sha256="c"*64,
     runtime_manifest_sha256="d"*64,
     preflight_runtime_tar_sha256="e"*64,native_spawn_bridge_sha256="f"*64,
@@ -113,6 +116,12 @@ CLOSURE=TrustedExecutionClosure(
 APPROVAL=VerifiedHostApproval("target:opaque-01","a"*64,"b"*64,CLOSURE)
 BOOTSTRAP=VerifiedBootstrapApproval(
     "target:opaque-01","a"*64,"b"*64,CLOSURE,"nonce:opaque-01",
+)
+LINUX_CLOSURE=LinuxTrustedExecutionClosure(
+    platform_id="linux-x86_64",
+    system_executable_sha256={name:"c"*64 for name in ("uname","id","stat")},
+    python_sha256="c"*64,runtime_manifest_sha256="d"*64,
+    preflight_runtime_tar_sha256="e"*64,native_spawn_bridge_sha256="f"*64,
 )
 
 class Runner:
@@ -178,6 +187,13 @@ def test_architecture_match_cannot_replace_trusted_owner_target():
     with pytest.raises(RuntimeError, match="trusted owner target unavailable"):
         run_installed_preflight("upgrade",Path("/Users/test"),Runner(),False,object())
 
+def test_linux_distribution_ci_closure_cannot_authorize_macos_host_preflight():
+    linux_bootstrap=VerifiedBootstrapApproval(
+        "target:opaque-01","a"*64,"b"*64,LINUX_CLOSURE,"nonce:opaque-01",
+    )
+    with pytest.raises(RuntimeError,match="^trusted owner target unavailable$"):
+        run_clean_bootstrap_preflight(Path("/Users/test"),Runner(),linux_bootstrap)
+
 def test_command_failure_does_not_disclose_arguments_or_output():
     class Failing:
         def run(self,argv): return CommandResult(1,"private-stdout","private-stderr")
@@ -221,6 +237,7 @@ def signed_record(*, target_id="target:opaque-01", target_key_sha256=sha256(TARG
         target_public_key_sha256=target_key_sha256,valid_from=valid_from,
         valid_until=valid_until,source_policy_sha256="b"*64,
         execution_closure={
+            "platform_id":"darwin-arm64",
             "system_executable_sha256":{name:"c"*64 for name in (
                 "uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof",
             )},
@@ -353,12 +370,35 @@ def test_upgrade_requires_reopened_installed_record_pin_and_current_target_key(
 
 ```python
 # tests/unit/deploy/test_trusted_commands.py
+import platform
+
 import pytest
 from tuntun_core.deploy import trusted_commands
 from tuntun_core.deploy.trusted_commands import (
     CLOSED_COMMAND_ENV,CommandResult,CommandRunner,PreparedCommand,
-    TrustedCommandRegistry,bounded_wait,
+    PLATFORM_FIXED_EXECUTABLES,TrustedCommandRegistry,bounded_wait,
 )
+
+CI_PLATFORM_IDS={
+    ("Linux","x86_64"):"linux-x86_64",
+    ("Darwin","arm64"):"darwin-arm64",
+    ("Darwin","x86_64"):"darwin-x86_64",
+}
+EXPECTED_PLATFORM_COMMANDS={
+    "linux-x86_64":{
+        "uname":"/usr/bin/uname","id":"/usr/bin/id","stat":"/usr/bin/stat",
+    },
+    "darwin-arm64":{
+        "uname":"/usr/bin/uname","id":"/usr/bin/id","fdesetup":"/usr/bin/fdesetup",
+        "security":"/usr/bin/security","route":"/sbin/route","ipconfig":"/usr/sbin/ipconfig",
+        "stat":"/usr/bin/stat","plutil":"/usr/bin/plutil","lsof":"/usr/sbin/lsof",
+    },
+    "darwin-x86_64":{
+        "uname":"/usr/bin/uname","id":"/usr/bin/id","fdesetup":"/usr/bin/fdesetup",
+        "security":"/usr/bin/security","route":"/sbin/route","ipconfig":"/usr/sbin/ipconfig",
+        "stat":"/usr/bin/stat","plutil":"/usr/bin/plutil","lsof":"/usr/sbin/lsof",
+    },
+}
 
 def registry_fixture(materialized_runtime):
     return TrustedCommandRegistry.open(
@@ -367,6 +407,41 @@ def registry_fixture(materialized_runtime):
         materialized_runtime.manifest_path,
         expected_source_policy_sha256=materialized_runtime.source_policy_sha256,
     )
+
+def test_every_fixed_ci_row_opens_exact_platform_registry_and_native_runtime(
+    materialized_runtime,
+):
+    platform_id=CI_PLATFORM_IDS[(platform.system(),platform.machine())]
+    assert materialized_runtime.platform_id==platform_id
+    assert set(PLATFORM_FIXED_EXECUTABLES)==set(EXPECTED_PLATFORM_COMMANDS)
+    assert {
+        name:str(path) for name,path in PLATFORM_FIXED_EXECUTABLES[platform_id].items()
+    }==EXPECTED_PLATFORM_COMMANDS[platform_id]
+    assert all(path.is_absolute() and path.is_file()
+               for path in PLATFORM_FIXED_EXECUTABLES[platform_id].values())
+    registry=registry_fixture(materialized_runtime)
+    try:
+        assert registry.command_names==tuple(sorted(EXPECTED_PLATFORM_COMMANDS[platform_id]))
+        assert CommandRunner(registry).run(("uname","-m")).returncode==0
+        result=CommandRunner(registry).run(("tuntunctl","diagnostics","runtime-imports"))
+        assert result.returncode==0
+        assert materialized_runtime.assert_closed_import_receipt(result.stdout)
+    finally:
+        registry.close()
+
+@pytest.mark.parametrize("mutation",(
+    "unknown_platform","missing_platform","extra_platform","missing_command",
+    "extra_command","cross_platform_command","closure_platform_mismatch",
+))
+def test_platform_command_inventory_mutations_fail_closed(
+    mutation,materialized_runtime,
+):
+    mutated=materialized_runtime.with_platform_command_mutation(mutation)
+    with pytest.raises(RuntimeError,match="^trusted executable unavailable$"):
+        TrustedCommandRegistry.open(
+            mutated.expected_closure,mutated.root_path,mutated.manifest_path,
+            expected_source_policy_sha256=mutated.source_policy_sha256,
+        )
 
 def test_path_bash_env_pythonpath_and_shims_cannot_redirect_commands(
     monkeypatch,tmp_path,materialized_runtime,
@@ -497,10 +572,19 @@ def test_darwin_replacement_is_killed_while_still_suspended(
 # tests/integration/deploy/test_preflight_runtime_build.py
 import importlib.machinery
 import json
+import platform
 from pathlib import Path
 from scripts.build_preflight_runtime import build_preflight_runtime
 from tuntun_core.deploy.runtime_materialization import materialize_verified_runtime
-from tuntun_core.deploy.trusted_commands import CommandRunner,TrustedCommandRegistry
+from tuntun_core.deploy.trusted_commands import (
+    CommandRunner,PLATFORM_FIXED_EXECUTABLES,TrustedCommandRegistry,
+)
+
+CI_PLATFORM_IDS={
+    ("Linux","x86_64"):"linux-x86_64",
+    ("Darwin","arm64"):"darwin-arm64",
+    ("Darwin","x86_64"):"darwin-x86_64",
+}
 
 def test_two_builds_are_identical_and_production_runtime_imports_native_modules(
     tmp_path,locked_runtime_input,root_owned_runtime_parent,
@@ -518,6 +602,10 @@ def test_two_builds_are_identical_and_production_runtime_imports_native_modules(
         expected_source_policy_sha256=first.source_policy_sha256,
     )
     try:
+        platform_id=CI_PLATFORM_IDS[(platform.system(),platform.machine())]
+        assert first.platform_id==platform_id
+        assert registry.command_names==tuple(sorted(PLATFORM_FIXED_EXECUTABLES[platform_id]))
+        assert CommandRunner(registry).run(("uname","-m")).returncode==0
         result=CommandRunner(registry).run(
             ("tuntunctl","diagnostics","runtime-imports","--json"),
         )
@@ -603,9 +691,9 @@ class SignedBootstrapAuthorization(ContractModel):
 
 `docs/evidence/bootstrap-authorization.schema.json` is generated byte-for-byte from this contract, carries `$schema: https://json-schema.org/draft/2020-12/schema`, `$id: https://tuntun.local/schemas/evidence/bootstrap-authorization.schema.json`, and sets `additionalProperties:false` on the envelope and record. It has exactly the fields above, RFC 3339 `date-time` formats with runtime format assertion, the literal purpose/version, the positive bounded generation, and the exact digest/target/nonce/signature patterns. The model validator and JSON Schema tests additionally assert the half-open validity interval is no longer than 15 minutes. The concrete `apps/core/src/tuntun_core/deploy/bootstrap_preflight.py` verifier consumes paths, not parsed models; production constructs its exact-type return capability only after cryptographic verification, while unit-only fixtures can construct it directly without becoming a production authority path.
 
-`packages/contracts/src/tuntun_contracts/preflight_runtime.py` defines the closed `PreflightRuntimeManifestV1`: exact schema/version/runtime ID, one literal platform ID (`darwin-arm64`, `darwin-x86_64`, or `linux-x86_64`), CPython ABI/tag, source commit, source-policy digest, deterministic runtime-tar digest, relative materialized Python/native-spawn paths and digests, aggregate inventory digest, required native-module records for `pydantic_core._pydantic_core` and `cryptography.hazmat.bindings._rust`, linked-library identities, and a sorted 1..50,000 tuple of `RuntimeFileV1(path, kind="regular"|"directory", mode=0o444|0o555, size<=268435456, sha256)`. Paths are canonical relative POSIX paths with no empty/dot/dot-dot/backslash/control component, casefold/NFC collision, duplicate, or link/special type. `docs/evidence/preflight-runtime-manifest.schema.json` is generated byte-for-byte with recursive `additionalProperties:false`. `security/schemas/phase1-preflight-source-policy.schema.json` closes the exact source policy fields: schema/version/policy ID, native bootstrap/spawn source digests, entrypoint `tuntun_core.cli`, isolation flags exactly `["-I","-S"]`, exact environment-key/value map, output/deadline/count/byte bounds, and the fixed system-executable map. The checked-in `security/phase1-preflight-source-policy-v1.json` validates canonically against it.
+`packages/contracts/src/tuntun_contracts/preflight_runtime.py` defines the closed `PreflightRuntimeManifestV1`: exact schema/version/runtime ID, one literal platform ID (`darwin-arm64`, `darwin-x86_64`, or `linux-x86_64`), CPython ABI/tag, source commit, source-policy digest, deterministic runtime-tar digest, relative materialized Python/native-spawn paths and digests, aggregate inventory digest, required native-module records for `pydantic_core._pydantic_core` and `cryptography.hazmat.bindings._rust`, linked-library identities, and a sorted 1..50,000 tuple of `RuntimeFileV1(path, kind="regular"|"directory", mode=0o444|0o555, size<=268435456, sha256)`. Paths are canonical relative POSIX paths with no empty/dot/dot-dot/backslash/control component, casefold/NFC collision, duplicate, or link/special type. `docs/evidence/preflight-runtime-manifest.schema.json` is generated byte-for-byte with recursive `additionalProperties:false`. `security/schemas/phase1-preflight-source-policy.schema.json` closes the exact source policy fields: schema/version/policy ID, native bootstrap/spawn source digests, entrypoint `tuntun_core.cli`, isolation flags exactly `["-I","-S"]`, exact environment-key/value map, output/deadline/count/byte bounds, and `platform_fixed_system_executables` with exactly the three platform keys and the exact absolute-path command maps shown below. The checked-in `security/phase1-preflight-source-policy-v1.json` validates canonically against it; schema and runtime validators reject unknown/missing platforms, missing/extra command names, relative paths, a command mapped to a different path, a host/platform mismatch, and any closure whose discriminated command-digest type disagrees with its signed platform ID.
 
-`scripts/build_preflight_runtime.py` is the sole deterministic per-platform builder. From the locked distribution set for the current CI row it builds a relocatable CPython layout, places the complete Tuntun and third-party import roots under that layout's isolated versioned library root, enumerates every importable file, package metadata file, CPython file, native extension, and non-system linked library, and normalizes native-loader references to manifest-listed `$ORIGIN`/`@loader_path` locations. On Darwin it requires a valid final Mach-O code signature for every executable image and records its CodeDirectory hash; the two-build check proves the chosen signing procedure is reproducible. It rejects an ABI/platform mismatch or an unlisted/missing/extra dependency; hashes final descriptor-read bytes/modes into the runtime manifest; then creates a canonical USTAR `preflight-runtime.tar` without links, devices, sparse/PAX/GNU records, ambient ownership, or nondeterministic timestamps. It reopens the tar and manifest to prove the complete member inventory and aggregate digest exactly. The tar is never imported or executed: the native bootstrap launcher extracts only verified entries into a fresh root-owned `0555` directory with `0444|0555` children outside managed Tuntun roots, fsyncs/reopens the tree, and passes retained descriptors to the registry. `tests/integration/deploy/test_preflight_runtime_build.py` performs two byte-identical builds on each fixed CI platform, uses the production materializer and `TrustedCommandRegistry`/native spawn bridge with `-I -S`, and invokes the real closed diagnostic entry. The subprocess must import Pydantic v2, `pydantic_core._pydantic_core`, `cryptography`, and `cryptography.hazmat.bindings._rust` from the materialized root and show that every effective `sys.path` entry remains under that root. The test uses the runner's scoped privileged fixture to create the same root-owned/non-writable layout; it does not relax ownership or use an alternate importer. It also rejects wrong ABI/tag, missing/extra/duplicate module or linked library, path collision, lock/policy/bootstrap mismatch, and module/native-library/tar/manifest mutation before and after registry open. Candidate assembly and Task 2 package every platform artifact without rebuilding; the selected target authorization and installed authority bind the one exact platform closure.
+`scripts/build_preflight_runtime.py` is the sole deterministic per-platform builder. From the locked distribution set for the current CI row it builds a relocatable CPython layout, places the complete Tuntun and third-party import roots under that layout's isolated versioned library root, enumerates every importable file, package metadata file, CPython file, native extension, and non-system linked library, and normalizes native-loader references to manifest-listed `$ORIGIN`/`@loader_path` locations. On Darwin it requires a valid final Mach-O code signature for every executable image and records its CodeDirectory hash; the two-build check proves the chosen signing procedure is reproducible. It rejects an ABI/platform mismatch or an unlisted/missing/extra dependency; hashes final descriptor-read bytes/modes into the runtime manifest; then creates a canonical USTAR `preflight-runtime.tar` without links, devices, sparse/PAX/GNU records, ambient ownership, or nondeterministic timestamps. It reopens the tar and manifest to prove the complete member inventory and aggregate digest exactly. The tar is never imported or executed: the native bootstrap launcher extracts only verified entries into a fresh root-owned `0555` directory with `0444|0555` children outside managed Tuntun roots, fsyncs/reopens the tree, and passes retained descriptors to the registry. `tests/integration/deploy/test_preflight_runtime_build.py` performs two byte-identical builds on each fixed CI platform, maps only `(Linux,x86_64)`, `(Darwin,arm64)`, and `(Darwin,x86_64)` to their signed platform IDs, materializes that platform's exact command inventory, and uses the production materializer and `TrustedCommandRegistry`/native spawn bridge with `-I -S`. Each row opens the registry, executes its retained `/usr/bin/uname` descriptor, and invokes the real closed diagnostic entry; the Linux row therefore exercises the production `execveat` registry/runtime path without opening any macOS-only command. The subprocess must import Pydantic v2, `pydantic_core._pydantic_core`, `cryptography`, and `cryptography.hazmat.bindings._rust` from the materialized root and show that every effective `sys.path` entry remains under that root. The test uses the runner's scoped privileged fixture to create the same root-owned/non-writable layout; it does not relax ownership or use an alternate importer. It also rejects an unknown or mismatched platform, missing/extra/cross-platform command, wrong ABI/tag, missing/extra/duplicate module or linked library, path collision, lock/policy/bootstrap mismatch, and module/native-library/tar/manifest mutation before and after registry open. Candidate assembly and Task 2 package every platform artifact without rebuilding; the selected target authorization and installed authority bind the one exact platform closure.
 
 ```python
 # packages/contracts/src/tuntun_contracts/host_approval.py
@@ -618,16 +706,31 @@ from .base import ContractModel, canonical_bytes, validate_canonical_base64
 
 Digest=Annotated[str,Field(pattern=r"^[0-9a-f]{64}$")]
 
-class TrustedSystemExecutableDigests(ContractModel):
+class DarwinTrustedSystemExecutableDigests(ContractModel):
     uname:Digest; id:Digest; fdesetup:Digest; security:Digest; route:Digest
     ipconfig:Digest; stat:Digest; plutil:Digest; lsof:Digest
 
-class TrustedExecutionClosure(ContractModel):
-    system_executable_sha256:TrustedSystemExecutableDigests
+class LinuxTrustedSystemExecutableDigests(ContractModel):
+    uname:Digest; id:Digest; stat:Digest
+
+class _TrustedExecutionClosureBase(ContractModel):
     python_sha256:Digest
     runtime_manifest_sha256:Digest
     preflight_runtime_tar_sha256:Digest
     native_spawn_bridge_sha256:Digest
+
+class DarwinTrustedExecutionClosure(_TrustedExecutionClosureBase):
+    platform_id:Literal["darwin-arm64","darwin-x86_64"]
+    system_executable_sha256:DarwinTrustedSystemExecutableDigests
+
+class LinuxTrustedExecutionClosure(_TrustedExecutionClosureBase):
+    platform_id:Literal["linux-x86_64"]
+    system_executable_sha256:LinuxTrustedSystemExecutableDigests
+
+TrustedExecutionClosure=Annotated[
+    DarwinTrustedExecutionClosure|LinuxTrustedExecutionClosure,
+    Field(discriminator="platform_id"),
+]
 
 class TrustedHostAuthorityRecord(ContractModel):
     schema_version:Literal["1.0"]
@@ -676,20 +779,26 @@ The exact checked-in `docs/evidence/trusted-host-approval.schema.json` artifact 
   },
   "$defs":{
     "digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},
-    "system_executables":{"type":"object","additionalProperties":false,
+    "darwin_system_executables":{"type":"object","additionalProperties":false,
       "required":["uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof"],
       "properties":{"uname":{"$ref":"#/$defs/digest"},"id":{"$ref":"#/$defs/digest"},"fdesetup":{"$ref":"#/$defs/digest"},"security":{"$ref":"#/$defs/digest"},"route":{"$ref":"#/$defs/digest"},"ipconfig":{"$ref":"#/$defs/digest"},"stat":{"$ref":"#/$defs/digest"},"plutil":{"$ref":"#/$defs/digest"},"lsof":{"$ref":"#/$defs/digest"}}},
-    "execution_closure":{"type":"object","additionalProperties":false,
-      "required":["system_executable_sha256","python_sha256","runtime_manifest_sha256","preflight_runtime_tar_sha256","native_spawn_bridge_sha256"],
-      "properties":{"system_executable_sha256":{"$ref":"#/$defs/system_executables"},"python_sha256":{"$ref":"#/$defs/digest"},"runtime_manifest_sha256":{"$ref":"#/$defs/digest"},"preflight_runtime_tar_sha256":{"$ref":"#/$defs/digest"},"native_spawn_bridge_sha256":{"$ref":"#/$defs/digest"}}},
+    "linux_system_executables":{"type":"object","additionalProperties":false,
+      "required":["uname","id","stat"],
+      "properties":{"uname":{"$ref":"#/$defs/digest"},"id":{"$ref":"#/$defs/digest"},"stat":{"$ref":"#/$defs/digest"}}},
+    "darwin_execution_closure":{"type":"object","additionalProperties":false,
+      "required":["platform_id","system_executable_sha256","python_sha256","runtime_manifest_sha256","preflight_runtime_tar_sha256","native_spawn_bridge_sha256"],
+      "properties":{"platform_id":{"enum":["darwin-arm64","darwin-x86_64"]},"system_executable_sha256":{"$ref":"#/$defs/darwin_system_executables"},"python_sha256":{"$ref":"#/$defs/digest"},"runtime_manifest_sha256":{"$ref":"#/$defs/digest"},"preflight_runtime_tar_sha256":{"$ref":"#/$defs/digest"},"native_spawn_bridge_sha256":{"$ref":"#/$defs/digest"}}},
+    "linux_execution_closure":{"type":"object","additionalProperties":false,
+      "required":["platform_id","system_executable_sha256","python_sha256","runtime_manifest_sha256","preflight_runtime_tar_sha256","native_spawn_bridge_sha256"],
+      "properties":{"platform_id":{"const":"linux-x86_64"},"system_executable_sha256":{"$ref":"#/$defs/linux_system_executables"},"python_sha256":{"$ref":"#/$defs/digest"},"runtime_manifest_sha256":{"$ref":"#/$defs/digest"},"preflight_runtime_tar_sha256":{"$ref":"#/$defs/digest"},"native_spawn_bridge_sha256":{"$ref":"#/$defs/digest"}}},
     "record":{"type":"object","additionalProperties":false,
       "required":["schema_version","purpose","authority_generation","target_id","approval_commitment_sha256","target_public_key_sha256","valid_from","valid_until","source_policy_sha256","execution_closure"],
-      "properties":{"schema_version":{"const":"1.0"},"purpose":{"const":"phase1.household-core.preflight.v1"},"authority_generation":{"type":"integer","minimum":1,"maximum":2147483647},"target_id":{"type":"string","pattern":"^target:[A-Za-z0-9_-]{8,64}$"},"approval_commitment_sha256":{"$ref":"#/$defs/digest"},"target_public_key_sha256":{"$ref":"#/$defs/digest"},"valid_from":{"type":"string","format":"date-time"},"valid_until":{"type":"string","format":"date-time"},"source_policy_sha256":{"$ref":"#/$defs/digest"},"execution_closure":{"$ref":"#/$defs/execution_closure"}}}
+      "properties":{"schema_version":{"const":"1.0"},"purpose":{"const":"phase1.household-core.preflight.v1"},"authority_generation":{"type":"integer","minimum":1,"maximum":2147483647},"target_id":{"type":"string","pattern":"^target:[A-Za-z0-9_-]{8,64}$"},"approval_commitment_sha256":{"$ref":"#/$defs/digest"},"target_public_key_sha256":{"$ref":"#/$defs/digest"},"valid_from":{"type":"string","format":"date-time"},"valid_until":{"type":"string","format":"date-time"},"source_policy_sha256":{"$ref":"#/$defs/digest"},"execution_closure":{"discriminator":{"propertyName":"platform_id","mapping":{"darwin-arm64":"#/$defs/darwin_execution_closure","darwin-x86_64":"#/$defs/darwin_execution_closure","linux-x86_64":"#/$defs/linux_execution_closure"}},"oneOf":[{"$ref":"#/$defs/darwin_execution_closure"},{"$ref":"#/$defs/linux_execution_closure"}]}}}
   }
 }
 ```
 
-`tests/contract/test_host_approval_contract.py` generates this schema from the contract, requires byte-for-byte equality with the checked-in artifact, enables RFC 3339 format assertion, and rejects every missing/extra field, noncanonical signature, validity interval over 90 days, wrong purpose, zero/negative generation, descriptive/invalid target ID, and wrong executable key set.
+`tests/contract/test_host_approval_contract.py` generates this schema from the contract, requires byte-for-byte equality with the checked-in artifact, enables RFC 3339 format assertion, and rejects every missing/extra field, noncanonical signature, validity interval over 90 days, wrong purpose, zero/negative generation, descriptive/invalid target ID, unknown platform ID, a Linux command set paired with Darwin (or the reverse), and every missing/extra executable key.
 
 ```python
 # apps/core/src/tuntun_core/deploy/host_approval.py
@@ -809,13 +918,29 @@ import os,selectors,signal,subprocess,time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from tuntun_core.deploy import native_spawn
 
-FIXED_EXECUTABLES={"uname":Path("/usr/bin/uname"),"id":Path("/usr/bin/id"),
+DARWIN_FIXED_EXECUTABLES=MappingProxyType({
+ "uname":Path("/usr/bin/uname"),"id":Path("/usr/bin/id"),
  "fdesetup":Path("/usr/bin/fdesetup"),"security":Path("/usr/bin/security"),
  "route":Path("/sbin/route"),"ipconfig":Path("/usr/sbin/ipconfig"),
- "stat":Path("/usr/bin/stat"),"plutil":Path("/usr/bin/plutil"),"lsof":Path("/usr/sbin/lsof")}
+ "stat":Path("/usr/bin/stat"),"plutil":Path("/usr/bin/plutil"),"lsof":Path("/usr/sbin/lsof"),
+})
+LINUX_FIXED_EXECUTABLES=MappingProxyType({
+ "uname":Path("/usr/bin/uname"),"id":Path("/usr/bin/id"),"stat":Path("/usr/bin/stat"),
+})
+PLATFORM_FIXED_EXECUTABLES=MappingProxyType({
+ "darwin-arm64":DARWIN_FIXED_EXECUTABLES,
+ "darwin-x86_64":DARWIN_FIXED_EXECUTABLES,
+ "linux-x86_64":LINUX_FIXED_EXECUTABLES,
+})
+HOST_PLATFORM_IDS=MappingProxyType({
+ ("Darwin","arm64"):"darwin-arm64",
+ ("Darwin","x86_64"):"darwin-x86_64",
+ ("Linux","x86_64"):"linux-x86_64",
+})
 CLOSED_COMMAND_ENV={"LANG":"C","LC_ALL":"C","PATH":"/usr/bin:/bin:/usr/sbin:/sbin"}
 MAX_COMMAND_OUTPUT_BYTES=65_536
 @dataclass(frozen=True,slots=True)
@@ -883,23 +1008,47 @@ class TrustedCommandRegistry:
         # descriptor. It never imports or executes the runtime tar.
         # It verifies closed canonical JSON, duplicate keys, owner/type/mode/nlink,
         # shared count/byte/time bounds, descriptor/path identity and every digest.
-        held=open_runtime_closure(release_root,manifest_path,FIXED_EXECUTABLES)
         try:
+            platform_id=expected.platform_id
+            current_platform_id=HOST_PLATFORM_IDS[(os.uname().sysname,os.uname().machine)]
+            if type(platform_id) is not str or platform_id!=current_platform_id:
+                raise RuntimeError
+            fixed_executables=PLATFORM_FIXED_EXECUTABLES[platform_id]
+            if set(expected.system_executable_sha256.model_dump())!=set(fixed_executables):
+                raise RuntimeError
+        except BaseException:
+            raise RuntimeError("trusted executable unavailable") from None
+        held=open_runtime_closure(
+            release_root,manifest_path,fixed_executables,
+            expected_platform_id=platform_id,
+        )
+        try:
+            if held.manifest.platform_id!=platform_id:
+                raise RuntimeError("trusted executable unavailable")
+            expected_policy_commands={
+                selected:{name:str(path) for name,path in commands.items()}
+                for selected,commands in PLATFORM_FIXED_EXECUTABLES.items()
+            }
+            if held.source_policy.platform_fixed_system_executables!=expected_policy_commands:
+                raise RuntimeError("trusted executable unavailable")
             if held.manifest.source_policy_sha256!=expected_source_policy_sha256:
                 raise RuntimeError("trusted executable unavailable")
             if held.policy_sha256!=expected_source_policy_sha256:
                 raise RuntimeError("trusted executable unavailable")
             if held.execution_closure!=expected.model_dump():
                 raise RuntimeError("trusted executable unavailable")
-            return cls(held,expected)
+            return cls(held,expected,fixed_executables)
         except BaseException:
             with suppress(BaseException): held.close_all()
             raise
-    def __init__(self,held,expected): self._held=held; self._expected=expected
+    def __init__(self,held,expected,fixed_executables):
+        self._held=held; self._expected=expected; self._fixed_executables=fixed_executables
     @property
     def release_root(self): return self._held.release_root
     @property
     def expected_closure(self): return self._expected
+    @property
+    def command_names(self): return tuple(sorted(self._fixed_executables))
     def close(self): self._held.close_all()
     def _revalidate(self):
         if not self._held.revalidate_every_identity_and_digest():
@@ -910,7 +1059,7 @@ class TrustedCommandRegistry:
         if name=="tuntunctl":
             executable=self._held.open_python_handle()
             child_argv=("python","-I","-S","-m","tuntun_core.cli",*tail)
-        elif name in FIXED_EXECUTABLES:
+        elif name in self._fixed_executables:
             executable=self._held.open_system_handle(name)
             child_argv=(name,*tail)
         else:
@@ -993,11 +1142,18 @@ def _approval_fields_are_closed(approval):
         and re.fullmatch(r"[0-9a-f]{64}",approval.approval_commitment_sha256) is not None
         and re.fullmatch(r"[0-9a-f]{64}",approval.source_policy_sha256) is not None)
 
-def _base_host_values(runner):
+def _darwin_machine(approval):
+    try: return {"darwin-arm64":"arm64","darwin-x86_64":"x86_64"}[
+        approval.execution_closure.platform_id
+    ]
+    except (AttributeError,KeyError):
+        raise RuntimeError("trusted owner target unavailable") from None
+
+def _base_host_values(runner,expected_machine):
     interface=resolve_private_interface(runner)
     return interface,{
         "trusted_owner_target":True,
-        "architecture":required(runner,("uname","-m")).strip()=="arm64",
+        "architecture":required(runner,("uname","-m")).strip()==expected_machine,
         "filevault":"FileVault is On." in required(runner,("fdesetup","status")),
         "keychain_available":bool(required(runner,("security","list-keychains","-d","user")).strip()),
         "resolved_interface":True,
@@ -1007,7 +1163,7 @@ def run_clean_bootstrap_preflight(home,runner,verified_bootstrap_approval):
     approval=verified_bootstrap_approval
     if type(approval) is not VerifiedBootstrapApproval or not _approval_fields_are_closed(approval):
         raise RuntimeError("trusted owner target unavailable")
-    interface,values=_base_host_values(runner); del interface
+    interface,values=_base_host_values(runner,_darwin_machine(approval)); del interface
     current=home/"Library/Application Support/Tuntun/runtime/current"
     values["existing_runtime_absent"]=not (current.exists() or current.is_symlink())
     ports=runner.run(("lsof","-nP","-iTCP:8787","-iTCP:7443","-iTCP:8443","-sTCP:LISTEN"))
@@ -1021,11 +1177,12 @@ def run_installed_preflight(mode,home,runner,lan_console,verified_host_approval)
     approval=verified_host_approval
     if type(approval) is not VerifiedHostApproval or not _approval_fields_are_closed(approval):
         raise RuntimeError("trusted owner target unavailable")
-    interface,values=_base_host_values(runner); plist=home/"Library/LaunchAgents/com.tuntun.core.plist"
+    expected_machine=_darwin_machine(approval)
+    interface,values=_base_host_values(runner,expected_machine); plist=home/"Library/LaunchAgents/com.tuntun.core.plist"
     roots=[home/path for path in ("Library/Application Support/Tuntun/runtime","Library/Application Support/Tuntun/data","Library/Application Support/Tuntun/models","Library/Application Support/Tuntun/backups","Library/Logs/Tuntun")]
     owner=required(runner,("id","-un")).strip()
     python_arch=command_json(runner,("tuntunctl","system","architecture","--json"),{"machine"})
-    values["architecture"]=values["architecture"] and python_arch["machine"]=="arm64"
+    values["architecture"]=values["architecture"] and python_arch["machine"]==expected_machine
     lan_commissioned=False
     if lan_console:
         lan_receipt=command_json(runner,("tuntunctl","lan","verify-commissioning","--json"),{
@@ -1174,7 +1331,7 @@ The Typer `doctor preflight` command has exactly one installed production regist
 
 Run: `uv run pytest tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q && uv run ruff check packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py scripts/build_preflight_runtime.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy tests/security/test_listener_allowlist.py && uv run mypy packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py scripts/build_preflight_runtime.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py`
 
-Expected: PASS; clean home works without installed state; forged/stale/mismatched/replayed bootstrap artifacts, wrong source/runtime/dependency closures, post-open swaps, and bootstrap use for restart/upgrade/repair fail before mutation/spawn; every required installed command is observed; exact listeners pass; timeout cleanup is finite and preserves the primary error; static checks exit `0`.
+Expected: PASS on `ubuntu-24.04` x86_64, `macos-26` arm64, and `macos-15-intel` x86_64; each row constructs the registry from its one exact command inventory and executes the descriptor-stable `uname` plus native-runtime import probe, and Ubuntu never opens a Darwin path. Clean home works without installed state; forged/stale/mismatched/replayed bootstrap artifacts, wrong/cross-platform command sets, wrong source/runtime/dependency closures, post-open swaps, and bootstrap use for restart/upgrade/repair fail before mutation/spawn; a Linux CI closure cannot authorize macOS host preflight; every required installed command is observed; exact listeners pass; timeout cleanup is finite and preserves the primary error; static checks exit `0`.
 
 - [ ] **Step 5: Commit**
 

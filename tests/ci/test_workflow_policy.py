@@ -181,7 +181,7 @@ def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -
         assert command_index > architecture_steps[0]
 
 
-def _assert_literal_workflow_root(raw: str) -> None:
+def _literal_workflow_root_keys(raw: str) -> list[str]:
     root = yaml.compose(raw, Loader=yaml.SafeLoader)
     assert isinstance(root, MappingNode)
     keys: list[str] = []
@@ -190,7 +190,53 @@ def _assert_literal_workflow_root(raw: str) -> None:
         assert key.style is None
         assert raw[key.start_mark.index : key.end_mark.index] == key.value
         keys.append(key.value)
+    return keys
+
+
+def _assert_literal_workflow_on_spelling(raw: str) -> None:
+    assert "on" in _literal_workflow_root_keys(raw)
+
+
+def _assert_literal_workflow_root(raw: str) -> None:
+    keys = _literal_workflow_root_keys(raw)
     assert keys == ["name", "on", "permissions", "jobs"]
+
+
+def _dump_workflow_mutation(workflow: object) -> str:
+    assert isinstance(workflow, dict)
+    rendered = yaml.safe_dump(workflow, sort_keys=False)
+    lines = rendered.splitlines(keepends=True)
+    normalized = [index for index, line in enumerate(lines) if line == "true:\n"]
+    assert len(normalized) == 1
+    lines[normalized[0]] = "on:\n"
+    canonical = "".join(lines)
+    _assert_literal_workflow_on_spelling(canonical)
+    assert yaml.safe_load(canonical) == workflow
+    return canonical
+
+
+def _write_workflow_mutation(path: Path, workflow: object) -> None:
+    path.write_text(_dump_workflow_mutation(workflow), encoding="utf-8")
+
+
+def _assert_mutation_reaches_policy(
+    path: Path,
+    *,
+    root_shape_is_target: bool = False,
+) -> None:
+    raw = path.read_text(encoding="utf-8")
+    _assert_literal_workflow_on_spelling(raw)
+    if not root_shape_is_target:
+        _assert_literal_workflow_root(raw)
+
+
+def test_workflow_mutation_roundtrip_preserves_literal_on_key() -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text(encoding="utf-8"))
+
+    rendered = _dump_workflow_mutation(workflow)
+
+    _assert_literal_workflow_root(rendered)
+    assert yaml.safe_load(rendered) == workflow
 
 
 def _assert_workflow_policy(path: Path) -> None:
@@ -358,7 +404,11 @@ def test_architecture_assertion_mutations_fail_full_workflow_policy(
         job["strategy"]["matrix"]["os"].remove("macos-15-intel")
 
     path = tmp_path / "ci.yml"
-    path.write_text(yaml.safe_dump(workflow), encoding="utf-8")
+    _write_workflow_mutation(path, workflow)
+    _assert_mutation_reaches_policy(
+        path,
+        root_shape_is_target=mutation == "workflow_env_path",
+    )
     with pytest.raises(AssertionError):
         _assert_workflow_policy(path)
 
@@ -375,8 +425,8 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
     root = tmp_path / ".github" / "workflows"
     root.mkdir(parents=True)
     valid = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
-    (root / "security.yml").write_text(yaml.safe_dump(valid))
-    (root / "release.yaml").write_text(yaml.safe_dump(valid))
+    _write_workflow_mutation(root / "security.yml", valid)
+    _write_workflow_mutation(root / "release.yaml", valid)
     assert {path.name for path in workflow_paths(root)} == {"security.yml", "release.yaml"}
     for name, mutation in (
         ("security.yml", {"runs-on": "ubuntu-latest"}),
@@ -455,13 +505,15 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
             },
         }
         path = root / name
-        path.write_text(yaml.safe_dump(changed))
+        _write_workflow_mutation(path, changed)
+        _assert_mutation_reaches_policy(path)
         with pytest.raises(AssertionError):
             _assert_workflow_policy(path)
-        path.write_text(yaml.safe_dump(valid))
+        _write_workflow_mutation(path, valid)
     privileged = {**valid, "permissions": {"contents": "write"}}
     path = root / "release.yaml"
-    path.write_text(yaml.safe_dump(privileged))
+    _write_workflow_mutation(path, privileged)
+    _assert_mutation_reaches_policy(path)
     with pytest.raises(AssertionError):
         _assert_workflow_policy(path)
 
@@ -480,11 +532,9 @@ def test_discovery_includes_later_yml_and_yaml_and_mutations_fail(tmp_path: Path
             "strategy": {"matrix": {"python": ["3.12"]}},
         },
     ):
-        workflow_with_reusable_job = {
-            "permissions": {"contents": "read"},
-            "jobs": {"reuse": reusable},
-        }
-        path.write_text(yaml.safe_dump(workflow_with_reusable_job))
+        workflow_with_reusable_job = {**valid, "jobs": {"reuse": reusable}}
+        _write_workflow_mutation(path, workflow_with_reusable_job)
+        _assert_mutation_reaches_policy(path)
         with pytest.raises(AssertionError):
             _assert_workflow_policy(path)
 
@@ -581,6 +631,10 @@ def test_ci_rejects_unreviewed_structure_and_environment_file_mutations(
         steps.insert(2, deepcopy(steps[1]))
 
     path = tmp_path / "ci.yml"
-    path.write_text(yaml.safe_dump(workflow), encoding="utf-8")
+    _write_workflow_mutation(path, workflow)
+    _assert_mutation_reaches_policy(
+        path,
+        root_shape_is_target=mutation in {"workflow_defaults", "workflow_extra_key"},
+    )
     with pytest.raises(AssertionError):
         _assert_workflow_policy(path)

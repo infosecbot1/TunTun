@@ -2803,6 +2803,103 @@ def test_matching_receipt_swap_before_final_acceptance_retires_owned_completion(
         )
 
 
+def test_matching_pair_swap_before_final_acceptance_cannot_leave_accepted_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
+    provider = InMemorySecretProvider()
+    _configure_receipt_probe(
+        monkeypatch,
+        provider,
+        (_safe_source_snapshot(), _safe_source_snapshot()),
+    )
+    real_verify = probe_script.verify_phase1_host_probe_receipt
+    foreign_receipt: bytes | None = None
+    foreign_completion: bytes | None = None
+
+    def swap_matching_pair_before_acceptance(*args: object, **kwargs: object) -> None:
+        nonlocal foreign_receipt, foreign_completion
+        foreign_receipt = receipt_path.read_bytes()
+        foreign_completion = completion_path.read_bytes()
+        receipt_path.unlink()
+        completion_path.unlink()
+        receipt_path.write_bytes(foreign_receipt)
+        completion_path.write_bytes(foreign_completion)
+        receipt_path.chmod(0o600)
+        completion_path.chmod(0o600)
+        real_verify(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        probe_script,
+        "verify_phase1_host_probe_receipt",
+        swap_matching_pair_before_acceptance,
+    )
+
+    assert probe_script.main(_receipt_cli_arguments(receipt_path)) == 1
+    assert foreign_receipt is not None
+    assert foreign_completion is not None
+    assert receipt_path.read_bytes() == foreign_receipt
+    assert completion_path.read_bytes() == b""
+    with pytest.raises(RuntimeError, match="invalid host probe receipt"):
+        real_verify(
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
+        )
+
+
+def test_matching_pair_swap_with_completion_truncate_failure_still_rejects_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    completion_path = probe_script.phase1_host_probe_completion_path(receipt_path)
+    provider = InMemorySecretProvider()
+    _configure_receipt_probe(
+        monkeypatch,
+        provider,
+        (_safe_source_snapshot(), _safe_source_snapshot()),
+    )
+    real_verify = probe_script.verify_phase1_host_probe_receipt
+    real_ftruncate = probe_script.os.ftruncate
+    swapped = False
+
+    def swap_matching_pair_before_acceptance(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        receipt = receipt_path.read_bytes()
+        completion = completion_path.read_bytes()
+        receipt_path.unlink()
+        completion_path.unlink()
+        receipt_path.write_bytes(receipt)
+        completion_path.write_bytes(completion)
+        receipt_path.chmod(0o600)
+        completion_path.chmod(0o600)
+        swapped = True
+        real_verify(*args, **kwargs)  # type: ignore[arg-type]
+
+    def fail_completion_truncate(descriptor: int, length: int) -> None:
+        if swapped:
+            raise OSError
+        real_ftruncate(descriptor, length)
+
+    monkeypatch.setattr(
+        probe_script,
+        "verify_phase1_host_probe_receipt",
+        swap_matching_pair_before_acceptance,
+    )
+    monkeypatch.setattr(probe_script.os, "ftruncate", fail_completion_truncate)
+
+    assert probe_script.main(_receipt_cli_arguments(receipt_path)) == 1
+    with pytest.raises(RuntimeError, match="invalid host probe receipt"):
+        real_verify(
+            receipt_path,
+            completion_path,
+            **_expected_host_probe_bindings(),
+        )
+
+
 @pytest.mark.parametrize(
     "stage",
     ("truncate", "write", "file_fsync", "directory_fsync"),

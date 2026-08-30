@@ -24320,7 +24320,12 @@ for privacy; later commissioning binds its opaque host record and target-held pu
 rather than inferring identity from this receipt or host strings. The completion companion's exclusive
 publication plus parent-directory fsync is the operation commit point. The winning invocation retains
 and revalidates the exact receipt and completion inodes through final path acceptance, so a matching
-foreign swap deterministically fails and restores the receipt claim while preserving the foreign file.
+single-name foreign swap deterministically fails and restores the owned receipt claim or retires the
+owned completion while preserving unrelated foreign data. If both names are replaced with a matching,
+independently acceptable copy of the exact invocation, failure cleanup uses the private expected-binding
+verifier and invalidates only the currently named matching companion before re-proving that the pair
+rejects; a cleanup error is not suppressed. An active same-user replacement after the final bounded
+observation remains part of the separately supervised exit boundary.
 A crash immediately afterward
 but before observed exit `0` can leave valid diagnostic evidence. Every deterministic `main()` return
 `1` rejects, including a durably completed failing receipt; a pre-commit exception has no acceptable

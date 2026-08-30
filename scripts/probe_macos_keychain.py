@@ -454,12 +454,12 @@ def _retire_owned_completion(artifact: EvidenceArtifact) -> None:
             _fsync_directory(artifact.path.parent)
 
 
-def _open_evidence_artifact(path: Path) -> EvidenceArtifact:
+def _open_evidence_artifact(path: Path, *, writable: bool = False) -> EvidenceArtifact:
     descriptor: int | None = None
     try:
         descriptor = os.open(
             path,
-            os.O_RDONLY
+            (os.O_RDWR if writable else os.O_RDONLY)
             | os.O_NONBLOCK
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0),
@@ -543,7 +543,7 @@ def _require_exact_evidence_path(path: Path) -> None:
         os.close(artifact.descriptor)
 
 
-def verify_phase1_host_probe_receipt(
+def _verify_phase1_host_probe_receipt_pair(
     receipt_path: Path,
     completion_path: Path,
     *,
@@ -593,6 +593,101 @@ def verify_phase1_host_probe_receipt(
             os.close(completion_artifact.descriptor)
         if receipt_artifact is not None:
             os.close(receipt_artifact.descriptor)
+
+
+def verify_phase1_host_probe_receipt(
+    receipt_path: Path,
+    completion_path: Path,
+    *,
+    expected_run_id: str,
+    expected_attempt_id: str,
+    expected_owner_approval_commitment_sha256: str,
+    expected_source_commit: str,
+    expected_probe_script_sha256: str,
+) -> None:
+    _verify_phase1_host_probe_receipt_pair(
+        receipt_path,
+        completion_path,
+        expected_run_id=expected_run_id,
+        expected_attempt_id=expected_attempt_id,
+        expected_owner_approval_commitment_sha256=(expected_owner_approval_commitment_sha256),
+        expected_source_commit=expected_source_commit,
+        expected_probe_script_sha256=expected_probe_script_sha256,
+    )
+
+
+def _ensure_failed_phase1_host_probe_pair_rejected(
+    receipt_path: Path,
+    *,
+    expected_run_id: str,
+    expected_attempt_id: str,
+    expected_owner_approval_commitment_sha256: str,
+    expected_source_commit: str,
+    expected_probe_script_sha256: str,
+) -> None:
+    completion_path = phase1_host_probe_completion_path(receipt_path)
+    expected = {
+        "expected_run_id": expected_run_id,
+        "expected_attempt_id": expected_attempt_id,
+        "expected_owner_approval_commitment_sha256": (expected_owner_approval_commitment_sha256),
+        "expected_source_commit": expected_source_commit,
+        "expected_probe_script_sha256": expected_probe_script_sha256,
+    }
+    cleanup_failure: BaseException | None = None
+    for _attempt in range(3):
+        try:
+            _verify_phase1_host_probe_receipt_pair(
+                receipt_path,
+                completion_path,
+                **expected,
+            )
+        except RuntimeError:
+            if cleanup_failure is not None:
+                raise cleanup_failure from None
+            return
+
+        artifact: EvidenceArtifact | None = None
+        try:
+            artifact = _open_evidence_artifact(completion_path, writable=True)
+            _verify_phase1_host_probe_receipt_pair(
+                receipt_path,
+                completion_path,
+                **expected,
+            )
+            if not _evidence_artifact_is_current(artifact):
+                continue
+            try:
+                os.ftruncate(artifact.descriptor, 0)
+                os.fsync(artifact.descriptor)
+            except BaseException as error:
+                cleanup_failure = error
+                if _unlink_if_owned(
+                    artifact.path,
+                    artifact.descriptor,
+                    device=artifact.device,
+                    inode=artifact.inode,
+                ):
+                    try:
+                        _fsync_directory(artifact.path.parent)
+                    except BaseException as directory_error:
+                        cleanup_failure = directory_error
+        except RuntimeError:
+            continue
+        finally:
+            if artifact is not None:
+                os.close(artifact.descriptor)
+
+    try:
+        _verify_phase1_host_probe_receipt_pair(
+            receipt_path,
+            completion_path,
+            **expected,
+        )
+    except RuntimeError:
+        if cleanup_failure is not None:
+            raise cleanup_failure from None
+        return
+    raise RuntimeError("host probe failure cleanup failed")
 
 
 def build_phase1_host_probe_receipt(
@@ -2062,6 +2157,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
 
     receipt_completed = False
     completion_artifact: EvidenceArtifact | None = None
+    publication_cleanup_failure: BaseException | None = None
     if (
         arguments.receipt is not None
         and claim is not None
@@ -2114,8 +2210,24 @@ def _main(argv: Sequence[str] | None = None) -> int:
             failure = error
             if completion_artifact is not None:
                 _retire_owned_completion(completion_artifact)
-            with suppress(BaseException):
+            try:
                 _restore_fail_closed_claim(claim)
+            except BaseException as cleanup_error:
+                publication_cleanup_failure = cleanup_error
+            if owner_approval_commitment_sha256 is not None:
+                try:
+                    _ensure_failed_phase1_host_probe_pair_rejected(
+                        arguments.receipt,
+                        expected_run_id=claim.run_id,
+                        expected_attempt_id=claim.attempt_id,
+                        expected_owner_approval_commitment_sha256=(
+                            owner_approval_commitment_sha256
+                        ),
+                        expected_source_commit=final_snapshot.commit,
+                        expected_probe_script_sha256=final_snapshot.probe_script_sha256,
+                    )
+                except BaseException as cleanup_error:
+                    publication_cleanup_failure = cleanup_error
 
     if claim is not None:
         with suppress(OSError):
@@ -2123,6 +2235,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
     if completion_artifact is not None:
         with suppress(OSError):
             os.close(completion_artifact.descriptor)
+    if publication_cleanup_failure is not None:
+        raise publication_cleanup_failure
 
     if failure is not None:
         _emit_probe_result(passed=False)
