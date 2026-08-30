@@ -43,24 +43,42 @@ def test_empty_registry_never_downloads(tmp_path: Path) -> None:
 
 def test_fifo_manifest_is_rejected_without_blocking(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.yaml"
+    ready = tmp_path / "child-ready"
     os.mkfifo(manifest, 0o600)
     program = (
         "from pathlib import Path\n"
         "from tuntun_core.services.models.registry import ModelRegistry\n"
+        "Path(__import__('sys').argv[2]).write_text('ready', encoding='utf-8')\n"
         "try:\n"
         "    ModelRegistry.load(Path(__import__('sys').argv[1]))\n"
         "except ValueError:\n"
         "    raise SystemExit(0)\n"
         "raise SystemExit(1)\n"
     )
-    result = subprocess.run(
-        [sys.executable, "-c", program, str(manifest)],
-        check=False,
-        capture_output=True,
+    process = subprocess.Popen(
+        [sys.executable, "-c", program, str(manifest), str(ready)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=1,
     )
-    assert result.returncode == 0, result.stderr
+    try:
+        startup_deadline = time.monotonic() + 10
+        while not ready.exists():
+            if process.poll() is not None:
+                _stdout, stderr = process.communicate()
+                pytest.fail(f"manifest child exited before readiness: {stderr}")
+            if time.monotonic() >= startup_deadline:
+                pytest.fail("manifest child startup timed out")
+            time.sleep(0.01)
+        try:
+            _stdout, stderr = process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            pytest.fail("FIFO manifest read blocked after child readiness")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    assert process.returncode == 0, stderr
 
 
 @pytest.mark.parametrize(
