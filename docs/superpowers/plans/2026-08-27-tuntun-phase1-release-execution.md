@@ -14,7 +14,7 @@
 - `P1R0` and `P1R1` are Phase 1-only standalone-preview gates. `P1R0` follows the family-ready FB0 private beta; `P1R1` may publish an explicitly labelled Phase 1 preview. Neither gate satisfies, aliases, or makes claims for the whole-program Phase 6 `C0/C1` gates.
 - Candidate version is exactly `0.1.0-beta.1`; release tag is exactly `v0.1.0-beta.1`.
 - Effort is preserved: WP31 `6` person-days, WP32 `7`, WP33 `8` plus two elapsed eight-hour runs and a four-calendar-day staged trial, WP34 `5`; total `26` engineering days.
-- Production household validation requires the owner-approved native Darwin `arm64` Core Mac from ADR 0001, FileVault on, macOS Keychain available, owner-only `0700` roots, installed launchd core limit zero, and no content-bearing crash diagnostic. Intel macOS remains a mandatory supported-distribution target; moving household deployment back to Intel requires fresh real-host probes before any live-household claim.
+- Production household validation requires the independently owner-approved opaque Core inventory target from ADR 0001, currently verified as native Darwin `arm64`, plus FileVault on, macOS Keychain available, owner-only `0700` roots, installed launchd core limit zero, and no content-bearing crash diagnostic. Architecture/model/product/year observations cannot authorize a target. Intel macOS remains a mandatory supported-distribution target; moving household deployment back to Intel requires fresh trusted owner approval and real-host probes before any live-household claim.
 - Listener policy is exact: `127.0.0.1:8787`, resolved RFC1918 interface address on `7443`, and optional passkey console on that same address at `8443`. Wildcard, public, unresolved-interface, and other Tuntun listeners fail.
 - Every upgrade invokes Privacy Shield, disables new provider attempts, drains in-flight calls to zero, creates/verifies an encrypted backup, verifies DB/audit/model/protocol compatibility, then switches runtime.
 - Failed install/upgrade restores the prior symlink and compatible encrypted DB before restart. Uninstall removes runtime/service only; data, models, backups, and Keychain items remain.
@@ -23,7 +23,7 @@
 - Acceptance includes 240+ bilingual/persona cases, 1,000 cross-profile cases, 500 mixed turns, two distinct eight-hour runs, then owner 48 hours followed by second-adult 48 hours. Simulation never replaces elapsed gates.
 - P1R0 is an explicit owner approve/reject artifact bound to version, commit, acceptance hash, evidence hashes, and a fresh action-bound owner passkey receipt.
 - Tasks 5–10 commit and test evidence tooling only with synthetic fixtures. After Task 10, one clean frozen commit is qualified by two byte-identical builds; a clean target is locally commissioned and evidence-pending-installed from those exact bytes. Official security, acceptance, elapsed soak/trial, P1R0, candidate assembly without rebuild, accepted installation, and tag outputs are then generated once, in that order; no tracked change may occur during the ceremony.
-- `Clean target` does not assume a second Mac. For this household it is the same owner-approved Darwin `arm64` Core Mac, entered through an owner-approved maintenance window only after a verified encrypted backup and recovery-key check. The clean-target probe means no installed Tuntun runtime, core leaf/private key, launchd registration, listener, or unfinished lifecycle journal remains; it does not require erasing unrelated office data. Qualified bytes are retained on owner-controlled immutable storage while the managed Tuntun namespace is cleaned, and rollback restores the previously verified backup/runtime if commissioning or evidence-pending installation fails. A VM, hosted runner, or synthetic receipt cannot replace this real-host lifecycle evidence. Intel distribution receipts remain separate and do not promote Intel to household target without new real-host qualification.
+- `Clean target` does not assume a second Mac. For this household it is the same independently owner-approved opaque Core inventory target, whose current Darwin `arm64` observation is a compatibility gate rather than authority, entered through an owner-approved maintenance window only after a verified encrypted backup and recovery-key check. The clean-target probe means no installed Tuntun runtime, core leaf/private key, launchd registration, listener, or unfinished lifecycle journal remains; it does not require erasing unrelated office data. Qualified bytes are retained on owner-controlled immutable storage while the managed Tuntun namespace is cleaned, and rollback restores the previously verified backup/runtime if commissioning or evidence-pending installation fails. A VM, hosted runner, synthetic receipt, or diagnostic Keychain receipt cannot replace the independent trusted owner-approval binding and real-host lifecycle evidence. Intel distribution receipts remain separate and do not promote Intel to household target without new real-host qualification.
 - Apache-2.0 is added only after owner license approval. Incompatible/non-commercial weights stay outside artifacts.
 - `.github/workflows/release.yml` has `contents: read`, never tags or publishes, and only builds/attests/uploads a workflow artifact. Final publication is manual.
 - Every task uses red → green → affected/static checks → exact staging → one reviewable commit.
@@ -56,14 +56,16 @@
 
 **Interfaces:**
 - Consumes: installed LaunchAgent, application roots, `route`, `ipconfig`, `fdesetup`, `security`, `stat`, `plutil`, `lsof`, crash probe, Privacy Shield, and provider drain commands.
-- Produces: `CommandRunner.run(argv) -> CommandResult`; `resolve_private_interface(runner) -> ResolvedInterface`; `verify_listeners(rows, interface, lan_console) -> tuple[str,...]`; `run_preflight(mode, home, runner, lan_console) -> PreflightReport`; JSON exit `0` or `78`. `install` is host-only and never assumes application roots, Keychain items, a plist, process, database, CA, backup recipient, or recovery record already exists. `verify-installed` checks those initialized assets and the live process. `upgrade` adds Privacy Shield/provider drain to the installed checks.
+- Produces: `CommandRunner.run(argv) -> CommandResult`; `TrustedHostApprovalVerifier.verify_current_target() -> VerifiedHostApproval`; `resolve_private_interface(runner) -> ResolvedInterface`; `verify_listeners(rows, interface, lan_console) -> tuple[str,...]`; `run_preflight(mode, home, runner, lan_console, host_approval_verifier) -> PreflightReport`; JSON exit `0` or `78`. The concrete verifier authenticates an owner-only signed authority record, compares its externally expected approval commitment and opaque target binding to an independently sampled current target, and fails closed on missing/stale/mismatched evidence. A Phase 1 diagnostic Keychain receipt is never an accepted implementation of this port. `install` is host-only and never assumes application roots, Keychain items, a plist, process, database, CA, backup recipient, or recovery record already exists. `verify-installed` checks those initialized assets and the live process. `upgrade` adds Privacy Shield/provider drain to the installed checks.
 
 - [ ] **Step 1: Write the failing invocation and listener tests**
 
 ```python
 # tests/unit/deploy/test_preflight.py
 from pathlib import Path
-from tuntun_core.deploy.preflight import CommandResult, run_preflight
+
+import pytest
+from tuntun_core.deploy.preflight import CommandResult, VerifiedHostApproval, run_preflight
 
 class Runner:
     def __init__(self): self.calls=[]
@@ -87,17 +89,21 @@ class Runner:
         if argv[:3]==("lsof","-nP","-iTCP:8787"): return CommandResult(1,"","")
         return CommandResult(0,values[argv],"")
 
+class TrustedApproval:
+    def verify_current_target(self):
+        return VerifiedHostApproval("opaque-target-1", "a"*64)
+
 def test_upgrade_invokes_every_check():
-    runner=Runner(); report=run_preflight("upgrade",Path("/Users/test"),runner,False)
+    runner=Runner(); report=run_preflight("upgrade",Path("/Users/test"),runner,False,TrustedApproval())
     assert report.ok
-    assert {check.check_id for check in report.checks}=={"architecture","filevault","keychain_available","resolved_interface","database_key","owner_paths","launchd_core_limit","crash_diagnostics","listeners","privacy","provider_drain"}
+    assert {check.check_id for check in report.checks}=={"trusted_owner_target","architecture","filevault","keychain_available","resolved_interface","database_key","owner_paths","launchd_core_limit","crash_diagnostics","listeners","privacy","provider_drain"}
     assert ("tuntunctl","providers","drain","--timeout-seconds","30","--json") in runner.calls
 
 def test_clean_install_runs_host_checks_without_assuming_initialized_state():
-    runner=Runner(); report=run_preflight("install",Path("/Users/test"),runner,False)
+    runner=Runner(); report=run_preflight("install",Path("/Users/test"),runner,False,TrustedApproval())
     assert report.ok
     assert {check.check_id for check in report.checks}=={
-        "architecture","filevault","keychain_available","resolved_interface","existing_runtime_absent","ports_available",
+        "trusted_owner_target","architecture","filevault","keychain_available","resolved_interface","existing_runtime_absent","ports_available",
     }
     forbidden={"find-generic-password","stat","plutil","crash-probe","service"}
     assert all(not forbidden.intersection(call) for call in runner.calls)
@@ -107,7 +113,7 @@ def test_clean_install_preflight_rejects_existing_or_broken_current_link(tmp_pat
     current=tmp_path/"Library/Application Support/Tuntun/runtime/current"
     current.parent.mkdir(parents=True)
     current.symlink_to(current.parent/"releases/0.1.0-alpha.1")
-    report=run_preflight("install",tmp_path,Runner(),False)
+    report=run_preflight("install",tmp_path,Runner(),False,TrustedApproval())
     check=next(item for item in report.checks if item.check_id=="existing_runtime_absent")
     assert report.ok is False
     assert check.reason=="existing_runtime_detected_use_upgrade"
@@ -118,9 +124,16 @@ def test_lan_listener_allowance_requires_current_commissioning_receipt():
         CommandResult(0,'{"verified":false,"private_dns":false,"certificate_match":false,"all_admin_devices":false,"drift":true}\n',"")
         if argv==("tuntunctl","lan","verify-commissioning","--json") else Runner().run(argv)
     )
-    report=run_preflight("verify-installed",Path("/Users/test"),runner,True)
+    report=run_preflight("verify-installed",Path("/Users/test"),runner,True,TrustedApproval())
     assert not report.ok
     assert next(item for item in report.checks if item.check_id=="lan_commissioning").passed is False
+
+def test_architecture_match_cannot_replace_trusted_owner_target():
+    class RejectedApproval:
+        def verify_current_target(self):
+            raise RuntimeError("trusted owner target mismatch")
+    with pytest.raises(RuntimeError, match="trusted owner target mismatch"):
+        run_preflight("install",Path("/Users/test"),Runner(),False,RejectedApproval())
 ```
 
 ```python
@@ -146,6 +159,7 @@ import os,re,selectors,subprocess,time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 from tuntun_contracts.base import parse_bounded_json_value
 MAX_COMMAND_OUTPUT_BYTES=65_536
 @dataclass(frozen=True,slots=True)
@@ -184,6 +198,10 @@ class ResolvedInterface: name:str; address:str
 class Check: check_id:str; passed:bool; reason:str
 @dataclass(frozen=True,slots=True)
 class PreflightReport: schema_version:str; mode:str; ok:bool; checks:tuple[Check,...]
+@dataclass(frozen=True,slots=True)
+class VerifiedHostApproval: target_id:str; approval_commitment_sha256:str
+class TrustedHostApprovalVerifier(Protocol):
+    def verify_current_target(self) -> VerifiedHostApproval: ...
 def required(runner,argv):
     result=runner.run(argv)
     if result.returncode: raise RuntimeError("command failed: "+" ".join(argv))
@@ -209,14 +227,22 @@ def verify_listeners(rows,interface,lan_console):
     allowed={("127.0.0.1",8787),(interface.address,7443)}
     if lan_console: allowed.add((interface.address,8443))
     return tuple(f"listener:{host}:{port}" for host,port in rows if (host,port) not in allowed)
-def run_preflight(mode,home,runner,lan_console):
+def run_preflight(mode,home,runner,lan_console,host_approval_verifier):
     if mode not in {"install","upgrade","verify-installed"}: raise ValueError("invalid mode")
+    approval=host_approval_verifier.verify_current_target()
+    if type(approval) is not VerifiedHostApproval:
+        raise RuntimeError("trusted owner target unavailable")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",approval.target_id) is None:
+        raise RuntimeError("trusted owner target unavailable")
+    if re.fullmatch(r"[0-9a-f]{64}",approval.approval_commitment_sha256) is None:
+        raise RuntimeError("trusted owner target unavailable")
     interface=resolve_private_interface(runner); plist=home/"Library/LaunchAgents/com.tuntun.core.plist"
     current=home/"Library/Application Support/Tuntun/runtime/current"
     roots=[home/path for path in ("Library/Application Support/Tuntun/runtime","Library/Application Support/Tuntun/data","Library/Application Support/Tuntun/models","Library/Application Support/Tuntun/backups","Library/Logs/Tuntun")]
     owner=required(runner,("id","-un")).strip()
     native=required(runner,("uname","-m")).strip()=="arm64" and required(runner,("uv","run","python","-c","import platform; print(platform.machine())")).strip()=="arm64"
     values={
+        "trusted_owner_target":True,
         "architecture":native,
         "filevault":"FileVault is On." in required(runner,("fdesetup","status")),
         "keychain_available":bool(required(runner,("security","list-keychains","-d","user")).strip()),
@@ -7128,7 +7154,7 @@ Tasks 5–10 commit implementation and synthetic fixtures only. After Task 10, f
 
 ### Ceremony A: qualify exact bytes, commission a clean target, then collect evidence
 
-For the initial household release, this ceremony runs on the owner-approved Darwin `arm64` Core Mac during the declared maintenance window above. Before the first command, verify the encrypted backup and recovery key, stop ordinary office use, and record the prior managed-runtime state (normally absent on first install). After qualification, preserve the exact signed role bytes outside the Tuntun managed runtime roots before the clean-target check. A later upgrade that cannot prove a clean evidence target on this same Mac remains an upgrade candidate only; it cannot mint fresh clean-install evidence from a VM or CI runner. Hosted or physical Intel macOS evidence remains a supported-distribution row until the owner repeats the household real-host probes for an Intel target.
+For the initial household release, this ceremony runs on the independently owner-approved opaque Core inventory target, currently verified as Darwin `arm64`, during the declared maintenance window above. The trusted preflight must authenticate that approval and match the current target before architecture compatibility is considered. Before the first command, verify the encrypted backup and recovery key, stop ordinary office use, and record the prior managed-runtime state (normally absent on first install). After qualification, preserve the exact signed role bytes outside the Tuntun managed runtime roots before the clean-target check. A later upgrade that cannot prove a clean evidence target on this same Mac remains an upgrade candidate only; it cannot mint fresh clean-install evidence from a VM or CI runner. Hosted or physical Intel macOS evidence remains a supported-distribution row until the owner supplies a new trusted target approval and repeats the household real-host probes for an Intel target.
 
 ```bash
 test -z "$(git status --porcelain)"

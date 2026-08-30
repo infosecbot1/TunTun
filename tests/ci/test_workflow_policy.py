@@ -1,5 +1,6 @@
 import re
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,27 @@ EXPECTED_ARCHITECTURES = {
     "macos-15-intel": "x86_64",
 }
 ARCHITECTURE_CHECK_STEP_NAME = "Assert runner architecture"
+ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
+  ubuntu-24.04)
+    expected="x86_64"
+    ;;
+  macos-26)
+    expected="arm64"
+    ;;
+  macos-15-intel)
+    expected="x86_64"
+    ;;
+  *)
+    echo "unsupported runner label: ${{ matrix.os }}" >&2
+    exit 1
+    ;;
+esac
+actual="$(uname -m)"
+if [ "$actual" != "$expected" ]; then
+  echo "runner architecture mismatch: expected $expected, got $actual" >&2
+  exit 1
+fi
+"""
 WORKFLOW_ROOT = Path(".github/workflows")
 
 
@@ -74,17 +96,12 @@ def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -
         for index, step in enumerate(steps)
         if isinstance(step, Mapping) and step.get("name") == ARCHITECTURE_CHECK_STEP_NAME
     ]
-    assert architecture_steps == [4]
+    assert architecture_steps == [0]
     architecture_step = steps[architecture_steps[0]]
     assert isinstance(architecture_step, Mapping)
     assert architecture_step.get("shell") == "bash"
     run = architecture_step.get("run")
-    assert isinstance(run, str)
-    assert "uname -m" in run
-    assert "*-latest" not in run
-    for runner, machine in EXPECTED_ARCHITECTURES.items():
-        assert runner in run
-        assert machine in run
+    assert run == ARCHITECTURE_CHECK_SCRIPT
     for command in (
         "uv sync --all-packages --locked",
         "pnpm install --frozen-lockfile",
@@ -159,6 +176,30 @@ def test_ci_matrix_remains_exact() -> None:
 def test_ci_check_asserts_expected_architectures_before_dependency_installation() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
     _assert_matrix_job_checks_expected_architecture(workflow["jobs"]["check"])
+
+
+@pytest.mark.parametrize("mutation", ("comment_only", "reordered", "changed_command"))
+def test_architecture_assertion_mutations_fail_closed(mutation: str) -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
+    job = deepcopy(workflow["jobs"]["check"])
+    steps = job["steps"]
+    architecture_step = next(
+        step for step in steps if step.get("name") == ARCHITECTURE_CHECK_STEP_NAME
+    )
+    if mutation == "comment_only":
+        architecture_step["run"] = (
+            "# uname -m ubuntu-24.04 x86_64 macos-26 arm64 macos-15-intel\ntrue\n"
+        )
+    elif mutation == "reordered":
+        steps.remove(architecture_step)
+        steps.insert(1, architecture_step)
+    else:
+        architecture_step["run"] = ARCHITECTURE_CHECK_SCRIPT.replace(
+            'actual="$(uname -m)"', 'actual="arm64"'
+        )
+
+    with pytest.raises(AssertionError):
+        _assert_matrix_job_checks_expected_architecture(job)
 
 
 def test_ci_is_unprivileged_and_has_no_hardware_or_provider_secrets() -> None:

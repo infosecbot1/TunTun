@@ -6,6 +6,8 @@
   "required": [
     "$schema",
     "receipt_id",
+    "evidence_use",
+    "run_id",
     "recorded_at_utc",
     "status",
     "cleanup_verified",
@@ -13,7 +15,7 @@
     "runtime",
     "source",
     "artifact_digests",
-    "owner_review_ref"
+    "owner_approval_commitment_sha256"
   ],
   "properties": {
     "$schema": {
@@ -21,6 +23,13 @@
     },
     "receipt_id": {
       "const": "phase1.macos-keychain.host-probe.v1"
+    },
+    "evidence_use": {
+      "const": "diagnostic_only"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
     "recorded_at_utc": {
       "type": "string",
@@ -119,9 +128,29 @@
         }
       }
     },
-    "owner_review_ref": {
+    "owner_approval_commitment_sha256": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+      "pattern": "^[0-9a-f]{64}$"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "pass"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "cleanup_verified": {
+            "const": true
+          }
+        },
+        "required": ["cleanup_verified"]
+      }
+    }
+  ]
 }

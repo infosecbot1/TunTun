@@ -6,7 +6,7 @@
 
 ## Context
 
-The Phase 1 plans previously treated the 2020 Intel Mac as the current household Core host and mixed three different meanings: the active development machine, the active household-validation machine, and Intel macOS distribution support. The owner has approved the current Darwin arm64 Mac as the active Phase 1 development and household-validation host after a reviewed temporary Keychain probe passed.
+The Phase 1 plans previously treated the 2020 Intel Mac as the current household Core host and mixed three different meanings: the active development machine, the active household-validation machine, and Intel macOS distribution support. The owner independently approved the current Darwin arm64 Mac as the active Phase 1 development and household-validation host. A reviewed temporary Keychain probe informed that baseline selection, but neither that result nor any replacement diagnostic receipt grants commissioning authority.
 
 This record contains no username, hostname, serial number, hardware UUID, provisioning UDID, account name, generated Keychain value, absolute home path, or Keychain path.
 
@@ -14,12 +14,12 @@ This record contains no username, hostname, serial number, hardware UUID, provis
 
 Phase 1 uses these four distinct qualification classes:
 
-1. Active Phase 1 development host: an owner-approved Darwin arm64 MacBook Pro model class `Mac15,7`, Apple M3 Pro class, 12 CPU cores, 36 GB RAM, macOS 26.6.1 build 25G76.
-2. Active Phase 1 household-validation and deployment host: the same owner-approved Darwin arm64 Mac. The reviewed temporary Keychain probe is accepted only as baseline-selection evidence until a content-safe receipt is recorded.
+1. Active Phase 1 development host: the owner-approved inventory target currently observed as Darwin arm64. Its `Mac15,7`, Apple M3 Pro class, 12 CPU cores, 36 GB RAM, and macOS 26.6.1 build 25G76 values are descriptive inventory only.
+2. Active Phase 1 household-validation and deployment host: that same independently owner-approved inventory target. The reviewed temporary Keychain probe is baseline-selection evidence only; a later content-safe receipt remains diagnostic evidence only.
 3. Supported-distribution CI target: Intel macOS remains mandatory. Hosted Intel CI proves build, install, and test portability only.
-4. Future host transition: moving household deployment back to the 2020 Intel Mac is a new target qualification and requires fresh real-host probes bound to the target host, OS, runtime, source commit, locks, artifacts, and receipt set.
+4. Future host transition: moving household deployment back to the 2020 Intel Mac is a new target qualification and requires a fresh trusted owner approval bound to an opaque inventory target plus real-host probes bound to that target, OS, runtime, source commit, locks, artifacts, and receipt set.
 
-There is still exactly one canonical household Core at a time. Hosted CI never commissions a household Core, and the 2020 Intel Mac is not the active household Core unless the full transition probe set passes.
+There is still exactly one canonical household Core at a time. Hosted CI never commissions a household Core, and the 2020 Intel Mac is not the active household Core unless independent owner approval and the full transition probe set pass. Architecture, model class, product name, and model year are never commissioning-authority identifiers.
 
 ## CI Policy
 
@@ -31,13 +31,17 @@ The `check` job uses only this fixed matrix:
 | `macos-26` | `arm64` | Current macOS arm64 distribution build, lock resolution, native imports, and common suite |
 | `macos-15-intel` | `x86_64` | Mandatory Intel macOS distribution build, lock resolution, native imports, and common suite |
 
-The workflow must assert `uname -m` before dependency installation. Mutable runner labels, Rosetta substitution, self-hosted labels, matrix `include`/`exclude`, extra axes, provider secrets, and hardware markers are not accepted as ordinary CI evidence.
+The workflow's first matrix-job step must execute the exact reviewed `uname -m` assertion before checkout, any third-party action, setup, or dependency installation. The policy tests reject comment-only/no-op, altered-command, and reordered substitutes. Mutable runner labels, Rosetta substitution, self-hosted labels, matrix `include`/`exclude`, extra axes, provider secrets, and hardware markers are not accepted as ordinary CI evidence.
 
 ## Keychain Receipt Policy
 
-The Keychain probe keeps its dual acknowledgement and default content-free `PASS`/`FAIL` output. When release-attributable evidence is needed, it writes a closed JSON receipt conforming to `docs/evidence/phase1-host-probe.schema.json`.
+The Keychain probe keeps its dual acknowledgement and default content-free `PASS`/`FAIL` output. When diagnostic evidence is needed, it writes a new closed JSON receipt conforming to `docs/evidence/phase1-host-probe.schema.json` at a previously absent, unique path. Publication is exclusive; an older receipt is never overwritten. Receipt version 1 is deliberately an active-target Darwin arm64 diagnostic and cannot be reused as Intel-transition evidence; a later Intel household transition requires a new reviewed versioned target probe plus the independent approval and lifecycle receipts in this ADR.
 
-That receipt records only content-safe metadata: receipt ID, UTC time, pass/fail, cleanup verification, Darwin arm64 host class, OS product/build, Python version, keyring version, backend class, source commit, probe-script digest, optional named artifact digests, and an owner-review reference. A failed cleanup can never produce a passing receipt.
+That receipt records only content-safe metadata: receipt ID, diagnostic-only evidence use, fresh UUIDv4 run ID, parsed UTC time, pass/fail, cleanup verification, Darwin arm64 host class, OS product/build, Python version, keyring version, backend class, clean script-repository commit, probe-script digest, optional named artifact digests, and an opaque SHA-256 commitment to an external owner-approval record. The external commitment is domain-separated and includes an independently stored random nonce so predictable approval text cannot be enumerated. A failed cleanup can never produce a passing receipt.
+
+The receipt is not self-authorizing. `validate_phase1_host_probe_receipt` performs structural validation only and can never accept evidence or authorize commissioning. `verify_phase1_host_probe_receipt` additionally requires and compares the expected run ID, external owner-approval commitment, source commit, and probe-script digest, but its successful result is still diagnostic evidence only. Acceptance requires an independent trusted verifier to authenticate the external approval record and its expected values.
+
+Unique physical-host identity is intentionally absent from this diagnostic receipt for privacy. Consequently, the receipt cannot prove which physical Mac ran it. Later commissioning must independently bind an opaque host record and target-held public key to the authenticated owner approval and lifecycle evidence; architecture, model, product, and year observations cannot replace that binding.
 
 ## Consequences
 

@@ -8,7 +8,7 @@
 
 ## 1. Outcome
 
-Phase 5 moves suitable AI workloads toward private local execution without moving trust into a model server. The owner-approved Darwin arm64 Mac recorded in `docs/architecture/decisions/0001-phase1-host-baseline.md` is the current Tuntun orchestration and control host. It continues to own canonical identity, family policy, authorization, the seven memory kinds, audit, cloud budget, and final routing decisions. A future inference appliance is a replaceable, model-independent compute worker behind the existing Tuntun gateway; it never becomes the household authority.
+Phase 5 moves suitable AI workloads toward private local execution without moving trust into a model server. The independently owner-approved opaque inventory target recorded in `docs/architecture/decisions/0001-phase1-host-baseline.md`, currently verified as Darwin arm64, is the current Tuntun orchestration and control host. Architecture/model/product/year strings are descriptive and never host authority. It continues to own canonical identity, family policy, authorization, the seven memory kinds, audit, cloud budget, and final routing decisions. A future inference appliance is a replaceable, model-independent compute worker behind the existing Tuntun gateway; it never becomes the household authority.
 
 Migration is staged. The existing cloud route remains the measured quality baseline. The active control host may run bounded small offline classifiers, embedding models, and deterministic support functions when resource tests pass, but it is not represented as capable of high-quality frontier-scale local conversation. Intel macOS remains a mandatory distribution target, not active household performance evidence. No inference appliance is purchased merely because a large model can load. Purchase and route activation require task-specific quality, bilingual behavior, safety, latency, power, maintenance, privacy, and total-cost evidence.
 
@@ -23,7 +23,7 @@ Raspbot V2 is a later supervised endpoint, not an autonomous household agent. It
 | Area | Decision |
 |---|---|
 | Migration strategy | **Staged local migration**; cloud remains the initial quality baseline and safe fallback only where consent, privacy, and budget permit |
-| Control host | Owner-approved Darwin arm64 Mac; owns orchestration and every canonical trust decision |
+| Control host | Independently owner-approved opaque inventory target, currently verified as Darwin arm64; owns orchestration and every canonical trust decision |
 | Control-host inference | Bounded small offline models only after active-host resource gates; never assumed sufficient for frontier-quality local conversation or sustained local vision |
 | Inference appliance | Replaceable worker behind `InferenceGatewayPort`; no canonical memory, family policy, action authority, or direct endpoint access |
 | Model serving | Adapter-compatible `llama.cpp`, vLLM, MLX-compatible, or future runtime; runtime compatibility never defines Tuntun’s public contract |
@@ -401,7 +401,9 @@ Migration is per task cell, not a global “local AI on” switch. A stronger ne
 
 ### 7.6 Control-host resource envelope
 
-The active control host can enable an `M1` model only when all of these hold under simultaneous Tuntun service load and the receipt binds the current host, OS, runtime, model, and candidate:
+The numeric limits below are provisional conservative planning ceilings, not copied performance evidence and not an accepted envelope for the current host. Before any `M1` promotion, a clean committed benchmark on the independently approved opaque active-Core target must derive and sign a safe operating envelope from simultaneous household-service load, baseline variance, memory pressure, thermal behavior, and stop/privacy/voice reserve. The effective gate uses the stricter of that measured envelope and every provisional ceiling below; measurements may tighten these numbers but cannot silently widen them. Until that receipt binds the approved target, OS, runtime, model, and exact candidate, no `M1` capability is promoted.
+
+The active control host can enable an `M1` model only when all of these effective gates hold:
 
 - model process resident memory is at most 4 GiB and system memory pressure remains green with at least 6 GiB available before launch;
 - the artefact is at most 3.5 GiB and its configured context does not push the process above the memory cap;

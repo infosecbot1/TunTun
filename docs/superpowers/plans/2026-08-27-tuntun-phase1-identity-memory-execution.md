@@ -3431,12 +3431,13 @@ git commit -m "feat(identity): enforce interaction-gated identity"
 - Create: `apps/core/src/tuntun_core/services/identity/voice_enrollment.py`
 - Create: `apps/core/src/tuntun_core/adapters/identity/voice_onnx.py`
 - Create: `scripts/models/convert_speechbrain_ecapa.py`
-- Modify: `apps/core/pyproject.toml` (ONNX Runtime only after Intel probe)
+- Modify: `apps/core/pyproject.toml` (ONNX Runtime only after the trusted active-Core hardware gate plus both hosted macOS arm64/Intel distribution gates)
 - Modify: `uv.lock` (resolved runtime artifacts)
 - Modify: `models/manifest.yaml` (`speechbrain-ecapa-onnx` entry at revision `0f99f2d0ebe89ac095bcc5903c4dd8f72b367286`)
 - Create: `tests/unit/identity/test_voice_quality.py`
 - Create: `tests/security/test_voice_retention.py`
-- Create: `tests/hardware/test_intel_voice_runtime.py`
+- Create: `tests/hardware/test_control_host_voice_runtime.py`
+- Create: `tests/ci/test_voice_runtime_distribution.py`
 
 **Interfaces:**
 - Consumes: 1.5–3.0 seconds of VAD-trimmed post-wake `EphemeralAudio`, an owner-authorized voice `EnrollmentSession` in `calibrating`, current HMAC-valid voice consent rechecked in the template-write UoW, and an activated reviewed ONNX model.
@@ -3568,18 +3569,18 @@ uv run tuntunctl models register-local --bundle speechbrain-ecapa-onnx --artifac
 
 Expected: `registered speechbrain-ecapa-onnx activation=blocked_calibration artifacts=1 hashes=verified`.
 
-- [ ] **Step 4: Run green, retention, governance, and Intel tests**
+- [ ] **Step 4: Run green, retention, governance, active-host, and distribution tests**
 
-Run: `uv run pytest tests/unit/identity/test_voice_quality.py tests/security/test_voice_retention.py tests/hardware/test_intel_voice_runtime.py tests/security/test_model_governance.py -q`
-Expected: PASS; the sentinel scan is empty and the Intel test reports bounded latency without importing PyTorch in the core environment.
+Run: `uv run pytest tests/unit/identity/test_voice_quality.py tests/security/test_voice_retention.py tests/hardware/test_control_host_voice_runtime.py tests/ci/test_voice_runtime_distribution.py tests/security/test_model_governance.py -q`
+Expected: PASS; the sentinel scan is empty, the hardware test reports bounded latency and numerical correctness on the independently owner-approved opaque active-Core target, and hosted `macos-26` arm64 plus `macos-15-intel` rows prove install/import/numerical distribution compatibility without importing PyTorch in the core environment. Architecture/model/product/year strings and hosted CI results never select or commission the household target.
 
 - [ ] **Step 5: Check and commit**
 
-Run: `uv run ruff format --check apps/core/src/tuntun_core/services/identity/voice_enrollment.py apps/core/src/tuntun_core/adapters/identity/voice_onnx.py scripts/models/convert_speechbrain_ecapa.py tests/unit/identity/test_voice_quality.py tests/security/test_voice_retention.py tests/hardware/test_intel_voice_runtime.py && uv run ruff check apps/core/src/tuntun_core/services/identity/voice_enrollment.py apps/core/src/tuntun_core/adapters/identity/voice_onnx.py scripts/models/convert_speechbrain_ecapa.py tests/unit/identity/test_voice_quality.py tests/security/test_voice_retention.py tests/hardware/test_intel_voice_runtime.py && uv run mypy apps/core/src/tuntun_core/services/identity/voice_enrollment.py apps/core/src/tuntun_core/adapters/identity/voice_onnx.py`
+Run: `uv run ruff format --check apps/core/src/tuntun_core/services/identity/voice_enrollment.py apps/core/src/tuntun_core/adapters/identity/voice_onnx.py scripts/models/convert_speechbrain_ecapa.py tests/unit/identity/test_voice_quality.py tests/security/test_voice_retention.py tests/hardware/test_control_host_voice_runtime.py tests/ci/test_voice_runtime_distribution.py && uv run ruff check apps/core/src/tuntun_core/services/identity/voice_enrollment.py apps/core/src/tuntun_core/adapters/identity/voice_onnx.py scripts/models/convert_speechbrain_ecapa.py tests/unit/identity/test_voice_quality.py tests/security/test_voice_retention.py tests/hardware/test_control_host_voice_runtime.py tests/ci/test_voice_runtime_distribution.py && uv run mypy apps/core/src/tuntun_core/services/identity/voice_enrollment.py apps/core/src/tuntun_core/adapters/identity/voice_onnx.py`
 Expected: PASS with exit code 0.
 
 ```bash
-git add apps/core/src/tuntun_core/services/identity/voice_enrollment.py apps/core/src/tuntun_core/adapters/identity/voice_onnx.py scripts/models/convert_speechbrain_ecapa.py apps/core/pyproject.toml uv.lock models/manifest.yaml tests/unit/identity/test_voice_quality.py tests/security/test_voice_retention.py tests/hardware/test_intel_voice_runtime.py
+git add apps/core/src/tuntun_core/services/identity/voice_enrollment.py apps/core/src/tuntun_core/adapters/identity/voice_onnx.py scripts/models/convert_speechbrain_ecapa.py apps/core/pyproject.toml uv.lock models/manifest.yaml tests/unit/identity/test_voice_quality.py tests/security/test_voice_retention.py tests/hardware/test_control_host_voice_runtime.py tests/ci/test_voice_runtime_distribution.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(identity): add governed voice evidence"

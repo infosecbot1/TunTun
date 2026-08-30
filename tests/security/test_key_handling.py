@@ -34,6 +34,9 @@ EXPECTED_SECRET_IDS = {
     "edge_ca": ("tuntun.edge.ca", "signing-v1"),
     "device_signing": ("tuntun.edge.device", "signing-v1"),
 }
+HOST_PROBE_RUN_ID = "00000000-0000-4000-8000-000000000901"
+OTHER_HOST_PROBE_RUN_ID = "00000000-0000-4000-8000-000000000902"
+OWNER_APPROVAL_COMMITMENT_SHA256 = "c" * 64
 
 
 def _safe_host_receipt_context(**overrides: object) -> dict[str, object]:
@@ -51,6 +54,19 @@ def _safe_host_receipt_context(**overrides: object) -> dict[str, object]:
     }
     context.update(overrides)
     return context
+
+
+def _safe_host_receipt(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "status": "pass",
+        "cleanup_verified": True,
+        "run_id": HOST_PROBE_RUN_ID,
+        "owner_approval_commitment_sha256": OWNER_APPROVAL_COMMITMENT_SHA256,
+        "recorded_at_utc": "2026-08-30T00:00:00Z",
+        **_safe_host_receipt_context(),
+    }
+    values.update(overrides)
+    return probe_script.build_phase1_host_probe_receipt(**values)  # type: ignore[arg-type]
 
 
 class ProbeControlFlow(BaseException):
@@ -1021,6 +1037,50 @@ def test_target_probe_requires_both_acknowledgements_before_side_effects(
         probe_script.main(arguments)
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ["--acknowledge-keychain-write", "--receipt", "unused.json"],
+        ["--acknowledge-keychain-write", "--run-id", HOST_PROBE_RUN_ID],
+        [
+            "--acknowledge-keychain-write",
+            "--receipt",
+            "unused.json",
+            "--run-id",
+            "not-a-uuid",
+            "--owner-approval-commitment-sha256",
+            OWNER_APPROVAL_COMMITMENT_SHA256,
+        ],
+        [
+            "--acknowledge-keychain-write",
+            "--receipt",
+            "unused.json",
+            "--run-id",
+            HOST_PROBE_RUN_ID,
+            "--owner-approval-commitment-sha256",
+            "not-a-digest",
+        ],
+    ),
+)
+def test_target_probe_requires_closed_receipt_bindings_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+) -> None:
+    monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
+    monkeypatch.setattr(
+        probe_script,
+        "MacOSKeychainSecretProvider",
+        lambda: pytest.fail("provider must not be constructed"),
+    )
+    monkeypatch.setattr(
+        probe_script,
+        "uuid4",
+        lambda: pytest.fail("must not generate a UUID"),
+    )
+    with pytest.raises(RuntimeError):
+        probe_script.main(arguments)
+
+
 def test_target_probe_cli_emits_no_secret_or_identifier(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1210,6 +1270,8 @@ def test_phase1_host_probe_receipt_schema_is_closed_and_content_safe() -> None:
     assert set(schema["required"]) == {
         "$schema",
         "receipt_id",
+        "evidence_use",
+        "run_id",
         "recorded_at_utc",
         "status",
         "cleanup_verified",
@@ -1217,10 +1279,23 @@ def test_phase1_host_probe_receipt_schema_is_closed_and_content_safe() -> None:
         "runtime",
         "source",
         "artifact_digests",
-        "owner_review_ref",
+        "owner_approval_commitment_sha256",
     }
     for nested in ("host", "runtime", "source", "artifact_digests"):
         assert schema["properties"][nested]["additionalProperties"] is False
+    assert schema["properties"]["evidence_use"] == {"const": "diagnostic_only"}
+    assert schema["allOf"] == [
+        {
+            "if": {
+                "properties": {"status": {"const": "pass"}},
+                "required": ["status"],
+            },
+            "then": {
+                "properties": {"cleanup_verified": {"const": True}},
+                "required": ["cleanup_verified"],
+            },
+        }
+    ]
     rendered = json.dumps(schema, sort_keys=True)
     for forbidden in (
         "username",
@@ -1232,20 +1307,21 @@ def test_phase1_host_probe_receipt_schema_is_closed_and_content_safe() -> None:
         "secret",
         "environment",
         "keychain_path",
+        "owner_review_ref",
+        "target_id",
+        "host_id",
+        "public_key",
     ):
         assert forbidden not in rendered
 
 
-def test_phase1_host_probe_receipt_is_bound_to_safe_darwin_arm64_metadata() -> None:
-    receipt = probe_script.build_phase1_host_probe_receipt(
-        status="pass",
-        cleanup_verified=True,
-        owner_review_ref="owner-approved-baseline-selection",
-        recorded_at_utc="2026-08-30T00:00:00Z",
-        **_safe_host_receipt_context(),
-    )
-    probe_script.validate_phase1_host_probe_receipt(
+def test_phase1_host_probe_receipt_is_diagnostic_and_bound_to_trusted_expectations() -> None:
+    receipt = _safe_host_receipt()
+    probe_script.validate_phase1_host_probe_receipt(receipt)
+    probe_script.verify_phase1_host_probe_receipt(
         receipt,
+        expected_run_id=HOST_PROBE_RUN_ID,
+        expected_owner_approval_commitment_sha256=OWNER_APPROVAL_COMMITMENT_SHA256,
         expected_source_commit="f" * 40,
         expected_probe_script_sha256="a" * 64,
     )
@@ -1253,6 +1329,8 @@ def test_phase1_host_probe_receipt_is_bound_to_safe_darwin_arm64_metadata() -> N
     assert receipt == {
         "$schema": probe_script.PHASE1_HOST_PROBE_SCHEMA_ID,
         "receipt_id": "phase1.macos-keychain.host-probe.v1",
+        "evidence_use": "diagnostic_only",
+        "run_id": HOST_PROBE_RUN_ID,
         "recorded_at_utc": "2026-08-30T00:00:00Z",
         "status": "pass",
         "cleanup_verified": True,
@@ -1273,7 +1351,7 @@ def test_phase1_host_probe_receipt_is_bound_to_safe_darwin_arm64_metadata() -> N
             "probe_script_sha256": "a" * 64,
         },
         "artifact_digests": {},
-        "owner_review_ref": "owner-approved-baseline-selection",
+        "owner_approval_commitment_sha256": OWNER_APPROVAL_COMMITMENT_SHA256,
     }
     rendered = json.dumps(receipt, sort_keys=True)
     for forbidden in (
@@ -1284,19 +1362,12 @@ def test_phase1_host_probe_receipt_is_bound_to_safe_darwin_arm64_metadata() -> N
         "target-probe-secret-sentinel-32b",
         "/Users/private-user-sentinel",
         "login.keychain",
+        "private-owner@example.invalid",
     ):
         assert forbidden not in rendered
 
 
-def test_phase1_host_probe_receipt_rejects_wrong_or_stale_evidence() -> None:
-    receipt = probe_script.build_phase1_host_probe_receipt(
-        status="pass",
-        cleanup_verified=True,
-        owner_review_ref="owner-approved-baseline-selection",
-        recorded_at_utc="2026-08-30T00:00:00Z",
-        **_safe_host_receipt_context(),
-    )
-
+def test_phase1_host_probe_receipt_rejects_malformed_or_impossible_evidence() -> None:
     for overrides in (
         {"system": "Linux"},
         {"machine": "x86_64"},
@@ -1304,46 +1375,153 @@ def test_phase1_host_probe_receipt_rejects_wrong_or_stale_evidence() -> None:
         {"keyring_backend_class": ""},
         {"source_commit": "not-a-commit"},
         {"probe_script_sha256": "not-a-digest"},
+        {"run_id": "not-a-run-id"},
+        {"owner_approval_commitment_sha256": "private-owner@example.invalid"},
+        {"recorded_at_utc": "2026-99-99T99:99:99Z"},
     ):
         with pytest.raises(RuntimeError, match="invalid host probe receipt"):
-            probe_script.build_phase1_host_probe_receipt(
-                status="pass",
-                cleanup_verified=True,
-                owner_review_ref="owner-approved-baseline-selection",
-                recorded_at_utc="2026-08-30T00:00:00Z",
-                **_safe_host_receipt_context(**overrides),
-            )
+            _safe_host_receipt(**overrides)
     with pytest.raises(RuntimeError, match="invalid host probe receipt"):
-        probe_script.build_phase1_host_probe_receipt(
-            status="pass",
-            cleanup_verified=False,
-            owner_review_ref="owner-approved-baseline-selection",
-            recorded_at_utc="2026-08-30T00:00:00Z",
-            **_safe_host_receipt_context(),
-        )
+        _safe_host_receipt(cleanup_verified=False)
 
+    receipt = _safe_host_receipt()
     extra = json.loads(json.dumps(receipt))
     extra["username"] = "private-user-sentinel"
     with pytest.raises(RuntimeError, match="invalid host probe receipt"):
         probe_script.validate_phase1_host_probe_receipt(extra)
 
-    changed_commit = json.loads(json.dumps(receipt))
-    changed_commit["source"]["commit"] = "e" * 40
-    with pytest.raises(RuntimeError, match="host probe receipt source mismatch"):
-        probe_script.validate_phase1_host_probe_receipt(
-            changed_commit,
+    fail_without_cleanup = json.loads(json.dumps(receipt))
+    fail_without_cleanup["status"] = "fail"
+    fail_without_cleanup["cleanup_verified"] = False
+    probe_script.validate_phase1_host_probe_receipt(fail_without_cleanup)
+    with pytest.raises(RuntimeError, match="host probe receipt did not pass"):
+        probe_script.verify_phase1_host_probe_receipt(
+            fail_without_cleanup,
+            expected_run_id=HOST_PROBE_RUN_ID,
+            expected_owner_approval_commitment_sha256=OWNER_APPROVAL_COMMITMENT_SHA256,
             expected_source_commit="f" * 40,
             expected_probe_script_sha256="a" * 64,
         )
 
-    changed_script = json.loads(json.dumps(receipt))
-    changed_script["source"]["probe_script_sha256"] = "b" * 64
-    with pytest.raises(RuntimeError, match="host probe receipt source mismatch"):
-        probe_script.validate_phase1_host_probe_receipt(
-            changed_script,
-            expected_source_commit="f" * 40,
-            expected_probe_script_sha256="a" * 64,
+
+@pytest.mark.parametrize(
+    "changed",
+    (
+        {"expected_run_id": OTHER_HOST_PROBE_RUN_ID},
+        {"expected_owner_approval_commitment_sha256": "d" * 64},
+        {"expected_source_commit": "e" * 40},
+        {"expected_probe_script_sha256": "b" * 64},
+    ),
+)
+def test_phase1_host_probe_verifier_requires_every_trusted_binding(
+    changed: dict[str, str],
+) -> None:
+    expected = {
+        "expected_run_id": HOST_PROBE_RUN_ID,
+        "expected_owner_approval_commitment_sha256": OWNER_APPROVAL_COMMITMENT_SHA256,
+        "expected_source_commit": "f" * 40,
+        "expected_probe_script_sha256": "a" * 64,
+    }
+    expected.update(changed)
+    with pytest.raises(RuntimeError, match="host probe receipt binding mismatch"):
+        probe_script.verify_phase1_host_probe_receipt(
+            _safe_host_receipt(),
+            **expected,
         )
+
+
+@pytest.mark.parametrize("source_state", ("wrong_root", "dirty", "submodule_drift"))
+def test_source_commit_is_bound_to_clean_script_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    source_state: str,
+) -> None:
+    repository_root = probe_script.REPOSITORY_ROOT
+    expected_calls = (
+        (
+            probe_script.SYSTEM_GIT,
+            "-C",
+            str(repository_root),
+            "rev-parse",
+            "--show-toplevel",
+        ),
+        (
+            probe_script.SYSTEM_GIT,
+            "-C",
+            str(repository_root),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ),
+        (
+            probe_script.SYSTEM_GIT,
+            "-C",
+            str(repository_root),
+            "submodule",
+            "status",
+            "--recursive",
+        ),
+        (
+            probe_script.SYSTEM_GIT,
+            "-C",
+            str(repository_root),
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        ),
+    )
+    outputs = {
+        expected_calls[0]: str(
+            repository_root.parent if source_state == "wrong_root" else repository_root
+        ),
+        expected_calls[1]: " M private.py" if source_state == "dirty" else "",
+        expected_calls[2]: (
+            "+" + "e" * 40 + " vendor/private" if source_state == "submodule_drift" else ""
+        ),
+        expected_calls[3]: "f" * 40,
+    }
+    calls: list[tuple[str, ...]] = []
+
+    def fake_command(
+        arguments: tuple[str, ...],
+        *,
+        cwd: Path,
+        allow_empty: bool = False,
+    ) -> str:
+        del allow_empty
+        assert cwd == repository_root
+        calls.append(arguments)
+        return outputs[arguments]
+
+    monkeypatch.setattr(probe_script, "_run_content_safe_command", fake_command)
+    with pytest.raises(RuntimeError, match="content-safe source metadata unavailable"):
+        probe_script._current_source_commit()
+    assert calls == list(expected_calls[: len(calls)])
+
+
+def test_source_commit_ignores_caller_working_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository_root = probe_script.REPOSITORY_ROOT
+
+    def fake_command(
+        arguments: tuple[str, ...],
+        *,
+        cwd: Path,
+        allow_empty: bool = False,
+    ) -> str:
+        assert cwd == repository_root
+        if "--show-toplevel" in arguments:
+            return str(repository_root)
+        if "status" in arguments:
+            assert allow_empty is True
+            return ""
+        return "f" * 40
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(probe_script, "_run_content_safe_command", fake_command)
+    assert probe_script._current_source_commit() == "f" * 40
 
 
 def test_target_probe_cli_writes_atomic_pass_receipt_without_extra_output(
@@ -1353,12 +1531,14 @@ def test_target_probe_cli_writes_atomic_pass_receipt_without_extra_output(
 ) -> None:
     provider = InMemorySecretProvider()
     receipt_path = tmp_path / "receipt.json"
-    replace_calls: list[tuple[Path, Path, bool]] = []
-    real_replace = probe_script._replace_file
+    publish_calls: list[tuple[Path, Path, bool, bool]] = []
+    real_publish = probe_script._publish_file_exclusively
 
-    def capture_replace(source_path: Path, destination_path: Path) -> None:
-        replace_calls.append((source_path, destination_path, source_path.exists()))
-        real_replace(source_path, destination_path)
+    def capture_publish(source_path: Path, destination_path: Path) -> None:
+        publish_calls.append(
+            (source_path, destination_path, source_path.exists(), destination_path.exists())
+        )
+        real_publish(source_path, destination_path)
 
     monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
     monkeypatch.setattr(probe_script, "MacOSKeychainSecretProvider", lambda: provider)
@@ -1374,7 +1554,7 @@ def test_target_probe_cli_writes_atomic_pass_receipt_without_extra_output(
         "uuid4",
         lambda: UUID("00000000-0000-4000-8000-000000000801"),
     )
-    monkeypatch.setattr(probe_script, "_replace_file", capture_replace)
+    monkeypatch.setattr(probe_script, "_publish_file_exclusively", capture_publish)
 
     assert (
         probe_script.main(
@@ -1382,8 +1562,10 @@ def test_target_probe_cli_writes_atomic_pass_receipt_without_extra_output(
                 "--acknowledge-keychain-write",
                 "--receipt",
                 str(receipt_path),
-                "--owner-review-ref",
-                "owner-approved-baseline-selection",
+                "--run-id",
+                HOST_PROBE_RUN_ID,
+                "--owner-approval-commitment-sha256",
+                OWNER_APPROVAL_COMMITMENT_SHA256,
             ]
         )
         == 0
@@ -1391,15 +1573,24 @@ def test_target_probe_cli_writes_atomic_pass_receipt_without_extra_output(
     output = capsys.readouterr()
     assert output.out == "macOS Keychain probe: PASS\n"
     assert output.err == ""
-    assert len(replace_calls) == 1
-    assert replace_calls[0][0].name.startswith(".receipt.json.")
-    assert replace_calls[0][1] == receipt_path
-    assert replace_calls[0][2] is True
+    assert len(publish_calls) == 1
+    assert publish_calls[0][0].name.startswith(".receipt.json.")
+    assert publish_calls[0][1] == receipt_path
+    assert publish_calls[0][2:] == (True, False)
 
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     probe_script.validate_phase1_host_probe_receipt(receipt)
+    probe_script.verify_phase1_host_probe_receipt(
+        receipt,
+        expected_run_id=HOST_PROBE_RUN_ID,
+        expected_owner_approval_commitment_sha256=OWNER_APPROVAL_COMMITMENT_SHA256,
+        expected_source_commit="f" * 40,
+        expected_probe_script_sha256="a" * 64,
+    )
     assert receipt["status"] == "pass"
     assert receipt["cleanup_verified"] is True
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    assert tuple(tmp_path.glob(".receipt.json.*.tmp")) == ()
     rendered = json.dumps(receipt, sort_keys=True)
     assert "round-trip-00000000-0000-4000-8000-000000000801" not in rendered
     assert "pppp" not in rendered
@@ -1437,8 +1628,10 @@ def test_target_probe_cli_writes_fail_receipt_when_cleanup_is_not_verified(
                 "--acknowledge-keychain-write",
                 "--receipt",
                 str(receipt_path),
-                "--owner-review-ref",
-                "owner-approved-baseline-selection",
+                "--run-id",
+                HOST_PROBE_RUN_ID,
+                "--owner-approval-commitment-sha256",
+                OWNER_APPROVAL_COMMITMENT_SHA256,
             ]
         )
         == 1
@@ -1453,3 +1646,120 @@ def test_target_probe_cli_writes_fail_receipt_when_cleanup_is_not_verified(
     rendered = json.dumps(receipt, sort_keys=True)
     assert "round-trip-00000000-0000-4000-8000-000000000801" not in rendered
     assert "qqqq" not in rendered
+
+
+def test_target_probe_cli_rejects_preexisting_receipt_before_keychain_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    old_receipt = _safe_host_receipt(run_id=OTHER_HOST_PROBE_RUN_ID)
+    original = json.dumps(old_receipt, sort_keys=True).encode()
+    receipt_path.write_bytes(original)
+    monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
+    monkeypatch.setattr(
+        probe_script,
+        "MacOSKeychainSecretProvider",
+        lambda: pytest.fail("Keychain must not be opened for an occupied receipt path"),
+    )
+
+    assert (
+        probe_script.main(
+            [
+                "--acknowledge-keychain-write",
+                "--receipt",
+                str(receipt_path),
+                "--run-id",
+                HOST_PROBE_RUN_ID,
+                "--owner-approval-commitment-sha256",
+                OWNER_APPROVAL_COMMITMENT_SHA256,
+            ]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "macOS Keychain probe: FAIL\n"
+    assert receipt_path.read_bytes() == original
+    with pytest.raises(RuntimeError, match="host probe receipt binding mismatch"):
+        probe_script.verify_phase1_host_probe_receipt(
+            old_receipt,
+            expected_run_id=HOST_PROBE_RUN_ID,
+            expected_owner_approval_commitment_sha256=OWNER_APPROVAL_COMMITMENT_SHA256,
+            expected_source_commit="f" * 40,
+            expected_probe_script_sha256="a" * 64,
+        )
+
+
+def test_target_probe_cli_publish_failure_leaves_no_receipt_or_temporary_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    calls = 0
+
+    def fail_publish(source_path: Path, destination_path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        assert source_path.exists()
+        assert destination_path == receipt_path
+        raise OSError("synthetic publication failure")
+
+    monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
+    monkeypatch.setattr(probe_script, "MacOSKeychainSecretProvider", InMemorySecretProvider)
+    monkeypatch.setattr(
+        probe_script,
+        "_capture_content_safe_host_context",
+        lambda selected_provider: _safe_host_receipt_context(),
+    )
+    monkeypatch.setattr(probe_script, "_utc_now", lambda: "2026-08-30T00:00:00Z")
+    monkeypatch.setattr(probe_script.secrets, "token_bytes", lambda size: b"r" * size)
+    monkeypatch.setattr(
+        probe_script,
+        "uuid4",
+        lambda: UUID("00000000-0000-4000-8000-000000000801"),
+    )
+    monkeypatch.setattr(probe_script, "_publish_file_exclusively", fail_publish, raising=False)
+
+    assert (
+        probe_script.main(
+            [
+                "--acknowledge-keychain-write",
+                "--receipt",
+                str(receipt_path),
+                "--run-id",
+                HOST_PROBE_RUN_ID,
+                "--owner-approval-commitment-sha256",
+                OWNER_APPROVAL_COMMITMENT_SHA256,
+            ]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "macOS Keychain probe: FAIL\n"
+    assert calls == 1
+    assert not receipt_path.exists()
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+def test_exclusive_receipt_publication_rolls_back_after_directory_fsync_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    temporary = tmp_path / ".receipt.json.synthetic.tmp"
+    receipt_path = tmp_path / "receipt.json"
+    temporary.write_bytes(b"complete-and-fsynced-before-publication")
+
+    def fail_directory_fsync(path: Path) -> None:
+        assert path == tmp_path
+        raise OSError("synthetic directory fsync failure")
+
+    monkeypatch.setattr(probe_script, "_fsync_directory", fail_directory_fsync)
+    with pytest.raises(OSError, match="synthetic directory fsync failure"):
+        probe_script._publish_file_exclusively(temporary, receipt_path)
+
+    assert temporary.is_file()
+    assert not receipt_path.exists()

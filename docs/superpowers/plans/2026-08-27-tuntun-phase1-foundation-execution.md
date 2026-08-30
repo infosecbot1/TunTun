@@ -379,6 +379,27 @@ EXPECTED_ARCHITECTURES = {
     "macos-15-intel": "x86_64",
 }
 ARCHITECTURE_CHECK_STEP_NAME = "Assert runner architecture"
+ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
+  ubuntu-24.04)
+    expected="x86_64"
+    ;;
+  macos-26)
+    expected="arm64"
+    ;;
+  macos-15-intel)
+    expected="x86_64"
+    ;;
+  *)
+    echo "unsupported runner label: ${{ matrix.os }}" >&2
+    exit 1
+    ;;
+esac
+actual="$(uname -m)"
+if [ "$actual" != "$expected" ]; then
+  echo "runner architecture mismatch: expected $expected, got $actual" >&2
+  exit 1
+fi
+"""
 WORKFLOW_ROOT = Path(".github/workflows")
 
 
@@ -438,11 +459,9 @@ def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -
         for index, step in enumerate(steps)
         if isinstance(step, Mapping) and step.get("name") == ARCHITECTURE_CHECK_STEP_NAME
     ]
-    assert architecture_steps == [4]
+    assert architecture_steps == [0]
     run = steps[architecture_steps[0]].get("run")
-    assert isinstance(run, str) and "uname -m" in run
-    for runner, machine in EXPECTED_ARCHITECTURES.items():
-        assert runner in run and machine in run
+    assert run == ARCHITECTURE_CHECK_SCRIPT
 
 
 def _assert_workflow_policy(path: Path) -> None:
@@ -1056,6 +1075,29 @@ jobs:
         os: [ubuntu-24.04, macos-26, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Assert runner architecture
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-24.04)
+              expected="x86_64"
+              ;;
+            macos-26)
+              expected="arm64"
+              ;;
+            macos-15-intel)
+              expected="x86_64"
+              ;;
+            *)
+              echo "unsupported runner label: ${{ matrix.os }}" >&2
+              exit 1
+              ;;
+          esac
+          actual="$(uname -m)"
+          if [ "$actual" != "$expected" ]; then
+            echo "runner architecture mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with: {version: "0.8.13", enable-cache: true}
@@ -1063,16 +1105,6 @@ jobs:
         with: {version: "10.15.0", run_install: false}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: {node-version: "22", cache: pnpm}
-      - name: Assert runner architecture
-        shell: bash
-        run: |
-          case "${{ matrix.os }}" in
-            ubuntu-24.04|macos-15-intel) expected="x86_64" ;;
-            macos-26) expected="arm64" ;;
-            *) echo "unsupported runner label: ${{ matrix.os }}" >&2; exit 1 ;;
-          esac
-          actual="$(uname -m)"
-          test "$actual" = "$expected"
       - run: uv sync --all-packages --locked
       - run: pnpm install --frozen-lockfile
       - run: make lint typecheck test test-security test-contract web-test web-build
@@ -20574,6 +20606,27 @@ EXPECTED_ARCHITECTURES = {
     "macos-15-intel": "x86_64",
 }
 ARCHITECTURE_CHECK_STEP_NAME = "Assert runner architecture"
+ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
+  ubuntu-24.04)
+    expected="x86_64"
+    ;;
+  macos-26)
+    expected="arm64"
+    ;;
+  macos-15-intel)
+    expected="x86_64"
+    ;;
+  *)
+    echo "unsupported runner label: ${{ matrix.os }}" >&2
+    exit 1
+    ;;
+esac
+actual="$(uname -m)"
+if [ "$actual" != "$expected" ]; then
+  echo "runner architecture mismatch: expected $expected, got $actual" >&2
+  exit 1
+fi
+"""
 WORKFLOW_ROOT = Path(".github/workflows")
 
 
@@ -20633,12 +20686,12 @@ def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -
         for index, step in enumerate(steps)
         if isinstance(step, Mapping) and step.get("name") == ARCHITECTURE_CHECK_STEP_NAME
     ]
-    assert architecture_steps == [4]
+    assert architecture_steps == [0]
     architecture_step = steps[architecture_steps[0]]
     assert isinstance(architecture_step, Mapping)
     assert architecture_step.get("shell") == "bash"
     run = architecture_step.get("run")
-    assert isinstance(run, str) and "uname -m" in run
+    assert run == ARCHITECTURE_CHECK_SCRIPT
     for runner, machine in EXPECTED_ARCHITECTURES.items():
         assert runner in run and machine in run
 
@@ -22165,13 +22218,6 @@ jobs:
         os: [ubuntu-24.04, macos-26, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with: {version: "0.8.13", enable-cache: true}
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-        with: {version: "10.15.0", run_install: false}
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with: {node-version: "22", cache: pnpm}
       - name: Assert runner architecture
         shell: bash
         run: |
@@ -22195,6 +22241,13 @@ jobs:
             echo "runner architecture mismatch: expected $expected, got $actual" >&2
             exit 1
           fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with: {version: "0.8.13", enable-cache: true}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with: {version: "10.15.0", run_install: false}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: {node-version: "22", cache: pnpm}
       - run: uv sync --all-packages --locked
       - run: pnpm install --frozen-lockfile
       - run: make check
@@ -22374,7 +22427,7 @@ begin until both hosted checks are green for the same committed SHA.
 - `MacOSKeychainSecretProvider` accepts only Darwin's exact `keyring.backends.macOS.Keyring` type with a finite exact-numeric priority of at least 1, captures that validated backend once, and never follows later global-keyring drift. Reads require bounded canonical strict Base64 and reject empty, oversized, noncanonical, malformed, or non-string values. Writes verify readback. Delete is a no-op only after a proved absence, accepts a concurrent delete only after re-proving absence, and otherwise surfaces or verifies every failure.
 - Produces: immutable, canonical, unique, disjoint private/public/structural log-key registries; `normalize_private_key(key: str) -> str`; and a real Structlog processor `redact_private_fields(logger: object, method: str, event: MutableMapping[str, object]) -> MutableMapping[str, object]`.
 - Redaction is closed, bounded, cycle-safe, non-mutating, and JSON-serializable. It recursively converts only exact structural-wrapper mappings/lists/tuples to JSON-safe structures; bounds depth, nodes, container items, keys, public strings, and integers; canonicalizes emitted recognized keys; rejects normalized-key collisions; redacts all known private DTO fields and common literal/JSON/Base64/URL-safe-Base64/hex/URL encodings; permits only the exact public scalar allowlist; and replaces unknown keys and their whole values, binary values, unsupported objects, invalid mappings, non-finite numbers, cycles, and exhausted budgets with typed content-free markers.
-- Ordinary unit, security, `make check`, and three-row CI runs use only deterministic fake backends and perform no real Keychain I/O. The one real Keychain round trip is a separately acknowledged, cleanup-verifying gate on the owner-approved Darwin arm64 Core Mac and writes only the content-safe receipt allowed by `docs/evidence/phase1-host-probe.schema.json`. Moving the household target back to Intel repeats the real probe.
+- Ordinary unit, security, `make check`, and three-row CI runs use only deterministic fake backends and perform no real Keychain I/O. The one real Keychain round trip is a separately acknowledged, cleanup-verifying diagnostic gate on the independently owner-approved active Core target, currently verified as Darwin arm64, and writes only the content-safe receipt allowed by `docs/evidence/phase1-host-probe.schema.json`. This v1 receipt is arm64-specific and never commissions a target. Moving household deployment to Intel requires a new reviewed versioned Intel-capable probe plus fresh trusted approval and full real-host lifecycle qualification; hosted Intel CI remains mandatory distribution evidence only.
 
 - [ ] **Step 1: Write the complete red secret/keychain and logging tests**
 
@@ -24230,12 +24283,19 @@ if __name__ == "__main__":
 ```
 
 The tracked probe implementation must extend the bootstrap code above with the optional
-`--receipt PATH --owner-review-ref REF` path from ADR 0001. Receipt mode writes only the closed
-`docs/evidence/phase1-host-probe.schema.json` fields, requires Darwin `arm64`, records source
-commit and probe-script digest, rejects stale commit/script expectations, writes atomically, and
-never serializes the generated account, generated value, username, hostname, serial, hardware UUID,
-provisioning UDID, environment, command output, absolute home path, or Keychain path. A failed
-cleanup can produce only a failing receipt.
+`--receipt PATH --run-id UUID4 --owner-approval-commitment-sha256 DIGEST` path from ADR 0001.
+Receipt mode writes only the closed `docs/evidence/phase1-host-probe.schema.json` fields, labels
+the artifact diagnostic-only, requires Darwin `arm64`, records a clean script-repository commit
+and probe-script digest, and exclusively publishes a complete fsynced file only to a previously
+absent unique path. It never serializes the generated account, generated value, username, hostname,
+serial, hardware UUID, provisioning UDID, environment, command output, absolute home path, or
+Keychain path. A failed cleanup can produce only a failing receipt. The receipt never authorizes
+commissioning: `validate_phase1_host_probe_receipt` is structural-only, while
+`verify_phase1_host_probe_receipt` must compare the externally expected run ID, owner-approval
+commitment, source commit, and script digest and still returns diagnostic evidence only. An
+independent trusted verifier separately authenticates that external approval. Unique physical-host
+identity is intentionally omitted for privacy; later commissioning binds its opaque host record and
+target-held public key independently rather than inferring identity from this receipt or host strings.
 
 - [ ] **Step 5: Run the local green and full regression gate without real Keychain I/O**
 
@@ -24271,13 +24331,13 @@ git commit -m "feat(core): add Keychain boundary and log redaction"
 
 Push the exact Task 8 commit through the Task 2 GitHub Actions matrix and require `check (ubuntu-24.04)`, `check (macos-26)`, and `check (macos-15-intel)` for that same SHA. All three jobs must complete `uv sync --all-packages --locked` and `make check`; they use the fake backend tests and must not access a host Keychain.
 
-Then, from that exact committed checkout on the owner-approved Darwin arm64 Core Mac, after reviewing the fixed probe service and confirming Keychain Access is available, run the deliberately dual-acknowledged write/read/delete smoke gate:
+Then, from that exact committed checkout on the independently owner-approved active Core inventory target, currently verified as Darwin arm64, after reviewing the fixed probe service and confirming Keychain Access is available, run the deliberately dual-acknowledged write/read/delete diagnostic gate:
 
 ```bash
-TUNTUN_ALLOW_KEYCHAIN_PROBE=1 uv run python scripts/probe_macos_keychain.py --acknowledge-keychain-write --receipt .superpowers/sdd/phase1-host-keychain-probe.json --owner-review-ref owner-approved-baseline-selection
+TUNTUN_ALLOW_KEYCHAIN_PROBE=1 uv run python scripts/probe_macos_keychain.py --acknowledge-keychain-write --receipt ".superpowers/sdd/phase1-host-keychain-probe-${TUNTUN_HOST_PROBE_RUN_ID}.json" --run-id "$TUNTUN_HOST_PROBE_RUN_ID" --owner-approval-commitment-sha256 "$TUNTUN_OWNER_APPROVAL_COMMITMENT_SHA256"
 ```
 
-Expected stdout is exactly one line: `macOS Keychain probe: PASS`. The probe generates a fresh random 32-byte value and UUID account, first proves the slot absent, verifies the write/readback, always attempts deletion even after a partial write failure, and finally proves absence. It never prints the value or generated account on success or failure; a handled probe/backend failure instead exits 1 with exactly `macOS Keychain probe: FAIL` on stderr. Missing either acknowledgement must fail before randomness or provider construction. Receipt output is content-safe, cleanup-bound, and release evidence only after owner review; the earlier temporary pass remains baseline-selection evidence unless this receipt exists for the exact run.
+Before the command, an independent trusted owner workflow creates a fresh UUIDv4 in `TUNTUN_HOST_PROBE_RUN_ID`, computes the opaque SHA-256 commitment to its private approval record in `TUNTUN_OWNER_APPROVAL_COMMITMENT_SHA256`, records the expected clean commit and script digest, and proves the run-specific destination absent. Expected stdout is exactly one line: `macOS Keychain probe: PASS`. The probe generates a fresh random 32-byte value and UUID account, first proves the slot absent, verifies the write/readback, always attempts deletion even after a partial write failure, and finally proves absence. It never prints the value or generated account on success or failure; a handled probe/backend/publication failure instead exits 1 with exactly `macOS Keychain probe: FAIL` on stderr. Missing either acknowledgement or evidence binding must fail before randomness or provider construction. A trusted acceptance verifier must compare all four expected bindings and the external approval record; the diagnostic receipt cannot commission a host. The earlier temporary pass remains baseline-selection evidence only.
 
 Record only the content-safe receipt, commit SHA, UTC timestamp, OS/Python/keyring versions, the content-free invocation, all three CI conclusions, and PASS in owner-only encrypted notes outside the repository; record no secret, generated account, backend payload, household path, or Keychain export. Any non-PASS result, CI mismatch, or cleanup result that cannot be proved blocks Task 8 and therefore Task 9. If cleanup cannot be proved, stop automation and use Keychain Access to inspect and remove only entries with service `tuntun.probe.keychain` created at the probe time before retrying.
 
