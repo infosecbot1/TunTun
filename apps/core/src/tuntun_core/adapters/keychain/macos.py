@@ -32,7 +32,11 @@ def _bind_macos_backend(
     backend: KeyringBackend,
     expected_type: type[KeyringBackend],
 ) -> KeyringBackend:
-    if system_name != "Darwin" or type(backend) is not expected_type:
+    if (
+        type(system_name) is not str
+        or system_name != "Darwin"
+        or type(backend) is not expected_type
+    ):
         raise RuntimeError("production secret backend must be macOS Keychain")
     try:
         raw_priority = expected_type.priority
@@ -50,7 +54,7 @@ def _bind_macos_backend(
 class MacOSKeychainSecretProvider(SecretProvider):
     def __init__(self) -> None:
         system_name = platform.system()
-        if system_name != "Darwin":
+        if type(system_name) is not str or system_name != "Darwin":
             raise RuntimeError("production secret backend must be macOS Keychain")
         expected_type = _load_macos_keyring_type()
         try:

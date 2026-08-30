@@ -96,6 +96,16 @@ def _format_runtime_error(action: Callable[[], object]) -> str:
     raise AssertionError("expected RuntimeError")
 
 
+def _capture_boundary_error(
+    action: Callable[[], object],
+) -> tuple[type[BaseException] | None, str]:
+    try:
+        action()
+    except BaseException as error:
+        return type(error), "".join(traceback.format_exception(error))
+    return None, ""
+
+
 def test_secret_identifier_map_is_exact_immutable_and_collision_free() -> None:
     assert SECRET_IDS == EXPECTED_SECRET_IDS
     assert len(set(SECRET_IDS.values())) == len(SECRET_IDS)
@@ -310,6 +320,65 @@ def test_macos_priority_type_check_does_not_hash_hostile_type(
     rendered = _format_runtime_error(MacOSKeychainSecretProvider)
     assert "private-priority-hash-sentinel" not in rendered
     assert effects == []
+
+
+@pytest.mark.parametrize("seam", ("bind", "constructor"))
+@pytest.mark.parametrize("comparison", ("eq", "ne"))
+@pytest.mark.parametrize("raises", (False, True), ids=("recording", "raising"))
+def test_macos_platform_checks_reject_non_strings_without_comparison_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+    seam: str,
+    comparison: str,
+    raises: bool,
+) -> None:
+    comparisons: list[str] = []
+    backend_loads: list[str] = []
+
+    if comparison == "eq":
+
+        class SystemNameSpy:
+            def __eq__(self, other: object) -> bool:
+                del other
+                comparisons.append("eq")
+                if raises:
+                    raise RuntimeError("private-platform-eq-sentinel")
+                return True
+
+    else:
+
+        class SystemNameSpy:
+            def __ne__(self, other: object) -> bool:
+                del other
+                comparisons.append("ne")
+                if raises:
+                    raise RuntimeError("private-platform-ne-sentinel")
+                return False
+
+    system_name = SystemNameSpy()
+    backend = FakeMacOSBackend()
+    if seam == "bind":
+        action = lambda: macos._bind_macos_backend(  # noqa: E731
+            cast(Any, system_name),
+            cast(Any, backend),
+            cast(Any, FakeMacOSBackend),
+        )
+    else:
+        monkeypatch.setattr(macos.platform, "system", lambda: cast(Any, system_name))
+
+        def load_backend() -> Any:
+            backend_loads.append("loaded")
+            return FakeMacOSBackend
+
+        monkeypatch.setattr(macos, "_load_macos_keyring_type", load_backend)
+        monkeypatch.setattr(macos.keyring, "get_keyring", lambda: backend)
+        action = MacOSKeychainSecretProvider
+
+    error_type, rendered = _capture_boundary_error(action)
+    assert error_type is RuntimeError
+    assert "production secret backend must be macOS Keychain" in rendered
+    assert "private-platform" not in rendered
+    assert comparisons == []
+    assert backend_loads == []
 
 
 def test_macos_provider_binds_validated_backend_and_round_trips_base64(
@@ -649,13 +718,97 @@ def test_target_probe_base_exception_after_partial_write_still_cleans_up(
             super().delete(service, account)
 
     provider = PartialControlFlowProvider()
-    with pytest.raises(error_type, match="private-control-flow-sentinel"):
-        probe_script.probe_keychain_round_trip(
+    captured_type, rendered = _capture_boundary_error(
+        lambda: probe_script.probe_keychain_round_trip(
             provider,
             "tuntun.probe",
             "slot-v1",
             b"probe",
         )
+    )
+    assert captured_type is RuntimeError
+    assert "Keychain probe operation failed" in rendered
+    assert "private-control-flow-sentinel" not in rendered
+    assert provider.delete_calls == 1
+    assert provider.exists_calls == 2
+    assert not InMemorySecretProvider.exists(provider, "tuntun.probe", "slot-v1")
+
+
+@pytest.mark.parametrize("error_type", (KeyboardInterrupt, SystemExit, ProbeControlFlow))
+def test_target_probe_preflight_translates_every_base_exception_without_cleanup(
+    error_type: type[BaseException],
+) -> None:
+    class PreflightControlFlowProvider(InMemorySecretProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delete_calls = 0
+
+        def exists(self, service: str, account: str) -> bool:
+            del service, account
+            raise error_type("private-preflight-control-flow-sentinel")
+
+        def delete(self, service: str, account: str) -> None:
+            del service, account
+            self.delete_calls += 1
+
+    provider = PreflightControlFlowProvider()
+    captured_type, rendered = _capture_boundary_error(
+        lambda: probe_script.probe_keychain_round_trip(
+            provider,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    )
+    assert captured_type is RuntimeError
+    assert "Keychain probe preflight failed" in rendered
+    assert "private-preflight-control-flow-sentinel" not in rendered
+    assert provider.delete_calls == 0
+
+
+@pytest.mark.parametrize("stage", ("get", "compare"))
+def test_target_probe_translates_get_and_compare_base_exceptions_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    class OperationControlFlowProvider(InMemorySecretProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delete_calls = 0
+            self.exists_calls = 0
+
+        def exists(self, service: str, account: str) -> bool:
+            self.exists_calls += 1
+            return super().exists(service, account)
+
+        def get(self, service: str, account: str) -> bytes:
+            if stage == "get":
+                raise ProbeControlFlow("private-get-control-flow-sentinel")
+            return super().get(service, account)
+
+        def delete(self, service: str, account: str) -> None:
+            self.delete_calls += 1
+            super().delete(service, account)
+
+    if stage == "compare":
+
+        def interrupt_compare(left: object, right: object) -> bool:
+            del left, right
+            raise KeyboardInterrupt("private-compare-control-flow-sentinel")
+
+        monkeypatch.setattr(probe_script.hmac, "compare_digest", interrupt_compare)
+    provider = OperationControlFlowProvider()
+    captured_type, rendered = _capture_boundary_error(
+        lambda: probe_script.probe_keychain_round_trip(
+            provider,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    )
+    assert captured_type is RuntimeError
+    assert "Keychain probe operation failed" in rendered
+    assert "private-" not in rendered
     assert provider.delete_calls == 1
     assert provider.exists_calls == 2
     assert not InMemorySecretProvider.exists(provider, "tuntun.probe", "slot-v1")
@@ -676,13 +829,17 @@ def test_target_probe_base_exception_delete_still_verifies_and_cleanup_takes_pre
             raise KeyboardInterrupt("private-delete-control-flow-sentinel")
 
     removed = RemovedThenInterruptedProvider()
-    with pytest.raises(KeyboardInterrupt, match="private-delete-control-flow-sentinel"):
-        probe_script.probe_keychain_round_trip(
+    captured_type, rendered = _capture_boundary_error(
+        lambda: probe_script.probe_keychain_round_trip(
             removed,
             "tuntun.probe",
             "slot-v1",
             b"probe",
         )
+    )
+    assert captured_type is RuntimeError
+    assert "Keychain probe cleanup failed" in rendered
+    assert "private-delete-control-flow-sentinel" not in rendered
     assert removed.exists_calls == 2
     assert not InMemorySecretProvider.exists(removed, "tuntun.probe", "slot-v1")
 
@@ -924,3 +1081,104 @@ def test_target_probe_cli_failure_is_content_free_and_nonzero(
         "tuntun.probe.keychain",
         "round-trip-00000000-0000-4000-8000-000000000801",
     )
+
+
+@pytest.mark.parametrize("stage", ("operation", "delete"))
+def test_target_probe_cli_system_exit_zero_fails_and_proves_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stage: str,
+) -> None:
+    class SystemExitProvider(InMemorySecretProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delete_calls = 0
+            self.exists_calls = 0
+
+        def exists(self, service: str, account: str) -> bool:
+            self.exists_calls += 1
+            return super().exists(service, account)
+
+        def set(self, service: str, account: str, value: bytes) -> None:
+            super().set(service, account, value)
+            if stage == "operation":
+                raise SystemExit(0)
+
+        def delete(self, service: str, account: str) -> None:
+            self.delete_calls += 1
+            super().delete(service, account)
+            if stage == "delete":
+                raise SystemExit(0)
+
+    provider = SystemExitProvider()
+    monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
+    monkeypatch.setattr(probe_script, "MacOSKeychainSecretProvider", lambda: provider)
+    monkeypatch.setattr(probe_script.secrets, "token_bytes", lambda size: b"p" * size)
+    monkeypatch.setattr(
+        probe_script,
+        "uuid4",
+        lambda: UUID("00000000-0000-4000-8000-000000000801"),
+    )
+    try:
+        result: int | BaseException = probe_script.main(["--acknowledge-keychain-write"])
+    except BaseException as error:
+        result = error
+    assert result == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "macOS Keychain probe: FAIL\n"
+    assert provider.delete_calls == 1
+    assert provider.exists_calls == 2
+    assert not InMemorySecretProvider.exists(
+        provider,
+        "tuntun.probe.keychain",
+        "round-trip-00000000-0000-4000-8000-000000000801",
+    )
+
+
+@pytest.mark.parametrize(
+    "stage,error",
+    (
+        ("provider", KeyboardInterrupt("private-provider-boundary-sentinel")),
+        ("uuid", ProbeControlFlow("private-uuid-boundary-sentinel")),
+        ("randomness", SystemExit(0)),
+        ("probe", ProbeControlFlow("private-probe-boundary-sentinel")),
+    ),
+)
+def test_target_probe_cli_translates_every_boundary_base_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stage: str,
+    error: BaseException,
+) -> None:
+    provider = InMemorySecretProvider()
+
+    def raise_boundary_error(*args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        raise error
+
+    monkeypatch.setenv(probe_script.PROBE_ENVIRONMENT_ACK, "1")
+    monkeypatch.setattr(probe_script, "MacOSKeychainSecretProvider", lambda: provider)
+    monkeypatch.setattr(probe_script.secrets, "token_bytes", lambda size: b"p" * size)
+    monkeypatch.setattr(
+        probe_script,
+        "uuid4",
+        lambda: UUID("00000000-0000-4000-8000-000000000801"),
+    )
+    if stage == "provider":
+        monkeypatch.setattr(probe_script, "MacOSKeychainSecretProvider", raise_boundary_error)
+    elif stage == "uuid":
+        monkeypatch.setattr(probe_script, "uuid4", raise_boundary_error)
+    elif stage == "randomness":
+        monkeypatch.setattr(probe_script.secrets, "token_bytes", raise_boundary_error)
+    else:
+        monkeypatch.setattr(probe_script, "probe_keychain_round_trip", raise_boundary_error)
+
+    try:
+        result: int | BaseException = probe_script.main(["--acknowledge-keychain-write"])
+    except BaseException as caught:
+        result = caught
+    assert result == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "macOS Keychain probe: FAIL\n"

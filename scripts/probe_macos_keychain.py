@@ -23,7 +23,7 @@ def probe_keychain_round_trip(
 ) -> None:
     try:
         occupied = provider.exists(service, account)
-    except Exception:
+    except BaseException:
         raise RuntimeError("Keychain probe preflight failed") from None
     if type(occupied) is not bool:
         raise RuntimeError("Keychain probe preflight failed") from None
@@ -37,13 +37,13 @@ def probe_keychain_round_trip(
             readback = provider.get(service, account)
             if not hmac.compare_digest(readback, value):
                 operation_failure = "Keychain probe readback mismatch"
-        except Exception:
+        except BaseException:
             operation_failure = "Keychain probe operation failed"
     finally:
         delete_failed = False
         try:
             provider.delete(service, account)
-        except Exception:
+        except BaseException:
             delete_failed = True
         finally:
             try:
@@ -73,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             account,
             value,
         )
-    except Exception:
+    except BaseException:
         print("macOS Keychain probe: FAIL", file=sys.stderr)
         return 1
     print("macOS Keychain probe: PASS")
