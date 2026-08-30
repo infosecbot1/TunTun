@@ -5,11 +5,22 @@ from __future__ import annotations
 
 import argparse
 import ast
+import ipaddress
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as element_tree
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import yaml
+from yaml.events import AliasEvent, CollectionEndEvent, CollectionStartEvent
 
 try:
     from scripts.materialize_conversation_plan import (
@@ -18,7 +29,8 @@ try:
         Snippet,
         foundation_files_from_ref,
         materialize_document,
-        parse_plan,
+        plan_document_from_ref,
+        write_materialized_tree,
     )
 except ModuleNotFoundError as error:
     if error.name != "scripts":
@@ -29,12 +41,13 @@ except ModuleNotFoundError as error:
         Snippet,
         foundation_files_from_ref,
         materialize_document,
-        parse_plan,
+        plan_document_from_ref,
+        write_materialized_tree,
     )
 
 
 FOUNDATION_MIGRATION_PATHS = (
-    "apps/core/src/tuntun_core/adapters/sqlcipher/connection.py",
+    "apps/core/src/tuntun_core/adapters/sqlcipher/engine.py",
     "apps/core/src/tuntun_core/adapters/sqlcipher/migrations.py",
     "tests/integration/storage/test_migrations.py",
 )
@@ -74,6 +87,51 @@ MODEL_KEYS = {
     "files",
 }
 MODEL_FILE_KEYS = {"path", "size", "sha256", "url"}
+BILINGUAL_SCHEMA_ID = (
+    "https://tuntun.local/schemas/bilingual-persona-score-v1.schema.json"
+)
+BILINGUAL_REPORT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "candidate_commit",
+        "model_id",
+        "prompt_bundle_sha256",
+        "policy_sha256",
+        "corpus_sha256",
+        "scorer_sha256",
+        "evaluator_model_lock_sha256",
+        "calibration_corpus_sha256",
+        "child_safety_corpus_sha256",
+        "evaluator_license",
+        "evaluator_artifacts_sha256",
+        "verification_key_sha256",
+        "calibration_evidence_sha256",
+        "result_manifest_paths",
+        "result_manifest_sha256",
+        "ordered_case_ids_sha256",
+        "aggregates",
+        "signer_key_id",
+        "signature_domain",
+        "signature_purpose",
+        "issued_at",
+        "expires_at",
+        "signature_b64",
+    }
+)
+BILINGUAL_DIRECT_HASH_FIELDS = frozenset(
+    {
+        "prompt_bundle_sha256",
+        "policy_sha256",
+        "corpus_sha256",
+        "scorer_sha256",
+        "evaluator_model_lock_sha256",
+        "calibration_corpus_sha256",
+        "child_safety_corpus_sha256",
+        "verification_key_sha256",
+        "calibration_evidence_sha256",
+        "ordered_case_ids_sha256",
+    }
+)
 NON_AUTHORIZATION_MARKERS = {
     "asyncio",
     "filterwarnings",
@@ -82,6 +140,45 @@ NON_AUTHORIZATION_MARKERS = {
     "skipif",
     "usefixtures",
 }
+MODEL_ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
+REVISION = re.compile(r"^[0-9a-f]{40,64}$")
+DIGEST = re.compile(r"^[0-9a-f]{64}$")
+FILE_PATH = re.compile(r"^[A-Za-z0-9_.-]+\.(?:onnx|json|txt|tflite|safetensors)$")
+FORBIDDEN_FIXTURE_TYPES = {
+    "Any",
+    "SimpleNamespace",
+    "dict",
+    "list",
+    "object",
+    "tuple",
+}
+BUILTIN_CONCRETE_TYPES = {"bool", "bytes", "float", "int", "Path", "str"}
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[object, object]:
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if not isinstance(key, str) or key in mapping:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"invalid or duplicate key: {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
 
 
 def approved_skip_marker_names(marker_names: tuple[str, ...]) -> bool:
@@ -91,17 +188,36 @@ def approved_skip_marker_names(marker_names: tuple[str, ...]) -> bool:
 
 
 def validate_model_manifest_bytes(content: bytes) -> list[str]:
-    """Validate the Foundation-owned closed manifest key surface."""
+    """Apply the Foundation manifest schema and runtime-loader semantics."""
 
     errors: list[str] = []
+    if len(content) > 1_048_576:
+        return ["model manifest exceeds the 1 MiB parser bound"]
     try:
-        document = yaml.safe_load(content)
-    except (UnicodeDecodeError, yaml.YAMLError) as error:
+        depth = 0
+        for count, event in enumerate(yaml.parse(content), start=1):
+            if count > 16_384 or isinstance(event, AliasEvent):
+                raise ValueError("alias or event bound violation")
+            if getattr(event, "tag", None) is not None:
+                raise ValueError("explicit YAML tags are forbidden")
+            if isinstance(event, CollectionStartEvent):
+                depth += 1
+                if depth > 32:
+                    raise ValueError("YAML nesting exceeds 32")
+            elif isinstance(event, CollectionEndEvent):
+                depth -= 1
+        if depth != 0:
+            raise ValueError("unbalanced YAML collection")
+        document = yaml.load(content, Loader=_UniqueKeyLoader)
+    except (UnicodeDecodeError, TypeError, ValueError, yaml.YAMLError) as error:
         return [f"invalid model manifest YAML: {error}"]
     if type(document) is not dict or set(document) != {"schema_version", "models"}:
         return ["model manifest root keys are not closed"]
-    if document.get("schema_version") != "1.0" or type(document.get("models")) is not list:
+    if type(document.get("schema_version")) is not str or document.get("schema_version") != "1.0":
+        errors.append("model manifest schema_version must be the string '1.0'")
+    if type(document.get("models")) is not list or len(document.get("models", ())) > 256:
         return ["model manifest version/models shape is invalid"]
+    model_ids: list[str] = []
     for model_index, model in enumerate(document["models"]):
         if type(model) is not dict:
             errors.append(f"model {model_index} is not an object")
@@ -110,10 +226,25 @@ def validate_model_manifest_bytes(content: bytes) -> list[str]:
             errors.append(
                 f"model {model_index} model keys are not closed: {sorted(set(model) ^ MODEL_KEYS)}"
             )
+        scalar_fields = tuple(MODEL_KEYS - {"files"})
+        for field in scalar_fields:
+            value = model.get(field)
+            if type(value) is not str or not value or len(value) > 4096:
+                errors.append(f"model {model_index} {field} must be a non-empty string")
+        model_id = model.get("id")
+        revision = model.get("revision")
+        if type(model_id) is not str or MODEL_ID.fullmatch(model_id) is None:
+            errors.append(f"model {model_index} id is invalid")
+        else:
+            model_ids.append(model_id)
+        if type(revision) is not str or REVISION.fullmatch(revision) is None:
+            errors.append(f"model {model_index} revision is not immutable")
         files = model.get("files")
-        if type(files) is not list:
+        if type(files) is not list or not 1 <= len(files) <= 64:
             errors.append(f"model {model_index} files is not a list")
             continue
+        file_paths: list[str] = []
+        total_size = 0
         for file_index, file_record in enumerate(files):
             if type(file_record) is not dict or set(file_record) != MODEL_FILE_KEYS:
                 actual = set(file_record) if type(file_record) is dict else set()
@@ -121,7 +252,303 @@ def validate_model_manifest_bytes(content: bytes) -> list[str]:
                     f"model {model_index} file {file_index} file keys are not closed: "
                     f"{sorted(actual ^ MODEL_FILE_KEYS)}"
                 )
+                continue
+            path = file_record.get("path")
+            size = file_record.get("size")
+            digest = file_record.get("sha256")
+            url = file_record.get("url")
+            if (
+                type(path) is not str
+                or FILE_PATH.fullmatch(path) is None
+                or Path(path).name != path
+                or len(path) > 255
+            ):
+                errors.append(f"model {model_index} file {file_index} path is invalid")
+            else:
+                file_paths.append(path)
+            if type(size) is not int or not 1 <= size <= 4_000_000_000:
+                errors.append(f"model {model_index} file {file_index} size is invalid")
+            else:
+                total_size += size
+            if type(digest) is not str or DIGEST.fullmatch(digest) is None:
+                errors.append(f"model {model_index} file {file_index} sha256 is invalid")
+            if type(url) is not str or _unsafe_model_url(url):
+                errors.append(f"model {model_index} file {file_index} URL is invalid or private")
+        if len(file_paths) != len(set(file_paths)):
+            errors.append(f"model {model_index} file paths are duplicated")
+        if total_size > 8_000_000_000:
+            errors.append(f"model {model_index} aggregate size exceeds 8 GB")
+    if len(model_ids) != len(set(model_ids)):
+        errors.append("model IDs are duplicated")
     return errors
+
+
+def _unsafe_model_url(value: str) -> bool:
+    if not 9 <= len(value) <= 4096:
+        return True
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return True
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+    ):
+        return True
+    host = parsed.hostname.casefold().rstrip(".")
+    if (
+        host in {"localhost"}
+        or host.endswith((".local", ".localhost", ".internal", ".invalid"))
+        or ":" in host
+    ):
+        return True
+    try:
+        decoded_path = unquote(parsed.path, errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return True
+    if (
+        any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or "\\" in decoded_path
+        or any(part in {".", ".."} for part in decoded_path.split("/"))
+    ):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        return len(labels) < 2 or len(host) > 253 or any(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
+            for label in labels
+        )
+    return not address.is_global
+
+
+def _schema_property_has_exact_value(
+    properties: dict[object, object], field: str, key: str, expected: str
+) -> bool:
+    value = properties.get(field)
+    return isinstance(value, dict) and value.get(key) == expected
+
+
+def validate_bilingual_schema_bytes(content: bytes) -> list[str]:
+    """Validate the generated report schema's closed, binding-critical semantics."""
+
+    if len(content) > 1_048_576:
+        return ["bilingual report schema exceeds the 1 MiB bound"]
+    try:
+        document = json.loads(content)
+    except (UnicodeDecodeError, ValueError) as error:
+        return [f"bilingual report schema is invalid JSON: {error}"]
+    if type(document) is not dict:
+        return ["bilingual report schema root is not an object"]
+    errors: list[str] = []
+    if document.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+        errors.append("bilingual report schema does not declare Draft 2020-12")
+    if document.get("$id") != BILINGUAL_SCHEMA_ID:
+        errors.append("bilingual report schema has the wrong stable $id")
+    if document.get("type") != "object" or document.get("additionalProperties") is not False:
+        errors.append("bilingual report schema root is not a closed object")
+    properties = document.get("properties")
+    required = document.get("required")
+    if type(properties) is not dict or set(properties) != BILINGUAL_REPORT_FIELDS:
+        errors.append("bilingual report schema properties do not match the closed report model")
+        properties = {}
+    if (
+        type(required) is not list
+        or any(type(name) is not str for name in required)
+        or len(required) != len(set(required))
+        or set(required) != BILINGUAL_REPORT_FIELDS
+    ):
+        errors.append("bilingual report schema required fields are not exact")
+    if not _schema_property_has_exact_value(
+        properties,
+        "schema_version",
+        "const",
+        "tuntun.bilingual-persona-score.v1",
+    ):
+        errors.append("bilingual report schema does not freeze schema_version")
+    if not _schema_property_has_exact_value(
+        properties, "candidate_commit", "pattern", "^[0-9a-f]{40}$"
+    ):
+        errors.append("bilingual report schema does not bind an immutable candidate commit")
+    for field in sorted(BILINGUAL_DIRECT_HASH_FIELDS):
+        if not _schema_property_has_exact_value(
+            properties, field, "pattern", "^[0-9a-f]{64}$"
+        ):
+            errors.append(f"bilingual report schema does not bind {field}")
+    for field, expected in (
+        ("signature_domain", "tuntun.bilingual-persona-score.v1"),
+        ("signature_purpose", "phase1_release_acceptance"),
+    ):
+        if not _schema_property_has_exact_value(properties, field, "const", expected):
+            errors.append(f"bilingual report schema does not freeze {field}")
+    canonical = (
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        .encode("utf-8")
+        + b"\n"
+    )
+    if content != canonical:
+        errors.append("bilingual report schema bytes are not canonical")
+    return errors
+
+
+_WAKE_BENCHMARK_PROBE = r'''import runpy
+import sys
+
+namespace = runpy.run_path(sys.argv[1])
+run_benchmark = namespace.get("run_benchmark")
+if not callable(run_benchmark):
+    raise AssertionError("run_benchmark callable is required")
+
+MODEL_SHA = "a" * 64
+RUNTIME_SHA = "b" * 64
+BOOT_UUID = "00000000-0000-0000-0000-000000000001"
+OPERATOR_GENERATION = 7
+FRAMES = [b"\x00" * 2560 for _ in range(4)]
+
+class Clock:
+    def __init__(self, start, end):
+        self.values = iter((start, end))
+    def __call__(self):
+        return next(self.values)
+
+class Converter:
+    def __init__(self, drop=False):
+        self.calls = 0
+        self.drop = drop
+    def convert(self, frame):
+        self.calls += 1
+        if len(frame) != 2560:
+            raise AssertionError("benchmark did not use exact 1280-sample S16LE frames")
+        return None if self.drop else frame
+
+class Adapter:
+    def __init__(self, *, noop=False, model_sha256=MODEL_SHA, runtime_sha256=RUNTIME_SHA):
+        self.noop = noop
+        self.model_sha256 = model_sha256
+        self.runtime_sha256 = runtime_sha256
+        self.inference_count = 0
+    def infer(self, frame):
+        if len(frame) != 2560:
+            raise AssertionError("adapter received the wrong frame size")
+        if not self.noop:
+            self.inference_count += 1
+        return 900000
+
+class Detector:
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self.calls = 0
+    def process(self, frame):
+        self.calls += 1
+        return self.adapter.infer(frame) >= 750000
+
+def invoke(*, adapter=None, converter=None, clock=None):
+    adapter = adapter or Adapter()
+    converter = converter or Converter()
+    detector = Detector(adapter)
+    receipt = run_benchmark(
+        frames=FRAMES,
+        converter=converter,
+        adapter=adapter,
+        detector=detector,
+        process_time=clock or Clock(0.0, 0.01),
+        boot_uuid=BOOT_UUID,
+        operator_generation=OPERATOR_GENERATION,
+        model_sha256=MODEL_SHA,
+        runtime_sha256=RUNTIME_SHA,
+        max_one_core_percent=25.0,
+    )
+    return receipt, adapter, converter, detector
+
+receipt, adapter, converter, detector = invoke()
+expected_keys = {
+    "boot_uuid", "operator_generation", "model_sha256", "runtime_sha256",
+    "input_count", "inference_count", "output_count", "drop_count",
+    "duration_seconds", "one_core_percent", "threshold_percent",
+}
+if type(receipt) is not dict or set(receipt) != expected_keys:
+    raise AssertionError("benchmark receipt is not closed")
+if (
+    receipt["boot_uuid"] != BOOT_UUID
+    or receipt["operator_generation"] != OPERATOR_GENERATION
+    or receipt["model_sha256"] != MODEL_SHA
+    or receipt["runtime_sha256"] != RUNTIME_SHA
+    or receipt["input_count"] != 4
+    or receipt["inference_count"] != 4
+    or receipt["output_count"] != 4
+    or receipt["drop_count"] != 0
+    or receipt["duration_seconds"] != 0.32
+    or not 0.0 <= receipt["one_core_percent"] <= 25.0
+    or receipt["threshold_percent"] != 25.0
+    or adapter.inference_count != 4
+    or converter.calls != 4
+    or detector.calls != 4
+):
+    raise AssertionError("benchmark receipt is not bound to observed work")
+
+faults = (
+    {"adapter": Adapter(noop=True)},
+    {"adapter": Adapter(model_sha256="c" * 64)},
+    {"adapter": Adapter(runtime_sha256="d" * 64)},
+    {"converter": Converter(drop=True)},
+    {"clock": Clock(0.0, 1.0)},
+)
+for fault in faults:
+    try:
+        invoke(**fault)
+    except (AssertionError, RuntimeError, ValueError):
+        pass
+    else:
+        raise AssertionError(f"benchmark accepted controlled fault: {sorted(fault)}")
+'''
+
+
+def validate_wake_benchmark_bytes(content: bytes) -> list[str]:
+    """Execute the wake benchmark contract against observed good and bad pipelines."""
+
+    try:
+        source = content.decode("utf-8")
+        tree = ast.parse(source, filename="tests/hardware/bench_wakeword.py")
+    except (UnicodeDecodeError, SyntaxError) as error:
+        return [f"benchmark source is invalid: {error}"]
+    if any(isinstance(node, ast.BitXor) for node in ast.walk(tree)):
+        return ["benchmark contains XOR inference"]
+    if any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "cm4" in node.value.casefold()
+        for node in ast.walk(tree)
+    ):
+        return ["benchmark contains guessed CM4 identity"]
+    with tempfile.TemporaryDirectory(prefix="tuntun-wake-probe-") as temporary:
+        root = Path(temporary)
+        benchmark = root / "benchmark.py"
+        probe = root / "probe.py"
+        benchmark.write_bytes(content)
+        probe.write_text(_WAKE_BENCHMARK_PROBE, encoding="utf-8")
+        try:
+            result = subprocess.run(
+                (sys.executable, "-I", str(probe), str(benchmark)),
+                cwd=root,
+                env={"PATH": os.environ.get("PATH", "")},
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return ["behavioral probe exceeded 10 seconds"]
+    if result.returncode != 0:
+        diagnostic = (result.stdout + result.stderr)[-2048:].decode(errors="replace")
+        return [f"behavioral probe failed: {diagnostic}"]
+    return []
 
 
 def _python_tree(snippet: Snippet, errors: list[str]) -> ast.Module | None:
@@ -149,20 +576,35 @@ def _module_for_path(path: str) -> str | None:
             return module.removesuffix(".__init__")
     if path.startswith("evals/") and path.endswith(".py"):
         return path.removesuffix(".py").replace("/", ".").removesuffix(".__init__")
-    if path.endswith(".py") and not path.startswith("tests/"):
+    if path.endswith(".py"):
         return path.removesuffix(".py").replace("/", ".").removesuffix(".__init__")
     return None
 
 
-def _imported_modules(tree: ast.Module) -> set[str]:
+def _imported_modules(
+    tree: ast.Module, *, current_module: str | None, current_is_package: bool
+) -> set[str]:
     result: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             result.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            result.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                if current_module is None:
+                    continue
+                module_parts = current_module.split(".")
+                package_parts = module_parts if current_is_package else module_parts[:-1]
+                ascend = node.level - 1
+                if ascend > len(package_parts):
+                    continue
+                base = package_parts[: len(package_parts) - ascend]
+                module = ".".join((*base, module)) if module else ".".join(base)
+            if not module:
+                continue
+            result.add(module)
             result.update(
-                f"{node.module}.{alias.name}"
+                f"{module}.{alias.name}"
                 for alias in node.names
                 if alias.name != "*"
             )
@@ -217,21 +659,38 @@ def _marker_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str
     return tuple(sorted(names))
 
 
-def _has_pytest_skip(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    for node in ast.walk(function):
-        if isinstance(node, ast.Call) and _decorator_name(node.func) == "pytest.skip":
-            return True
-        if (
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
-            and node is not function
+def _walk_function_body(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> Sequence[ast.AST]:
+    nodes: list[ast.AST] = []
+    pending: list[ast.AST] = list(reversed(function.body))
+    while pending:
+        node = pending.pop()
+        nodes.append(node)
+        if isinstance(
+            node,
+            (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda),
         ):
             continue
+        pending.extend(reversed(list(ast.iter_child_nodes(node))))
+    return nodes
+
+
+def _has_pytest_skip(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for node in ast.walk(function):
+        if isinstance(node, ast.Call) and _decorator_name(node.func) in {
+            "pytest.importorskip",
+            "pytest.skip",
+            "pytest.xfail",
+        }:
+            return True
     return False
 
 
 def _has_skip_decorator(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return any(
-        _decorator_name(decorator) in {"pytest.mark.skip", "pytest.mark.skipif"}
+        _decorator_name(decorator)
+        in {"pytest.mark.skip", "pytest.mark.skipif", "pytest.mark.xfail"}
         for decorator in function.decorator_list
     )
 
@@ -241,11 +700,12 @@ def _fixture_placeholder_reason(
 ) -> str | None:
     if not function.body or all(isinstance(statement, ast.Pass) for statement in function.body):
         return "empty"
-    returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
-    if not returns or all(node.value is None for node in returns):
+    values = _fixture_values(function)
+    if not values:
         return "empty"
-    for returned in returns:
-        value = returned.value
+    for value in values:
+        if isinstance(value, ast.Call) and _decorator_name(value.func) == "object":
+            return "object"
         if not isinstance(value, ast.Call):
             continue
         if _decorator_name(value.func) != "SimpleNamespace":
@@ -262,7 +722,9 @@ def _validate_path_parity(document: PlanDocument, errors: list[str]) -> None:
     for task in document.tasks:
         declared = {declaration.path for declaration in task.declarations}
         staged = set(task.staged_paths)
-        snippets = {snippet.path for snippet in task.snippets}
+        snippets = {snippet.path for snippet in task.snippets} | {
+            generator.output for generator in task.generators
+        }
         if declared != staged:
             errors.append(
                 f"Task {task.number:02d}: declared/staged path mismatch "
@@ -283,11 +745,30 @@ def _validate_dependencies(document: PlanDocument, errors: list[str]) -> None:
             )
 
 
+def _function_has_call(function: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
+    return any(
+        isinstance(node, ast.Call) and _decorator_name(node.func).split(".")[-1] == name
+        for node in ast.walk(function)
+    )
+
+
+def _meaningful_function(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return bool(function.body) and not all(
+        isinstance(statement, (ast.Pass, ast.Expr))
+        and (
+            isinstance(statement, ast.Pass)
+            or (isinstance(statement.value, ast.Constant) and statement.value.value is Ellipsis)
+        )
+        for statement in function.body
+    )
+
+
 def _validate_foundation(
     foundation_files: dict[str, bytes], errors: list[str], *, required: bool
 ) -> None:
     if not required:
         return
+    foundation_error_start = len(errors)
     for path in FOUNDATION_MIGRATION_PATHS:
         content = foundation_files.get(path)
         if content is None:
@@ -295,15 +776,140 @@ def _validate_foundation(
             continue
         if not content.strip():
             errors.append(f"Foundation Task 13 capability is empty: {path}")
-    connection = foundation_files.get(FOUNDATION_MIGRATION_PATHS[0], b"").lower()
-    if connection and b"sqlcipher" not in connection:
-        errors.append("Foundation Task 13 SQLCipher engine capability is not evidenced")
-    migrations = foundation_files.get(FOUNDATION_MIGRATION_PATHS[1], b"").lower()
-    if migrations and b"migration" not in migrations:
-        errors.append("Foundation Task 13 migration runner capability is not evidenced")
-    tests = foundation_files.get(FOUNDATION_MIGRATION_PATHS[2], b"").lower()
-    if tests and (b"migration" not in tests or b"upgrade" not in tests):
-        errors.append("Foundation Task 13 migration integration test lacks upgrade coverage")
+    parsed: dict[str, ast.Module] = {}
+    for path in FOUNDATION_MIGRATION_PATHS:
+        content = foundation_files.get(path)
+        if not content:
+            continue
+        try:
+            parsed[path] = ast.parse(content.decode(), filename=path)
+        except (SyntaxError, UnicodeDecodeError) as error:
+            errors.append(f"Foundation Task 13 behavioral interface invalid at {path}: {error}")
+    engine_tree = parsed.get(FOUNDATION_MIGRATION_PATHS[0])
+    engine_functions = {
+        node.name: node
+        for node in (engine_tree.body if engine_tree is not None else [])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    engine = engine_functions.get("create_sqlcipher_engine")
+    if (
+        engine_tree is not None
+        and (
+            engine is None
+            or not _meaningful_function(engine)
+            or [arg.arg for arg in engine.args.args] != ["path", "key"]
+            or not _function_has_call(engine, "create_engine")
+        )
+    ):
+        errors.append(
+            f"Foundation Task 13 behavioral interface invalid: {FOUNDATION_MIGRATION_PATHS[0]}"
+        )
+    migration_tree = parsed.get(FOUNDATION_MIGRATION_PATHS[1])
+    migration_functions = {
+        node.name: node
+        for node in (migration_tree.body if migration_tree is not None else [])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for name, args, required_call in (
+        ("encrypted_backup", ["source", "destination", "key"], "backup"),
+        ("upgrade_encrypted", ["path", "key", "backup"], "upgrade"),
+    ):
+        function = migration_functions.get(name)
+        if (
+            migration_tree is not None
+            and (
+                function is None
+                or not _meaningful_function(function)
+                or [arg.arg for arg in function.args.args] != args
+                or not _function_has_call(function, required_call)
+            )
+        ):
+            errors.append(
+                f"Foundation Task 13 behavioral interface invalid: "
+                f"{FOUNDATION_MIGRATION_PATHS[1]}:{name}"
+            )
+    test_tree = parsed.get(FOUNDATION_MIGRATION_PATHS[2])
+    tests = [
+        node
+        for node in (test_tree.body if test_tree is not None else [])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    ]
+    if test_tree is not None and (
+        not tests
+        or not all(_meaningful_function(function) for function in tests)
+        or not any(_function_has_call(function, "upgrade") for function in tests)
+        or not any(_function_has_call(function, "downgrade") for function in tests)
+        or not any(
+            any(isinstance(node, ast.Assert) for node in ast.walk(function))
+            for function in tests
+        )
+    ):
+        errors.append(
+            f"Foundation Task 13 behavioral interface invalid: {FOUNDATION_MIGRATION_PATHS[2]}"
+        )
+    if test_tree is not None and (
+        _has_module_level_skip_or_xfail(test_tree)
+        or any(_has_pytest_skip(function) or _has_skip_decorator(function) for function in tests)
+    ):
+        errors.append("Foundation Task 13 migration integration test contains skip/xfail")
+    if len(errors) == foundation_error_start:
+        _run_foundation_behavioral_probe(foundation_files, errors)
+
+
+def _junit_is_complete_pass(path: Path) -> tuple[bool, str]:
+    try:
+        root = element_tree.parse(path).getroot()
+    except (OSError, element_tree.ParseError) as error:
+        return False, f"JUnit evidence is absent or invalid: {error}"
+    cases = list(root.iter("testcase"))
+    skipped = sum(case.find("skipped") is not None for case in cases)
+    failed = sum(
+        case.find("failure") is not None or case.find("error") is not None
+        for case in cases
+    )
+    if not cases or skipped or failed:
+        return (
+            False,
+            f"JUnit evidence tests={len(cases)} skipped={skipped} failed={failed}",
+        )
+    return True, f"JUnit evidence tests={len(cases)} skipped=0 failed=0"
+
+
+def _run_foundation_behavioral_probe(
+    foundation_files: dict[str, bytes], errors: list[str]
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="tuntun-foundation-task13-") as temporary:
+        root = Path(temporary)
+        junit = root / ".foundation-task13.junit.xml"
+        write_materialized_tree(root, foundation_files)
+        try:
+            result = subprocess.run(
+                (
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-q",
+                    "--maxfail=1",
+                    f"--junitxml={junit}",
+                    FOUNDATION_MIGRATION_PATHS[2],
+                ),
+                cwd=root,
+                env=_pytest_environment(root),
+                check=False,
+                capture_output=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            errors.append("Foundation Task 13 behavioral probe failed: exceeded 120 seconds")
+            return
+        complete, junit_diagnostic = _junit_is_complete_pass(junit)
+    if result.returncode != 0 or not complete:
+        diagnostic = (result.stdout + result.stderr)[-4096:].decode(errors="replace")
+        errors.append(
+            "Foundation Task 13 behavioral probe failed "
+            f"with exit {result.returncode}; {junit_diagnostic}: {diagnostic}"
+        )
 
 
 def _validate_import_ownership(
@@ -326,7 +932,11 @@ def _validate_import_ownership(
             tree = _python_tree(snippet, errors)
             if tree is None:
                 continue
-            for imported in _imported_modules(tree):
+            for imported in _imported_modules(
+                tree,
+                current_module=_module_for_path(snippet.path),
+                current_is_package=snippet.path.endswith("/__init__.py"),
+            ):
                 matches = [
                     (module, owner)
                     for module, owner in owners.items()
@@ -342,16 +952,172 @@ def _validate_import_ownership(
                     )
 
 
-def _validate_fixtures_and_skips(document: PlanDocument, errors: list[str]) -> None:
-    producers: Counter[str] = Counter()
-    consumers: list[tuple[str, str]] = []
+def _annotation_name(annotation: ast.expr | None) -> str | None:
+    if annotation is None:
+        return None
+    if isinstance(annotation, ast.Constant) and annotation.value is None:
+        return None
+    if isinstance(annotation, ast.Subscript):
+        wrapper = _decorator_name(annotation.value).split(".")[-1]
+        if wrapper in {
+            "Annotated",
+            "AsyncGenerator",
+            "AsyncIterator",
+            "Generator",
+            "Iterable",
+            "Iterator",
+        }:
+            inner = (
+                annotation.slice.elts[0]
+                if isinstance(annotation.slice, ast.Tuple)
+                else annotation.slice
+            )
+            return _annotation_name(inner)
+    return _decorator_name(annotation).split(".")[-1] or None
+
+
+def _fixture_values(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[ast.expr]:
+    values: list[ast.expr] = []
+    for node in _walk_function_body(function):
+        if (
+            isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))
+            and node.value is not None
+        ):
+            values.append(node.value)
+    return values
+
+
+def _consumer_member_uses(
+    function: ast.FunctionDef | ast.AsyncFunctionDef, fixture_name: str
+) -> set[str]:
+    return {
+        node.attr
+        for node in ast.walk(function)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == fixture_name
+    }
+
+
+def _additional_fixture_consumers(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[str, ...]:
+    names: list[str] = []
+    for decorator in function.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        if _decorator_name(decorator.func) == "pytest.mark.usefixtures":
+            names.extend(
+                argument.value
+                for argument in decorator.args
+                if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+            )
+    for node in ast.walk(function):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "getfixturevalue"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            names.append(node.args[0].value)
+    return tuple(names)
+
+
+def _class_surface(node: ast.ClassDef) -> set[str]:
+    surface = {
+        child.name
+        for child in node.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for child in node.body:
+        if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+            surface.add(child.target.id)
+        elif isinstance(child, ast.Assign):
+            surface.update(
+                target.id for target in child.targets if isinstance(target, ast.Name)
+            )
+    for descendant in ast.walk(node):
+        if (
+            isinstance(descendant, ast.AnnAssign)
+            and isinstance(descendant.target, ast.Attribute)
+            and isinstance(descendant.target.value, ast.Name)
+            and descendant.target.value.id == "self"
+        ):
+            surface.add(descendant.target.attr)
+        elif isinstance(descendant, ast.Assign):
+            for target in descendant.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    surface.add(target.attr)
+    return surface
+
+
+def _has_module_level_skip_or_xfail(tree: ast.Module) -> bool:
+    for statement in tree.body:
+        if (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and _decorator_name(statement.value.func)
+            in {"pytest.importorskip", "pytest.skip", "pytest.xfail"}
+        ):
+            return True
+        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            value = statement.value
+            values = (
+                value.elts
+                if isinstance(value, (ast.List, ast.Tuple, ast.Set))
+                else ([value] if value is not None else [])
+            )
+            if any(
+                _decorator_name(candidate).startswith(
+                    ("pytest.mark.skip", "pytest.mark.skipif", "pytest.mark.xfail")
+                )
+                for candidate in values
+            ):
+                return True
+    return False
+
+
+def _validate_fixtures_and_skips(
+    document: PlanDocument, foundation_files: dict[str, bytes], errors: list[str]
+) -> None:
+    producers: dict[
+        str, list[tuple[int, str, ast.FunctionDef | ast.AsyncFunctionDef]]
+    ] = {}
+    consumers: list[tuple[str, str, str, set[str]]] = []
+    class_surfaces: dict[str, set[str]] = {}
+    for path, content in foundation_files.items():
+        if not path.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(content.decode("utf-8"), filename=path)
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                class_surfaces[node.name] = _class_surface(node)
     for task in document.tasks:
         for snippet in task.snippets:
-            tree = _python_tree(snippet, errors)
-            if tree is None:
+            snippet_tree = _python_tree(snippet, errors)
+            if snippet_tree is None:
                 continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Name) and node.id == "_NAMES":
+            for node in snippet_tree.body:
+                if isinstance(node, ast.ClassDef):
+                    class_surfaces[node.name] = _class_surface(node)
+            if _has_module_level_skip_or_xfail(snippet_tree):
+                errors.append(
+                    f"Task {task.number:02d} {snippet.path}: unapproved module-level "
+                    "skip/xfail; external lanes must use an exact item marker"
+                )
+            for walked in ast.walk(snippet_tree):
+                if isinstance(walked, ast.Name) and walked.id == "_NAMES":
                     errors.append(
                         f"Task {task.number:02d} {snippet.path}: "
                         "dynamic fixture name table is forbidden"
@@ -359,18 +1125,23 @@ def _validate_fixtures_and_skips(document: PlanDocument, errors: list[str]) -> N
                     break
             for function in (
                 node
-                for node in tree.body
+                for node in snippet_tree.body
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             ):
                 if _is_fixture(function):
-                    producers[function.name] += 1
+                    producers.setdefault(function.name, []).append(
+                        (task.number, snippet.path, function)
+                    )
                     reason = _fixture_placeholder_reason(function)
                     if reason:
                         errors.append(
                             f"Task {task.number:02d} {snippet.path}: fixture {function.name} "
                             f"is a placeholder ({reason})"
                         )
-                if function.name.startswith("test_") and snippet.path.startswith("tests/"):
+                is_test = function.name.startswith("test_") and snippet.path.startswith(
+                    "tests/"
+                )
+                if _is_fixture(function) or is_test:
                     parametrized = _parametrized_names(function)
                     arguments = (
                         *function.args.posonlyargs,
@@ -379,7 +1150,18 @@ def _validate_fixtures_and_skips(document: PlanDocument, errors: list[str]) -> N
                     )
                     for argument in arguments:
                         if argument.arg not in PYTEST_FIXTURES | parametrized | {"self", "cls"}:
-                            consumers.append((argument.arg, snippet.path))
+                            consumers.append(
+                                (
+                                    argument.arg,
+                                    snippet.path,
+                                    function.name,
+                                    _consumer_member_uses(function, argument.arg),
+                                )
+                            )
+                    consumers.extend(
+                        (name, snippet.path, function.name, set())
+                        for name in _additional_fixture_consumers(function)
+                    )
                 if _has_pytest_skip(function) or _has_skip_decorator(function):
                     markers = _marker_names(function)
                     if _is_fixture(function) or not approved_skip_marker_names(markers):
@@ -387,13 +1169,310 @@ def _validate_fixtures_and_skips(document: PlanDocument, errors: list[str]) -> N
                             f"Task {task.number:02d} {snippet.path}:{function.name}: "
                             "unapproved pytest skip"
                         )
-    for name, path in consumers:
-        count = producers[name]
-        if count != 1:
-            errors.append(f"{path}: fixture {name} has {count} explicit producers")
+    consumer_counts = Counter(name for name, _, _, _ in consumers)
+    missing = {name for name in consumer_counts if len(producers.get(name, ())) == 0}
+    ambiguous = {name for name in consumer_counts if len(producers.get(name, ())) != 1} - missing
+    for name in sorted(missing):
+        sites = [
+            f"{path}:{function}"
+            for candidate, path, function, _ in consumers
+            if candidate == name
+        ]
+        errors.append(
+            f"fixture {name} has 0 explicit producers; fixture consumer missing; "
+            f"referenced {consumer_counts[name]} times at {sites}"
+        )
+    for name in sorted(ambiguous):
+        errors.append(
+            f"fixture {name} has {len(producers[name])} explicit producers; "
+            f"referenced {consumer_counts[name]} times"
+        )
+    if missing or ambiguous:
+        errors.append(
+            f"fixture closure failure: {len(consumers)} consumer occurrences; "
+            f"{len(missing)} distinct missing producers; "
+            f"{len(ambiguous)} distinct ambiguous producers"
+        )
+    used_members: dict[str, set[str]] = {}
+    for name, _, _, members in consumers:
+        used_members.setdefault(name, set()).update(members)
+    for name, definitions in producers.items():
+        for task_number, path, function in definitions:
+            annotation = _annotation_name(function.returns)
+            values = _fixture_values(function)
+            called_types = {
+                _decorator_name(value.func).split(".")[-1]
+                for value in values
+                if isinstance(value, ast.Call)
+            }
+            if (
+                annotation is None
+                or annotation in FORBIDDEN_FIXTURE_TYPES
+                or (annotation not in BUILTIN_CONCRETE_TYPES and annotation not in called_types)
+            ):
+                errors.append(
+                    f"Task {task_number:02d} {path}: fixture {name} does not return "
+                    "a typed concrete harness"
+                )
+                continue
+            required_members = used_members.get(name, set())
+            if not required_members:
+                continue
+            surface = class_surfaces.get(annotation, set())
+            missing_members = required_members - surface
+            if annotation in BUILTIN_CONCRETE_TYPES or missing_members:
+                absent = sorted(missing_members or required_members)
+                errors.append(
+                    f"Task {task_number:02d} {path}: fixture {name} typed concrete harness "
+                    f"does not implement consumer members {absent}"
+                )
 
 
-def _validate_model_and_eval_contracts(document: PlanDocument, errors: list[str]) -> None:
+def _command_invocations(command: str) -> tuple[tuple[str, ...], ...]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="&|;")
+    lexer.whitespace_split = True
+    invocations: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for word in lexer:
+        if word in {"&&", "||", ";"}:
+            if current:
+                invocations.append(tuple(current))
+                current = []
+            continue
+        current.append(word)
+    if current:
+        invocations.append(tuple(current))
+    return tuple(invocations)
+
+
+def _unwrap_invocation(invocation: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
+    words = list(invocation)
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+        words.pop(0)
+    if not words:
+        return "", ()
+    if words[0] == "uv":
+        if len(words) < 3 or words[1] != "run":
+            return "", ()
+        words = words[2:]
+        options_with_values = {"--directory", "--project", "--python"}
+        while words and words[0].startswith("-"):
+            option = words.pop(0)
+            if option in options_with_values and words:
+                words.pop(0)
+        if not words:
+            return "", ()
+    return words[0], tuple(words[1:])
+
+
+def _pytest_arguments(invocation: tuple[str, ...]) -> tuple[str, ...] | None:
+    executable, arguments = _unwrap_invocation(invocation)
+    if Path(executable).name == "pytest":
+        return arguments
+    if Path(executable).name.startswith("python") and arguments[:2] == ("-m", "pytest"):
+        return arguments[2:]
+    return None
+
+
+def _pytest_targets(arguments: tuple[str, ...]) -> tuple[str, ...]:
+    options_with_values = {
+        "--basetemp",
+        "--capture",
+        "--color",
+        "--confcutdir",
+        "--durations",
+        "--durations-min",
+        "--import-mode",
+        "--junit-prefix",
+        "--junit-xml",
+        "--junitxml",
+        "--log-level",
+        "--maxfail",
+        "--override-ini",
+        "--rootdir",
+        "--tb",
+        "-c",
+        "-m",
+        "-o",
+        "-r",
+    }
+    targets: list[str] = []
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        if word == "--":
+            targets.extend(arguments[index + 1 :])
+            break
+        if word in options_with_values:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        targets.append(word)
+        index += 1
+    return tuple(targets)
+
+
+def _arguments_cover_path(arguments: tuple[str, ...], path: str) -> bool:
+    return any(
+        target.split("::", 1)[0] == path
+        or path.startswith(target.rstrip("/") + "/")
+        for target in _pytest_targets(arguments)
+    )
+
+
+def _green_command_is_fail_closed(command: str) -> bool:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="&|;")
+    lexer.whitespace_split = True
+    words = tuple(lexer)
+    if any(word in {"||", "|", ";", "&"} for word in words):
+        return False
+    unsafe_pytest_options = {
+        "--co",
+        "--collect-only",
+        "--deselect",
+        "--failed-first",
+        "--ff",
+        "--ignore",
+        "--ignore-glob",
+        "--last-failed",
+        "--lf",
+        "--stepwise",
+        "--stepwise-skip",
+        "--sw",
+        "-k",
+    }
+    for invocation in _command_invocations(command):
+        arguments = _pytest_arguments(invocation)
+        if arguments is None:
+            continue
+        if any(
+            word in unsafe_pytest_options
+            or any(word.startswith(f"{option}=") for option in unsafe_pytest_options)
+            for word in arguments
+        ):
+            return False
+    return True
+
+
+def _python_entry_point_invoked(
+    path: str, invocations: tuple[tuple[str, ...], ...]
+) -> bool:
+    module = path.removesuffix(".py").replace("/", ".")
+    for invocation in invocations:
+        executable, arguments = _unwrap_invocation(invocation)
+        if not Path(executable).name.startswith("python"):
+            continue
+        if arguments and arguments[0] == path:
+            return True
+        if arguments[:2] == ("-m", module):
+            return True
+    return False
+
+
+def _validate_green_commands(document: PlanDocument, errors: list[str]) -> None:
+    for task in document.tasks:
+        for command in task.green_commands:
+            if not _green_command_is_fail_closed(command):
+                errors.append(
+                    f"Task {task.number:02d}: green command is not fail-closed: {command}"
+                )
+        invocations = tuple(
+            invocation
+            for command in task.green_commands
+            for invocation in _command_invocations(command)
+        )
+        pytest_commands = tuple(
+            arguments
+            for invocation in invocations
+            if (arguments := _pytest_arguments(invocation)) is not None
+        )
+        for declaration in task.declarations:
+            if declaration.kind != "Test":
+                continue
+            executed_by_pytest = any(
+                _arguments_cover_path(arguments, declaration.path)
+                for arguments in pytest_commands
+            )
+            executed_benchmark = (
+                Path(declaration.path).name.startswith("bench_")
+                and _python_entry_point_invoked(declaration.path, invocations)
+            )
+            if not executed_by_pytest and not executed_benchmark:
+                errors.append(
+                    f"Task {task.number:02d}: green command does not execute owned test "
+                    f"{declaration.path}"
+                )
+        for declaration in task.declarations:
+            path = declaration.path
+            parts = Path(path).parts
+            if (
+                not path.endswith(".py")
+                or not parts
+                or parts[0] not in {"evals", "scripts", "tools"}
+                or not Path(path).stem.startswith(("check_", "validate_", "verify_"))
+            ):
+                continue
+            if not _python_entry_point_invoked(path, invocations):
+                errors.append(
+                    f"Task {task.number:02d}: green command does not execute owned "
+                    f"critical validator {path}"
+                )
+        for generator in task.generators:
+            matching = [
+                arguments
+                for invocation in invocations
+                for executable, arguments in [_unwrap_invocation(invocation)]
+                if Path(executable).name.startswith("python")
+                and arguments
+                and arguments[0] == generator.entry_point
+            ]
+            if not matching or not any("--check" in words for words in matching):
+                errors.append(
+                    f"Task {task.number:02d}: green command does not verify generator "
+                    f"{generator.name} with --check"
+                )
+        if task.number == 12:
+            checker = "scripts/check_model_manifest.py"
+            manifests = (
+                "models/manifest.yaml",
+                "apps/core/src/tuntun_core/resources/model-manifest.yaml",
+            )
+            if not all(
+                any(
+                    Path(executable).name.startswith("python")
+                    and arguments
+                    and arguments[0] == checker
+                    and path in arguments[1:]
+                    for invocation in invocations
+                    for executable, arguments in [_unwrap_invocation(invocation)]
+                )
+                for path in manifests
+            ):
+                errors.append(
+                    "Task 12 green command does not validate both model manifests "
+                    "through the strict Foundation loader"
+                )
+            if not any(
+                executable == "/venvs/apps_venv/bin/python3"
+                and arguments
+                and arguments[0] == "tests/hardware/bench_wakeword.py"
+                for invocation in invocations
+                for executable, arguments in [_unwrap_invocation(invocation)]
+            ):
+                errors.append(
+                    "Task 12 green command does not run the physical wake benchmark "
+                    "with the delivered interpreter"
+                )
+
+
+def _validate_model_and_eval_contracts(
+    document: PlanDocument,
+    errors: list[str],
+    *,
+    materialized_files: dict[str, bytes] | None,
+) -> None:
     by_number = {task.number: task for task in document.tasks}
     task_12 = by_number.get(12)
     if task_12 is not None:
@@ -404,93 +1483,210 @@ def _validate_model_and_eval_contracts(document: PlanDocument, errors: list[str]
         ):
             if path not in declared:
                 errors.append(f"Task 12 must declare and stage {path}")
-        offline_test_path = "tests/unit/edge/test_wake_model_offline.py"
-        offline_source = next(
-            (
-                snippet.body.decode(errors="replace")
-                for snippet in task_12.snippets
-                if snippet.path == offline_test_path
-            ),
-            "",
+        manifest_paths = (
+            "models/manifest.yaml",
+            "apps/core/src/tuntun_core/resources/model-manifest.yaml",
         )
-        if offline_test_path not in declared or not all(
-            token in offline_source
-            for token in (
-                'monkeypatch.setattr(socket, "socket"',
-                'monkeypatch.setattr(socket, "getaddrinfo"',
-                "activate",
-                "process",
+        if materialized_files is not None:
+            values = tuple(materialized_files.get(path) for path in manifest_paths)
+            if any(value is None for value in values):
+                errors.append("Task 12 materialized manifests are absent")
+            elif values[0] != values[1]:
+                errors.append(
+                    "Task 12 materialized repository and packaged manifests are not byte identical"
+                )
+            else:
+                errors.extend(
+                    f"Task 12 {error}"
+                    for error in validate_model_manifest_bytes(values[0] or b"")
+                )
+        benchmark = (
+            materialized_files.get("tests/hardware/bench_wakeword.py")
+            if materialized_files is not None
+            else next(
+                (
+                    snippet.body
+                    for snippet in task_12.snippets
+                    if snippet.path == "tests/hardware/bench_wakeword.py"
+                ),
+                None,
             )
-        ):
-            errors.append(
-                "Task 12 offline wake-model test must block sockets/DNS during activation/inference"
-            )
-        manifest_snippets = {
-            snippet.path: snippet.body
-            for snippet in task_12.snippets
-            if snippet.path
-            in {
-                "models/manifest.yaml",
-                "apps/core/src/tuntun_core/resources/model-manifest.yaml",
-            }
-        }
-        if len(manifest_snippets) == 2:
-            values = tuple(manifest_snippets.values())
-            if values[0] != values[1]:
-                errors.append("Task 12 repository and packaged manifests are not byte identical")
+        )
+        if benchmark is not None:
             errors.extend(
-                f"Task 12 {error}"
-                for error in validate_model_manifest_bytes(values[0])
+                f"Task 12 wake benchmark behavioral probe: {error}"
+                for error in validate_wake_benchmark_bytes(benchmark)
             )
-        else:
-            errors.append("Task 12 must contain two literal byte-identical manifest snippets")
-        task_text = task_12.raw_text
-        if "runtime_download" in task_text:
-            errors.append("Task 12 model manifest contains forbidden key runtime_download")
-        benchmark = next(
-            (
-                snippet.body.decode(errors="replace")
-                for snippet in task_12.snippets
-                if snippet.path == "tests/hardware/bench_wakeword.py"
-            ),
-            "",
-        )
-        for token in (
-            "StreamingAudioConverter",
-            "WakeDetector",
-            "1280",
-            "process_time",
-            "boot_uuid",
-            "inference_count",
-            "drop_count",
-            "/venvs/apps_venv/bin/python3",
-        ):
-            if token not in benchmark:
-                errors.append(f"Task 12 wake benchmark missing required binding: {token}")
-        if "CM4" in benchmark or "^" in benchmark:
-            errors.append("Task 12 wake benchmark contains guessed CM4/XOR evidence")
     task_15 = by_number.get(15)
     if task_15 is not None:
         declarations = {declaration.path for declaration in task_15.declarations}
         generator = "evals/generate_bilingual_report_schema.py"
         if generator not in declarations:
             errors.append(f"Task 15 must own {generator}")
-        generator_source = next(
-            (
-                snippet.body.decode(errors="replace")
-                for snippet in task_15.snippets
-                if snippet.path == generator
-            ),
-            "",
+        schema_path = "evals/reports/bilingual-persona-score-v1.schema.json"
+        matching = [item for item in task_15.generators if item.output == schema_path]
+        if len(matching) != 1 or matching[0].entry_point != generator:
+            errors.append(
+                "Task 15 must generate the bilingual report schema with its owned generator"
+            )
+        if materialized_files is not None:
+            schema = materialized_files.get(schema_path)
+            if schema is None:
+                errors.append("Task 15 generated schema output is absent")
+            else:
+                errors.extend(
+                    f"Task 15 {error}"
+                    for error in validate_bilingual_schema_bytes(schema)
+                )
+
+
+def _pytest_environment(root: Path) -> dict[str, str]:
+    environment = dict(os.environ)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (
+            str(root),
+            str(root / "apps/core/src"),
+            str(root / "apps/edge/src"),
+            str(root / "packages/contracts/src"),
+            str(root / "packages/testing/src"),
         )
-        for token in (
-            "BilingualScoreReportV1.model_json_schema()",
-            '"$id"',
-            "sort_keys=True",
-            "separators=(\",\", \":\")",
-        ):
-            if token not in generator_source:
-                errors.append(f"Task 15 schema generator missing canonical binding: {token}")
+    )
+    return environment
+
+
+def _execute_pytest_boundary_probe(
+    root: Path,
+    paths: Sequence[str],
+    *,
+    task_number: int,
+    label: str,
+    errors: list[str],
+) -> None:
+    junit = root / f".{label}.junit.xml"
+    try:
+        result = subprocess.run(
+            (
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "--maxfail=1",
+                f"--junitxml={junit}",
+                "-m",
+                "not reachy_hardware and not live_cloud",
+                *paths,
+            ),
+            cwd=root,
+            env=_pytest_environment(root),
+            check=False,
+            capture_output=True,
+            timeout=45,
+        )
+    except subprocess.TimeoutExpired:
+        errors.append(
+            f"Task {task_number:02d}: {label} failed: exceeded 45 seconds"
+        )
+        return
+    complete, junit_diagnostic = _junit_is_complete_pass(junit)
+    if result.returncode != 0 or not complete:
+        diagnostic = (result.stdout + result.stderr)[-4096:].decode(errors="replace")
+        errors.append(
+            f"Task {task_number:02d}: {label} failed with exit {result.returncode}; "
+            f"{junit_diagnostic}: {diagnostic}"
+        )
+
+
+def _validate_pytest_task_boundaries(
+    document: PlanDocument, foundation_files: dict[str, bytes], errors: list[str]
+) -> None:
+    files = dict(foundation_files)
+    for task in document.tasks:
+        try:
+            files = materialize_document(
+                PlanDocument((task,)), foundation_files=files
+            )
+        except MaterializationError:
+            return
+        consumer_test_paths: set[str] = set()
+        producer_names: set[str] = set()
+        for snippet in task.snippets:
+            tree = _python_tree(snippet, errors)
+            if tree is None:
+                continue
+            producer_names.update(
+                function.name
+                for function in tree.body
+                if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and _is_fixture(function)
+            )
+            if not snippet.path.startswith("tests/"):
+                continue
+            for function in tree.body:
+                if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if not function.name.startswith("test_"):
+                    continue
+                parametrized = _parametrized_names(function)
+                arguments = (
+                    *function.args.posonlyargs,
+                    *function.args.args,
+                    *function.args.kwonlyargs,
+                )
+                if any(
+                    argument.arg
+                    not in PYTEST_FIXTURES | parametrized | {"self", "cls"}
+                    for argument in arguments
+                ):
+                    consumer_test_paths.add(snippet.path)
+                if _additional_fixture_consumers(function):
+                    consumer_test_paths.add(snippet.path)
+        test_paths = [
+            declaration.path
+            for declaration in task.declarations
+            if declaration.kind == "Test"
+            and declaration.path in consumer_test_paths
+            and not declaration.path.startswith("tests/hardware/")
+        ]
+        if not test_paths and not producer_names:
+            continue
+        prefix = f"tuntun-plan-task-{task.number:02d}-"
+        with tempfile.TemporaryDirectory(prefix=prefix) as temporary:
+            root = Path(temporary)
+            write_materialized_tree(root, files)
+            if producer_names:
+                probe_path = "tests/__tuntun_plan_fixture_probe__.py"
+                if probe_path in files:
+                    errors.append(
+                        f"Task {task.number:02d}: reserved fixture probe path already exists"
+                    )
+                else:
+                    probe = root / probe_path
+                    probe.parent.mkdir(parents=True, exist_ok=True)
+                    names = repr(tuple(sorted(producer_names)))
+                    probe.write_text(
+                        "import pytest\n\n"
+                        f"@pytest.mark.parametrize('fixture_name', {names})\n"
+                        "def test_fixture_producer_is_discoverable(request, fixture_name):\n"
+                        "    value = request.getfixturevalue(fixture_name)\n"
+                        "    assert value is not None and type(value) is not object\n",
+                        encoding="utf-8",
+                    )
+                    _execute_pytest_boundary_probe(
+                        root,
+                        (probe_path,),
+                        task_number=task.number,
+                        label="fixture-producer discovery probe",
+                        errors=errors,
+                    )
+            if test_paths:
+                _execute_pytest_boundary_probe(
+                    root,
+                    test_paths,
+                    task_number=task.number,
+                    label="pytest task-boundary probe",
+                    errors=errors,
+                )
 
 
 def validate_plan_document(
@@ -498,6 +1694,7 @@ def validate_plan_document(
     *,
     foundation_files: dict[str, bytes],
     require_foundation_task_13: bool = False,
+    execute_behavioral_probes: bool = True,
 ) -> list[str]:
     """Return every independently actionable plan-integrity error."""
 
@@ -506,23 +1703,29 @@ def validate_plan_document(
     _validate_dependencies(document, errors)
     _validate_foundation(foundation_files, errors, required=require_foundation_task_13)
     _validate_import_ownership(document, foundation_files, errors)
-    _validate_fixtures_and_skips(document, errors)
-    _validate_model_and_eval_contracts(document, errors)
+    _validate_fixtures_and_skips(document, foundation_files, errors)
+    _validate_green_commands(document, errors)
+    materialized: dict[str, bytes] | None = None
     try:
-        materialize_document(document, foundation_files=foundation_files)
+        materialized = materialize_document(document, foundation_files=foundation_files)
     except MaterializationError as error:
         errors.append(f"materialization failed: {error}")
-    return list(dict.fromkeys(errors))
+    _validate_model_and_eval_contracts(
+        document, errors, materialized_files=materialized
+    )
+    if execute_behavioral_probes and materialized is not None:
+        _validate_pytest_task_boundaries(document, foundation_files, errors)
+    return errors
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--foundation-ref", required=True)
+    parser.add_argument("--plan-ref", required=True)
     parser.add_argument("--repository-root", type=Path, default=Path.cwd())
     parser.add_argument(
-        "--plan",
-        type=Path,
-        default=Path(
+        "--plan-path",
+        default=(
             "docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md"
         ),
     )
@@ -532,19 +1735,25 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     root = args.repository_root.resolve()
-    plan_path = args.plan if args.plan.is_absolute() else root / args.plan
     foundation = foundation_files_from_ref(root, args.foundation_ref)
+    document = plan_document_from_ref(root, args.plan_ref, args.plan_path)
     errors = validate_plan_document(
-        parse_plan(plan_path),
+        document,
         foundation_files=foundation,
         require_foundation_task_13=True,
     )
     if errors:
-        print(f"conversation plan integrity: FAIL ({len(errors)} errors)")
+        print(
+            f"conversation plan integrity: FAIL ({len(errors)} errors; "
+            f"plan={document.source_commit}:{document.source_path})"
+        )
         for error in errors:
             print(f"- {error}")
         return 1
-    print("conversation plan integrity: PASS")
+    print(
+        "conversation plan integrity: PASS "
+        f"(plan={document.source_commit}:{document.source_path})"
+    )
     return 0
 
 

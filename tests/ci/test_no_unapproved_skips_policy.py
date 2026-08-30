@@ -84,6 +84,66 @@ git add tests/hardware/test_case.py
     assert any("unapproved pytest skip" in error for error in errors), errors
 
 
+def test_static_validator_rejects_module_level_skip_and_xfail_smuggling() -> None:
+    plan = """### Task 01: skip
+
+**Depends on:** Foundation contracts
+
+**Files:**
+- Test: `tests/test_module_skip.py`
+
+```python
+# tests/test_module_skip.py
+import pytest
+pytestmark = [pytest.mark.reachy_hardware, pytest.mark.owner_only]
+pytest.skip("module unavailable", allow_module_level=True)
+```
+
+```bash
+git add tests/test_module_skip.py
+```
+"""
+
+    errors = validate_plan_document(parse_plan_text(plan), foundation_files={})
+
+    assert any("module-level skip/xfail" in error for error in errors), errors
+
+
+def test_static_validator_rejects_importorskip_inside_fixture() -> None:
+    plan = """### Task 01: skip
+
+**Depends on:** Foundation contracts
+
+**Files:**
+- Create: `tests/fixtures/cases.py`
+- Test: `tests/test_case.py`
+
+```python
+# tests/fixtures/cases.py
+import pytest
+@pytest.fixture
+def case() -> int:
+    pytest.importorskip("missing_dependency")
+    return 1
+```
+
+```python
+# tests/test_case.py
+pytest_plugins = ("tests.fixtures.cases",)
+def test_case(case):
+    assert case == 1
+```
+
+```bash
+git add tests/fixtures/cases.py tests/test_case.py
+```
+"""
+
+    errors = validate_plan_document(parse_plan_text(plan), foundation_files={})
+
+    assert any("unapproved pytest skip" in error for error in errors), errors
+
+
 def test_task_02_materializes_global_skip_to_failure_hook() -> None:
     document = parse_plan_text(PLAN_PATH.read_text())
     task_02 = document.only_tasks({2})
@@ -136,6 +196,94 @@ def test_extra_marker_skip():
 
     assert result.returncode == 1, output
     assert "2 failed, 1 skipped" in output
+
+
+def test_materialized_hook_fails_module_level_skip(tmp_path: Path) -> None:
+    document = parse_plan_text(PLAN_PATH.read_text())
+    files = materialize_document(document.only_tasks({2}), foundation_files={})
+    (tmp_path / "conftest.py").write_bytes(files["tests/conftest.py"])
+    (tmp_path / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    (tmp_path / "test_module_skip.py").write_text(
+        "import pytest\npytest.skip('bypass', allow_module_level=True)\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 1, output
+    assert "unapproved module-level pytest skip/xfail" in output
+
+
+def _materialized_policy_hook(tmp_path: Path) -> None:
+    document = parse_plan_text(PLAN_PATH.read_text())
+    files = materialize_document(document.only_tasks({2}), foundation_files={})
+    (tmp_path / "conftest.py").write_bytes(files["tests/conftest.py"])
+
+
+def test_materialized_hook_allows_pass_and_exact_hardware_skip(tmp_path: Path) -> None:
+    _materialized_policy_hook(tmp_path)
+    (tmp_path / "test_policy.py").write_text(
+        """import pytest
+
+def test_ok():
+    assert True
+
+@pytest.mark.reachy_hardware
+def test_hardware():
+    pytest.skip("requires delivered hardware")
+"""
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_materialized_hook_fails_unapproved_xfail_and_deselection(tmp_path: Path) -> None:
+    _materialized_policy_hook(tmp_path)
+    (tmp_path / "test_policy.py").write_text(
+        """import pytest
+
+@pytest.mark.xfail(reason="unapproved")
+def test_xfail():
+    assert False
+
+def test_ordinary():
+    assert True
+"""
+    )
+
+    xfail = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-k", "xfail"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    deselected = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-k", "nothing-matches"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert xfail.returncode == 1, xfail.stdout + xfail.stderr
+    assert "unapproved collected pytest skip/xfail" in xfail.stdout
+    assert deselected.returncode == 1, deselected.stdout + deselected.stderr
+    assert "unapproved pytest deselection" in deselected.stdout
 
 
 def test_authoritative_plan_exposes_each_residual_unapproved_skip() -> None:

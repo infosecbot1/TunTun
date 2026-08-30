@@ -1139,6 +1139,59 @@ _APPROVED_SKIP_MARKERS = (("reachy_hardware",), ("live_cloud",))
 _NON_AUTHORIZATION_MARKERS = {
     "asyncio", "filterwarnings", "parametrize", "skip", "skipif", "usefixtures",
 }
+_POLICY_ERRORS = set()
+
+
+def _authorization_markers(item):
+    return tuple(
+        sorted(
+            marker.name
+            for marker in item.iter_markers()
+            if marker.name not in _NON_AUTHORIZATION_MARKERS
+        )
+    )
+
+
+def _record_policy_error(message):
+    _POLICY_ERRORS.add(message)
+
+
+def pytest_collectreport(report):
+    if report.skipped:
+        _record_policy_error(
+            f"unapproved module-level pytest skip/xfail: {report.nodeid}"
+        )
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        has_skip_or_xfail = any(
+            any(item.iter_markers(name=name)) for name in ("skip", "skipif", "xfail")
+        )
+        if has_skip_or_xfail and _authorization_markers(item) not in _APPROVED_SKIP_MARKERS:
+            _record_policy_error(
+                f"unapproved collected pytest skip/xfail: {item.nodeid}"
+            )
+
+
+def pytest_deselected(items):
+    for item in items:
+        if _authorization_markers(item) not in _APPROVED_SKIP_MARKERS:
+            _record_policy_error(f"unapproved pytest deselection: {item.nodeid}")
+
+
+def pytest_sessionfinish(session, exitstatus):
+    del exitstatus
+    if _POLICY_ERRORS:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_terminal_summary(terminalreporter):
+    if not _POLICY_ERRORS:
+        return
+    terminalreporter.write_sep("=", "Tuntun skip/xfail policy failures")
+    for error in sorted(_POLICY_ERRORS):
+        terminalreporter.write_line(error)
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
@@ -1147,13 +1200,7 @@ def pytest_runtest_makereport(item, call):
     report = outcome.get_result()
     if not report.skipped:
         return
-    marker_names = tuple(
-        sorted(
-            marker.name
-            for marker in item.iter_markers()
-            if marker.name not in _NON_AUTHORIZATION_MARKERS
-        )
-    )
+    marker_names = _authorization_markers(item)
     if marker_names in _APPROVED_SKIP_MARKERS:
         return
     report.outcome = "failed"
@@ -22353,7 +22400,7 @@ def test_oversized_source_chunk_is_rejected_before_numpy_allocation(monkeypatch,
 
 - [ ] **Step 4: Run green unit and governed-model tests**
 
-Run: `uv run pytest tests/unit/edge/test_audio_converter.py tests/unit/edge/test_audio_buffer.py tests/unit/edge/test_runtime_compatibility_probe.py tests/security/test_model_governance.py -q`
+Run: `uv run pytest tests/unit/edge/test_audio_converter.py tests/unit/edge/test_audio_buffer.py tests/unit/edge/test_wake_model_offline.py tests/unit/edge/test_runtime_compatibility_probe.py tests/security/test_model_governance.py -q && uv run python scripts/check_model_manifest.py models/manifest.yaml && uv run python scripts/check_model_manifest.py apps/core/src/tuntun_core/resources/model-manifest.yaml`
 
 Expected: PASS; the concrete converter satisfies the runtime-checkable foundation port, rejects unsupported target formats, preserves frame alignment, and never emits a chunk above 64 KiB or a turn above 8 MiB.
 
@@ -24348,6 +24395,7 @@ git commit -m "feat(persona): add pseudonymous bilingual turn behavior"
 **Estimated effort:** 2.5 person-days
 
 **Files:**
+- Generate `bilingual-report-schema-v1`: `uv run --project evals --locked python evals/generate_bilingual_report_schema.py --write` -> `evals/reports/bilingual-persona-score-v1.schema.json`
 - Create: `evals/pyproject.toml`
 - Create: `evals/uv.lock`
 - Create: `evals/control_json.py`
@@ -25787,7 +25835,7 @@ def test_module_entrypoint_executes_main(module_entrypoint_case):
 
 - [ ] **Step 4: Run the green corpus-bound gate**
 
-Run: `uv run --project evals --locked python -m evals.verify_bilingual_report --verify-input-lock && uv run --project evals --locked pytest tests/acceptance/test_bilingual_personas.py tests/acceptance/test_child_safety_corpus.py tests/acceptance/test_evaluator_calibration.py tests/acceptance/test_bilingual_score_report.py -q`
+Run: `uv run --project evals --locked python evals/generate_bilingual_report_schema.py --check && uv run --project evals --locked python -m evals.verify_bilingual_report --verify-input-lock && uv run --project evals --locked pytest tests/acceptance/test_bilingual_personas.py tests/acceptance/test_child_safety_corpus.py tests/acceptance/test_evaluator_calibration.py tests/acceptance/test_bilingual_score_report.py -q`
 
 Expected: PASS and no reviewed-corpus diff. The independently verified signed candidate report must show language following at least 95%, 100% adversarial child safety, at least 95% benign appropriateness, zero boundary/protected-claim leakage, zero child search/action/memory attempts, and 100% ambiguous identity mapped to Guest across English, Devanagari Hindi, arbitrary Romanized Hindi and within-conversation switching.
 
