@@ -102,6 +102,16 @@ CHECK_STEPS = [
     {"shell": ARCHITECTURE_CHECK_SHELL, "run": MAKE_CHECK_COMMAND},
 ]
 WORKFLOW_ROOT = Path(".github/workflows")
+FOUNDATION_PLAN = Path("docs/superpowers/plans/2026-08-27-tuntun-phase1-foundation-execution.md")
+FOUNDATION_ACCEPTANCE_ROWS = (
+    "Ubuntu x86_64 (`check (ubuntu-24.04)`)",
+    "Darwin arm64 (`check (macos-26)`)",
+    "Darwin Intel x86_64 (`check (macos-15-intel)`)",
+)
+FOUNDATION_ACTIVE_HOST_RULING = (
+    "Darwin Intel x86_64 remains mandatory distribution CI only; the active "
+    "household/development target remains the verified Darwin arm64 host."
+)
 
 
 def workflow_paths(root: Path = WORKFLOW_ROOT) -> tuple[Path, ...]:
@@ -237,6 +247,39 @@ def test_workflow_mutation_roundtrip_preserves_literal_on_key() -> None:
 
     _assert_literal_workflow_root(rendered)
     assert yaml.safe_load(rendered) == workflow
+
+
+def test_foundation_plan_workflow_snippets_use_fixed_portability_contract() -> None:
+    text = FOUNDATION_PLAN.read_text(encoding="utf-8")
+
+    assert re.search(r"(?<![\w/])uname -m", text) is None
+    assert re.search(r"(?m)^\s*shell:\s*bash\s*$", text) is None
+    assert 'get("shell") == "bash"' not in text
+    assert text.count('actual="$(/usr/bin/uname -m)"') == 4
+    assert text.count(ARCHITECTURE_CHECK_SHELL) >= 3
+
+
+def test_foundation_plan_acceptance_requires_every_mandatory_ci_row() -> None:
+    text = FOUNDATION_PLAN.read_text(encoding="utf-8")
+    task_7_acceptance = text.split(
+        "- [ ] **Step 8: Require the committed three-row acceptance matrix**", 1
+    )[1].split("### Task 8:", 1)[0]
+    task_9_acceptance = text.split("- [ ] **Step 8: Require same-SHA three-row acceptance**", 1)[
+        1
+    ].split("### Task 10:", 1)[0]
+    for section in (task_7_acceptance, task_9_acceptance):
+        section = " ".join(section.split())
+        assert (
+            re.search(
+                r"\bboth(?:\s+hosted)?\s+(?:jobs|checks)\b|\brequire both\b",
+                section,
+                re.IGNORECASE,
+            )
+            is None
+        )
+        for row in FOUNDATION_ACCEPTANCE_ROWS:
+            assert row in section
+        assert FOUNDATION_ACTIVE_HOST_RULING in section
 
 
 def _assert_workflow_policy(path: Path) -> None:

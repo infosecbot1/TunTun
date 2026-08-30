@@ -394,7 +394,7 @@ ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
     exit 1
     ;;
 esac
-actual="$(uname -m)"
+actual="$(/usr/bin/uname -m)"
 if [ "$actual" != "$expected" ]; then
   echo "runner architecture mismatch: expected $expected, got $actual" >&2
   exit 1
@@ -1076,7 +1076,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Assert runner architecture
-        shell: bash
+        shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: |
           case "${{ matrix.os }}" in
             ubuntu-24.04)
@@ -1093,7 +1093,7 @@ jobs:
               exit 1
               ;;
           esac
-          actual="$(uname -m)"
+          actual="$(/usr/bin/uname -m)"
           if [ "$actual" != "$expected" ]; then
             echo "runner architecture mismatch: expected $expected, got $actual" >&2
             exit 1
@@ -20621,7 +20621,7 @@ ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
     exit 1
     ;;
 esac
-actual="$(uname -m)"
+actual="$(/usr/bin/uname -m)"
 if [ "$actual" != "$expected" ]; then
   echo "runner architecture mismatch: expected $expected, got $actual" >&2
   exit 1
@@ -20689,7 +20689,9 @@ def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -
     assert architecture_steps == [0]
     architecture_step = steps[architecture_steps[0]]
     assert isinstance(architecture_step, Mapping)
-    assert architecture_step.get("shell") == "bash"
+    assert architecture_step.get("shell") == (
+        "/bin/bash --noprofile --norc -p -euo pipefail {0}"
+    )
     run = architecture_step.get("run")
     assert run == ARCHITECTURE_CHECK_SCRIPT
     for runner, machine in EXPECTED_ARCHITECTURES.items():
@@ -22219,7 +22221,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Assert runner architecture
-        shell: bash
+        shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: |
           case "${{ matrix.os }}" in
             ubuntu-24.04)
@@ -22236,7 +22238,7 @@ jobs:
               exit 1
               ;;
           esac
-          actual="$(uname -m)"
+          actual="$(/usr/bin/uname -m)"
           if [ "$actual" != "$expected" ]; then
             echo "runner architecture mismatch: expected $expected, got $actual" >&2
             exit 1
@@ -22389,20 +22391,24 @@ generated wheel may be staged.
 - [ ] **Step 8: Require the committed three-row acceptance matrix**
 
 Push the exact Task 7 commit through the Task 2 GitHub Actions workflow amended
-only with the short per-run pytest base. Require check (ubuntu-24.04),
-check (macos-26), and check (macos-15-intel) for the same commit SHA.
+only with the short per-run pytest base. Require all three mandatory rows for
+the same commit SHA: Ubuntu x86_64 (`check (ubuntu-24.04)`), Darwin arm64
+(`check (macos-26)`), and Darwin Intel x86_64 (`check (macos-15-intel)`).
 
-Expected: both jobs pass `uv sync --all-packages --locked` and `make check`
-without xfail, emulation, or a skipped Task 7 case. The check step's short
-unique base keeps every AF_UNIX fixture below Darwin's path limit. Hosted Linux
-exercises the root-owned sticky `/tmp` ancestor, the reviewed filesystem/xattr
-inspection, and a real mode-preserving POSIX ACL rejection. Hosted Intel macOS
-exercises the trusted temporary-directory alias to its `/private/...` target,
+Expected: each mandatory row passes `uv sync --all-packages --locked` and
+`make check` without xfail, emulation, or a skipped Task 7 case. The check
+step's short unique base keeps every AF_UNIX fixture below Darwin's path limit.
+Hosted Linux exercises the root-owned sticky `/tmp` ancestor, the reviewed
+filesystem/xattr inspection, and a real mode-preserving POSIX ACL rejection.
+Hosted Intel macOS exercises the trusted temporary-directory alias to its `/private/...` target,
 accepts a real deny-only extended ACL, and rejects a real granting ACL. Each
 fixture proves the installed raw ACL and mode are unchanged before teardown and
 restores the exact original state. A local run, container, emulation, or result
-from only one operating system is not evidence for the other. Task 8 may not
-begin until both hosted checks are green for the same committed SHA.
+from only one row is not evidence for either of the other two mandatory rows.
+Darwin Intel x86_64 remains mandatory distribution CI only; the active
+household/development target remains the verified Darwin arm64 host. Task 8 may
+not begin until the Ubuntu x86_64, Darwin arm64, and Darwin Intel x86_64 `check`
+rows are green for the same committed SHA.
 
 ### Task 8: Implement secret providers and recursive log redaction
 
@@ -27790,8 +27796,12 @@ wheel, venv, private temp directory, cache, real audio/transcript, or Task 10 pa
 
 - [ ] **Step 8: Require same-SHA three-row acceptance**
 
-Push the exact Task 9 commit through the unchanged Task 7 GitHub Actions matrix. Require both
-`check (ubuntu-24.04)`, `check (macos-26)`, and `check (macos-15-intel)` for that same SHA. Each job must complete
+Push the exact Task 9 commit through the unchanged Task 7 GitHub Actions matrix.
+Require all three mandatory rows for that same SHA:
+Ubuntu x86_64 (`check (ubuntu-24.04)`), Darwin arm64 (`check (macos-26)`), and
+Darwin Intel x86_64 (`check (macos-15-intel)`). Darwin Intel x86_64 remains
+mandatory distribution CI only; the active household/development target
+remains the verified Darwin arm64 host. Each job must complete
 `uv sync --all-packages --locked` and `make check`; therefore each independently executes the
 actual scenario chain, strict runner/test mypy target, FD/task measurement, network/DNS subprocess
 tests, 32-scenario and 10,000 aggregate-turn boundaries, private-data scan, and
