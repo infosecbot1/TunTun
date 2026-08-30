@@ -135,14 +135,21 @@ class ModelInstaller:
             ):
                 raise ValueError("model size/hash mismatch")
             hash_exact_fd(read_fd, item.size, item.sha256)
-            os.close(write_fd)
+            descriptor_to_close = write_fd
             write_fd = -1
+            os.close(descriptor_to_close)
             return read_fd
         except BaseException:
             if read_fd is not None:
-                os.close(read_fd)
+                descriptor_to_close = read_fd
+                read_fd = None
+                with contextlib.suppress(OSError):
+                    os.close(descriptor_to_close)
             if write_fd >= 0:
-                os.close(write_fd)
+                descriptor_to_close = write_fd
+                write_fd = -1
+                with contextlib.suppress(OSError):
+                    os.close(descriptor_to_close)
             raise
 
     @staticmethod
@@ -163,51 +170,80 @@ class ModelInstaller:
         if revision is None:
             return None
         handles: list[VerifiedModelFile] = []
+        activated: ActivatedModel | None = None
+        sealed_by_recovery = False
+        post_seal_verified = False
         try:
             mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
             if mode == 0o500:
-                return self.registry.activate(entry.model_id)
-            if mode != 0o700:
-                raise PermissionError("unsafe model filesystem revision")
+                activated = self.registry.activate(entry.model_id)
+            else:
+                if mode != 0o700:
+                    raise PermissionError("unsafe model filesystem revision")
 
-            expected_names = tuple(sorted(item.path for item in entry.files))
-            if tuple(sorted(os.listdir(revision.fd))) != expected_names:
-                raise PermissionError("unsafe unsealed model revision")
-            for item in entry.files:
-                descriptor = open_regular_at(
-                    revision,
-                    item.path,
-                    os.O_RDONLY,
-                    mode=0o400,
-                    expected_mode=0o400,
-                )
+                expected_names = tuple(sorted(item.path for item in entry.files))
+                if tuple(sorted(os.listdir(revision.fd))) != expected_names:
+                    raise PermissionError("unsafe unsealed model revision")
+                for item in entry.files:
+                    descriptor = open_regular_at(
+                        revision,
+                        item.path,
+                        os.O_RDONLY,
+                        mode=0o400,
+                        expected_mode=0o400,
+                    )
+                    try:
+                        hash_exact_fd(descriptor, item.size, item.sha256)
+                        handle = VerifiedModelFile.from_manifest(item, descriptor)
+                    except BaseException:
+                        with contextlib.suppress(OSError):
+                            os.close(descriptor)
+                        raise
+                    try:
+                        handles.append(handle)
+                    except BaseException:
+                        handle.close()
+                        raise
+
+                sealed_by_recovery = True
+                revision.chmod(0o500)
+                revision.fsync()
+                self._fault_hook("after_recovery_seal_before_verify")
+                if tuple(sorted(os.listdir(revision.fd))) != expected_names:
+                    raise PermissionError("unsafe unsealed model revision")
+                for item, handle in zip(entry.files, handles, strict=True):
+                    hash_exact_fd(handle.fd, item.size, item.sha256)
+                post_seal_verified = True
+                model.fsync()
+                activated = ActivatedModel.from_manifest(entry, tuple(handles))
+                handles.clear()
+        except BaseException as error:
+            rollback_error: BaseException | None = None
+            if sealed_by_recovery and not post_seal_verified:
                 try:
-                    hash_exact_fd(descriptor, item.size, item.sha256)
-                    handles.append(VerifiedModelFile.from_manifest(item, descriptor))
-                except BaseException:
-                    os.close(descriptor)
-                    raise
-
-            revision.chmod(0o500)
-            revision.fsync()
-            if tuple(sorted(os.listdir(revision.fd))) != expected_names:
-                raise PermissionError("unsafe unsealed model revision")
-            for item, handle in zip(entry.files, handles, strict=True):
-                hash_exact_fd(handle.fd, item.size, item.sha256)
-            model.fsync()
-            return ActivatedModel.from_manifest(entry, tuple(handles))
-        except OSError as error:
+                    revision.chmod(0o700)
+                    revision.fsync()
+                except BaseException as caught:
+                    rollback_error = caught
             for handle in handles:
                 with contextlib.suppress(OSError):
                     handle.close()
-            raise PermissionError("unsafe unsealed model revision") from error
-        except BaseException:
-            for handle in handles:
-                with contextlib.suppress(OSError):
-                    handle.close()
+            with contextlib.suppress(OSError):
+                revision.close()
+            if rollback_error is not None:
+                raise PermissionError("unsafe unsealed model revision") from rollback_error
+            if isinstance(error, OSError):
+                raise PermissionError("unsafe unsealed model revision") from error
             raise
-        finally:
+        if activated is None:
             revision.close()
+            raise RuntimeError("model revision recovery did not activate")
+        try:
+            revision.close()
+        except BaseException:
+            activated.close()
+            raise
+        return activated
 
     def install(self, model_id: str) -> ActivatedModel:
         entry = self.registry.entry(model_id)
@@ -231,7 +267,16 @@ class ModelInstaller:
                         deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
                         for item in entry.files:
                             descriptor = self._download(stage, item, deadline)
-                            handles.append(VerifiedModelFile.from_manifest(item, descriptor))
+                            try:
+                                handle = VerifiedModelFile.from_manifest(item, descriptor)
+                            except BaseException:
+                                os.close(descriptor)
+                                raise
+                            try:
+                                handles.append(handle)
+                            except BaseException:
+                                handle.close()
+                                raise
                             self._fault_hook("after_each_file")
                         for item, handle in zip(entry.files, handles, strict=True):
                             hash_exact_fd(handle.fd, item.size, item.sha256)

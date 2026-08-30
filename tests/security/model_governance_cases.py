@@ -669,6 +669,8 @@ class GovernedModelCase:
             unexpected = revision / "unexpected.onnx"
             unexpected.write_bytes(b"unexpected")
             unexpected.chmod(0o400)
+        elif mutation == "missing_artifact":
+            artifact.unlink()
         elif mutation == "hash_mismatch":
             artifact.chmod(0o600)
             artifact.write_bytes(b"x" * len(self.expected_bytes))
@@ -676,8 +678,35 @@ class GovernedModelCase:
         elif mutation == "artifact_symlink":
             artifact.unlink()
             artifact.symlink_to("/dev/null")
+        elif mutation == "artifact_fifo":
+            artifact.unlink()
+            os.mkfifo(artifact, 0o400)
+        elif mutation == "writable_artifact":
+            artifact.chmod(0o600)
+        elif mutation == "wrong_size":
+            artifact.chmod(0o600)
+            artifact.write_bytes(self.expected_bytes + b"!")
+            artifact.chmod(0o400)
         else:
             raise AssertionError(f"unknown unsealed revision mutation: {mutation}")
+
+    def restart_with_post_seal_recovery_fault(self, fault: str) -> ActivatedModel:
+        if fault not in {"mutate_artifact", "raise_error"}:
+            raise AssertionError(f"unknown post-seal recovery fault: {fault}")
+
+        def inject(point: str) -> None:
+            if point != "after_recovery_seal_before_verify":
+                return
+            if fault == "raise_error":
+                raise RuntimeError("scripted post-seal recovery failure")
+            artifact = self._artifact_path()
+            artifact.chmod(0o600)
+            artifact.write_bytes(b"x" * len(self.expected_bytes))
+            artifact.chmod(0o400)
+
+        activated = self._installer(fault_hook=inject).install(self.model_id)
+        self._track_activation(activated)
+        return activated
 
     def final_revision_is_complete_and_verified(self) -> bool:
         try:

@@ -15,10 +15,15 @@ from pathlib import Path
 import pytest
 from tuntun_core.cli.commands import models as models_command
 from tuntun_core.cli.main import app
+from tuntun_core.services.models import installer as installer_module
 from tuntun_core.services.models import network as network_module
-from tuntun_core.services.models.fs import hash_exact_fd
+from tuntun_core.services.models.fs import OwnedDirectory, hash_exact_fd
 from tuntun_core.services.models.installer import ModelInstaller
-from tuntun_core.services.models.registry import ModelRegistry, ModelVerificationError
+from tuntun_core.services.models.registry import (
+    ModelRegistry,
+    ModelVerificationError,
+    VerifiedModelFile,
+)
 from typer.testing import CliRunner
 
 
@@ -244,6 +249,93 @@ def test_installer_retains_only_same_inode_read_only_verified_descriptor(
     assert "return read_fd" in source
     assert "return write_fd" not in source and "return fd" not in source
     assert runtime_adapter.path_opens == []  # type: ignore[attr-defined]
+
+
+def test_fresh_install_wrapper_failure_closes_download_descriptor_once(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained_descriptor: list[int] = []
+    close_attempts: list[int] = []
+    real_close = os.close
+
+    def fail_from_manifest(
+        _cls: type[VerifiedModelFile], _item: object, descriptor: int
+    ) -> VerifiedModelFile:
+        retained_descriptor.append(descriptor)
+        raise RuntimeError("scripted wrapper construction failure")
+
+    def track_close(descriptor: int) -> None:
+        if retained_descriptor and descriptor == retained_descriptor[0]:
+            close_attempts.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(
+        VerifiedModelFile,
+        "from_manifest",
+        classmethod(fail_from_manifest),
+    )
+    monkeypatch.setattr(os, "close", track_close)
+
+    with pytest.raises(RuntimeError, match="scripted wrapper construction failure"):
+        governed_model_case.install()  # type: ignore[attr-defined]
+
+    assert len(retained_descriptor) == 1
+    assert close_attempts == retained_descriptor
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_download_write_descriptor_close_failure_is_not_retried(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_descriptors: list[int] = []
+    close_attempts: list[int] = []
+    real_open = installer_module.open_regular_at
+    real_close = os.close
+
+    def capture_open(
+        directory: object,
+        name: str,
+        flags: int,
+        *,
+        mode: int = 0o600,
+        expected_mode: int | None = None,
+    ) -> int:
+        descriptor = real_open(  # type: ignore[arg-type]
+            directory,
+            name,
+            flags,
+            mode=mode,
+            expected_mode=expected_mode,
+        )
+        if flags & os.O_ACCMODE == os.O_WRONLY:
+            write_descriptors.append(descriptor)
+        return descriptor
+
+    def fail_first_write_close(descriptor: int) -> None:
+        if write_descriptors and descriptor == write_descriptors[0]:
+            try:
+                os.fstat(descriptor)
+            except OSError:
+                close_attempts.append(descriptor)
+                real_close(descriptor)
+                return
+            if not close_attempts:
+                close_attempts.append(descriptor)
+                real_close(descriptor)
+                raise OSError("scripted write descriptor close failure")
+        real_close(descriptor)
+
+    monkeypatch.setattr(installer_module, "open_regular_at", capture_open)
+    monkeypatch.setattr(os, "close", fail_first_write_close)
+
+    with pytest.raises(OSError, match="scripted write descriptor close failure"):
+        governed_model_case.install()  # type: ignore[attr-defined]
+
+    assert len(write_descriptors) == 1
+    assert close_attempts == write_descriptors
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
 
 
 def test_activated_manifest_expectations_and_file_tuple_cannot_be_rebased(
@@ -655,7 +747,64 @@ def test_crash_after_publish_before_seal_is_unusable_then_recovered(
     assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("mutation", ("unexpected_file", "hash_mismatch", "artifact_symlink"))
+def test_recovery_revision_close_failure_closes_every_artifact_once(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_seal"
+    )
+    revision_path = (
+        governed_model_case.model_root
+        / governed_model_case.model_id
+        / (  # type: ignore[attr-defined]
+            "a" * 40
+        )
+    )
+    revision_metadata = revision_path.stat(follow_symlinks=False)
+    revision_identity = (revision_metadata.st_dev, revision_metadata.st_ino)
+    directory_close_failed = False
+    artifact_close_attempts: list[int] = []
+    real_directory_close = OwnedDirectory.close
+    real_artifact_close = VerifiedModelFile.close
+
+    def fail_revision_close(directory: OwnedDirectory) -> None:
+        nonlocal directory_close_failed
+        directory_identity = (directory.identity.device, directory.identity.inode)
+        if directory_identity == revision_identity and not directory_close_failed:
+            directory_close_failed = True
+            real_directory_close(directory)
+            raise OSError("scripted recovery revision close failure")
+        real_directory_close(directory)
+
+    def track_artifact_close(handle: VerifiedModelFile) -> None:
+        artifact_close_attempts.append(id(handle))
+        real_artifact_close(handle)
+
+    monkeypatch.setattr(OwnedDirectory, "close", fail_revision_close)
+    monkeypatch.setattr(VerifiedModelFile, "close", track_artifact_close)
+
+    with pytest.raises(OSError, match="scripted recovery revision close failure"):
+        governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
+
+    assert directory_close_failed is True
+    assert len(artifact_close_attempts) == 1
+    assert len(set(artifact_close_attempts)) == 1
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "unexpected_file",
+        "missing_artifact",
+        "artifact_symlink",
+        "artifact_fifo",
+        "writable_artifact",
+        "wrong_size",
+        "hash_mismatch",
+    ),
+)
 def test_unsealed_revision_tampering_is_never_sealed_or_loaded(
     governed_model_case: object,
     mutation: str,
@@ -668,6 +817,26 @@ def test_unsealed_revision_tampering_is_never_sealed_or_loaded(
         governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
     assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
     assert not governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("fault", ("mutate_artifact", "raise_error"))
+def test_recovery_fault_between_seal_and_verification_restores_unsealed_state(
+    governed_model_case: object,
+    fault: str,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_seal"
+    )
+
+    with pytest.raises((PermissionError, RuntimeError, ValueError)):
+        governed_model_case.restart_with_post_seal_recovery_fault(  # type: ignore[attr-defined]
+            fault
+        )
+
+    assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
+    assert not governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(

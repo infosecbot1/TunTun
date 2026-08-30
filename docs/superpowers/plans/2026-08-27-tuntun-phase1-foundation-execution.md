@@ -28082,7 +28082,10 @@ def test_crash_after_publish_before_seal_is_unusable_then_recovered(
     assert governed_model_case.final_revision_mode==0o500
     assert governed_model_case.final_revision_is_complete_and_verified()
 
-@pytest.mark.parametrize("mutation",("unexpected_file","hash_mismatch","artifact_symlink"))
+@pytest.mark.parametrize("mutation",(
+    "unexpected_file","missing_artifact","artifact_symlink","artifact_fifo",
+    "writable_artifact","wrong_size","hash_mismatch",
+))
 def test_unsealed_revision_tampering_is_never_sealed_or_loaded(
     governed_model_case,mutation,
 ) -> None:
@@ -28092,6 +28095,18 @@ def test_unsealed_revision_tampering_is_never_sealed_or_loaded(
         governed_model_case.restart_and_reconcile()
     assert governed_model_case.final_revision_mode==0o700
     assert not governed_model_case.final_revision_is_complete_and_verified()
+    assert governed_model_case.open_descriptor_count==0
+
+@pytest.mark.parametrize("fault",("mutate_artifact","raise_error"))
+def test_recovery_fault_between_seal_and_verification_restores_unsealed_state(
+    governed_model_case,fault,
+) -> None:
+    governed_model_case.crash_install_at("after_publish_before_seal")
+    with pytest.raises((PermissionError,RuntimeError,ValueError)):
+        governed_model_case.restart_with_post_seal_recovery_fault(fault)
+    assert governed_model_case.final_revision_mode==0o700
+    assert not governed_model_case.final_revision_is_complete_and_verified()
+    assert governed_model_case.open_descriptor_count==0
 
 
 @pytest.mark.parametrize("fault",(
@@ -28152,7 +28167,7 @@ def concurrent_model_case(governed_model_case):
     return governed_model_case.concurrent_view()
 ```
 
-`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`: `manifest`, `model_id`, `expected_bytes`, `expected_sha256`, `network.inject()/followed_redirects`, `mutate_manifest`, `apply_filesystem_mutation`, `registry_or_activate`, `inject_os_write_result`, `inject_repeated_os_write_result`, `install`, `as_installed_model`, `concurrent_view`, `race_activation`, `crash_install_at`, `restart_and_reconcile`, `require_write_enabled_publish_source`, `mutate_unsealed_revision`, `final_revision_mode`, `rehash_exact_descriptor`, and every asserted state/identity/count query. Each mutation/race/fault string in the test has one explicit dispatch-table entry; unknown names raise `AssertionError`. Filesystem mutations use real symlinks/FIFOs/modes/inode replacements, write faults monkeypatch only `os.write`, and network faults drive the injected transport/child-resolver seam. State queries inspect the real staged/final filesystem and live descriptors rather than booleans set by the case.
+`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`: `manifest`, `model_id`, `expected_bytes`, `expected_sha256`, `network.inject()/followed_redirects`, `mutate_manifest`, `apply_filesystem_mutation`, `registry_or_activate`, `inject_os_write_result`, `inject_repeated_os_write_result`, `install`, `as_installed_model`, `concurrent_view`, `race_activation`, `crash_install_at`, `restart_and_reconcile`, `restart_with_post_seal_recovery_fault`, `require_write_enabled_publish_source`, `mutate_unsealed_revision`, `final_revision_mode`, `rehash_exact_descriptor`, and every asserted state/identity/count query. Each mutation/race/fault string in the test has one explicit dispatch-table entry; unknown names raise `AssertionError`. Filesystem mutations use real missing entries, symlinks, FIFOs, modes, sizes, hashes, and inode replacements; the post-seal recovery seam either mutates the artifact or raises before the repeated inventory/hash checks. Write faults monkeypatch only `os.write`, and network faults drive the injected transport/child-resolver seam. State queries inspect the real staged/final filesystem and live descriptors rather than booleans set by the case.
 
 `InstalledModel` exposes only `registry`, `model_id`, `expected_bytes`, `expected_sha256`, and `replace_every_named_path_with_attacker_bytes()`. `ScriptedRuntimeAdapter.load_verified_reader` consumes the bounded reader to EOF, records bytes and open duplicate count, returns an exact per-file receipt, and never accepts a path; `finish_model` returns an unpublished signed candidate; the verifier publishes only after checking the exact domain/generation/expiry/model/revision/ordered file tuple. `mutate_receipt`, `fail_at`, and `abort_model` are closed dispatch methods for the test strings and maintain the asserted `path_opens`, `open_duplicate_fd_count`, `abort_calls`, `published_runtime_count`, and `last_loaded_bytes`. The concurrent view uses two real `ModelInstaller` instances plus a barrier only before lock acquisition, measures lock ownership around the production lock, and derives publication/stage results from disk. This helper contains no pass-through fake of `ModelRegistry`, `ModelInstaller`, descriptor hashing, publication, or receipt comparison.
 
@@ -28697,13 +28712,13 @@ class PinnedHttpsTransport:
 
 ```python
 # apps/core/src/tuntun_core/services/models/installer.py
-import fcntl,hashlib,os,secrets,stat,time
+import contextlib,fcntl,hashlib,os,secrets,stat,time
 from urllib.parse import urlsplit
 from .fs import (
     OwnedDirectory,atomic_publish_dir_noreplace,hash_exact_fd,open_regular_at,
 )
 from .network import PinnedHttpsTransport
-from .registry import ActivatedModel,VerifiedModelFile
+from .registry import ActivatedModel,ModelEntry,VerifiedModelFile
 
 class ModelInstaller:
     def __init__(self,registry,allowed_hosts,transport=None):
@@ -28773,12 +28788,87 @@ class ModelInstaller:
             ):
                 raise ValueError("model size/hash mismatch")
             hash_exact_fd(read_fd,item.size,item.sha256)
-            os.close(write_fd); write_fd=None
+            descriptor_to_close=write_fd; write_fd=-1
+            os.close(descriptor_to_close)
             return read_fd
-        except Exception:
-            if read_fd is not None: os.close(read_fd)
-            if write_fd is not None: os.close(write_fd)
+        except BaseException:
+            if read_fd is not None:
+                descriptor_to_close=read_fd; read_fd=None
+                with contextlib.suppress(OSError): os.close(descriptor_to_close)
+            if write_fd>=0:
+                descriptor_to_close=write_fd; write_fd=-1
+                with contextlib.suppress(OSError): os.close(descriptor_to_close)
             raise
+
+    @staticmethod
+    def _open_existing_revision(model,revision):
+        try: return model.child(revision)
+        except FileNotFoundError: return None
+        except OSError as error:
+            raise PermissionError("unsafe model filesystem revision") from error
+
+    def _reuse_or_recover_revision(
+        self,model:OwnedDirectory,entry:ModelEntry,
+    ) -> ActivatedModel|None:
+        revision=self._open_existing_revision(model,entry.revision)
+        if revision is None: return None
+        handles=[]; activated=None
+        sealed_by_recovery=False; post_seal_verified=False
+        try:
+            mode=stat.S_IMODE(os.fstat(revision.fd).st_mode)
+            if mode==0o500:
+                activated=self.registry.activate(entry.model_id)
+            else:
+                if mode!=0o700:
+                    raise PermissionError("unsafe model filesystem revision")
+                expected_names=tuple(sorted(item.path for item in entry.files))
+                if tuple(sorted(os.listdir(revision.fd)))!=expected_names:
+                    raise PermissionError("unsafe unsealed model revision")
+                for item in entry.files:
+                    descriptor=open_regular_at(
+                        revision,item.path,os.O_RDONLY,
+                        mode=0o400,expected_mode=0o400,
+                    )
+                    try:
+                        hash_exact_fd(descriptor,item.size,item.sha256)
+                        handle=VerifiedModelFile.from_manifest(item,descriptor)
+                    except BaseException:
+                        with contextlib.suppress(OSError): os.close(descriptor)
+                        raise
+                    try: handles.append(handle)
+                    except BaseException:
+                        handle.close(); raise
+                sealed_by_recovery=True
+                revision.chmod(0o500); revision.fsync()
+                self._fault_hook("after_recovery_seal_before_verify")
+                if tuple(sorted(os.listdir(revision.fd)))!=expected_names:
+                    raise PermissionError("unsafe unsealed model revision")
+                for item,handle in zip(entry.files,handles,strict=True):
+                    hash_exact_fd(handle.fd,item.size,item.sha256)
+                post_seal_verified=True
+                model.fsync()
+                activated=ActivatedModel.from_manifest(entry,tuple(handles))
+                handles.clear()
+        except BaseException as error:
+            rollback_error=None
+            if sealed_by_recovery and not post_seal_verified:
+                try: revision.chmod(0o700); revision.fsync()
+                except BaseException as caught: rollback_error=caught
+            for handle in handles:
+                with contextlib.suppress(OSError): handle.close()
+            with contextlib.suppress(OSError): revision.close()
+            if rollback_error is not None:
+                raise PermissionError("unsafe unsealed model revision") from rollback_error
+            if isinstance(error,OSError):
+                raise PermissionError("unsafe unsealed model revision") from error
+            raise
+        if activated is None:
+            revision.close()
+            raise RuntimeError("model revision recovery did not activate")
+        try: revision.close()
+        except BaseException:
+            activated.close(); raise
+        return activated
 
     def install(self,model_id):
         entry=self.registry.entry(model_id)
@@ -28800,8 +28890,14 @@ class ModelInstaller:
                     try:
                         download_deadline=time.monotonic()+self.MAX_TOTAL_DOWNLOAD_SECONDS
                         for item in entry.files:
-                            fd=self._download(stage,item,download_deadline)
-                            handles.append(VerifiedModelFile.from_manifest(item,fd))
+                            descriptor=self._download(stage,item,download_deadline)
+                            try:
+                                handle=VerifiedModelFile.from_manifest(item,descriptor)
+                            except BaseException:
+                                os.close(descriptor); raise
+                            try: handles.append(handle)
+                            except BaseException:
+                                handle.close(); raise
                         # Rehash the retained same-inode O_RDONLY descriptions
                         # that are handed to the runtime; publication never
                         # qualifies one pathname and later reopens it.
