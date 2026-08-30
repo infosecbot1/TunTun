@@ -438,6 +438,7 @@ def _runtime_tree(root: Path) -> Path:
         "root-writable",
         "workspace-writable",
         "site-writable",
+        "interpreter-group-writable",
         "interpreter-writable",
         "prefix",
     ],
@@ -490,6 +491,8 @@ def test_runtime_layout_rejects_untrusted_symlink_mode_or_interpreter_prefix(
             / f"python{sys.version_info.major}.{sys.version_info.minor}"
             / "site-packages"
         ).chmod(0o777)
+    elif mutation == "interpreter-group-writable":
+        executable.chmod(0o775)
     elif mutation == "interpreter-writable":
         executable.chmod(0o777)
     else:

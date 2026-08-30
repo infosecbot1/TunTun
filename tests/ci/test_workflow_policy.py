@@ -22,6 +22,7 @@ MAKE_CHECK_COMMAND = (
     "PYTEST_ADDOPTS=--basetemp=/tmp/t7-${{ github.run_id }}-${{ github.run_attempt }} "
     "/usr/bin/make check"
 )
+MANAGED_SYNC_COMMAND = "uv sync --all-packages --locked --managed-python"
 ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
   ubuntu-24.04)
     expected="x86_64"
@@ -93,7 +94,7 @@ CHECK_STEPS = [
     },
     {
         "shell": ARCHITECTURE_CHECK_SHELL,
-        "run": "uv sync --all-packages --locked",
+        "run": MANAGED_SYNC_COMMAND,
     },
     {
         "shell": ARCHITECTURE_CHECK_SHELL,
@@ -179,7 +180,7 @@ def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -
     run = architecture_step.get("run")
     assert run == ARCHITECTURE_CHECK_SCRIPT
     for command in (
-        "uv sync --all-packages --locked",
+        MANAGED_SYNC_COMMAND,
         "pnpm install --frozen-lockfile",
         MAKE_CHECK_COMMAND,
     ):
@@ -346,6 +347,25 @@ def test_ci_matrix_remains_exact() -> None:
 def test_ci_check_asserts_expected_architectures_before_dependency_installation() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
     _assert_matrix_job_checks_expected_architecture(workflow["jobs"]["check"])
+
+
+def test_ci_check_requires_an_owner_controlled_managed_python_runtime() -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
+    steps = workflow["jobs"]["check"]["steps"]
+
+    sync_steps = [step for step in steps if str(step.get("run", "")).startswith("uv sync")]
+    assert sync_steps == [
+        {
+            "shell": ARCHITECTURE_CHECK_SHELL,
+            "run": MANAGED_SYNC_COMMAND,
+        }
+    ]
+    task_9_acceptance = (
+        FOUNDATION_PLAN.read_text(encoding="utf-8")
+        .split("- [ ] **Step 8: Require same-SHA three-row acceptance**", 1)[1]
+        .split("### Task 10:", 1)[0]
+    )
+    assert MANAGED_SYNC_COMMAND in task_9_acceptance
 
 
 @pytest.mark.parametrize("yaml_11_alias", ("yes", "true"))

@@ -24389,6 +24389,7 @@ Record only the content-safe receipt, commit SHA, UTC timestamp, OS/Python/keyri
 **Estimated effort:** 3 person-days.
 
 **Files:**
+- Modify: `.github/workflows/ci.yml`
 - Modify: `Makefile`
 - Modify: `apps/core/pyproject.toml`
 - Modify: `packages/testing/pyproject.toml`
@@ -24409,6 +24410,7 @@ Record only the content-safe receipt, commit SHA, UTC timestamp, OS/Python/keyri
 - Test: `tests/unit/testing/test_scenario_cli.py`
 - Test: `tests/integration/test_deterministic_turn.py`
 - Test: `tests/security/test_scenario_guard.py`
+- Modify: `tests/ci/test_workflow_policy.py`
 
 **Interfaces:**
 - Consumes the frozen Task 5 DTOs/ports, Task 6 canonical JCS function, Task 7 three-row CI gate, and Task 8 fail-closed logging/secret baseline. Scenario audio is exactly one canonical UUID encoded as 16 synthetic bytes; it is never PCM, recorded speech, or household media.
@@ -27668,6 +27670,14 @@ isolated venv, proves `tuntun_testing` absent, imports the lazy command module, 
 proves invoking `simulate` fails with exit 2. All three are dependencies of `check`, so the
 existing Task 7 matrix executes them natively on `ubuntu-24.04`, `macos-26`, and `macos-15-intel`.
 
+Hosted-runtime correction (2026-08-30): the final Task 9 matrix command is exactly
+`uv sync --all-packages --locked --managed-python`. Every row must create its project environment
+from a uv-managed CPython rather than falling back to a shared system/tool-cache interpreter. The
+resolved virtual-environment executable must still satisfy Task 9's strict regular-file,
+owner/root, executable, and no-group/world-write checks. Do not weaken those checks to accommodate
+a hosted image whose shared Python is group-writable; such an image must instead use the managed
+runtime path. `tests/ci/test_workflow_policy.py` closes this command and ordering requirement.
+
 ```make
 # Makefile
 .PHONY: bootstrap format lint typecheck test test-security test-contract web-test web-build web-e2e scenario-typecheck scenario-check core-wheel-smoke check verify-private-data
@@ -27783,26 +27793,27 @@ FD/task deltas, and all six C23/B2 metric values null with `status="not_measured
 
 ```bash
 git status --short
-git add Makefile apps/core/pyproject.toml packages/testing/pyproject.toml uv.lock packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/network_guard.py packages/testing/src/tuntun_testing/scenario_io.py packages/testing/src/tuntun_testing/scenario.py packages/testing/src/tuntun_testing/__init__.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/fixtures/scenarios/guest-hinglish.yaml tests/fixtures/synthetic/README.md tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py
+git add .github/workflows/ci.yml Makefile apps/core/pyproject.toml packages/testing/pyproject.toml uv.lock packages/testing/src/tuntun_testing/fake_clock.py packages/testing/src/tuntun_testing/fake_providers.py packages/testing/src/tuntun_testing/fake_reachy.py packages/testing/src/tuntun_testing/network_guard.py packages/testing/src/tuntun_testing/scenario_io.py packages/testing/src/tuntun_testing/scenario.py packages/testing/src/tuntun_testing/__init__.py scripts/run_scenarios.py apps/core/src/tuntun_core/cli/commands/simulate.py apps/core/src/tuntun_core/cli/main.py tests/fixtures/scenarios/guest-hinglish.yaml tests/fixtures/synthetic/README.md tests/unit/testing/test_scenario.py tests/unit/testing/test_scenario_cli.py tests/integration/test_deterministic_turn.py tests/security/test_scenario_guard.py tests/ci/test_workflow_policy.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
 git commit -m "test: add deterministic foundation scenario"
 ```
 
-`git diff --cached --name-only` must equal the 20-entry **Files** list exactly, including generated
+`git diff --cached --name-only` must equal the 22-entry **Files** list exactly, including generated
 `uv.lock`. No Task 7 configuration fixture, Task 8 Keychain/logging file, generated scenario gate,
 wheel, venv, private temp directory, cache, real audio/transcript, or Task 10 path may be staged.
 
 - [ ] **Step 8: Require same-SHA three-row acceptance**
 
-Push the exact Task 9 commit through the unchanged Task 7 GitHub Actions matrix.
+Push the exact Task 9 commit through the Task 7 runner matrix with the hosted-runtime correction
+above.
 Require all three mandatory rows for that same SHA:
 Ubuntu x86_64 (`check (ubuntu-24.04)`), Darwin arm64 (`check (macos-26)`), and
 Darwin Intel x86_64 (`check (macos-15-intel)`). Darwin Intel x86_64 remains
 mandatory distribution CI only; the active household/development target
 remains the verified Darwin arm64 host. Each job must complete
-`uv sync --all-packages --locked` and `make check`; therefore each independently executes the
+`uv sync --all-packages --locked --managed-python` and `make check`; therefore each independently executes the
 actual scenario chain, strict runner/test mypy target, FD/task measurement, network/DNS subprocess
 tests, 32-scenario and 10,000 aggregate-turn boundaries, private-data scan, and
 production-wheel-without-extra smoke. On each host, repeated same-host executions must be
