@@ -53,9 +53,12 @@ def _scenario_typecheck_invocation(
     uv_cache: Path,
     temp_root: Path | None = None,
 ) -> tuple[list[str], subprocess.CompletedProcess[bytes]]:
+    environment = os.environ.copy()
+    environment.update({"MAKEFLAGS": "w", "MAKELEVEL": "1"})
     rendered = subprocess.run(
-        ["make", "-n", "scenario-typecheck"],
+        ["make", "--no-print-directory", "-n", "scenario-typecheck"],
         cwd=ROOT,
+        env=environment,
         capture_output=True,
         check=False,
         timeout=20,
@@ -921,9 +924,12 @@ def test_make_launcher_explicitly_enforces_root_mypy_config(
 
 
 def test_make_delegates_the_complete_mypy_policy_to_the_launcher() -> None:
+    environment = os.environ.copy()
+    environment.update({"MAKEFLAGS": "w", "MAKELEVEL": "1"})
     rendered = subprocess.run(
-        ["make", "-n", "scenario-typecheck"],
+        ["make", "--no-print-directory", "-n", "scenario-typecheck"],
         cwd=ROOT,
+        env=environment,
         capture_output=True,
         check=False,
         timeout=20,
