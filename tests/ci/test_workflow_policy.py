@@ -16,6 +16,10 @@ EXPECTED_ARCHITECTURES = {
     "macos-15-intel": "x86_64",
 }
 ARCHITECTURE_CHECK_STEP_NAME = "Assert runner architecture"
+ARCHITECTURE_CHECK_SHELL = "/bin/bash --noprofile --norc -p -euo pipefail {0}"
+MAKE_CHECK_COMMAND = (
+    "PYTEST_ADDOPTS=--basetemp=/tmp/t7-${{ github.run_id }}-${{ github.run_attempt }} make check"
+)
 ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
   ubuntu-24.04)
     expected="x86_64"
@@ -31,7 +35,7 @@ ARCHITECTURE_CHECK_SCRIPT = """case "${{ matrix.os }}" in
     exit 1
     ;;
 esac
-actual="$(uname -m)"
+actual="$(/usr/bin/uname -m)"
 if [ "$actual" != "$expected" ]; then
   echo "runner architecture mismatch: expected $expected, got $actual" >&2
   exit 1
@@ -82,7 +86,8 @@ def _assert_strategy_matches_runner(job: Mapping[str, object]) -> None:
         assert strategy is None
         return
     assert isinstance(strategy, Mapping)
-    assert set(strategy) <= {"fail-fast", "matrix"}
+    assert set(strategy) == {"fail-fast", "matrix"}
+    assert strategy["fail-fast"] is False
     assert strategy["matrix"] == APPROVED_MATRIX
 
 
@@ -99,13 +104,14 @@ def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -
     assert architecture_steps == [0]
     architecture_step = steps[architecture_steps[0]]
     assert isinstance(architecture_step, Mapping)
-    assert architecture_step.get("shell") == "bash"
+    assert set(architecture_step) == {"name", "shell", "run"}
+    assert architecture_step.get("shell") == ARCHITECTURE_CHECK_SHELL
     run = architecture_step.get("run")
     assert run == ARCHITECTURE_CHECK_SCRIPT
     for command in (
         "uv sync --all-packages --locked",
         "pnpm install --frozen-lockfile",
-        "make check",
+        MAKE_CHECK_COMMAND,
     ):
         command_index = next(
             index
@@ -133,10 +139,14 @@ def _assert_workflow_policy(path: Path) -> None:
         assert forbidden not in lowered, (path, forbidden)
     workflow = yaml.safe_load(raw)
     assert isinstance(workflow, dict) and isinstance(workflow.get("jobs"), dict)
+    assert "env" not in workflow
     _assert_permissions(workflow, required=True)
     _assert_no_secret_channel(workflow)
     for job in workflow["jobs"].values():
         assert isinstance(job, dict)
+        assert "if" not in job
+        assert "continue-on-error" not in job
+        assert "env" not in job
         _assert_permissions(job, required=False)
         _assert_strategy_matches_runner(job)
         if "uses" in job:
@@ -157,6 +167,9 @@ def _assert_workflow_policy(path: Path) -> None:
             assert runner in FIXED_RUNNERS
         _assert_matrix_job_checks_expected_architecture(job)
         for step in job.get("steps", []):
+            assert "if" not in step
+            assert "continue-on-error" not in step
+            assert "env" not in step
             if "uses" in step:
                 _assert_uses_is_immutable(step["uses"])
 
@@ -178,10 +191,33 @@ def test_ci_check_asserts_expected_architectures_before_dependency_installation(
     _assert_matrix_job_checks_expected_architecture(workflow["jobs"]["check"])
 
 
-@pytest.mark.parametrize("mutation", ("comment_only", "reordered", "changed_command"))
-def test_architecture_assertion_mutations_fail_closed(mutation: str) -> None:
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "comment_only",
+        "reordered",
+        "changed_command",
+        "relative_uname",
+        "extra_step_key",
+        "step_if",
+        "step_continue",
+        "step_env_path",
+        "job_if",
+        "job_continue",
+        "job_env_bash_env",
+        "workflow_env_path",
+        "matrix_exclude",
+        "matrix_fail_fast",
+        "matrix_remove_runner",
+    ),
+)
+def test_architecture_assertion_mutations_fail_full_workflow_policy(
+    mutation: str,
+    tmp_path: Path,
+) -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
-    job = deepcopy(workflow["jobs"]["check"])
+    workflow = deepcopy(workflow)
+    job = workflow["jobs"]["check"]
     steps = job["steps"]
     architecture_step = next(
         step for step in steps if step.get("name") == ARCHITECTURE_CHECK_STEP_NAME
@@ -193,13 +229,39 @@ def test_architecture_assertion_mutations_fail_closed(mutation: str) -> None:
     elif mutation == "reordered":
         steps.remove(architecture_step)
         steps.insert(1, architecture_step)
-    else:
+    elif mutation == "changed_command":
         architecture_step["run"] = ARCHITECTURE_CHECK_SCRIPT.replace(
-            'actual="$(uname -m)"', 'actual="arm64"'
+            'actual="$(/usr/bin/uname -m)"', 'actual="arm64"'
         )
+    elif mutation == "relative_uname":
+        architecture_step["run"] = ARCHITECTURE_CHECK_SCRIPT.replace("/usr/bin/uname", "uname")
+    elif mutation == "extra_step_key":
+        architecture_step["timeout-minutes"] = 1
+    elif mutation == "step_if":
+        architecture_step["if"] = "${{ false }}"
+    elif mutation == "step_continue":
+        architecture_step["continue-on-error"] = True
+    elif mutation == "step_env_path":
+        architecture_step["env"] = {"PATH": "/tmp/private-shim"}
+    elif mutation == "job_if":
+        job["if"] = "${{ false }}"
+    elif mutation == "job_continue":
+        job["continue-on-error"] = True
+    elif mutation == "job_env_bash_env":
+        job["env"] = {"BASH_ENV": "/tmp/private-bootstrap"}
+    elif mutation == "workflow_env_path":
+        workflow["env"] = {"PATH": "/tmp/private-shim"}
+    elif mutation == "matrix_exclude":
+        job["strategy"]["matrix"]["exclude"] = [{"os": "macos-15-intel"}]
+    elif mutation == "matrix_fail_fast":
+        job["strategy"]["fail-fast"] = True
+    else:
+        job["strategy"]["matrix"]["os"].remove("macos-15-intel")
 
+    path = tmp_path / "ci.yml"
+    path.write_text(yaml.safe_dump(workflow), encoding="utf-8")
     with pytest.raises(AssertionError):
-        _assert_matrix_job_checks_expected_architecture(job)
+        _assert_workflow_policy(path)
 
 
 def test_ci_is_unprivileged_and_has_no_hardware_or_provider_secrets() -> None:
@@ -334,8 +396,5 @@ def test_ci_check_uses_short_per_run_pytest_basetemp() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
 
     assert workflow["jobs"]["check"]["steps"][-1] == {
-        "run": "make check",
-        "env": {
-            "PYTEST_ADDOPTS": ("--basetemp=/tmp/t7-${{ github.run_id }}-${{ github.run_attempt }}"),
-        },
+        "run": MAKE_CHECK_COMMAND,
     }

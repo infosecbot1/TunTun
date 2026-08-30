@@ -46,17 +46,25 @@
 **Estimated effort:** 2 person-days
 
 **Files:**
+- Create: `packages/contracts/src/tuntun_contracts/host_approval.py`
+- Create: `docs/evidence/trusted-host-approval.schema.json`
 - Create: `apps/core/src/tuntun_core/deploy/__init__.py`
+- Create: `apps/core/src/tuntun_core/deploy/host_approval.py`
+- Create: `apps/core/src/tuntun_core/deploy/trusted_commands.py`
 - Create: `apps/core/src/tuntun_core/deploy/preflight.py`
-- Create: `deploy/macos/preflight.sh`
 - Create: `apps/core/src/tuntun_core/cli/commands/doctor.py`
 - Modify: `apps/core/src/tuntun_core/cli/main.py`
+- Test: `tests/contract/test_host_approval_contract.py`
+- Test: `tests/unit/deploy/test_host_approval.py`
+- Test: `tests/unit/deploy/test_trusted_commands.py`
 - Test: `tests/unit/deploy/test_preflight.py`
 - Test: `tests/security/test_listener_allowlist.py`
 
 **Interfaces:**
-- Consumes: installed LaunchAgent, application roots, `route`, `ipconfig`, `fdesetup`, `security`, `stat`, `plutil`, `lsof`, crash probe, Privacy Shield, and provider drain commands.
-- Produces: `CommandRunner.run(argv) -> CommandResult`; `TrustedHostApprovalVerifier.verify_current_target() -> VerifiedHostApproval`; `resolve_private_interface(runner) -> ResolvedInterface`; `verify_listeners(rows, interface, lan_console) -> tuple[str,...]`; `run_preflight(mode, home, runner, lan_console, host_approval_verifier) -> PreflightReport`; JSON exit `0` or `78`. The concrete verifier authenticates an owner-only signed authority record, compares its externally expected approval commitment and opaque target binding to an independently sampled current target, and fails closed on missing/stale/mismatched evidence. A Phase 1 diagnostic Keychain receipt is never an accepted implementation of this port. `install` is host-only and never assumes application roots, Keychain items, a plist, process, database, CA, backup recipient, or recovery record already exists. `verify-installed` checks those initialized assets and the live process. `upgrade` adds Privacy Shield/provider drain to the installed checks.
+- Consumes: the closed `TrustedHostAuthorityRecord` envelope, a pinned owner Ed25519 authority key at the exact configured generation, a fresh challenge signed by the current target-held P-256 key, the installed-release manifest, installed LaunchAgent, application roots, and the fixed macOS executables `/usr/bin/uname`, `/usr/bin/id`, `/usr/bin/fdesetup`, `/usr/bin/security`, `/sbin/route`, `/usr/sbin/ipconfig`, `/usr/bin/stat`, `/usr/bin/plutil`, and `/usr/sbin/lsof`.
+- Produces: `SignedTrustedHostAuthorityRecord.signing_bytes() -> bytes`; `SignedTrustedHostApprovalVerifier.verify_current_target(expected_target_id=...) -> VerifiedHostApproval`; `TrustedCommandRegistry.resolve(argv) -> tuple[str,...]`; `CommandRunner.run(argv) -> CommandResult`; `resolve_private_interface(runner) -> ResolvedInterface`; `verify_listeners(rows, interface, lan_console) -> tuple[str,...]`; `run_preflight(mode, home, runner, lan_console, verified_host_approval) -> PreflightReport`; JSON exit `0` or `78`.
+- Authority is executable rather than structural: production `doctor preflight` always constructs `SignedTrustedHostApprovalVerifier` from the exact owner-only path `~/Library/Application Support/Tuntun/data/trust/trusted-host-authority.json`, the independently commissioned Keychain pin at service/account `tuntun.trust.owner-authority/current-v1`, `MacOSTargetKeySampler`, secure clock, and CSPRNG. The closed Keychain pin supplies only the pinned owner public key, exact owner key ID, current positive generation, and current opaque target ID; it is created/rotated only by the existing owner-passkey commissioning ceremony and has no environment, CLI, or authority-file fallback. The signed record purpose is exactly `phase1.household-core.preflight.v1`, authority generation must equal that pin, validity is half-open and at most 90 days, and the record binds one opaque target ID, approval commitment, sampled target public-key SHA-256, source policy, and the exact absolute executable/module digests. A diagnostic Keychain receipt has the wrong schema and is rejected before signature verification; no `Protocol`, architecture/model string, test double, or caller-supplied `VerifiedHostApproval` is production wiring.
+- `install` is host-only and never assumes application roots, Keychain items, a plist, process, database, CA, backup recipient, or recovery record already exists. `verify-installed` checks those initialized assets and the live process. `upgrade` adds Privacy Shield/provider drain to the installed checks.
 
 - [ ] **Step 1: Write the failing invocation and listener tests**
 
@@ -65,14 +73,22 @@
 from pathlib import Path
 
 import pytest
-from tuntun_core.deploy.preflight import CommandResult, VerifiedHostApproval, run_preflight
+from tuntun_contracts.host_approval import TrustedExecutableDigests
+from tuntun_core.deploy.host_approval import VerifiedHostApproval
+from tuntun_core.deploy.preflight import CommandResult, required, run_preflight
+
+DIGESTS=TrustedExecutableDigests(**{name:"c"*64 for name in (
+    "uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof",
+    "python","tuntun_core_cli_main",
+)})
+APPROVAL=VerifiedHostApproval("target:opaque-01","a"*64,"b"*64,DIGESTS)
 
 class Runner:
     def __init__(self): self.calls=[]
     def run(self, argv):
         self.calls.append(argv)
         values={
-          ("uname","-m"):"arm64\n", ("uv","run","python","-c","import platform; print(platform.machine())"):"arm64\n",
+          ("uname","-m"):"arm64\n", ("tuntunctl","system","architecture","--json"):'{"machine":"arm64"}\n',
           ("id","-un"):"test\n", ("fdesetup","status"):"FileVault is On.\n",
           ("security","list-keychains","-d","user"):'    "/Users/test/Library/Keychains/login.keychain-db"\n',
           ("security","find-generic-password","-s","tuntun.database","-a","root-v1"):"ok\n",
@@ -89,18 +105,14 @@ class Runner:
         if argv[:3]==("lsof","-nP","-iTCP:8787"): return CommandResult(1,"","")
         return CommandResult(0,values[argv],"")
 
-class TrustedApproval:
-    def verify_current_target(self):
-        return VerifiedHostApproval("opaque-target-1", "a"*64)
-
 def test_upgrade_invokes_every_check():
-    runner=Runner(); report=run_preflight("upgrade",Path("/Users/test"),runner,False,TrustedApproval())
+    runner=Runner(); report=run_preflight("upgrade",Path("/Users/test"),runner,False,APPROVAL)
     assert report.ok
     assert {check.check_id for check in report.checks}=={"trusted_owner_target","architecture","filevault","keychain_available","resolved_interface","database_key","owner_paths","launchd_core_limit","crash_diagnostics","listeners","privacy","provider_drain"}
     assert ("tuntunctl","providers","drain","--timeout-seconds","30","--json") in runner.calls
 
 def test_clean_install_runs_host_checks_without_assuming_initialized_state():
-    runner=Runner(); report=run_preflight("install",Path("/Users/test"),runner,False,TrustedApproval())
+    runner=Runner(); report=run_preflight("install",Path("/Users/test"),runner,False,APPROVAL)
     assert report.ok
     assert {check.check_id for check in report.checks}=={
         "trusted_owner_target","architecture","filevault","keychain_available","resolved_interface","existing_runtime_absent","ports_available",
@@ -113,7 +125,7 @@ def test_clean_install_preflight_rejects_existing_or_broken_current_link(tmp_pat
     current=tmp_path/"Library/Application Support/Tuntun/runtime/current"
     current.parent.mkdir(parents=True)
     current.symlink_to(current.parent/"releases/0.1.0-alpha.1")
-    report=run_preflight("install",tmp_path,Runner(),False,TrustedApproval())
+    report=run_preflight("install",tmp_path,Runner(),False,APPROVAL)
     check=next(item for item in report.checks if item.check_id=="existing_runtime_absent")
     assert report.ok is False
     assert check.reason=="existing_runtime_detected_use_upgrade"
@@ -124,16 +136,154 @@ def test_lan_listener_allowance_requires_current_commissioning_receipt():
         CommandResult(0,'{"verified":false,"private_dns":false,"certificate_match":false,"all_admin_devices":false,"drift":true}\n',"")
         if argv==("tuntunctl","lan","verify-commissioning","--json") else Runner().run(argv)
     )
-    report=run_preflight("verify-installed",Path("/Users/test"),runner,True,TrustedApproval())
+    report=run_preflight("verify-installed",Path("/Users/test"),runner,True,APPROVAL)
     assert not report.ok
     assert next(item for item in report.checks if item.check_id=="lan_commissioning").passed is False
 
 def test_architecture_match_cannot_replace_trusted_owner_target():
-    class RejectedApproval:
-        def verify_current_target(self):
-            raise RuntimeError("trusted owner target mismatch")
-    with pytest.raises(RuntimeError, match="trusted owner target mismatch"):
-        run_preflight("install",Path("/Users/test"),Runner(),False,RejectedApproval())
+    with pytest.raises(RuntimeError, match="trusted owner target unavailable"):
+        run_preflight("install",Path("/Users/test"),Runner(),False,object())
+
+def test_command_failure_does_not_disclose_arguments_or_output():
+    class Failing:
+        def run(self,argv): return CommandResult(1,"private-stdout","private-stderr")
+    with pytest.raises(RuntimeError,match="^preflight command failed$") as caught:
+        required(Failing(),("stat","-f","%Su:%Lp","/Users/private-path-sentinel"))
+    assert "private" not in str(caught.value) and "/Users" not in str(caught.value)
+```
+
+```python
+# tests/unit/deploy/test_host_approval.py
+import base64
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from tuntun_contracts.base import canonical_bytes
+from tuntun_contracts.host_approval import SignedTrustedHostAuthorityRecord, TrustedHostAuthorityRecord
+from tuntun_core.deploy.host_approval import SignedTrustedHostApprovalVerifier, TargetKeySample
+
+NOW=datetime(2026,8,30,12,0,tzinfo=UTC)
+OWNER_PRIVATE=Ed25519PrivateKey.generate()
+OWNER_PUBLIC=OWNER_PRIVATE.public_key()
+TARGET_DER=b"sampled-target-public-key-der"
+
+class Sampler:
+    def __init__(self, *, present=True, public_key_der=TARGET_DER, valid=True):
+        self.present=present; self.public_key_der=public_key_der; self.valid=valid
+    def sample(self, challenge):
+        if not self.present: raise RuntimeError("trusted target key unavailable")
+        return TargetKeySample(self.public_key_der,challenge,b"signature",self.valid)
+
+def signed_record(*, target_id="target:opaque-01", target_key_sha256=sha256(TARGET_DER).hexdigest(),
+                  generation=7, valid_from=NOW-timedelta(minutes=1),
+                  valid_until=NOW+timedelta(days=30)):
+    record=TrustedHostAuthorityRecord(
+        schema_version="1.0",purpose="phase1.household-core.preflight.v1",
+        authority_generation=generation,
+        target_id=target_id,approval_commitment_sha256="a"*64,
+        target_public_key_sha256=target_key_sha256,valid_from=valid_from,
+        valid_until=valid_until,source_policy_sha256="b"*64,
+        executable_sha256={name:"c"*64 for name in (
+            "uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof",
+            "python","tuntun_core_cli_main",
+        )},
+    )
+    signature=OWNER_PRIVATE.sign(b"tuntun:trusted-host-authority:v1\0"+canonical_bytes(record))
+    return SignedTrustedHostAuthorityRecord(record=record,owner_key_id="owner:authority:v7",
+        signature_b64=base64.b64encode(signature).decode("ascii"))
+
+def verifier(envelope, sampler=None):
+    return SignedTrustedHostApprovalVerifier(
+        envelope=envelope,pinned_owner_public_key=OWNER_PUBLIC,
+        expected_owner_key_id="owner:authority:v7",expected_generation=7,
+        target_sampler=sampler or Sampler(),now=lambda:NOW,random_bytes=lambda size:b"r"*size,
+    )
+
+def test_signed_current_target_is_bound_to_sampled_target_key():
+    approval=verifier(signed_record()).verify_current_target(expected_target_id="target:opaque-01")
+    assert approval.target_id=="target:opaque-01"
+    assert approval.approval_commitment_sha256=="a"*64
+
+@pytest.mark.parametrize("case",("forged","stale","target_mismatch","wrong_key","no_target","purpose","generation"))
+def test_forged_stale_mismatched_wrong_key_or_missing_target_is_rejected(case):
+    envelope=signed_record()
+    sampler=Sampler()
+    if case=="forged": envelope=envelope.model_copy(update={"signature_b64":base64.b64encode(b"x"*64).decode("ascii")})
+    elif case=="stale": envelope=signed_record(valid_from=NOW-timedelta(days=31),valid_until=NOW)
+    elif case=="target_mismatch": envelope=signed_record(target_id="target:opaque-02")
+    elif case=="wrong_key": sampler=Sampler(public_key_der=b"different-target-key")
+    elif case=="no_target": sampler=Sampler(present=False)
+    elif case=="purpose":
+        record=envelope.record.model_copy(update={"purpose":"diagnostic.host-probe"})
+        signature=OWNER_PRIVATE.sign(b"tuntun:trusted-host-authority:v1\0"+canonical_bytes(record))
+        envelope=envelope.model_copy(update={"record":record,"signature_b64":base64.b64encode(signature).decode("ascii")})
+    else: envelope=signed_record(generation=6)
+    with pytest.raises(RuntimeError,match="trusted owner target unavailable"):
+        verifier(envelope,sampler).verify_current_target(expected_target_id="target:opaque-01")
+
+def test_diagnostic_probe_receipt_is_rejected_before_authority_verification(tmp_path):
+    path=tmp_path/"authority.json"
+    path.write_text('{"$schema":"https://tuntun.local/schemas/evidence/phase1-host-probe.schema.json"}'); path.chmod(0o600)
+    with pytest.raises(RuntimeError,match="trusted host authority schema rejected"):
+        SignedTrustedHostApprovalVerifier.load_envelope(path)
+```
+
+```python
+# tests/unit/deploy/test_trusted_commands.py
+from hashlib import sha256
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from tuntun_core.deploy import trusted_commands
+from tuntun_core.deploy.trusted_commands import CLOSED_COMMAND_ENV,CommandResult,CommandRunner,TrustedCommandRegistry
+
+class Expected:
+    def __init__(self,values): self._values=values
+    def model_dump(self): return dict(self._values)
+
+def registry_fixture(monkeypatch,tmp_path):
+    release=tmp_path/"release"; release.mkdir()
+    paths={}
+    for name in ("uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof","python"):
+        path=release/name; path.write_bytes((name+"\n").encode()); path.chmod(0o700); paths[name]=path
+    module=release/"__main__.py"; module.write_text("raise SystemExit(0)\n")
+    monkeypatch.setattr(trusted_commands,"FIXED_EXECUTABLES",{name:path for name,path in paths.items() if name!="python"})
+    monkeypatch.setattr(trusted_commands.sys,"executable",str(paths["python"]))
+    monkeypatch.setattr(trusted_commands.importlib.util,"find_spec",lambda name:SimpleNamespace(origin=str(module)))
+    expected={name:sha256(path.read_bytes()).hexdigest() for name,path in paths.items()}
+    expected["tuntun_core_cli_main"]=sha256(module.read_bytes()).hexdigest()
+    manifest=SimpleNamespace(python_path=paths["python"])
+    return TrustedCommandRegistry(Expected(expected),release,manifest),paths,module,expected,manifest
+
+def test_path_bash_env_pythonpath_and_shims_cannot_redirect_commands(monkeypatch,tmp_path):
+    registry,paths,_module,_expected,_manifest=registry_fixture(monkeypatch,tmp_path)
+    shim=tmp_path/"uname"; shim.write_text("#!/bin/sh\nexit 99\n"); shim.chmod(0o755)
+    monkeypatch.setenv("PATH",str(tmp_path)); monkeypatch.setenv("BASH_ENV",str(shim))
+    monkeypatch.setenv("ENV",str(shim)); monkeypatch.setenv("PYTHONPATH",str(tmp_path))
+    observed={}
+    monkeypatch.setattr(trusted_commands.subprocess,"Popen",lambda argv,**kwargs:observed.update(argv=argv,kwargs=kwargs) or object())
+    monkeypatch.setattr(trusted_commands,"bounded_wait",lambda process,limit,seconds:CommandResult(0,"arm64\n",""))
+    result=CommandRunner(registry).run(("uname","-m"))
+    assert result.returncode==0
+    assert observed["argv"]==(str(paths["uname"]),"-m")
+    assert observed["kwargs"]["env"]==CLOSED_COMMAND_ENV
+    assert "BASH_ENV" not in observed["kwargs"]["env"] and "PYTHONPATH" not in observed["kwargs"]["env"]
+
+@pytest.mark.parametrize("mutation",("digest","relative","symlink","python","module"))
+def test_digest_path_shim_python_or_module_mutation_fails_before_spawn(mutation,tmp_path,monkeypatch):
+    _registry,paths,_module,expected,manifest=registry_fixture(monkeypatch,tmp_path)
+    if mutation=="digest": expected["uname"]="0"*64
+    elif mutation=="relative": monkeypatch.setitem(trusted_commands.FIXED_EXECUTABLES,"uname",Path("uname"))
+    elif mutation=="symlink":
+        link=tmp_path/"uname-link"; link.symlink_to(paths["uname"]); monkeypatch.setitem(trusted_commands.FIXED_EXECUTABLES,"uname",link)
+    elif mutation=="python": manifest=SimpleNamespace(python_path=paths["uname"])
+    else: monkeypatch.setattr(trusted_commands.importlib.util,"find_spec",lambda name:SimpleNamespace(origin=str(tmp_path/"outside.py")))
+    with pytest.raises(RuntimeError,match="trusted executable unavailable"):
+        TrustedCommandRegistry(Expected(expected),tmp_path/"release",manifest)
 ```
 
 ```python
@@ -147,64 +297,306 @@ def test_wildcard_public_and_wrong_interface_fail():
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q`
+Run: `uv run pytest tests/contract/test_host_approval_contract.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q`
 
-Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_core.deploy'`.
+Expected: FAIL during collection because the host-approval contract/schema and `tuntun_core.deploy` production modules do not exist yet.
 
 - [ ] **Step 3: Implement the command-backed preflight**
 
 ```python
-# apps/core/src/tuntun_core/deploy/preflight.py
-import os,re,selectors,subprocess,time
+# packages/contracts/src/tuntun_contracts/host_approval.py
+from datetime import timedelta
+from typing import Annotated, Literal, Self
+
+from pydantic import AwareDatetime, Field, field_validator, model_validator
+
+from .base import ContractModel, canonical_bytes, validate_canonical_base64
+
+Digest=Annotated[str,Field(pattern=r"^[0-9a-f]{64}$")]
+
+class TrustedExecutableDigests(ContractModel):
+    uname:Digest; id:Digest; fdesetup:Digest; security:Digest; route:Digest
+    ipconfig:Digest; stat:Digest; plutil:Digest; lsof:Digest; python:Digest
+    tuntun_core_cli_main:Digest
+
+class TrustedHostAuthorityRecord(ContractModel):
+    schema_version:Literal["1.0"]
+    purpose:Literal["phase1.household-core.preflight.v1"]
+    authority_generation:Annotated[int,Field(ge=1,le=2**31-1)]
+    target_id:Annotated[str,Field(pattern=r"^target:[A-Za-z0-9_-]{8,64}$")]
+    approval_commitment_sha256:Digest
+    target_public_key_sha256:Digest
+    valid_from:AwareDatetime
+    valid_until:AwareDatetime
+    source_policy_sha256:Digest
+    executable_sha256:TrustedExecutableDigests
+
+    @model_validator(mode="after")
+    def bounded_validity(self)->Self:
+        if self.valid_until<=self.valid_from or self.valid_until-self.valid_from>timedelta(days=90):
+            raise ValueError("trusted host authority validity invalid")
+        return self
+
+class SignedTrustedHostAuthorityRecord(ContractModel):
+    record:TrustedHostAuthorityRecord
+    owner_key_id:Annotated[str,Field(pattern=r"^owner:authority:v[1-9][0-9]{0,8}$")]
+    signature_b64:Annotated[str,Field(pattern=r"^[A-Za-z0-9+/]{86}==$")]
+
+    @field_validator("signature_b64")
+    @classmethod
+    def canonical_signature(cls,value:str)->str:
+        return validate_canonical_base64(value,expected_bytes=64,label="signature")
+
+    def signing_bytes(self)->bytes:
+        return b"tuntun:trusted-host-authority:v1\0"+canonical_bytes(self.record)
+```
+
+The exact checked-in `docs/evidence/trusted-host-approval.schema.json` artifact is:
+
+```json
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://tuntun.local/schemas/evidence/trusted-host-approval.schema.json",
+  "type":"object","additionalProperties":false,
+  "required":["record","owner_key_id","signature_b64"],
+  "properties":{
+    "record":{"$ref":"#/$defs/record"},
+    "owner_key_id":{"type":"string","pattern":"^owner:authority:v[1-9][0-9]{0,8}$"},
+    "signature_b64":{"type":"string","pattern":"^[A-Za-z0-9+/]{86}==$"}
+  },
+  "$defs":{
+    "digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "executables":{"type":"object","additionalProperties":false,
+      "required":["uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof","python","tuntun_core_cli_main"],
+      "properties":{"uname":{"$ref":"#/$defs/digest"},"id":{"$ref":"#/$defs/digest"},"fdesetup":{"$ref":"#/$defs/digest"},"security":{"$ref":"#/$defs/digest"},"route":{"$ref":"#/$defs/digest"},"ipconfig":{"$ref":"#/$defs/digest"},"stat":{"$ref":"#/$defs/digest"},"plutil":{"$ref":"#/$defs/digest"},"lsof":{"$ref":"#/$defs/digest"},"python":{"$ref":"#/$defs/digest"},"tuntun_core_cli_main":{"$ref":"#/$defs/digest"}}},
+    "record":{"type":"object","additionalProperties":false,
+      "required":["schema_version","purpose","authority_generation","target_id","approval_commitment_sha256","target_public_key_sha256","valid_from","valid_until","source_policy_sha256","executable_sha256"],
+      "properties":{"schema_version":{"const":"1.0"},"purpose":{"const":"phase1.household-core.preflight.v1"},"authority_generation":{"type":"integer","minimum":1,"maximum":2147483647},"target_id":{"type":"string","pattern":"^target:[A-Za-z0-9_-]{8,64}$"},"approval_commitment_sha256":{"$ref":"#/$defs/digest"},"target_public_key_sha256":{"$ref":"#/$defs/digest"},"valid_from":{"type":"string","format":"date-time"},"valid_until":{"type":"string","format":"date-time"},"source_policy_sha256":{"$ref":"#/$defs/digest"},"executable_sha256":{"$ref":"#/$defs/executables"}}}
+  }
+}
+```
+
+`tests/contract/test_host_approval_contract.py` generates this schema from the contract, requires byte-for-byte equality with the checked-in artifact, enables RFC 3339 format assertion, and rejects every missing/extra field, noncanonical signature, validity interval over 90 days, wrong purpose, zero/negative generation, descriptive/invalid target ID, and wrong executable key set.
+
+```python
+# apps/core/src/tuntun_core/deploy/host_approval.py
+import base64,hashlib,os,secrets,stat
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC,timedelta
 from pathlib import Path
 from typing import Protocol
-from tuntun_contracts.base import parse_bounded_json_value
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes,serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from tuntun_contracts.base import parse_contract_json
+from tuntun_contracts.host_approval import SignedTrustedHostAuthorityRecord,TrustedExecutableDigests
+from tuntun_core.config.secure_paths import absolute_lexical_path,open_trusted_directory,_require_no_unsafe_acl
+
+TARGET_CHALLENGE_DOMAIN=b"tuntun:trusted-host-target-key:v1\0"
+@dataclass(frozen=True,slots=True)
+class TargetKeySample:
+    public_key_der:bytes; challenge:bytes; signature:bytes; proof_verified:bool
+@dataclass(frozen=True,slots=True)
+class VerifiedHostApproval:
+    target_id:str; approval_commitment_sha256:str; source_policy_sha256:str
+    executable_sha256:TrustedExecutableDigests
+class TargetKeySampler(Protocol):
+    def sample(self,challenge:bytes)->TargetKeySample: ...
+
+def read_owner_only_nofollow_bounded(path:Path,max_bytes:int)->bytes:
+    absolute=absolute_lexical_path(path)
+    with open_trusted_directory(absolute.parent) as parent:
+        parent.revalidate()
+        fd=os.open(absolute.name,os.O_RDONLY|os.O_NONBLOCK|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=parent.fd)
+        try:
+            before=os.fstat(fd); named=os.stat(absolute.name,dir_fd=parent.fd,follow_symlinks=False)
+            if (not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(named.st_mode)
+                or (before.st_dev,before.st_ino)!=(named.st_dev,named.st_ino)
+                or before.st_dev!=parent.device or before.st_nlink!=1
+                or before.st_uid!=os.geteuid() or stat.S_IMODE(before.st_mode)!=0o600
+                or before.st_size>max_bytes): raise PermissionError("unsafe trusted authority file")
+            _require_no_unsafe_acl(fd,"unsafe trusted authority file")
+            chunks=[]; total=0
+            while True:
+                chunk=os.read(fd,min(65_536,max_bytes+1-total))
+                if not chunk: break
+                chunks.append(chunk); total+=len(chunk)
+                if total>max_bytes: raise PermissionError("unsafe trusted authority file")
+            raw=b"".join(chunks)
+            if len(raw)!=before.st_size: raise PermissionError("unsafe trusted authority file")
+            after=os.fstat(fd); named_after=os.stat(absolute.name,dir_fd=parent.fd,follow_symlinks=False)
+            parent.revalidate()
+            stable=lambda row:(row.st_dev,row.st_ino,row.st_size,row.st_mtime_ns,row.st_ctime_ns)
+            if stable(before)!=stable(after) or stable(after)!=stable(named_after):
+                raise PermissionError("unsafe trusted authority file")
+            return raw
+        finally: os.close(fd)
+
+class MacOSTargetKeySampler:
+    KEY_ID="tuntun.local-presence.target-signing.v1"
+    def __init__(self,keychain_signer): self._signer=keychain_signer
+    def sample(self,challenge):
+        if type(challenge) is not bytes or len(challenge)!=32: raise RuntimeError("trusted target key unavailable")
+        public_der=self._signer.public_key_der(self.KEY_ID)
+        signature=self._signer.sign(self.KEY_ID,TARGET_CHALLENGE_DOMAIN+challenge)
+        public=serialization.load_der_public_key(public_der)
+        if not isinstance(public,ec.EllipticCurvePublicKey) or not isinstance(public.curve,ec.SECP256R1):
+            raise RuntimeError("trusted target key unavailable")
+        try: public.verify(signature,TARGET_CHALLENGE_DOMAIN+challenge,ec.ECDSA(hashes.SHA256()))
+        except InvalidSignature: raise RuntimeError("trusted target key unavailable") from None
+        return TargetKeySample(public_der,challenge,signature,True)
+
+class SignedTrustedHostApprovalVerifier:
+    MAX_BYTES=65_536
+    def __init__(self,*,envelope,pinned_owner_public_key,expected_owner_key_id,
+                 expected_generation,target_sampler,now,random_bytes):
+        self._envelope=envelope; self._owner_key=pinned_owner_public_key
+        self._owner_key_id=expected_owner_key_id; self._generation=expected_generation
+        self._sampler=target_sampler; self._now=now; self._random=random_bytes
+    @classmethod
+    def load_envelope(cls,path:Path):
+        try:
+            raw=read_owner_only_nofollow_bounded(path,cls.MAX_BYTES)
+            value=parse_contract_json(SignedTrustedHostAuthorityRecord,raw,max_bytes=cls.MAX_BYTES)
+            if value.record.purpose!="phase1.household-core.preflight.v1": raise RuntimeError
+            return value
+        except BaseException:
+            raise RuntimeError("trusted host authority schema rejected") from None
+    def verify_current_target(self,*,expected_target_id):
+        try:
+            signed=self._envelope; record=signed.record; now=self._now().astimezone(UTC)
+            if signed.owner_key_id!=self._owner_key_id or record.authority_generation!=self._generation:
+                raise RuntimeError
+            if record.purpose!="phase1.household-core.preflight.v1" or record.target_id!=expected_target_id:
+                raise RuntimeError
+            if not record.valid_from<=now<record.valid_until or record.valid_until-record.valid_from>timedelta(days=90):
+                raise RuntimeError
+            self._owner_key.verify(base64.b64decode(signed.signature_b64,validate=True),signed.signing_bytes())
+            challenge=self._random(32)
+            if type(challenge) is not bytes or len(challenge)!=32: raise RuntimeError
+            sample=self._sampler.sample(challenge)
+            if type(sample) is not TargetKeySample or sample.proof_verified is not True:
+                raise RuntimeError
+            if sample.challenge!=challenge or not 33<=len(sample.public_key_der)<=512:
+                raise RuntimeError
+            if not secrets.compare_digest(hashlib.sha256(sample.public_key_der).hexdigest(),record.target_public_key_sha256):
+                raise RuntimeError
+            return VerifiedHostApproval(record.target_id,record.approval_commitment_sha256,
+                                        record.source_policy_sha256,record.executable_sha256)
+        except BaseException:
+            raise RuntimeError("trusted owner target unavailable") from None
+```
+
+`read_owner_only_nofollow_bounded` is a concrete function in this file: it opens through the existing secure-path descriptor API with `O_RDONLY|O_NOFOLLOW|O_CLOEXEC`, requires an owner-only regular file, reads to the exact asserted size through one descriptor with a 65,536-byte cap, rechecks device/inode/type/size/change timestamps, and returns bytes. A missing record, diagnostic host-probe receipt, symlink, ownership/mode failure, parse error, signature error, stale interval, wrong generation/purpose/target, absent target key, wrong sampled public key, invalid challenge proof, or changed file maps to the one content-free error above. `MacOSTargetKeySampler` consumes the same target-held Keychain P-256 signing key created by the local-presence implementation; it never exports private material.
+
+```python
+# apps/core/src/tuntun_core/deploy/trusted_commands.py
+import hashlib,importlib.util,os,selectors,stat,subprocess,sys,time
+from dataclasses import dataclass
+from pathlib import Path
+
+FIXED_EXECUTABLES={"uname":Path("/usr/bin/uname"),"id":Path("/usr/bin/id"),
+ "fdesetup":Path("/usr/bin/fdesetup"),"security":Path("/usr/bin/security"),
+ "route":Path("/sbin/route"),"ipconfig":Path("/usr/sbin/ipconfig"),
+ "stat":Path("/usr/bin/stat"),"plutil":Path("/usr/bin/plutil"),"lsof":Path("/usr/sbin/lsof")}
+CLOSED_COMMAND_ENV={"LANG":"C","LC_ALL":"C","PATH":"/usr/bin:/bin:/usr/sbin:/sbin"}
 MAX_COMMAND_OUTPUT_BYTES=65_536
 @dataclass(frozen=True,slots=True)
 class CommandResult: returncode:int; stdout:str; stderr:str
+def sha256_regular_nofollow(path):
+    fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_CLOEXEC|os.O_NOFOLLOW)
+    try:
+        before=os.fstat(fd); named=os.stat(path,follow_symlinks=False)
+        if (not stat.S_ISREG(before.st_mode) or (before.st_dev,before.st_ino)!=(named.st_dev,named.st_ino)
+            or before.st_nlink!=1 or before.st_size>268_435_456): raise RuntimeError("trusted executable unavailable")
+        digest=hashlib.sha256(); total=0
+        while True:
+            chunk=os.read(fd,65_536)
+            if not chunk: break
+            total+=len(chunk)
+            if total>268_435_456: raise RuntimeError("trusted executable unavailable")
+            digest.update(chunk)
+        after=os.fstat(fd); named_after=os.stat(path,follow_symlinks=False)
+        stable=lambda row:(row.st_dev,row.st_ino,row.st_size,row.st_mtime_ns,row.st_ctime_ns)
+        if total!=before.st_size or stable(before)!=stable(after) or stable(after)!=stable(named_after):
+            raise RuntimeError("trusted executable unavailable")
+        return digest.hexdigest()
+    finally: os.close(fd)
+def bounded_wait(process,limit,seconds):
+    captured={"stdout":bytearray(),"stderr":bytearray()}; deadline=time.monotonic()+seconds
+    try:
+        with selectors.DefaultSelector() as selector:
+            for stream,name in ((process.stdout,"stdout"),(process.stderr,"stderr")):
+                if stream is None: raise RuntimeError("preflight command pipe unavailable")
+                os.set_blocking(stream.fileno(),False); selector.register(stream,selectors.EVENT_READ,name)
+            while selector.get_map():
+                remaining=deadline-time.monotonic()
+                if remaining<=0: raise TimeoutError("preflight command timeout")
+                events=selector.select(remaining)
+                if not events: raise TimeoutError("preflight command timeout")
+                for key,_ in events:
+                    chunk=os.read(key.fileobj.fileno(),16_384)
+                    if not chunk: selector.unregister(key.fileobj); continue
+                    captured[key.data].extend(chunk)
+                    if len(captured["stdout"])+len(captured["stderr"])>limit:
+                        raise RuntimeError("preflight command output too large")
+        code=process.wait(timeout=max(.001,deadline-time.monotonic()))
+        return CommandResult(code,captured["stdout"].decode("utf-8","strict"),captured["stderr"].decode("utf-8","strict"))
+    except BaseException:
+        process.kill(); process.wait(); raise
+class TrustedCommandRegistry:
+    def __init__(self,expected,release_root,manifest):
+        try: self._configure(expected,release_root,manifest)
+        except BaseException: raise RuntimeError("trusted executable unavailable") from None
+    def _configure(self,expected,release_root,manifest):
+        self._paths=dict(FIXED_EXECUTABLES); self._paths["python"]=Path(sys.executable).resolve(strict=True)
+        spec=importlib.util.find_spec("tuntun_core.cli.__main__")
+        if spec is None or spec.origin is None: raise RuntimeError("trusted executable unavailable")
+        self._module=Path(spec.origin).resolve(strict=True); self._release=release_root.resolve(strict=True)
+        if not self._module.is_relative_to(self._release): raise RuntimeError("trusted executable unavailable")
+        if self._paths["python"]!=manifest.python_path.resolve(strict=True): raise RuntimeError("trusted executable unavailable")
+        checks={**self._paths,"tuntun_core_cli_main":self._module}
+        if set(checks)!=set(expected.model_dump()) or any(path.is_symlink() or path.resolve(strict=True)!=path for path in checks.values()):
+            raise RuntimeError("trusted executable unavailable")
+        for name,path in checks.items():
+            if sha256_regular_nofollow(path)!=expected.model_dump()[name]: raise RuntimeError("trusted executable unavailable")
+    @property
+    def release_root(self): return self._release
+    def resolve(self,argv):
+        name,*tail=argv
+        if name=="tuntunctl": return (str(self._paths["python"]),"-I","-m","tuntun_core.cli",*tail)
+        if name not in FIXED_EXECUTABLES: raise RuntimeError("trusted executable unavailable")
+        return (str(self._paths[name]),*tail)
 class CommandRunner:
+    def __init__(self,registry): self._registry=registry
     def run(self,argv):
-        process=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,shell=False)
-        captured={"stdout":bytearray(),"stderr":bytearray()}; deadline=time.monotonic()+30
-        try:
-            with selectors.DefaultSelector() as selector:
-                for stream,name in ((process.stdout,"stdout"),(process.stderr,"stderr")):
-                    os.set_blocking(stream.fileno(),False)
-                    selector.register(stream,selectors.EVENT_READ,name)
-                while selector.get_map():
-                    remaining=deadline-time.monotonic()
-                    if remaining<=0: raise TimeoutError("preflight command timeout")
-                    events=selector.select(remaining)
-                    if not events: raise TimeoutError("preflight command timeout")
-                    for key,_ in events:
-                        chunk=os.read(key.fileobj.fileno(),16_384)
-                        if not chunk: selector.unregister(key.fileobj); continue
-                        value=captured[key.data]
-                        value.extend(chunk[:MAX_COMMAND_OUTPUT_BYTES+1-len(value)])
-                        if len(value)>MAX_COMMAND_OUTPUT_BYTES:
-                            raise RuntimeError("preflight command output too large")
-            returncode=process.wait(timeout=max(.001,deadline-time.monotonic()))
-            return CommandResult(
-                returncode,captured["stdout"].decode("utf-8",errors="strict"),
-                captured["stderr"].decode("utf-8",errors="strict"),
-            )
-        except BaseException:
-            process.kill(); process.wait(); raise
+        resolved=self._registry.resolve(argv)
+        process=subprocess.Popen(resolved,executable=resolved[0],cwd=self._registry.release_root,
+            env=CLOSED_COMMAND_ENV,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,shell=False,close_fds=True)
+        return bounded_wait(process,MAX_COMMAND_OUTPUT_BYTES,30)
+```
+
+`sha256_regular_nofollow`, `bounded_wait`, and `release_root` are implemented in full in this file using the same descriptor-stability and selector/deadline pattern already required elsewhere: hash through one nofollow descriptor with pre/post metadata equality; read both pipes to an aggregate 65,536-byte cap; kill and reap on timeout/error. `TrustedCommandRegistry` accepts exactly the eleven digest keys from the signed approval, validates resolved `sys.executable` against the signed installation manifest, validates the installed `tuntun_core.cli.__main__` origin/digest under the immutable release root, and always runs it as `<validated-python> -I -m tuntun_core.cli`. It never executes `uv`, a console-script shim, a relative path, or a caller-selected module. The subprocess environment is exactly `CLOSED_COMMAND_ENV`; inherited `PATH`, `BASH_ENV`, `ENV`, `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV`, shell functions, and Git/Python startup variables are absent.
+
+```python
+# apps/core/src/tuntun_core/deploy/preflight.py
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from tuntun_contracts.base import parse_bounded_json_value
+from .host_approval import VerifiedHostApproval
+from .trusted_commands import MAX_COMMAND_OUTPUT_BYTES,CommandResult,CommandRunner
 @dataclass(frozen=True,slots=True)
 class ResolvedInterface: name:str; address:str
 @dataclass(frozen=True,slots=True)
 class Check: check_id:str; passed:bool; reason:str
 @dataclass(frozen=True,slots=True)
 class PreflightReport: schema_version:str; mode:str; ok:bool; checks:tuple[Check,...]
-@dataclass(frozen=True,slots=True)
-class VerifiedHostApproval: target_id:str; approval_commitment_sha256:str
-class TrustedHostApprovalVerifier(Protocol):
-    def verify_current_target(self) -> VerifiedHostApproval: ...
 def required(runner,argv):
     result=runner.run(argv)
-    if result.returncode: raise RuntimeError("command failed: "+" ".join(argv))
+    if result.returncode: raise RuntimeError("preflight command failed")
     if len(result.stdout.encode("utf-8"))>MAX_COMMAND_OUTPUT_BYTES:
         raise RuntimeError("preflight command output too large")
     return result.stdout
@@ -227,12 +619,12 @@ def verify_listeners(rows,interface,lan_console):
     allowed={("127.0.0.1",8787),(interface.address,7443)}
     if lan_console: allowed.add((interface.address,8443))
     return tuple(f"listener:{host}:{port}" for host,port in rows if (host,port) not in allowed)
-def run_preflight(mode,home,runner,lan_console,host_approval_verifier):
+def run_preflight(mode,home,runner,lan_console,verified_host_approval):
     if mode not in {"install","upgrade","verify-installed"}: raise ValueError("invalid mode")
-    approval=host_approval_verifier.verify_current_target()
+    approval=verified_host_approval
     if type(approval) is not VerifiedHostApproval:
         raise RuntimeError("trusted owner target unavailable")
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",approval.target_id) is None:
+    if re.fullmatch(r"target:[A-Za-z0-9_-]{8,64}",approval.target_id) is None:
         raise RuntimeError("trusted owner target unavailable")
     if re.fullmatch(r"[0-9a-f]{64}",approval.approval_commitment_sha256) is None:
         raise RuntimeError("trusted owner target unavailable")
@@ -240,7 +632,8 @@ def run_preflight(mode,home,runner,lan_console,host_approval_verifier):
     current=home/"Library/Application Support/Tuntun/runtime/current"
     roots=[home/path for path in ("Library/Application Support/Tuntun/runtime","Library/Application Support/Tuntun/data","Library/Application Support/Tuntun/models","Library/Application Support/Tuntun/backups","Library/Logs/Tuntun")]
     owner=required(runner,("id","-un")).strip()
-    native=required(runner,("uname","-m")).strip()=="arm64" and required(runner,("uv","run","python","-c","import platform; print(platform.machine())")).strip()=="arm64"
+    python_arch=command_json(runner,("tuntunctl","system","architecture","--json"),{"machine"})
+    native=required(runner,("uname","-m")).strip()=="arm64" and python_arch["machine"]=="arm64"
     values={
         "trusted_owner_target":True,
         "architecture":native,
@@ -288,19 +681,48 @@ def run_preflight(mode,home,runner,lan_console,host_approval_verifier):
     return PreflightReport("tuntun.preflight.v1",mode,all(item.passed for item in checks),checks)
 ```
 
-```sh
-# deploy/macos/preflight.sh
-#!/bin/sh
-set -eu
-uv run tuntunctl doctor preflight --mode "${1:-verify-installed}" --json \
-  | uv run python -c 'import sys; from tuntun_contracts.base import parse_bounded_json_value; raw=sys.stdin.buffer.read(65537); value=parse_bounded_json_value(raw,max_bytes=65536,max_depth=8,max_containers=128,max_structure_tokens=512); sys.stdout.buffer.write(raw+b"\n"); raise SystemExit(0 if isinstance(value,dict) and value.get("ok") is True else 78)'
+```python
+# apps/core/src/tuntun_core/cli/commands/doctor.py (production construction path)
+import base64,secrets
+from datetime import UTC,datetime
+from pathlib import Path
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from tuntun_core.deploy.host_approval import MacOSTargetKeySampler,SignedTrustedHostApprovalVerifier
+from tuntun_core.deploy.preflight import run_preflight
+from tuntun_core.deploy.trusted_commands import CommandRunner,TrustedCommandRegistry
+
+AUTHORITY_RELATIVE_PATH=Path("Library/Application Support/Tuntun/data/trust/trusted-host-authority.json")
+OWNER_PIN_SERVICE="tuntun.trust.owner-authority"
+OWNER_PIN_ACCOUNT="current-v1"
+
+def production_preflight(mode,home,lan_console,container):
+    authority_path=home/AUTHORITY_RELATIVE_PATH
+    trust=container.commissioning_trust_store.open_current(
+        service=OWNER_PIN_SERVICE,account=OWNER_PIN_ACCOUNT,
+    )
+    envelope=SignedTrustedHostApprovalVerifier.load_envelope(authority_path)
+    verifier=SignedTrustedHostApprovalVerifier(
+        envelope=envelope,
+        pinned_owner_public_key=Ed25519PublicKey.from_public_bytes(
+            base64.b64decode(trust.owner_public_key_b64,validate=True)
+        ),
+        expected_owner_key_id=trust.owner_key_id,
+        expected_generation=trust.authority_generation,
+        target_sampler=MacOSTargetKeySampler(container.local_presence_keychain_signer),
+        now=lambda:datetime.now(UTC),random_bytes=secrets.token_bytes,
+    )
+    approval=verifier.verify_current_target(expected_target_id=trust.opaque_target_id)
+    manifest=container.installed_release_manifest.verify_current()
+    registry=TrustedCommandRegistry(approval.executable_sha256,manifest.release_root,manifest)
+    report=run_preflight(mode,home,CommandRunner(registry),lan_console,approval)
+    return serialize_content_safe_report(report),0 if report.ok else 78
 ```
 
-`doctor.py` serializes the report without secrets/absolute paths; `service crash-probe` deliberately crashes a content-free helper and compares `/cores` plus `~/Library/Logs/DiagnosticReports` before/after. Port 8443 is allowed only when the strict LAN commissioning verifier reopens a current receipt proving the exact private-DNS mapping, matching local-CA certificate/SAN, every admin-device trust receipt, and no drift. The flag alone never widens loopback, and failure returns the service to loopback-only. No production bypass environment variable is accepted.
+The Typer `doctor preflight` command has exactly one production registration and calls `production_preflight`; dependency override is available only through the unit-test container factory, never a CLI option or environment variable. The installed signed launcher invokes the immutable release's resolved `sys.executable -I -m tuntun_core.cli`; no shell/`uv` wrapper is shipped. `doctor.py` serializes the report without secrets/absolute paths; `service crash-probe` deliberately crashes a content-free helper and compares `/cores` plus `~/Library/Logs/DiagnosticReports` before/after. Port 8443 is allowed only when the strict LAN commissioning verifier reopens a current receipt proving the exact private-DNS mapping, matching local-CA certificate/SAN, every admin-device trust receipt, and no drift. The flag alone never widens loopback, and failure returns the service to loopback-only. No production bypass environment variable is accepted.
 
 - [ ] **Step 4: Run green**
 
-Run: `chmod +x deploy/macos/preflight.sh && shellcheck deploy/macos/preflight.sh && uv run pytest tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q && uv run ruff check apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py tests/unit/deploy tests/security/test_listener_allowlist.py && uv run mypy apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py`
+Run: `uv run pytest tests/contract/test_host_approval_contract.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q && uv run ruff check packages/contracts/src/tuntun_contracts/host_approval.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py tests/contract/test_host_approval_contract.py tests/unit/deploy tests/security/test_listener_allowlist.py && uv run mypy packages/contracts/src/tuntun_contracts/host_approval.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py`
 
 Expected: PASS; every required command is observed, exact listeners pass, deliberate bad checks fail with exit `78`, and static checks exit `0`.
 
@@ -308,7 +730,7 @@ Expected: PASS; every required command is observed, exact listeners pass, delibe
 
 ```bash
 git status --short
-git add apps/core/src/tuntun_core/deploy/__init__.py apps/core/src/tuntun_core/deploy/preflight.py deploy/macos/preflight.sh apps/core/src/tuntun_core/cli/commands/doctor.py apps/core/src/tuntun_core/cli/main.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py
+git add packages/contracts/src/tuntun_contracts/host_approval.py docs/evidence/trusted-host-approval.schema.json apps/core/src/tuntun_core/deploy/__init__.py apps/core/src/tuntun_core/deploy/host_approval.py apps/core/src/tuntun_core/deploy/trusted_commands.py apps/core/src/tuntun_core/deploy/preflight.py apps/core/src/tuntun_core/cli/commands/doctor.py apps/core/src/tuntun_core/cli/main.py tests/contract/test_host_approval_contract.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached

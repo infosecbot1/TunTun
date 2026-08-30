@@ -22417,6 +22417,7 @@ begin until both hosted checks are green for the same committed SHA.
 - Create: `apps/core/src/tuntun_core/adapters/keychain/macos.py`
 - Create: `apps/core/src/tuntun_core/config/logging.py`
 - Create: `docs/evidence/phase1-host-probe.schema.json`
+- Create: `docs/evidence/phase1-host-probe-completion.schema.json`
 - Create: `scripts/probe_macos_keychain.py`
 - Test: `tests/security/test_key_handling.py`
 - Test: `tests/security/test_log_redaction.py`
@@ -22427,7 +22428,7 @@ begin until both hosted checks are green for the same committed SHA.
 - `MacOSKeychainSecretProvider` accepts only Darwin's exact `keyring.backends.macOS.Keyring` type with a finite exact-numeric priority of at least 1, captures that validated backend once, and never follows later global-keyring drift. Reads require bounded canonical strict Base64 and reject empty, oversized, noncanonical, malformed, or non-string values. Writes verify readback. Delete is a no-op only after a proved absence, accepts a concurrent delete only after re-proving absence, and otherwise surfaces or verifies every failure.
 - Produces: immutable, canonical, unique, disjoint private/public/structural log-key registries; `normalize_private_key(key: str) -> str`; and a real Structlog processor `redact_private_fields(logger: object, method: str, event: MutableMapping[str, object]) -> MutableMapping[str, object]`.
 - Redaction is closed, bounded, cycle-safe, non-mutating, and JSON-serializable. It recursively converts only exact structural-wrapper mappings/lists/tuples to JSON-safe structures; bounds depth, nodes, container items, keys, public strings, and integers; canonicalizes emitted recognized keys; rejects normalized-key collisions; redacts all known private DTO fields and common literal/JSON/Base64/URL-safe-Base64/hex/URL encodings; permits only the exact public scalar allowlist; and replaces unknown keys and their whole values, binary values, unsupported objects, invalid mappings, non-finite numbers, cycles, and exhausted budgets with typed content-free markers.
-- Ordinary unit, security, `make check`, and three-row CI runs use only deterministic fake backends and perform no real Keychain I/O. The one real Keychain round trip is a separately acknowledged, cleanup-verifying diagnostic gate on the independently owner-approved active Core target, currently verified as Darwin arm64, and writes only the content-safe receipt allowed by `docs/evidence/phase1-host-probe.schema.json`. This v1 receipt is arm64-specific and never commissions a target. Moving household deployment to Intel requires a new reviewed versioned Intel-capable probe plus fresh trusted approval and full real-host lifecycle qualification; hosted Intel CI remains mandatory distribution evidence only.
+- Ordinary unit, security, `make check`, and three-row CI runs use only deterministic fake backends and perform no real Keychain I/O. The one real Keychain round trip is a separately acknowledged, cleanup-verifying diagnostic gate on the independently owner-approved active Core target, currently verified as Darwin arm64, and writes only the content-safe receipt/completion pair allowed by `docs/evidence/phase1-host-probe.schema.json` and `docs/evidence/phase1-host-probe-completion.schema.json`. This v1 receipt is arm64-specific and never commissions a target. Moving household deployment to Intel requires a new reviewed versioned Intel-capable probe plus fresh trusted approval and full real-host lifecycle qualification; hosted Intel CI remains mandatory distribution evidence only.
 
 - [ ] **Step 1: Write the complete red secret/keychain and logging tests**
 
@@ -24283,19 +24284,35 @@ if __name__ == "__main__":
 ```
 
 The tracked probe implementation must extend the bootstrap code above with the optional
-`--receipt PATH --run-id UUID4 --owner-approval-commitment-sha256 DIGEST` path from ADR 0001.
-Receipt mode writes only the closed `docs/evidence/phase1-host-probe.schema.json` fields, labels
-the artifact diagnostic-only, requires Darwin `arm64`, records a clean script-repository commit
-and probe-script digest, and exclusively publishes a complete fsynced file only to a previously
-absent unique path. It never serializes the generated account, generated value, username, hostname,
-serial, hardware UUID, provisioning UDID, environment, command output, absolute home path, or
-Keychain path. A failed cleanup can produce only a failing receipt. The receipt never authorizes
-commissioning: `validate_phase1_host_probe_receipt` is structural-only, while
-`verify_phase1_host_probe_receipt` must compare the externally expected run ID, owner-approval
-commitment, source commit, and script digest and still returns diagnostic evidence only. An
-independent trusted verifier separately authenticates that external approval. Unique physical-host
-identity is intentionally omitted for privacy; later commissioning binds its opaque host record and
-target-held public key independently rather than inferring identity from this receipt or host strings.
+`--receipt PATH --run-id UUID4 --attempt-id UUID4 --owner-approval-commitment-sha256 DIGEST` path
+from ADR 0001. Before any Keychain side effect, receipt mode exclusively creates and fsyncs a
+fail-closed claim at the exact previously absent destination; a failed attempt keeps that path
+occupied. It writes only the closed `docs/evidence/phase1-host-probe.schema.json` fields, labels the
+artifact diagnostic-only, requires Darwin `arm64`, and accepts evidence only with the closed
+`docs/evidence/phase1-host-probe-completion.schema.json` companion. The receipt contains a real
+canonical RFC 3339 UTC time and records a clean script-derived repository commit and probe-script
+digest. The implementation captures a bounded, content-safe source snapshot both before Keychain
+access and after cleanup immediately before finalization: exact HEAD and script digest, clean
+tracked/untracked status, stage-zero index, default assume-unchanged/skip-worktree/fsmonitor flags,
+and recursively initialized submodule commits/state must compare exactly. It never serializes the
+generated account, generated value, username, hostname, serial, hardware UUID, provisioning UDID,
+environment, command output, absolute home path, repository path, tracked path, submodule path, or
+Keychain path. A failed cleanup, source re-proof, publication, rollback, or fsync cannot produce an
+acceptable pass.
+
+The receipt never authorizes commissioning: `validate_phase1_host_probe_receipt` is structural-only
+and can never accept evidence, while `verify_phase1_host_probe_receipt` requires the completion
+companion and compares the externally expected run ID, attempt ID, owner-approval commitment,
+source commit, probe-script digest, receipt digest, and completion binding. Even success returns
+diagnostic evidence only. An independent trusted verifier separately authenticates the external
+approval and supplies every expected binding. Unique physical-host identity is intentionally omitted
+for privacy; later commissioning binds its opaque host record and target-held public key independently
+rather than inferring identity from this receipt or host strings. The completion companion's exclusive
+publication plus parent-directory fsync is the operation commit point: a crash immediately afterward
+but before observed exit `0` can leave valid diagnostic evidence. Every deterministic `main()` return
+`1` rejects, including a durably completed failing receipt; a pre-commit exception has no acceptable
+completion. Removing that narrow crash boundary requires a separate trusted supervisor-signed exit
+receipt and is not claimed here.
 
 - [ ] **Step 5: Run the local green and full regression gate without real Keychain I/O**
 
@@ -24312,20 +24329,20 @@ PYTEST_ADDOPTS="--basetemp=/tmp/t8-$$" make check
 git diff --check
 ```
 
-Expected: the focused suite reports exactly 172 passed. The tests cover the immutable exact secret map and root sizes; every provider operation and testable failure boundary; exact backend binding and drift resistance; bounded canonical storage encoding; verified write/delete semantics; probe dual acknowledgement, collision, mismatch, partial-write, cleanup, and content-free CLI failures; exact log registries; every private alias plus common encodings; all seven Task 5 memory-content shapes plus the provider, transcript, speech, and search shapes; canonical and invalid keys; public-scalar/container smuggling; hostile iterators; non-mutation; JSON rendering; and cycle/depth/node/container/type limits. The combined private-data scan reports `private-data scan: PASS`; Ruff format/check and strict Python-3.12 mypy report zero issues; and `make check` passes all predecessor plus these 172 nodes without losing any accepted node. None of these commands instantiates the real macOS backend.
+Expected: the focused suite reports exactly 438 passed. The tests cover the immutable exact secret map and root sizes; every provider operation and testable failure boundary; exact backend binding and drift resistance; bounded canonical storage encoding; verified write/delete semantics; probe dual acknowledgement, collision, mismatch, partial-write, cleanup, source/index/submodule mutation, fail-closed claim/publication, closed completion binding, RFC 3339 schema/runtime equivalence, and content-free CLI failures; exact log registries; every private alias plus common encodings; all seven Task 5 memory-content shapes plus the provider, transcript, speech, and search shapes; canonical and invalid keys; public-scalar/container smuggling; hostile iterators; non-mutation; JSON rendering; and cycle/depth/node/container/type limits. The combined private-data scan reports `private-data scan: PASS`; Ruff format/check and strict Python-3.12 mypy report zero issues; and `make check` passes all predecessor plus these 438 focused nodes without losing any accepted node. None of these commands instantiates the real macOS backend.
 
 - [ ] **Step 6: Commit exactly the complete Task 8 closure**
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/adapters/keychain/provider.py apps/core/src/tuntun_core/adapters/keychain/macos.py apps/core/src/tuntun_core/config/logging.py scripts/probe_macos_keychain.py tests/security/test_key_handling.py tests/security/test_log_redaction.py
+git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/adapters/keychain/provider.py apps/core/src/tuntun_core/adapters/keychain/macos.py apps/core/src/tuntun_core/config/logging.py docs/evidence/phase1-host-probe.schema.json docs/evidence/phase1-host-probe-completion.schema.json scripts/probe_macos_keychain.py tests/security/test_key_handling.py tests/security/test_log_redaction.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
 git commit -m "feat(core): add Keychain boundary and log redaction"
 ```
 
-`git diff --cached --name-only` must equal the eight-entry Files list exactly. Generated `uv.lock` is reviewed but never hand-edited. No Task 7 configuration/path file, Task 4-6 contract/schema artifact, private-data matcher fixture, real credential, probe evidence, or Task 9 path may be staged.
+`git diff --cached --name-only` must equal the ten-entry Files list exactly. Generated `uv.lock` is reviewed but never hand-edited. No Task 7 configuration/path file, Task 4-6 contract/schema artifact, private-data matcher fixture, real credential, probe evidence, or Task 9 path may be staged.
 
 - [ ] **Step 7: Require the committed three-row CI and active-host acceptance gates**
 
@@ -24334,10 +24351,10 @@ Push the exact Task 8 commit through the Task 2 GitHub Actions matrix and requir
 Then, from that exact committed checkout on the independently owner-approved active Core inventory target, currently verified as Darwin arm64, after reviewing the fixed probe service and confirming Keychain Access is available, run the deliberately dual-acknowledged write/read/delete diagnostic gate:
 
 ```bash
-TUNTUN_ALLOW_KEYCHAIN_PROBE=1 uv run python scripts/probe_macos_keychain.py --acknowledge-keychain-write --receipt ".superpowers/sdd/phase1-host-keychain-probe-${TUNTUN_HOST_PROBE_RUN_ID}.json" --run-id "$TUNTUN_HOST_PROBE_RUN_ID" --owner-approval-commitment-sha256 "$TUNTUN_OWNER_APPROVAL_COMMITMENT_SHA256"
+TUNTUN_ALLOW_KEYCHAIN_PROBE=1 uv run python scripts/probe_macos_keychain.py --acknowledge-keychain-write --receipt ".superpowers/sdd/phase1-host-keychain-probe-${TUNTUN_HOST_PROBE_RUN_ID}-${TUNTUN_HOST_PROBE_ATTEMPT_ID}.json" --run-id "$TUNTUN_HOST_PROBE_RUN_ID" --attempt-id "$TUNTUN_HOST_PROBE_ATTEMPT_ID" --owner-approval-commitment-sha256 "$TUNTUN_OWNER_APPROVAL_COMMITMENT_SHA256"
 ```
 
-Before the command, an independent trusted owner workflow creates a fresh UUIDv4 in `TUNTUN_HOST_PROBE_RUN_ID`, computes the opaque SHA-256 commitment to its private approval record in `TUNTUN_OWNER_APPROVAL_COMMITMENT_SHA256`, records the expected clean commit and script digest, and proves the run-specific destination absent. Expected stdout is exactly one line: `macOS Keychain probe: PASS`. The probe generates a fresh random 32-byte value and UUID account, first proves the slot absent, verifies the write/readback, always attempts deletion even after a partial write failure, and finally proves absence. It never prints the value or generated account on success or failure; a handled probe/backend/publication failure instead exits 1 with exactly `macOS Keychain probe: FAIL` on stderr. Missing either acknowledgement or evidence binding must fail before randomness or provider construction. A trusted acceptance verifier must compare all four expected bindings and the external approval record; the diagnostic receipt cannot commission a host. The earlier temporary pass remains baseline-selection evidence only.
+Before the command, an independent trusted owner workflow creates fresh UUIDv4 values in `TUNTUN_HOST_PROBE_RUN_ID` and `TUNTUN_HOST_PROBE_ATTEMPT_ID`, computes the opaque SHA-256 commitment to its private approval record in `TUNTUN_OWNER_APPROVAL_COMMITMENT_SHA256`, records the expected clean commit and script digest, and proves the exact attempt destination and completion-companion path absent. Expected stdout is exactly one line: `macOS Keychain probe: PASS`. The probe generates a fresh random 32-byte value and UUID account, first proves the slot absent, verifies the write/readback, always attempts deletion even after a partial write failure, and finally proves absence. It never prints the value or generated account on success or failure; a handled probe/backend/publication failure instead exits 1 with exactly `macOS Keychain probe: FAIL` on stderr. Missing either acknowledgement or any evidence binding must fail before randomness or provider construction. A trusted acceptance verifier must open both artifacts, compare all five externally supplied expected bindings plus the receipt/completion cross-bindings, and authenticate the external approval record; the diagnostic receipt cannot commission a host. The earlier temporary pass remains baseline-selection evidence only.
 
 Record only the content-safe receipt, commit SHA, UTC timestamp, OS/Python/keyring versions, the content-free invocation, all three CI conclusions, and PASS in owner-only encrypted notes outside the repository; record no secret, generated account, backend payload, household path, or Keychain export. Any non-PASS result, CI mismatch, or cleanup result that cannot be proved blocks Task 8 and therefore Task 9. If cleanup cannot be proved, stop automation and use Keychain Access to inspect and remove only entries with service `tuntun.probe.keychain` created at the probe time before retrying.
 
