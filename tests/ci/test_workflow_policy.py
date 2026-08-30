@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from yaml.nodes import MappingNode, ScalarNode
 
 FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 FIXED_RUNNERS = {"ubuntu-24.04", "macos-26", "macos-15-intel"}
@@ -180,9 +181,22 @@ def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -
         assert command_index > architecture_steps[0]
 
 
+def _assert_literal_workflow_root(raw: str) -> None:
+    root = yaml.compose(raw, Loader=yaml.SafeLoader)
+    assert isinstance(root, MappingNode)
+    keys: list[str] = []
+    for key, _value in root.value:
+        assert isinstance(key, ScalarNode)
+        assert key.style is None
+        assert raw[key.start_mark.index : key.end_mark.index] == key.value
+        keys.append(key.value)
+    assert keys == ["name", "on", "permissions", "jobs"]
+
+
 def _assert_workflow_policy(path: Path) -> None:
     assert path.is_file() and not path.is_symlink()
-    raw = path.read_text()
+    raw = path.read_text(encoding="utf-8")
+    _assert_literal_workflow_root(raw)
     lowered = raw.lower()
     for forbidden in (
         "contents: write",
@@ -243,6 +257,37 @@ def test_ci_matrix_remains_exact() -> None:
 def test_ci_check_asserts_expected_architectures_before_dependency_installation() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
     _assert_matrix_job_checks_expected_architecture(workflow["jobs"]["check"])
+
+
+@pytest.mark.parametrize("yaml_11_alias", ("yes", "true"))
+def test_workflow_trigger_key_must_be_spelled_literal_on(
+    yaml_11_alias: str,
+    tmp_path: Path,
+) -> None:
+    raw = (WORKFLOW_ROOT / "ci.yml").read_text(encoding="utf-8")
+    mutated = raw.replace("\non:", f"\n{yaml_11_alias}:", 1)
+    assert mutated != raw
+    assert yaml.safe_load(mutated) == yaml.safe_load(raw)
+    path = tmp_path / "ci.yml"
+    path.write_text(mutated, encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_workflow_policy(path)
+
+
+@pytest.mark.parametrize("nonliteral_spelling", ('"on"', "'on'", "!!bool on"))
+def test_workflow_root_keys_reject_quoted_or_tagged_spellings(
+    nonliteral_spelling: str,
+    tmp_path: Path,
+) -> None:
+    raw = (WORKFLOW_ROOT / "ci.yml").read_text(encoding="utf-8")
+    mutated = raw.replace("\non:", f"\n{nonliteral_spelling}:", 1)
+    assert mutated != raw
+    path = tmp_path / "ci.yml"
+    path.write_text(mutated, encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_workflow_policy(path)
 
 
 @pytest.mark.parametrize(

@@ -438,6 +438,22 @@ def _evidence_artifact_is_current(artifact: EvidenceArtifact) -> bool:
     )
 
 
+def _retire_owned_completion(artifact: EvidenceArtifact) -> None:
+    if not _evidence_artifact_is_current(artifact):
+        return
+    with suppress(BaseException):
+        os.ftruncate(artifact.descriptor, 0)
+        os.fsync(artifact.descriptor)
+    if _unlink_if_owned(
+        artifact.path,
+        artifact.descriptor,
+        device=artifact.device,
+        inode=artifact.inode,
+    ):
+        with suppress(BaseException):
+            _fsync_directory(artifact.path.parent)
+
+
 def _open_evidence_artifact(path: Path) -> EvidenceArtifact:
     descriptor: int | None = None
     try:
@@ -2096,6 +2112,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
             receipt_completed = True
         except BaseException as error:
             failure = error
+            if completion_artifact is not None:
+                _retire_owned_completion(completion_artifact)
             with suppress(BaseException):
                 _restore_fail_closed_claim(claim)
 

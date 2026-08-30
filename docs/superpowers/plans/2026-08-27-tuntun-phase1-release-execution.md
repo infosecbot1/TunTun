@@ -55,17 +55,24 @@
 - Create: `security/phase1-preflight-source-policy-v1.json`
 - Create: `security/schemas/phase1-preflight-source-policy.schema.json`
 - Create: `scripts/build_preflight_runtime.py`
+- Create: `native/preflight-bootstrap/main.c`
+- Create: `native/preflight-spawn/preflight_spawn.c`
 - Create: `apps/core/src/tuntun_core/deploy/__init__.py`
 - Create: `apps/core/src/tuntun_core/deploy/bootstrap_preflight.py`
 - Create: `apps/core/src/tuntun_core/deploy/host_approval.py`
+- Create: `apps/core/src/tuntun_core/deploy/native_bootstrap.py`
+- Create: `apps/core/src/tuntun_core/deploy/native_spawn.py`
+- Create: `apps/core/src/tuntun_core/deploy/runtime_materialization.py`
 - Create: `apps/core/src/tuntun_core/deploy/trusted_commands.py`
 - Create: `apps/core/src/tuntun_core/deploy/preflight.py`
 - Create: `apps/core/src/tuntun_core/cli/commands/doctor.py`
+- Modify: `apps/core/pyproject.toml`
 - Modify: `apps/core/src/tuntun_core/cli/main.py`
 - Test: `tests/contract/test_host_approval_contract.py`
 - Test: `tests/contract/test_bootstrap_authorization_contract.py`
 - Test: `tests/contract/test_preflight_runtime_contract.py`
 - Test: `tests/integration/deploy/test_clean_bootstrap_preflight.py`
+- Test: `tests/integration/deploy/test_descriptor_stable_spawn.py`
 - Test: `tests/integration/deploy/test_preflight_runtime_build.py`
 - Test: `tests/unit/deploy/test_host_approval.py`
 - Test: `tests/unit/deploy/test_trusted_commands.py`
@@ -73,11 +80,12 @@
 - Test: `tests/security/test_listener_allowlist.py`
 
 **Interfaces:**
-- Clean bootstrap consumes only the candidate's signed, closed bootstrap manifest, a prior owner-present `SignedBootstrapAuthorization`, the separately ceremony-pinned owner public key, a fresh proof from the authorization-bound target-held P-256 key, secure time, and the fixed system executables. The authorization purpose is exactly `phase1.household-core.bootstrap.v1`, is valid for at most 15 minutes, is one-use, and binds the opaque target ID, target public-key digest, candidate-manifest digest, source-policy digest, bootstrap-runtime digest, owner-approval commitment, positive generation, and random nonce. The prior ceremony exports the authorization, public key, and its owner-passkey/WebAuthn authentication receipt to an owner-controlled read-only bootstrap kit; the verifier validates that receipt against the already enrolled external owner credential before trusting the supplied key. The bootstrap path requires no Tuntun managed root, Tuntun Keychain item, installed manifest, installed CLI, LaunchAgent, database, CA, backup record, or `tuntunctl`.
+- Clean bootstrap consumes only the candidate's signed, closed bootstrap manifest, a prior owner-present `SignedBootstrapAuthorization`, the separately ceremony-pinned owner public key, a fresh proof from the authorization-bound target-held P-256 key, secure time, and the fixed system executables. The authorization purpose is exactly `phase1.household-core.bootstrap.v1`, is valid for at most 15 minutes, is one-use, and binds the opaque target ID, target public-key digest, candidate-manifest digest, source-policy digest, selected-platform runtime-manifest and runtime-tar digests, owner-approval commitment, positive generation, and random nonce. The prior ceremony exports the authorization, public key, and its owner-passkey/WebAuthn authentication receipt to an owner-controlled read-only bootstrap kit; the verifier validates that receipt against the already enrolled external owner credential before trusting the supplied key. The bootstrap path requires no Tuntun managed root, Tuntun Keychain item, installed manifest, installed CLI, LaunchAgent, database, CA, backup record, or `tuntunctl`.
 - Installed `verify-installed`, `upgrade`, and `repair` consume only the closed `TrustedHostAuthorityRecord`, the commissioned Keychain owner-authority pin at service/account `tuntun.trust.owner-authority/current-v1`, a fresh target-key proof, and the installed signed release/runtime manifests. They reject bootstrap authorizations. After clean host checks pass, lifecycle initialization creates the managed roots and target Keychain key, then atomically publishes and reopens the installed authority record and Keychain pin before any installed preflight or service start.
-- Produces: `SignedBootstrapAuthorization.signing_bytes() -> bytes`; `BootstrapAuthorizationVerifier.verify_candidate_target(...) -> VerifiedBootstrapApproval`; `SignedTrustedHostAuthorityRecord.signing_bytes() -> bytes`; `SignedTrustedHostApprovalVerifier.verify_current_target(expected_target_id=...) -> VerifiedHostApproval`; `TrustedCommandRegistry.open(...) -> TrustedCommandRegistry`; `CommandRunner.run(argv) -> CommandResult`; `run_clean_bootstrap_preflight(...) -> PreflightReport`; `run_installed_preflight(mode, ...) -> PreflightReport`; JSON exit `0` or `78`.
-- Authority is executable rather than structural. The candidate's signed release manifest names the exact nofollow descriptor-verified bootstrap launcher and sealed bootstrap runtime. Production clean install constructs `BootstrapAuthorizationVerifier` directly from descriptor-held artifacts; production installed preflight constructs `SignedTrustedHostApprovalVerifier` directly from the exact owner-only installed authority path, Keychain pin, `MacOSTargetKeySampler`, secure clock, and CSPRNG. No `Protocol`, arbitrary string, architecture/model/product/year observation, diagnostic receipt, caller-created approval object, environment variable, or CLI override can satisfy either production path.
-- Both authority records bind `source_policy_sha256` and a signed `TrustedExecutionClosure`: exact absolute system-binary identities/digests, the installed Python identity/digest, a canonical sealed `tuntun-preflight.pyz` digest containing the complete Tuntun and third-party dependency closure, and the closed runtime-manifest digest. The registry independently opens and verifies `security/phase1-preflight-source-policy-v1.json`, the runtime manifest, the archive, Python, and every fixed binary; it exact-compares the actual policy digest and every closure field before a spawn. The archive is copied from the retained verified descriptor to an owner-only anonymous/unlinked staging descriptor and loaded with fixed `-I -S` bootstrap code through `/dev/fd`; it never imports installed loose modules. System binaries run only by fixed absolute path, with retained descriptor identity checked immediately before spawn, attested against the child executable before output is accepted, and rechecked after exit.
+- Produces: `SignedBootstrapAuthorization.signing_bytes() -> bytes`; `BootstrapAuthorizationVerifier.verify_candidate_target(...) -> VerifiedBootstrapApproval`; `production_clean_bootstrap_preflight(...) -> VerifiedBootstrapPreflight`; `SignedTrustedHostAuthorityRecord.signing_bytes() -> bytes`; `SignedTrustedHostApprovalVerifier.verify_current_target(expected_target_id=...) -> VerifiedHostApproval`; `TrustedCommandRegistry.open(...) -> TrustedCommandRegistry`; `TrustedCommandRegistry.prepare(argv) -> PreparedCommand`; `CommandRunner.run(argv) -> CommandResult`; `run_clean_bootstrap_preflight(...) -> PreflightReport`; `run_installed_preflight(mode, ...) -> PreflightReport`; JSON exit `0` or `78`. `VerifiedBootstrapPreflight` is one closed exact-type result containing both the successful `PreflightReport` and the full `VerifiedBootstrapApproval`; it is passed unchanged into `Installer.install_verified` and is never reduced to a nonce or tuple.
+- Authority is executable rather than structural. The candidate's signed release manifest names the exact nofollow descriptor-verified native bootstrap launcher, deterministic platform runtime tar, and closed runtime manifest. Before any Python import, the native launcher verifies the candidate signature and manifest, safely materializes the exact tar inventory into a fresh root-owned non-writable ephemeral runtime tree outside every Tuntun managed root, reopens every entry nofollow, and retains the tree/entry descriptors. Production clean install then constructs `BootstrapAuthorizationVerifier` directly from descriptor-held artifacts inside that tree; production installed preflight constructs `SignedTrustedHostApprovalVerifier` directly from the exact owner-only installed authority path, Keychain pin, `MacOSTargetKeySampler`, secure clock, and CSPRNG. No `Protocol`, arbitrary string, architecture/model/product/year observation, diagnostic receipt, caller-created approval object, environment variable, or CLI override can satisfy either production path.
+- Both authority records bind `source_policy_sha256` and a platform-specific signed `TrustedExecutionClosure`: exact system-binary content/execution identities, the materialized Python identity/digest, native spawn bridge digest, deterministic runtime-tar digest, and closed runtime-manifest digest. The runtime inventory contains the complete Tuntun and third-party closure, including the selected platform's CPython standard library, `pydantic_core` extension, `cryptography` native extension and every linked non-system library; native/dynamic modules are required to match their platform tag and manifest entry rather than being rejected. The registry exact-compares the actual policy digest and every closure field and retains the root and all executable/runtime descriptors.
+- `TrustedCommandRegistry.prepare` returns an opaque `PreparedCommand`, never a pathname. On Linux the C bridge executes the retained executable descriptor with `execveat(..., AT_EMPTY_PATH)` in a new process group. Darwin has no `fexecve`; there the bridge uses `posix_spawn` with `POSIX_SPAWN_START_SUSPENDED`, compares the suspended child's `csops` CodeDirectory hash and executable-vnode identity with the retained manifest-bound executable, kills on mismatch before any child instruction can run, and only then sends `SIGCONT`. The same bridge governs the materialized Python and fixed system binaries. A resolve-to-exec pathname replacement therefore either runs the retained Linux descriptor or is rejected while suspended on Darwin; replacement bytes never execute.
 - `install` performs host-only checks and never assumes initialized state. `verify-installed` checks initialized assets and the live process. `upgrade` and `repair` add Privacy Shield/provider drain and cannot fall back to the bootstrap path.
 
 - [ ] **Step 1: Write the failing invocation and listener tests**
@@ -100,7 +108,7 @@ SYSTEM_DIGESTS={name:"c"*64 for name in (
 CLOSURE=TrustedExecutionClosure(
     system_executable_sha256=SYSTEM_DIGESTS,python_sha256="c"*64,
     runtime_manifest_sha256="d"*64,
-    preflight_archive_sha256="e"*64,
+    preflight_runtime_tar_sha256="e"*64,native_spawn_bridge_sha256="f"*64,
 )
 APPROVAL=VerifiedHostApproval("target:opaque-01","a"*64,"b"*64,CLOSURE)
 BOOTSTRAP=VerifiedBootstrapApproval(
@@ -217,7 +225,8 @@ def signed_record(*, target_id="target:opaque-01", target_key_sha256=sha256(TARG
                 "uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof",
             )},
             "python_sha256":"c"*64,"runtime_manifest_sha256":"d"*64,
-            "preflight_archive_sha256":"e"*64,
+            "preflight_runtime_tar_sha256":"e"*64,
+            "native_spawn_bridge_sha256":"f"*64,
         },
     )
     signature=OWNER_PRIVATE.sign(b"tuntun:trusted-host-authority:v1\0"+canonical_bytes(record))
@@ -263,7 +272,9 @@ def test_diagnostic_probe_receipt_is_rejected_before_authority_verification(tmp_
 ```python
 # tests/integration/deploy/test_clean_bootstrap_preflight.py
 import pytest
-from tuntun_core.deploy.bootstrap_preflight import production_clean_bootstrap_preflight
+from tuntun_core.deploy.bootstrap_preflight import (
+    VerifiedBootstrapPreflight,production_clean_bootstrap_preflight,
+)
 from tuntun_core.deploy.host_approval import production_installed_approval
 
 class ProtocolApprovalFake:
@@ -277,15 +288,20 @@ def test_clean_home_uses_descriptor_verified_candidate_and_external_owner_kit(
     assert clean_home.tuntun_keychain_items == ()
     assert clean_home.installed_manifest is None
     assert clean_home.command_exists("tuntunctl") is False
-    report=production_clean_bootstrap_preflight(
-        candidate_dir=signed_candidate.path,
-        authorization_path=fresh_owner_bootstrap_kit.authorization_path,
-        owner_trust_path=fresh_owner_bootstrap_kit.external_owner_trust_path,
-        owner_presence_receipt_path=fresh_owner_bootstrap_kit.presence_receipt_path,
-        home=clean_home.path,
-    )
-    assert report.ok
-    assert report.authority_kind=="one_use_bootstrap"
+    with signed_candidate.real_native_bootstrap_context(
+        fresh_owner_bootstrap_kit,
+    ):
+        verified=production_clean_bootstrap_preflight(
+            candidate_dir=signed_candidate.path,
+            authorization_path=fresh_owner_bootstrap_kit.authorization_path,
+            owner_trust_path=fresh_owner_bootstrap_kit.external_owner_trust_path,
+            owner_presence_receipt_path=fresh_owner_bootstrap_kit.presence_receipt_path,
+            home=clean_home.path,
+        )
+    assert type(verified) is VerifiedBootstrapPreflight
+    assert verified.report.ok
+    assert verified.authority_kind=="one_use_bootstrap"
+    assert verified.approval.one_use_nonce==fresh_owner_bootstrap_kit.one_use_nonce
 
 @pytest.mark.parametrize("mutation",(
     "forged","stale","future","replayed_nonce","wrong_generation","wrong_purpose",
@@ -296,8 +312,10 @@ def test_clean_home_uses_descriptor_verified_candidate_and_external_owner_kit(
 def test_clean_bootstrap_rejects_every_unbound_or_changed_input_before_mutation(
     clean_home, mutated_bootstrap_case, mutation,
 ):
+    case=mutated_bootstrap_case(mutation)
     with pytest.raises(RuntimeError,match="^trusted bootstrap unavailable$"):
-        production_clean_bootstrap_preflight(**mutated_bootstrap_case(mutation))
+        with case.real_native_bootstrap_context():
+            production_clean_bootstrap_preflight(**case.production_kwargs)
     assert clean_home.mutations == ()
 
 @pytest.mark.parametrize("fake",("target:opaque-01",object(),ProtocolApprovalFake()))
@@ -331,77 +349,68 @@ def test_upgrade_requires_reopened_installed_record_pin_and_current_target_key(
         production_installed_approval(mode="upgrade",home=initialized_home.path)
 ```
 
-`tests/contract/test_bootstrap_authorization_contract.py` generates `bootstrap-authorization.schema.json` byte-for-byte and rejects extra/missing fields, validity intervals over 15 minutes, a nonpositive or mismatched generation, noncanonical timestamps/signature/nonce, the installed or diagnostic purpose, and malformed target/candidate/source/runtime digests. The fixture ceremony signs the domain-separated canonical record with the externally enrolled owner credential only after an owner-presence assertion and a fresh challenge to a purpose-separated external hardware target credential; its private key never enters the kit or a Mac Keychain. `BootstrapAuthorizationVerifier` opens the authorization, external-owner/target credential trust record, owner-presence receipt, signed candidate manifest, source-policy file, and bootstrap runtime through retained nofollow descriptors with owner/type/mode/link/count/byte/deadline bounds; the concrete production wiring opens the authorization-bound CTAP2 credential directly and validates its fresh proof, the external credential chain, exact candidate and policy hashes, one-use nonce ledger, and descriptor/path identity before and after verification. No schema validator returns authority: the production entry constructs `VerifiedBootstrapApproval` only inside this concrete verifier, and its public path accepts paths rather than a caller-supplied capability; direct capability construction is confined to unit fixtures.
+`tests/contract/test_bootstrap_authorization_contract.py` generates `bootstrap-authorization.schema.json` byte-for-byte and rejects extra/missing fields, validity intervals over 15 minutes, a nonpositive or mismatched generation, noncanonical timestamps/signature/nonce, the installed or diagnostic purpose, and malformed target/candidate/source/runtime digests. The fixture ceremony signs the domain-separated canonical record with the externally enrolled owner credential only after an owner-presence assertion and a fresh challenge to a purpose-separated external hardware target credential; its private key never enters the kit or a Mac Keychain. `BootstrapAuthorizationVerifier` opens the authorization, external-owner/target credential trust record, owner-presence receipt, signed candidate manifest, source-policy file, runtime tar, and runtime manifest through retained nofollow descriptors with owner/type/mode/link/count/byte/deadline bounds; the concrete production wiring opens the authorization-bound CTAP2 credential directly and validates its fresh proof, the external credential chain, exact candidate/policy/runtime hashes, one-use nonce ledger, and descriptor/path identity before and after verification. No schema validator returns authority: the native-launched production entry constructs `VerifiedBootstrapApproval` only inside this concrete verifier and wraps it with the successful report and native one-use seal as `VerifiedBootstrapPreflight`. Tests obtain a capability only from the real verifier under a signed synthetic ceremony/native-context harness; they do not construct or inject one through a fixture-only production seam.
 
 ```python
 # tests/unit/deploy/test_trusted_commands.py
-from hashlib import sha256
-from pathlib import Path
-
 import pytest
 from tuntun_core.deploy import trusted_commands
 from tuntun_core.deploy.trusted_commands import (
-    CLOSED_COMMAND_ENV,CommandResult,CommandRunner,TrustedCommandRegistry,bounded_wait,
+    CLOSED_COMMAND_ENV,CommandResult,CommandRunner,PreparedCommand,
+    TrustedCommandRegistry,bounded_wait,
 )
 
-class Expected:
-    def __init__(self,values): self._values=values
-    def model_dump(self): return dict(self._values)
-
-def registry_fixture(monkeypatch,tmp_path):
-    release=tmp_path/"release"; release.mkdir()
-    paths={}; system_names=("uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof")
-    for name in (*system_names,"python"):
-        path=release/name; path.write_bytes((name+"\n").encode()); path.chmod(0o700); paths[name]=path
-    module=release/"tuntun_core.py"; module.write_text("raise SystemExit(0)\n"); module.chmod(0o600)
-    dependency=release/"dependency.py"; dependency.write_text("VALUE=1\n"); dependency.chmod(0o600)
-    policy=release/"source-policy.json"; policy.write_text('{"policy":"phase1-preflight-v1"}\n'); policy.chmod(0o600)
-    archive=release/"tuntun-preflight.pyz"; archive.write_bytes(b"sealed-runtime"); archive.chmod(0o600)
-    manifest=make_runtime_manifest(release,(module,dependency),paths["python"],policy,archive)
-    monkeypatch.setattr(trusted_commands,"FIXED_EXECUTABLES",{name:paths[name] for name in system_names})
-    monkeypatch.setattr(trusted_commands.sys,"executable",str(paths["python"]))
-    expected=Expected({
-        "system_executable_sha256":{name:sha256(paths[name].read_bytes()).hexdigest() for name in system_names},
-        "python_sha256":sha256(paths["python"].read_bytes()).hexdigest(),
-        "runtime_manifest_sha256":sha256(manifest.read_bytes()).hexdigest(),
-        "preflight_archive_sha256":sha256(archive.read_bytes()).hexdigest(),
-    })
-    registry=TrustedCommandRegistry.open(
-        expected,release,manifest,expected_source_policy_sha256=sha256(policy.read_bytes()).hexdigest(),
+def registry_fixture(materialized_runtime):
+    return TrustedCommandRegistry.open(
+        materialized_runtime.expected_closure,
+        materialized_runtime.root_path,
+        materialized_runtime.manifest_path,
+        expected_source_policy_sha256=materialized_runtime.source_policy_sha256,
     )
-    return registry,paths,{"module":module,"dependency":dependency,"policy":policy,"archive":archive,"manifest":manifest}
 
-def test_path_bash_env_pythonpath_and_shims_cannot_redirect_commands(monkeypatch,tmp_path):
-    registry,paths,_artifacts=registry_fixture(monkeypatch,tmp_path)
+def test_path_bash_env_pythonpath_and_shims_cannot_redirect_commands(
+    monkeypatch,tmp_path,materialized_runtime,
+):
+    registry=registry_fixture(materialized_runtime)
     shim=tmp_path/"uname"; shim.write_text("#!/bin/sh\nexit 99\n"); shim.chmod(0o755)
     monkeypatch.setenv("PATH",str(tmp_path)); monkeypatch.setenv("BASH_ENV",str(shim))
     monkeypatch.setenv("ENV",str(shim)); monkeypatch.setenv("PYTHONPATH",str(tmp_path))
     observed={}
-    monkeypatch.setattr(trusted_commands.subprocess,"Popen",lambda argv,**kwargs:observed.update(argv=argv,kwargs=kwargs) or object())
-    monkeypatch.setattr(trusted_commands,"bounded_wait",lambda process,limit,seconds:CommandResult(0,"arm64\n",""))
+    def spawn(prepared,*,environment,output_limit,timeout_seconds):
+        observed.update(prepared=prepared,environment=environment,
+                        output_limit=output_limit,timeout_seconds=timeout_seconds)
+        return CommandResult(0,"arm64\n","")
+    monkeypatch.setattr(trusted_commands.native_spawn,"spawn_verified",spawn)
     result=CommandRunner(registry).run(("uname","-m"))
     assert result.returncode==0
-    assert observed["argv"]==(str(paths["uname"]),"-m")
-    assert observed["kwargs"]["env"]==CLOSED_COMMAND_ENV
-    assert "BASH_ENV" not in observed["kwargs"]["env"] and "PYTHONPATH" not in observed["kwargs"]["env"]
-    assert observed["kwargs"]["start_new_session"] is True
+    assert type(observed["prepared"]) is PreparedCommand
+    assert observed["environment"]==CLOSED_COMMAND_ENV
+    assert "BASH_ENV" not in observed["environment"] and "PYTHONPATH" not in observed["environment"]
 
-@pytest.mark.parametrize("mutation",("system_executable","python","module","dependency","policy","archive","manifest"))
-def test_post_registry_closure_or_source_policy_swap_fails_before_spawn(mutation,tmp_path,monkeypatch):
-    registry,paths,artifacts=registry_fixture(monkeypatch,tmp_path)
-    selected=paths["uname"] if mutation=="system_executable" else paths["python"] if mutation=="python" else artifacts[mutation]
-    replacement=tmp_path/(selected.name+".replacement"); replacement.write_bytes(selected.read_bytes()+b"changed")
-    replacement.chmod(selected.stat().st_mode & 0o777); replacement.replace(selected)
-    spawned=[]; monkeypatch.setattr(trusted_commands.subprocess,"Popen",lambda *a,**k:spawned.append((a,k)))
+@pytest.mark.parametrize("mutation",(
+    "system_executable","python","project_module","pydantic_core",
+    "cryptography_native","linked_library","policy","runtime_tar","manifest",
+))
+def test_post_registry_closure_or_source_policy_swap_fails_before_spawn(
+    mutation,materialized_runtime,monkeypatch,
+):
+    registry=registry_fixture(materialized_runtime)
+    materialized_runtime.replace_selected_entry(mutation)
+    spawned=[]
+    monkeypatch.setattr(
+        trusted_commands.native_spawn,"spawn_verified",
+        lambda *a,**k:spawned.append((a,k)),
+    )
     with pytest.raises(RuntimeError,match="trusted executable unavailable"):
         CommandRunner(registry).run(("uname","-m") if mutation=="system_executable" else ("tuntunctl","system","architecture","--json"))
     assert spawned==[]
 
-def test_wrong_source_policy_digest_is_rejected_at_registry_open(tmp_path,monkeypatch):
-    registry,paths,artifacts=registry_fixture(monkeypatch,tmp_path); registry.close()
+def test_wrong_source_policy_digest_is_rejected_at_registry_open(materialized_runtime):
     with pytest.raises(RuntimeError,match="trusted executable unavailable"):
         TrustedCommandRegistry.open(
-            registry.expected_closure,registry.release_root,artifacts["manifest"],
+            materialized_runtime.expected_closure,
+            materialized_runtime.root_path,
+            materialized_runtime.manifest_path,
             expected_source_policy_sha256="0"*64,
         )
 
@@ -420,8 +429,10 @@ def test_cleanup_failure_never_replaces_the_primary_error(fake_process,cleanup_f
     with pytest.raises(TimeoutError,match="^primary-timeout$"):
         bounded_wait(fake_process,65_536,30,terminate_seconds=1,kill_seconds=1)
 
-def test_registry_open_failure_closes_every_held_descriptor(tmp_path,monkeypatch):
-    held=held_runtime_closure_with_wrong_source_policy(tmp_path)
+def test_registry_open_failure_closes_every_held_descriptor(
+    materialized_runtime,monkeypatch,
+):
+    held=materialized_runtime.held_with_wrong_source_policy()
     monkeypatch.setattr(trusted_commands,"open_runtime_closure",lambda *a,**k:held)
     with pytest.raises(RuntimeError,match="^trusted executable unavailable$"):
         TrustedCommandRegistry.open(
@@ -429,6 +440,112 @@ def test_registry_open_failure_closes_every_held_descriptor(tmp_path,monkeypatch
             expected_source_policy_sha256="0"*64,
         )
     assert held.close_calls==1 and held.open_descriptors==()
+```
+
+```python
+# tests/integration/deploy/test_descriptor_stable_spawn.py
+import platform
+import pytest
+from tuntun_core.deploy import native_spawn
+from tuntun_core.deploy.trusted_commands import CommandRunner,TrustedCommandRegistry
+
+def test_resolve_to_exec_replacement_bytes_never_run(
+    descriptor_spawn_runtime,tmp_path,monkeypatch,
+):
+    original=descriptor_spawn_runtime.materialized_python_path
+    sentinel=tmp_path/"replacement-ran"
+    replacement=descriptor_spawn_runtime.compile_replacement(sentinel)
+    registry=TrustedCommandRegistry.open(
+        descriptor_spawn_runtime.expected_closure,
+        descriptor_spawn_runtime.root_path,
+        descriptor_spawn_runtime.manifest_path,
+        expected_source_policy_sha256=descriptor_spawn_runtime.source_policy_sha256,
+    )
+    real_spawn=native_spawn.spawn_verified
+    observed=[]
+    def replace_after_final_registry_check(prepared,**kwargs):
+        replacement.replace(original)
+        result=real_spawn(prepared,**kwargs)
+        observed.append(result)
+        return result
+    monkeypatch.setattr(native_spawn,"spawn_verified",replace_after_final_registry_check)
+    try:
+        with pytest.raises(RuntimeError,match="^trusted executable unavailable$"):
+            CommandRunner(registry).run(
+                ("tuntunctl","diagnostics","spawn-identity"),
+            )
+    finally:
+        registry.close()
+    if platform.system()=="Linux":
+        assert len(observed)==1
+        assert observed[0].returncode==0 and observed[0].stdout=="original\n"
+    else:
+        assert observed==[]
+    assert not sentinel.exists()
+
+def test_darwin_replacement_is_killed_while_still_suspended(
+    darwin_spawn_probe,
+):
+    if platform.system()!="Darwin": pytest.skip("Darwin-only suspended-spawn proof")
+    result=darwin_spawn_probe.replace_after_prepare()
+    assert result.child_user_instruction_count==0
+    assert result.signal_sent=="SIGKILL"
+    assert result.reason=="execution_identity_mismatch"
+```
+
+```python
+# tests/integration/deploy/test_preflight_runtime_build.py
+import importlib.machinery
+import json
+from pathlib import Path
+from scripts.build_preflight_runtime import build_preflight_runtime
+from tuntun_core.deploy.runtime_materialization import materialize_verified_runtime
+from tuntun_core.deploy.trusted_commands import CommandRunner,TrustedCommandRegistry
+
+def test_two_builds_are_identical_and_production_runtime_imports_native_modules(
+    tmp_path,locked_runtime_input,root_owned_runtime_parent,
+):
+    first=build_preflight_runtime(locked_runtime_input,tmp_path/"first")
+    second=build_preflight_runtime(locked_runtime_input,tmp_path/"second")
+    assert first.manifest_bytes==second.manifest_bytes
+    assert first.tar_bytes==second.tar_bytes
+    runtime=materialize_verified_runtime(
+        first.runtime_tar,first.runtime_manifest,
+        destination_parent=root_owned_runtime_parent,
+    )
+    registry=TrustedCommandRegistry.open(
+        first.expected_closure,runtime.root,runtime.manifest,
+        expected_source_policy_sha256=first.source_policy_sha256,
+    )
+    try:
+        result=CommandRunner(registry).run(
+            ("tuntunctl","diagnostics","runtime-imports","--json"),
+        )
+    finally:
+        registry.close()
+    assert result.returncode==0
+    probe=json.loads(result.stdout)
+    assert set(probe)=={"imported","module_paths","native_module_paths","sys_path"}
+    assert set(probe["imported"])=={
+        "pydantic","pydantic_core._pydantic_core","cryptography",
+        "cryptography.hazmat.bindings._rust",
+    }
+    assert all(Path(path).is_relative_to(runtime.root) for path in probe["module_paths"])
+    assert all(
+        any(path.endswith(suffix) for suffix in importlib.machinery.EXTENSION_SUFFIXES)
+        for path in probe["native_module_paths"]
+    )
+    assert all(Path(path).is_relative_to(runtime.root) for path in probe["sys_path"])
+
+@pytest.mark.parametrize("mutation",(
+    "wrong_platform","wrong_abi","missing_pydantic_core","missing_cryptography_rust",
+    "extra_native_module","unlisted_linked_library","post_open_native_swap",
+))
+def test_native_runtime_mutations_fail_before_import_or_spawn(
+    mutation,mutated_runtime_case,
+):
+    with pytest.raises(RuntimeError,match="^trusted runtime unavailable$"):
+        materialize_verified_runtime(*mutated_runtime_case(mutation))
 ```
 
 ```python
@@ -442,7 +559,7 @@ def test_wildcard_public_and_wrong_interface_fail():
 
 - [ ] **Step 2: Run red**
 
-Run: `uv run pytest tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q`
+Run: `uv run pytest tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q`
 
 Expected: FAIL during collection because the bootstrap/installed authority contracts, closed schemas, source policy, and `tuntun_core.deploy` production modules do not exist yet.
 
@@ -464,7 +581,8 @@ class BootstrapAuthorizationRecord(ContractModel):
     target_public_key_sha256:Digest
     candidate_manifest_sha256:Digest
     source_policy_sha256:Digest
-    bootstrap_runtime_sha256:Digest
+    preflight_runtime_manifest_sha256:Digest
+    preflight_runtime_tar_sha256:Digest
     approval_commitment_sha256:Digest
     one_use_nonce:Annotated[str,Field(pattern=r"^nonce:[A-Za-z0-9_-]{16,86}$")]
     valid_from:AwareDatetime
@@ -485,9 +603,9 @@ class SignedBootstrapAuthorization(ContractModel):
 
 `docs/evidence/bootstrap-authorization.schema.json` is generated byte-for-byte from this contract, carries `$schema: https://json-schema.org/draft/2020-12/schema`, `$id: https://tuntun.local/schemas/evidence/bootstrap-authorization.schema.json`, and sets `additionalProperties:false` on the envelope and record. It has exactly the fields above, RFC 3339 `date-time` formats with runtime format assertion, the literal purpose/version, the positive bounded generation, and the exact digest/target/nonce/signature patterns. The model validator and JSON Schema tests additionally assert the half-open validity interval is no longer than 15 minutes. The concrete `apps/core/src/tuntun_core/deploy/bootstrap_preflight.py` verifier consumes paths, not parsed models; production constructs its exact-type return capability only after cryptographic verification, while unit-only fixtures can construct it directly without becoming a production authority path.
 
-`packages/contracts/src/tuntun_contracts/preflight_runtime.py` defines the closed `PreflightRuntimeManifestV1`: exact schema/version/runtime ID, source commit, source-policy digest, relative Python and sealed-archive paths/digests, aggregate inventory digest, and a sorted 1..50,000 tuple of `RuntimeFileV1(path, kind="regular", mode=0o444|0o555, size<=268435456, sha256)`. Paths are canonical relative POSIX paths with no empty/dot/dot-dot/backslash/control component, casefold/NFC collision, duplicate, or link/special type. `docs/evidence/preflight-runtime-manifest.schema.json` is generated byte-for-byte with recursive `additionalProperties:false`. `security/schemas/phase1-preflight-source-policy.schema.json` closes the exact source policy fields: schema/version/policy ID, `fd_bootstrap_source_sha256`, entrypoint `tuntun_core.cli`, isolation flags exactly `["-I","-S"]`, exact environment-key/value map, output/deadline/count/byte bounds, and the fixed system-executable map. The checked-in `security/phase1-preflight-source-policy-v1.json` validates canonically against it.
+`packages/contracts/src/tuntun_contracts/preflight_runtime.py` defines the closed `PreflightRuntimeManifestV1`: exact schema/version/runtime ID, one literal platform ID (`darwin-arm64`, `darwin-x86_64`, or `linux-x86_64`), CPython ABI/tag, source commit, source-policy digest, deterministic runtime-tar digest, relative materialized Python/native-spawn paths and digests, aggregate inventory digest, required native-module records for `pydantic_core._pydantic_core` and `cryptography.hazmat.bindings._rust`, linked-library identities, and a sorted 1..50,000 tuple of `RuntimeFileV1(path, kind="regular"|"directory", mode=0o444|0o555, size<=268435456, sha256)`. Paths are canonical relative POSIX paths with no empty/dot/dot-dot/backslash/control component, casefold/NFC collision, duplicate, or link/special type. `docs/evidence/preflight-runtime-manifest.schema.json` is generated byte-for-byte with recursive `additionalProperties:false`. `security/schemas/phase1-preflight-source-policy.schema.json` closes the exact source policy fields: schema/version/policy ID, native bootstrap/spawn source digests, entrypoint `tuntun_core.cli`, isolation flags exactly `["-I","-S"]`, exact environment-key/value map, output/deadline/count/byte bounds, and the fixed system-executable map. The checked-in `security/phase1-preflight-source-policy-v1.json` validates canonically against it.
 
-`scripts/build_preflight_runtime.py` is the sole deterministic builder. From the locked installed distribution set it enumerates every Tuntun and third-party importable file plus required package metadata, rejects native/dynamic/unlisted imports, hashes descriptor-read bytes/modes into the runtime manifest, constructs canonical `tuntun-preflight.pyz` with those exact bytes, and reopens both outputs to prove the archive member inventory and aggregate digest exactly equal the manifest. It also hashes the literal production `FD_BOOTSTRAP_SOURCE` and requires equality with the source-policy field. `tests/integration/deploy/test_preflight_runtime_build.py` performs two byte-identical builds and rejects a missing/extra/duplicate module, dependency, metadata file, native extension, path collision, policy/bootstrap mismatch, lock drift, and module/dependency/archive mutation before and after registry open. Candidate assembly and Task 2 package both artifacts without rebuilding; the signed candidate manifest and installed authority bind their exact digests.
+`scripts/build_preflight_runtime.py` is the sole deterministic per-platform builder. From the locked distribution set for the current CI row it builds a relocatable CPython layout, places the complete Tuntun and third-party import roots under that layout's isolated versioned library root, enumerates every importable file, package metadata file, CPython file, native extension, and non-system linked library, and normalizes native-loader references to manifest-listed `$ORIGIN`/`@loader_path` locations. On Darwin it requires a valid final Mach-O code signature for every executable image and records its CodeDirectory hash; the two-build check proves the chosen signing procedure is reproducible. It rejects an ABI/platform mismatch or an unlisted/missing/extra dependency; hashes final descriptor-read bytes/modes into the runtime manifest; then creates a canonical USTAR `preflight-runtime.tar` without links, devices, sparse/PAX/GNU records, ambient ownership, or nondeterministic timestamps. It reopens the tar and manifest to prove the complete member inventory and aggregate digest exactly. The tar is never imported or executed: the native bootstrap launcher extracts only verified entries into a fresh root-owned `0555` directory with `0444|0555` children outside managed Tuntun roots, fsyncs/reopens the tree, and passes retained descriptors to the registry. `tests/integration/deploy/test_preflight_runtime_build.py` performs two byte-identical builds on each fixed CI platform, uses the production materializer and `TrustedCommandRegistry`/native spawn bridge with `-I -S`, and invokes the real closed diagnostic entry. The subprocess must import Pydantic v2, `pydantic_core._pydantic_core`, `cryptography`, and `cryptography.hazmat.bindings._rust` from the materialized root and show that every effective `sys.path` entry remains under that root. The test uses the runner's scoped privileged fixture to create the same root-owned/non-writable layout; it does not relax ownership or use an alternate importer. It also rejects wrong ABI/tag, missing/extra/duplicate module or linked library, path collision, lock/policy/bootstrap mismatch, and module/native-library/tar/manifest mutation before and after registry open. Candidate assembly and Task 2 package every platform artifact without rebuilding; the selected target authorization and installed authority bind the one exact platform closure.
 
 ```python
 # packages/contracts/src/tuntun_contracts/host_approval.py
@@ -508,7 +626,8 @@ class TrustedExecutionClosure(ContractModel):
     system_executable_sha256:TrustedSystemExecutableDigests
     python_sha256:Digest
     runtime_manifest_sha256:Digest
-    preflight_archive_sha256:Digest
+    preflight_runtime_tar_sha256:Digest
+    native_spawn_bridge_sha256:Digest
 
 class TrustedHostAuthorityRecord(ContractModel):
     schema_version:Literal["1.0"]
@@ -561,8 +680,8 @@ The exact checked-in `docs/evidence/trusted-host-approval.schema.json` artifact 
       "required":["uname","id","fdesetup","security","route","ipconfig","stat","plutil","lsof"],
       "properties":{"uname":{"$ref":"#/$defs/digest"},"id":{"$ref":"#/$defs/digest"},"fdesetup":{"$ref":"#/$defs/digest"},"security":{"$ref":"#/$defs/digest"},"route":{"$ref":"#/$defs/digest"},"ipconfig":{"$ref":"#/$defs/digest"},"stat":{"$ref":"#/$defs/digest"},"plutil":{"$ref":"#/$defs/digest"},"lsof":{"$ref":"#/$defs/digest"}}},
     "execution_closure":{"type":"object","additionalProperties":false,
-      "required":["system_executable_sha256","python_sha256","runtime_manifest_sha256","preflight_archive_sha256"],
-      "properties":{"system_executable_sha256":{"$ref":"#/$defs/system_executables"},"python_sha256":{"$ref":"#/$defs/digest"},"runtime_manifest_sha256":{"$ref":"#/$defs/digest"},"preflight_archive_sha256":{"$ref":"#/$defs/digest"}}},
+      "required":["system_executable_sha256","python_sha256","runtime_manifest_sha256","preflight_runtime_tar_sha256","native_spawn_bridge_sha256"],
+      "properties":{"system_executable_sha256":{"$ref":"#/$defs/system_executables"},"python_sha256":{"$ref":"#/$defs/digest"},"runtime_manifest_sha256":{"$ref":"#/$defs/digest"},"preflight_runtime_tar_sha256":{"$ref":"#/$defs/digest"},"native_spawn_bridge_sha256":{"$ref":"#/$defs/digest"}}},
     "record":{"type":"object","additionalProperties":false,
       "required":["schema_version","purpose","authority_generation","target_id","approval_commitment_sha256","target_public_key_sha256","valid_from","valid_until","source_policy_sha256","execution_closure"],
       "properties":{"schema_version":{"const":"1.0"},"purpose":{"const":"phase1.household-core.preflight.v1"},"authority_generation":{"type":"integer","minimum":1,"maximum":2147483647},"target_id":{"type":"string","pattern":"^target:[A-Za-z0-9_-]{8,64}$"},"approval_commitment_sha256":{"$ref":"#/$defs/digest"},"target_public_key_sha256":{"$ref":"#/$defs/digest"},"valid_from":{"type":"string","format":"date-time"},"valid_until":{"type":"string","format":"date-time"},"source_policy_sha256":{"$ref":"#/$defs/digest"},"execution_closure":{"$ref":"#/$defs/execution_closure"}}}
@@ -691,6 +810,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from tuntun_core.deploy import native_spawn
+
 FIXED_EXECUTABLES={"uname":Path("/usr/bin/uname"),"id":Path("/usr/bin/id"),
  "fdesetup":Path("/usr/bin/fdesetup"),"security":Path("/usr/bin/security"),
  "route":Path("/sbin/route"),"ipconfig":Path("/usr/sbin/ipconfig"),
@@ -699,6 +820,11 @@ CLOSED_COMMAND_ENV={"LANG":"C","LC_ALL":"C","PATH":"/usr/bin:/bin:/usr/sbin:/sbi
 MAX_COMMAND_OUTPUT_BYTES=65_536
 @dataclass(frozen=True,slots=True)
 class CommandResult: returncode:int; stdout:str; stderr:str
+
+# Re-export the exact non-serializable C-extension capability. Its constructor is
+# not exposed; it owns the executable/runtime descriptors, argv, and policy digest
+# and deliberately exposes no executable pathname or raw descriptor integer.
+PreparedCommand=native_spawn.PreparedCommand
 
 def terminate_process_group_bounded(process,*,terminate_seconds,kill_seconds):
     cleanup_failed=False
@@ -753,7 +879,8 @@ class TrustedCommandRegistry:
     @classmethod
     def open(cls,expected,release_root,manifest_path,*,expected_source_policy_sha256):
         # open_runtime_closure retains the release-root, manifest, policy, Python,
-        # sealed-archive, every manifest inventory entry, and fixed-binary descriptors.
+        # every materialized inventory entry, linked library, and fixed-binary
+        # descriptor. It never imports or executes the runtime tar.
         # It verifies closed canonical JSON, duplicate keys, owner/type/mode/nlink,
         # shared count/byte/time bounds, descriptor/path identity and every digest.
         held=open_runtime_closure(release_root,manifest_path,FIXED_EXECUTABLES)
@@ -764,9 +891,6 @@ class TrustedCommandRegistry:
                 raise RuntimeError("trusted executable unavailable")
             if held.execution_closure!=expected.model_dump():
                 raise RuntimeError("trusted executable unavailable")
-            # Copy only already-verified archive bytes from the retained descriptor to
-            # an owner-only unlinked descriptor; all Python imports come from this fd.
-            held.sealed_runtime_fd=copy_to_unlinked_verified_fd(held.archive_fd)
             return cls(held,expected)
         except BaseException:
             with suppress(BaseException): held.close_all()
@@ -780,43 +904,49 @@ class TrustedCommandRegistry:
     def _revalidate(self):
         if not self._held.revalidate_every_identity_and_digest():
             raise RuntimeError("trusted executable unavailable")
-    @property
-    def pass_fds(self): return (self._held.sealed_runtime_fd,)
-    def resolve(self,argv):
+    def prepare(self,argv):
         self._revalidate()
         name,*tail=argv
         if name=="tuntunctl":
-            return (str(self._held.python_path),"-I","-S","-c",FD_BOOTSTRAP_SOURCE,
-                    str(self._held.sealed_runtime_fd),*tail)
-        if name not in FIXED_EXECUTABLES: raise RuntimeError("trusted executable unavailable")
-        return (str(FIXED_EXECUTABLES[name]),*tail)
-    def attest_spawned(self,process,resolved):
-        if not attest_child_executable_identity(process.pid,resolved[0],self._held):
+            executable=self._held.open_python_handle()
+            child_argv=("python","-I","-S","-m","tuntun_core.cli",*tail)
+        elif name in FIXED_EXECUTABLES:
+            executable=self._held.open_system_handle(name)
+            child_argv=(name,*tail)
+        else:
             raise RuntimeError("trusted executable unavailable")
         self._revalidate()
+        return native_spawn.prepare_verified_command(
+            executable=executable,argv=tuple(child_argv),
+            runtime=self._held.native_runtime_handle(),
+            source_policy_sha256=self._held.policy_sha256,
+        )
 
 class CommandRunner:
     def __init__(self,registry): self._registry=registry
     def run(self,argv):
-        resolved=self._registry.resolve(argv)
-        process=subprocess.Popen(resolved,executable=resolved[0],cwd=self._registry.release_root,
-            env=CLOSED_COMMAND_ENV,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,shell=False,close_fds=True,
-            pass_fds=self._registry.pass_fds,start_new_session=True)
+        return self.run_prepared(self._registry.prepare(argv))
+    def run_prepared(self,prepared):
         try:
-            self._registry.attest_spawned(process,resolved)
-            result=bounded_wait(process,MAX_COMMAND_OUTPUT_BYTES,30)
+            self._registry._revalidate()
+            result=native_spawn.spawn_verified(
+                prepared,environment=CLOSED_COMMAND_ENV,
+                output_limit=MAX_COMMAND_OUTPUT_BYTES,timeout_seconds=30,
+            )
             self._registry._revalidate()
             return result
         except BaseException:
-            if terminate_process_group_bounded(
-                process,terminate_seconds=1,kill_seconds=1,
-            ):
-                record_cleanup_failure_without_raising()
+            # spawn_verified never raises until any child it created has undergone
+            # finite process-group termination and reap; cleanup cannot replace the
+            # primary exception.
             raise
 ```
 
-`open_runtime_closure`, `copy_to_unlinked_verified_fd`, `attest_child_executable_identity`, `terminate_process_group_bounded`, and the `HeldRuntimeClosure` methods are implemented in full in this file, not left as Protocols. The canonical runtime manifest has a closed, sorted inventory of every project and third-party dependency byte loaded by `tuntun-preflight.pyz`, with path, type, mode, size, and SHA-256; it also binds the exact archive, Python, fixed-system-executable, and source-policy digests. The registry holds all descriptors and the release-root identity until the command finishes, then revalidates them. `FD_BOOTSTRAP_SOURCE` is a fixed source-policy-hashed constant that mounts only the sealed descriptor archive and invokes the one closed CLI entry; it disables site initialization and rejects ambient import locations. Fixed system binaries remain absolute and are tied to retained pre/post descriptors plus the spawned process identity before output is accepted. Tests run real archive imports and child identity checks, not a `find_spec` or arbitrary module fake. The environment is exactly `CLOSED_COMMAND_ENV`; inherited `PATH`, `BASH_ENV`, `ENV`, `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV`, shell functions, Git/Python startup variables, and `GITHUB_ENV`/`GITHUB_PATH` are absent. Every timeout/output/decode/attestation/error path terminates the new process group with finite TERM and KILL waits, records cleanup failure without replacing the primary exception, and has no unbounded `wait()`.
+`open_runtime_closure`, `terminate_process_group_bounded`, and every `HeldRuntimeClosure` method are implemented in full, not left as `Protocol`s. The canonical runtime manifest is a closed, sorted inventory of every project, standard-library, third-party, native-extension, and non-system linked-library byte loaded from the already materialized runtime tree; it binds the exact runtime tar, manifest, Python, native spawn bridge, fixed system executables, and source policy. The registry retains and revalidates the runtime-root descriptor, every inventory descriptor, and every executable descriptor through child completion. It returns only the exact non-constructible C-extension `PreparedCommand`, which binds the executable handle, argv, runtime handles, and source-policy digest; neither the registry nor `CommandRunner` returns an executable path/raw descriptor or calls `subprocess.Popen` on a mutable name. The bridge rejects subclasses, deserialized objects, altered argv/environment, reused handles, or a capability from another registry.
+
+`native/preflight-spawn/preflight_spawn.c` and its thin `native_spawn.py` wrapper are production code, not an interface sketch. On Linux, the bridge creates the pipes and process group, then executes the retained descriptor with `execveat(fd, "", argv, envp, AT_EMPTY_PATH)`. On Darwin, where descriptor execution is unavailable, it calls `posix_spawn` with `POSIX_SPAWN_START_SUSPENDED`; while the child is still suspended it obtains and compares the child's `csops` CodeDirectory hash and executable-vnode identity with the retained manifest-bound descriptor, sends `SIGKILL` and reaps on any mismatch, and sends `SIGCONT` only after both match. A pathname is used only inside that Darwin bridge to ask the kernel to create the suspended image; it is never returned to Python, and replacement bytes cannot execute before attestation. The same bridge governs the materialized Python and fixed system binaries. The materialized tree is root-owned and non-writable for the invoking account, so Python's native-module and shared-library loads cannot be redirected after verification. The bridge rejects an unexpected platform/ABI, missing `execveat`/suspended-spawn guarantee, descriptor/root change, wrong code identity, or unsupported command instead of falling back to path execution.
+
+The environment is exactly `CLOSED_COMMAND_ENV`; inherited `PATH`, `BASH_ENV`, `ENV`, `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV`, shell functions, Git/Python startup variables, and `GITHUB_ENV`/`GITHUB_PATH` are absent. The native bridge owns the child from creation through bounded output collection and reap. Every spawn, timeout, output, decode, attestation, and registry-revalidation failure runs finite process-group TERM then KILL waits, records a content-free cleanup failure without replacing the primary exception, and has no unbounded `wait()`. Tests compile and execute real original/replacement binaries and import the real native runtime closure; they do not use `find_spec`, a pathname-returning fake, or post-execution attestation.
 
 ```python
 # apps/core/src/tuntun_core/deploy/preflight.py
@@ -929,33 +1059,70 @@ def run_installed_preflight(mode,home,runner,lan_console,verified_host_approval)
 
 ```python
 # apps/core/src/tuntun_core/deploy/bootstrap_preflight.py (clean production path)
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+from tuntun_core.deploy import native_bootstrap
+
+@dataclass(frozen=True,slots=True,init=False)
+class VerifiedBootstrapPreflight:
+    report:"PreflightReport"
+    approval:VerifiedBootstrapApproval
+    authority_kind:Literal["one_use_bootstrap"]
+    _seal:native_bootstrap.VerificationSeal
+
+def _verified_result(report,approval,seal):
+    value=object.__new__(VerifiedBootstrapPreflight)
+    object.__setattr__(value,"report",report)
+    object.__setattr__(value,"approval",approval)
+    object.__setattr__(value,"authority_kind","one_use_bootstrap")
+    object.__setattr__(value,"_seal",seal)
+    return value
+
 def production_clean_bootstrap_preflight(*,candidate_dir,authorization_path,
         owner_trust_path,owner_presence_receipt_path,home):
+    from tuntun_core.deploy.preflight import run_clean_bootstrap_preflight
+
+    # Only the signed native bootstrap launcher can establish this descriptor-held
+    # context. Direct Python invocation or a caller-created object fails closed.
+    context=native_bootstrap.claim_verified_candidate_context(candidate_dir)
+    authorization=context.open_owner_kit_file(authorization_path)
+    owner_trust=context.open_owner_kit_file(owner_trust_path)
+    owner_presence=context.open_owner_kit_file(owner_presence_receipt_path)
     target_sampler=ExternalHardwareBootstrapTargetKeySampler.open_bound_credential(
-        owner_trust_path,
+        owner_trust,
     )
-    verifier=BootstrapAuthorizationVerifier.from_paths(
-        authorization_path=authorization_path,owner_trust_path=owner_trust_path,
-        owner_presence_receipt_path=owner_presence_receipt_path,
-        candidate_manifest_path=candidate_dir/"candidate-manifest.json",
-        source_policy_path=candidate_dir/"security/phase1-preflight-source-policy-v1.json",
-        bootstrap_runtime_path=candidate_dir/"bootstrap/tuntun-preflight.pyz",
+    verifier=BootstrapAuthorizationVerifier.from_descriptors(
+        authorization=authorization,owner_trust=owner_trust,
+        owner_presence_receipt=owner_presence,
+        candidate_manifest=context.candidate_manifest,
+        source_policy=context.source_policy,
+        runtime_tar=context.runtime_tar,runtime_manifest=context.runtime_manifest,
         target_sampler=target_sampler,now=secure_utc_now,random_bytes=secrets.token_bytes,
     )
     approval=verifier.verify_candidate_target()
     registry=TrustedCommandRegistry.open(
-        approval.execution_closure,candidate_dir,
-        candidate_dir/"bootstrap/runtime-manifest.json",
+        approval.execution_closure,context.materialized_runtime.root,
+        context.materialized_runtime.manifest,
         expected_source_policy_sha256=approval.source_policy_sha256,
     )
     try:
         report=run_clean_bootstrap_preflight(home,CommandRunner(registry),approval)
     finally:
         registry.close()
-    return report,approval.one_use_nonce
+    if not report.ok:
+        raise RuntimeError("clean bootstrap preflight failed")
+    seal=context.issue_one_use_preflight_seal(
+        approval=approval,report=report,candidate_identity=context.candidate_identity,
+    )
+    return _verified_result(report,approval,seal)
 ```
 
-This public clean entry has only path inputs; it has no `verified_approval`, target-sampler, dependency-injection, `Protocol`, environment, or installed-container argument. It constructs the exact external-hardware sampler internally and validates that the sampled credential ID is the one signed into the owner kit. `install.sh` invokes the signed candidate entry directly, then `initialize_trust_from_bootstrap` makes the first lifecycle mutation: it creates an owner-only managed trust root, exclusively publishes a fail-closed nonce-consumption claim, reopens it, and only then generates the installed target Keychain item. A replay or interrupted prior attempt therefore cannot initialize twice. It derives and atomically publishes the installed-purpose authority and Keychain pin, fsyncs and reopens both, then runs `production_installed_preflight("verify-installed", ...)`. A bootstrap record is never copied into the installed authority location.
+The external clean-install entry is the candidate's exact signed `preflight-bootstrap` native executable, not a Python console script. `install.sh` passes it only the four path arguments above. Before Python starts, the launcher nofollow-opens and verifies the signed candidate manifest, source policy, selected-platform runtime tar and manifest, safely materializes the complete runtime into a fresh root-owned non-writable directory, reopens every entry, and establishes a one-use descriptor context in the native extension. `production_clean_bootstrap_preflight` rejects a process without that context; it has no `verified_approval`, target-sampler, dependency-injection, `Protocol`, environment, installed-container, or materialized-runtime path argument. It constructs the exact external-hardware sampler internally and validates that the sampled credential ID is the one signed into the owner kit.
+
+The successful API result is exactly `VerifiedBootstrapPreflight`, containing the complete successful `PreflightReport`, the complete `VerifiedBootstrapApproval`, literal `authority_kind="one_use_bootstrap"`, and a native, non-serializable, one-use seal bound to candidate identity, nonce, target, report, and retained context. A tuple, nonce, parsed JSON value, subclass, arbitrary strings, or a caller-created dataclass cannot satisfy the lifecycle consumer. The result never crosses a process or JSON boundary: the same native-launched production process passes it unchanged to `Installer.install_verified`. That method consumes the seal while atomically creating the first owner-only managed trust/journal root, exclusively publishes the fail-closed nonce-consumption claim, reopens it, and only then generates the installed target Keychain item. A replay or interrupted prior attempt therefore cannot initialize twice. It derives and atomically publishes the installed-purpose authority and Keychain pin, fsyncs and reopens both, then runs `production_installed_preflight("verify-installed", ...)`. A bootstrap record is never copied into the installed authority location.
 
 ```python
 # apps/core/src/tuntun_core/cli/commands/doctor.py (production construction path)
@@ -1001,11 +1168,11 @@ def production_preflight(mode,home,lan_console,container):
     return serialize_content_safe_report(report),0 if report.ok else 78
 ```
 
-The Typer `doctor preflight` command has exactly one installed production registration and calls `production_preflight`; it cannot dispatch `install`. Clean install calls only the signed candidate `production_clean_bootstrap_preflight`. Dependency override is available only through unit-test-only factories that are unreachable from registered CLI paths. The installed launcher invokes the descriptor-stable sealed runtime; no shell, `uv`, console-script shim, ambient package, or loose installed module is loaded. `doctor.py` serializes the report without secrets/absolute paths; `service crash-probe` deliberately crashes a content-free helper and compares `/cores` plus `~/Library/Logs/DiagnosticReports` before/after. Port 8443 is allowed only when the strict LAN commissioning verifier reopens a current receipt proving the exact private-DNS mapping, matching local-CA certificate/SAN, every admin-device trust receipt, and no drift. The flag alone never widens loopback, and failure returns the service to loopback-only. No production bypass environment variable is accepted.
+The Typer `doctor preflight` command has exactly one installed production registration and calls `production_preflight`; it cannot dispatch `install`. Clean install calls only the exact signed native candidate entry, which establishes the descriptor context and calls `production_clean_install`; no standalone Python preflight command is registered. Dependency override is available only through unit-test-only factories that are unreachable from registered CLI paths. The installed launcher invokes the descriptor-stable materialized runtime; no shell, `uv`, console-script shim, ambient package, archive importer, or loose installed module is loaded. `doctor.py` serializes the report without secrets/absolute paths; `service crash-probe` deliberately crashes a content-free helper and compares `/cores` plus `~/Library/Logs/DiagnosticReports` before/after. Port 8443 is allowed only when the strict LAN commissioning verifier reopens a current receipt proving the exact private-DNS mapping, matching local-CA certificate/SAN, every admin-device trust receipt, and no drift. The flag alone never widens loopback, and failure returns the service to loopback-only. No production bypass environment variable is accepted.
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run pytest tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q && uv run ruff check packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py scripts/build_preflight_runtime.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy tests/security/test_listener_allowlist.py && uv run mypy packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py scripts/build_preflight_runtime.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py`
+Run: `uv run pytest tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py -q && uv run ruff check packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py scripts/build_preflight_runtime.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy tests/security/test_listener_allowlist.py && uv run mypy packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py scripts/build_preflight_runtime.py apps/core/src/tuntun_core/deploy apps/core/src/tuntun_core/cli/commands/doctor.py`
 
 Expected: PASS; clean home works without installed state; forged/stale/mismatched/replayed bootstrap artifacts, wrong source/runtime/dependency closures, post-open swaps, and bootstrap use for restart/upgrade/repair fail before mutation/spawn; every required installed command is observed; exact listeners pass; timeout cleanup is finite and preserves the primary error; static checks exit `0`.
 
@@ -1013,7 +1180,7 @@ Expected: PASS; clean home works without installed state; forged/stale/mismatche
 
 ```bash
 git status --short
-git add packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py docs/evidence/bootstrap-authorization.schema.json docs/evidence/preflight-runtime-manifest.schema.json docs/evidence/trusted-host-approval.schema.json security/phase1-preflight-source-policy-v1.json security/schemas/phase1-preflight-source-policy.schema.json scripts/build_preflight_runtime.py apps/core/src/tuntun_core/deploy/__init__.py apps/core/src/tuntun_core/deploy/bootstrap_preflight.py apps/core/src/tuntun_core/deploy/host_approval.py apps/core/src/tuntun_core/deploy/trusted_commands.py apps/core/src/tuntun_core/deploy/preflight.py apps/core/src/tuntun_core/cli/commands/doctor.py apps/core/src/tuntun_core/cli/main.py tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py
+git add packages/contracts/src/tuntun_contracts/bootstrap_authorization.py packages/contracts/src/tuntun_contracts/host_approval.py packages/contracts/src/tuntun_contracts/preflight_runtime.py docs/evidence/bootstrap-authorization.schema.json docs/evidence/preflight-runtime-manifest.schema.json docs/evidence/trusted-host-approval.schema.json security/phase1-preflight-source-policy-v1.json security/schemas/phase1-preflight-source-policy.schema.json scripts/build_preflight_runtime.py native/preflight-bootstrap/main.c native/preflight-spawn/preflight_spawn.c apps/core/pyproject.toml apps/core/src/tuntun_core/deploy/__init__.py apps/core/src/tuntun_core/deploy/bootstrap_preflight.py apps/core/src/tuntun_core/deploy/host_approval.py apps/core/src/tuntun_core/deploy/native_bootstrap.py apps/core/src/tuntun_core/deploy/native_spawn.py apps/core/src/tuntun_core/deploy/runtime_materialization.py apps/core/src/tuntun_core/deploy/trusted_commands.py apps/core/src/tuntun_core/deploy/preflight.py apps/core/src/tuntun_core/cli/commands/doctor.py apps/core/src/tuntun_core/cli/main.py tests/contract/test_bootstrap_authorization_contract.py tests/contract/test_host_approval_contract.py tests/contract/test_preflight_runtime_contract.py tests/integration/deploy/test_clean_bootstrap_preflight.py tests/integration/deploy/test_descriptor_stable_spawn.py tests/integration/deploy/test_preflight_runtime_build.py tests/unit/deploy/test_host_approval.py tests/unit/deploy/test_trusted_commands.py tests/unit/deploy/test_preflight.py tests/security/test_listener_allowlist.py
 git diff --cached --name-only
 git diff --cached --check
 git diff --cached
@@ -1044,20 +1211,80 @@ git commit -m "build(deploy): enforce complete production preflight"
 - Create: `docs/operations/upgrade-rollback.md`
 - Create: `docs/operations/uninstall.md`
 
-**Interfaces:** `ReleaseLayout.for_home(home: Path) -> ReleaseLayout`; signed-candidate public `install.sh --candidate PATH --bootstrap-authorization PATH --owner-trust PATH --owner-presence-receipt PATH`; internal `Installer.install_verified(bundle: Path, version: str, bootstrap: VerifiedBootstrapApproval) -> Path`; installed-only public `UpgradeCoordinator.apply(bundle: Path, version: str) -> str`; `RecoveryCoordinator.resume(record_id: UUID) -> None`; `Installer.uninstall_preserving_state() -> tuple[Path,Path,Path]`. There is no public preflight/initialization/activation bypass flag and no clean-install `tuntunctl` route. The signed candidate entry first runs Task 1's descriptor-verified clean bootstrap without creating or reading managed state. `claim_bootstrap_and_begin_record` is the first mutation: it creates the owner-only trust/journal directory, publishes a fail-closed one-use nonce claim and durable install record, fsyncs/reopens both, and never removes the nonce claim on failure. Private `_stage_verified` is callable only inside that active record. `LifecycleOps.run_recorded_step(record, name, operation, inverse)` fsyncs a `started` record plus the idempotent inverse before invoking the operation, then fsyncs `completed|failed`; `attempt_all_and_record` never raises, attempts every applicable inverse, records every outcome, and finishes `recovered|needs_owner_recovery`. Its owner-only journal is sufficient to resume after a crash between an operation and its completion record. It consumes host-only bootstrap preflight, hash/SBOM verification, purpose-root/Keychain/installed-authority/SQLCipher/audit-genesis/household-CA/backup-recipient/recovery initialization, encrypted backup, storage/audit/model/protocol verification, migration, readiness; rollback exit `70`. The newly started candidate must pass Privacy Shield, listener, storage, outbound-network, and commissioned-device probes inside the try/rollback boundary; readiness is evaluated only afterward.
+**Interfaces:** `ReleaseLayout.for_home(home: Path) -> ReleaseLayout`; signed-candidate public `install.sh --candidate PATH --bootstrap-authorization PATH --owner-trust PATH --owner-presence-receipt PATH`; same-process `production_clean_install(...) -> Path`; internal `Installer.install_verified(bundle: Path, version: str, preflight: VerifiedBootstrapPreflight) -> Path`; installed-only public `UpgradeCoordinator.apply(bundle: Path, version: str) -> str`; `RecoveryCoordinator.resume(record_id: UUID) -> None`; `Installer.uninstall_preserving_state() -> tuple[Path,Path,Path]`. There is no public preflight/initialization/activation bypass flag and no clean-install `tuntunctl` route. The exact signed native candidate entry establishes Task 1's descriptor context and calls `production_clean_install`; that function obtains one `VerifiedBootstrapPreflight` and passes that same object unchanged to `Installer.install_verified` before the context can close. The installer exact-type/read-only checks reject any unsuccessful report or existing runtime and never rerun preflight or reduce the approval to a nonce. `claim_bootstrap_and_begin_record` then verifies the native seal against the candidate/report without consuming it, creates and fsyncs the exclusive full-binding nonce claim as the first filesystem/Keychain mutation, and only after that durable claim exists atomically consumes the seal and returns the exact approval plus durable install record. A crash before claim publication has made no managed mutation and may retry; a crash or returned failure at/after publication leaves the fail-closed claim, so no second process or restart can reuse the authorization. The owner-only claim binds the full approval nonce, target, candidate, source/runtime closure and report digest; the adjacent journal record is fsynced/reopened and the claim is never removed on failure. Private `_stage_verified` is callable only inside that active record. `LifecycleOps.run_recorded_step(record, name, operation, inverse)` fsyncs a `started` record plus the idempotent inverse before invoking the operation, then fsyncs `completed|failed`; `attempt_all_and_record` never raises, attempts every applicable inverse, records every outcome, and finishes `recovered|needs_owner_recovery`. Its owner-only journal is sufficient to resume after a crash between an operation and its completion record. It consumes host-only bootstrap preflight, hash/SBOM verification, purpose-root/Keychain/installed-authority/SQLCipher/audit-genesis/household-CA/backup-recipient/recovery initialization, encrypted backup, storage/audit/model/protocol verification, migration, readiness; rollback exit `70`. The newly started candidate must pass Privacy Shield, listener, storage, outbound-network, and commissioned-device probes inside the try/rollback boundary; readiness is evaluated only afterward.
 
 - [ ] **Step 1: Write separate failing install, upgrade, rollback, and uninstall tests**
 
 ```python
 # tests/integration/deploy/test_atomic_install.py
 import pytest
-from tuntun_core.deploy.lifecycle import Installer,ReleaseLayout
+from tuntun_core.deploy.lifecycle import Installer,ReleaseLayout,production_clean_install
+
+def test_production_clean_install_composes_one_native_verified_result(
+    clean_home,signed_candidate,fresh_owner_bootstrap_kit,
+):
+    with signed_candidate.real_native_bootstrap_context(
+        fresh_owner_bootstrap_kit,
+    ) as trace:
+        installed=production_clean_install(
+            candidate_dir=signed_candidate.path,
+            authorization_path=fresh_owner_bootstrap_kit.authorization_path,
+            owner_trust_path=fresh_owner_bootstrap_kit.external_owner_trust_path,
+            owner_presence_receipt_path=fresh_owner_bootstrap_kit.presence_receipt_path,
+            home=clean_home.path,
+        )
+    record=clean_home.reopen_install_record()
+    assert installed==clean_home.current.resolve()
+    assert trace.events.count("bootstrap:cryptographic_verify")==1
+    assert trace.events.index("bootstrap:result_issued")+1==trace.events.index(
+        "bootstrap:result_consumed"
+    )
+    assert record.bootstrap_authority_kind=="one_use_bootstrap"
+    assert record.bootstrap_nonce==fresh_owner_bootstrap_kit.one_use_nonce
+    assert record.target_id==fresh_owner_bootstrap_kit.target_id
+    assert record.candidate_manifest_sha256==signed_candidate.manifest_sha256
+    assert record.preflight_result_sha256==trace.preflight_result_sha256
+
+@pytest.mark.parametrize("forged",(
+    "nonce:caller-string",("report","nonce"),object(),
+))
+def test_installer_rejects_noncapability_results_without_mutation(
+    tmp_path,fake_lifecycle_ops,forged,
+):
+    layout=ReleaseLayout.for_home(tmp_path)
+    with pytest.raises(RuntimeError,match="^trusted bootstrap unavailable$"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",forged,
+        )
+    assert fake_lifecycle_ops.mutations==[]
+
+def test_preflight_capability_is_bound_to_candidate_and_consumed_once(
+    tmp_path,fake_lifecycle_ops,
+):
+    layout=ReleaseLayout.for_home(tmp_path)
+    verified=fake_lifecycle_ops.verified_bootstrap_preflight
+    with pytest.raises(RuntimeError,match="trusted bootstrap unavailable"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"different-candidate.tar.zst","0.1.0-beta.1",verified,
+        )
+    fake_lifecycle_ops.fail_at="roots:init"
+    with pytest.raises(RuntimeError,match="injected roots:init"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",verified,
+        )
+    fake_lifecycle_ops.fail_at=None
+    assert not layout.current.exists()
+    with pytest.raises(RuntimeError,match="trusted bootstrap unavailable"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",verified,
+        )
+
 def test_clean_install_switches_only_after_verified_unpack(tmp_path,fake_lifecycle_ops):
     layout=ReleaseLayout.for_home(tmp_path)
-    installed=Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval)
+    installed=Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert layout.current.resolve()==installed
     assert fake_lifecycle_ops.events==[
-        "preflight:bootstrap","bootstrap_nonce:claim","recovery:begin:install","roots:init","bundle:verify","bundle:unpack","keychain:init",
+        "bootstrap_nonce:claim","bootstrap_result:consume","recovery:begin:install","roots:init","bundle:verify","bundle:unpack","keychain:init",
         "installed_authority:publish","installed_authority:reopen",
         "sqlcipher:init","database:head:verify","audit_genesis:init","household_ca:init","backup_recipient:init",
         "recovery:ceremony","launch_agent:install","service:load","candidate:privacy_probe",
@@ -1066,7 +1293,7 @@ def test_clean_install_switches_only_after_verified_unpack(tmp_path,fake_lifecyc
     ]
 def test_failed_clean_install_leaves_no_current_runtime(tmp_path,fake_lifecycle_ops):
     layout=ReleaseLayout.for_home(tmp_path); fake_lifecycle_ops.ready_result=False
-    with pytest.raises(RuntimeError,match="installed service readiness failed"): Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval)
+    with pytest.raises(RuntimeError,match="installed service readiness failed"): Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert not layout.current.exists() and layout.data.exists() and layout.models.exists()
 
 def test_installed_authority_and_pin_are_reopened_before_any_installed_command_or_service(
@@ -1074,7 +1301,7 @@ def test_installed_authority_and_pin_are_reopened_before_any_installed_command_o
 ):
     layout=ReleaseLayout.for_home(tmp_path)
     Installer(layout,fake_lifecycle_ops).install_verified(
-        tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval,
+        tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
     )
     events=fake_lifecycle_ops.events
     assert events.index("keychain:init") < events.index("installed_authority:publish")
@@ -1088,7 +1315,7 @@ def test_interrupted_authority_publication_leaves_nonce_claim_and_never_starts_s
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError):
         Installer(layout,fake_lifecycle_ops).install_verified(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval,
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.bootstrap_nonce_claim_exists is True
     assert fake_lifecycle_ops.service_load_count==0
@@ -1105,7 +1332,7 @@ def test_clean_install_accepts_exact_independent_search_namespace(
     fake_lifecycle_ops.optional_search_down_revision=None
     layout=ReleaseLayout.for_home(tmp_path)
     installed=Installer(layout,fake_lifecycle_ops).install_verified(
-        tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval,
+        tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
     )
     assert layout.current.resolve()==installed
     assert fake_lifecycle_ops.observed_database_heads==("0008_prepared_mutations",)
@@ -1113,8 +1340,21 @@ def test_clean_install_accepts_exact_independent_search_namespace(
         "search_0001_experimental_search",
     )
 
+def test_bootstrap_claim_failure_never_initializes_or_publishes_readiness(
+    tmp_path,fake_lifecycle_ops,
+):
+    fake_lifecycle_ops.fail_before_side_effect="bootstrap_nonce:claim"
+    layout=ReleaseLayout.for_home(tmp_path)
+    with pytest.raises(RuntimeError):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",
+            fake_lifecycle_ops.verified_bootstrap_preflight,
+        )
+    assert fake_lifecycle_ops.managed_mutations==[]
+    assert fake_lifecycle_ops.readiness_published is False
+
 @pytest.mark.parametrize("failed_step", [
-    "preflight:bootstrap", "bootstrap_nonce:claim", "roots:init", "bundle:verify", "bundle:unpack",
+    "roots:init", "bundle:verify", "bundle:unpack",
     "keychain:init", "installed_authority:publish", "installed_authority:reopen",
     "sqlcipher:init", "database:head:verify", "audit_genesis:init", "household_ca:init",
     "backup_recipient:init", "recovery:ceremony", "launch_agent:install",
@@ -1126,7 +1366,7 @@ def test_clean_install_never_becomes_ready_with_incomplete_security_initializati
     fake_lifecycle_ops.fail_at=failed_step
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError):
-        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval)
+        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert not layout.current.exists()
     assert fake_lifecycle_ops.readiness_published is False
     assert fake_lifecycle_ops.recovery_record.completed_steps
@@ -1147,7 +1387,7 @@ def test_clean_install_blocks_wrong_or_multiple_core_migration_heads(
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration head mismatch"):
         Installer(layout,fake_lifecycle_ops).install_verified(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval,
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.facade_registration_count==0
     assert fake_lifecycle_ops.handler_composition_count==0
@@ -1180,7 +1420,7 @@ def test_clean_install_blocks_mismatched_search_migration_namespace(
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
         Installer(layout,fake_lifecycle_ops).install_verified(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval,
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.facade_registration_count==0
     assert fake_lifecycle_ops.handler_composition_count==0
@@ -1209,7 +1449,7 @@ def test_clean_install_blocks_wrong_search_version_table_or_head(
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration head mismatch"):
         Installer(layout,fake_lifecycle_ops).install_verified(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval,
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.facade_registration_count==0
     assert fake_lifecycle_ops.handler_composition_count==0
@@ -1235,7 +1475,7 @@ def test_clean_install_blocks_nonexact_search_feature_graph(
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
         Installer(layout,fake_lifecycle_ops).install_verified(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval,
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.service_load_count==0
     assert not layout.current.exists()
@@ -1256,7 +1496,7 @@ def test_clean_install_blocks_forked_mandatory_migration_tail(
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
         Installer(layout,fake_lifecycle_ops).install_verified(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval,
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.service_load_count==0
     assert not layout.current.exists()
@@ -1275,7 +1515,7 @@ def test_clean_install_blocks_nonexact_packaged_migration_graph(
     layout=ReleaseLayout.for_home(tmp_path)
     with pytest.raises(RuntimeError,match="phase1 migration graph mismatch"):
         Installer(layout,fake_lifecycle_ops).install_verified(
-            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval,
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight,
         )
     assert fake_lifecycle_ops.service_load_count==0
     assert not layout.current.exists()
@@ -1284,15 +1524,16 @@ def test_clean_install_blocks_nonexact_packaged_migration_graph(
 def test_public_install_has_no_security_bypass_flags():
     import inspect
     assert tuple(inspect.signature(Installer.install_verified).parameters) == (
-        "self","bundle","version","bootstrap",
+        "self","bundle","version","preflight",
     )
 
-def test_preflight_failure_never_unlinks_an_existing_runtime(tmp_path,fake_lifecycle_ops):
+def test_forged_preflight_result_never_unlinks_an_existing_runtime(tmp_path,fake_lifecycle_ops):
     layout=ReleaseLayout.for_home(tmp_path)
     fake_lifecycle_ops.seed(layout,"0.1.0-alpha.1",b"encrypted-old")
-    fake_lifecycle_ops.fail_at="preflight:bootstrap"
-    with pytest.raises(RuntimeError):
-        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval)
+    with pytest.raises(RuntimeError,match="trusted bootstrap unavailable"):
+        Installer(layout,fake_lifecycle_ops).install_verified(
+            tmp_path/"candidate.tar.zst","0.1.0-beta.1",object(),
+        )
     assert layout.current.resolve().name=="0.1.0-alpha.1"
 
 
@@ -1301,7 +1542,7 @@ def test_clean_install_rejects_existing_runtime_without_overwrite(tmp_path,fake_
     fake_lifecycle_ops.seed(layout,"0.1.0-alpha.1",b"encrypted-old")
     prior_link=layout.current.readlink()
     with pytest.raises(RuntimeError,match="existing_runtime_detected_use_upgrade"):
-        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval)
+        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert layout.current.readlink()==prior_link
     assert layout.current.resolve().name=="0.1.0-alpha.1"
     assert fake_lifecycle_ops.bundle_unpack_calls==0
@@ -1313,7 +1554,7 @@ def test_partial_initialization_failure_attempts_every_recorded_inverse_and_keep
     fake_lifecycle_ops.fail_after_side_effect="sqlcipher:init"
     fake_lifecycle_ops.cleanup_fault="keychain:rollback"
     with pytest.raises(RuntimeError,match="injected sqlcipher:init") as caught:
-        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.bootstrap_approval)
+        Installer(layout,fake_lifecycle_ops).install_verified(tmp_path/"candidate.tar.zst","0.1.0-beta.1",fake_lifecycle_ops.verified_bootstrap_preflight)
     assert str(caught.value)=="injected sqlcipher:init"
     assert set(fake_lifecycle_ops.recovery_record.attempted_recovery_steps) >= {
         "staging:remove","initialization:rollback","current:restore","service:unload",
@@ -1615,6 +1856,10 @@ import os,shutil
 from dataclasses import dataclass
 from pathlib import Path
 from tuntun_core.bootstrap.container import require_final_phase1_migration_state
+from tuntun_core.deploy import native_bootstrap
+from tuntun_core.deploy.bootstrap_preflight import (
+    VerifiedBootstrapPreflight,production_clean_bootstrap_preflight,
+)
 @dataclass(frozen=True,slots=True)
 class ReleaseLayout:
     runtime:Path; releases:Path; current:Path; data:Path; database:Path; models:Path; backups:Path; logs:Path; launch_agent:Path
@@ -1658,20 +1903,27 @@ class Installer:
             ("launch_agent:remove",lambda:self.ops.remove_owned_launch_agent(self.layout.launch_agent,record) if self.ops.was_started(record,"launch_agent") else None),
         )
         self.ops.attempt_all_and_record(record,steps)
-    def install_verified(self,bundle,version,bootstrap):
-        self.ops.require_verified_bootstrap_capability(bootstrap)
-        self.ops.clean_bootstrap_preflight(bundle,bootstrap)
+    def install_verified(self,bundle,version,preflight):
+        if (type(preflight) is not VerifiedBootstrapPreflight
+            or preflight.authority_kind!="one_use_bootstrap"
+            or preflight.report.ok is not True):
+            raise RuntimeError("trusted bootstrap unavailable")
+        native_bootstrap.verify_one_use_preflight_seal_read_only(
+            preflight._seal,approval=preflight.approval,report=preflight.report,
+            candidate_bundle=bundle,
+        )
         if self.layout.current.exists() or self.layout.current.is_symlink():
             raise RuntimeError("existing_runtime_detected_use_upgrade")
-        record=self.ops.claim_bootstrap_and_begin_record(
-            bootstrap.one_use_nonce,"install",bundle=bundle,version=version,
+        approval,record=self.ops.claim_bootstrap_and_begin_record(
+            preflight=preflight,
+            mode="install",bundle=bundle,version=version,
         )
         destination=self.layout.releases/version
         try:
             _recorded(self.ops,record,"purpose_roots",lambda:self.ops.initialize_purpose_roots(self.layout,mode=0o700),{"action":"rollback_initialized_roots"})
             destination=self._stage_verified(bundle,version,record)
             _recorded(self.ops,record,"keychain",self.ops.initialize_keychain_items,{"action":"delete_record_owned_keychain_items"})
-            _recorded(self.ops,record,"installed_authority",lambda:self.ops.publish_and_reopen_installed_authority(bootstrap,destination),{"action":"remove_record_owned_installed_authority_and_pin"})
+            _recorded(self.ops,record,"installed_authority",lambda:self.ops.publish_and_reopen_installed_authority(approval,destination),{"action":"remove_record_owned_installed_authority_and_pin"})
             _recorded(self.ops,record,"sqlcipher",lambda:self.ops.initialize_sqlcipher_and_migrate(self.layout.database),{"action":"restore_or_remove_record_owned_database"})
             _recorded(self.ops,record,"migration_head_verified",lambda:require_release_database_head(self.ops,self.layout.database),{"action":"none"})
             _recorded(self.ops,record,"audit_genesis",self.ops.initialize_and_verify_audit_genesis,{"action":"rollback_record_owned_audit_genesis"})
@@ -1696,6 +1948,22 @@ class Installer:
         self.ops.unload(self.layout.launch_agent); self.layout.launch_agent.unlink(missing_ok=True)
         if self.layout.runtime.exists(): shutil.rmtree(self.layout.runtime)
         return self.layout.data,self.layout.models,self.layout.backups
+
+def production_clean_install(*,candidate_dir,authorization_path,owner_trust_path,
+        owner_presence_receipt_path,home):
+    # The native bootstrap context supplies the signed bundle/version identity;
+    # neither value is accepted from a caller or environment variable.
+    preflight=production_clean_bootstrap_preflight(
+        candidate_dir=candidate_dir,authorization_path=authorization_path,
+        owner_trust_path=owner_trust_path,
+        owner_presence_receipt_path=owner_presence_receipt_path,home=home,
+    )
+    bundle,version=native_bootstrap.bound_install_inputs(preflight._seal)
+    layout=ReleaseLayout.for_home(home)
+    return Installer(layout,ProductionLifecycleOps.for_native_context()).install_verified(
+        bundle,version,preflight,
+    )
+
 class UpgradeCoordinator:
     def __init__(self,layout,ops): self.layout,self.ops=layout,ops
     def apply(self,bundle,version):
@@ -1760,7 +2028,7 @@ class UpgradeCoordinator:
             raise primary.with_traceback(primary.__traceback__)
 ```
 
-The signed candidate shell exposes clean `install` only with the four explicit bootstrap-kit/candidate paths above; installed `tuntunctl update` exposes only `apply|repair|resume-recovery|uninstall`. Neither accepts `--skip-preflight`, `--skip-init`, `--stage-only`, `--no-activate`, direct approval strings, or equivalent environment variables. The plist sets explicit current/config/log paths, `KeepAlive`, throttle 10, `SoftResourceLimits/Core=0`, files `1024`, processes `128`, and no secret environment. Clean install completes descriptor-verified bootstrap preflight before managed-state mutation, then atomically claims the one-use nonce and opens its durable record. It creates owner-only purpose-separated roots and the target Keychain item, derives/publishes/reopens the installed-purpose authority plus owner pin, and only then provisions and migrates SQLCipher. It queries the actual core and feature-version rows and enumerates both packaged migration namespaces before any facade, handler, service load, installed command, or readiness side effect. Every build packages exactly the linear core revisions `0001_foundation` through sole `alembic_version` head `0008_prepared_mutations`, with every frozen parent edge and no branch label, dependency, extra base, fork, merge, or orphan. An absent-search build omits the search migration namespace and `alembic_version_experimental_search` table. An enabled build adds the independent one-revision namespace `search_0001_experimental_search` (`down_revision=None`) and that exact sole feature-table head; it never extends or forks the core graph. Any inventory, edge, metadata, feature-state, version-table, or head mismatch blocks. Only then does install append and reopen audit genesis, create the household CA, configure the age backup recipient, and complete a restore/recovery ceremony before linking or readiness. Every completed initialization boundary is fsync-recorded and has an idempotent inverse; the nonce claim intentionally survives every failure so the same authorization cannot restart. Upgrade/repair require the reopened installed authority and Keychain pin, invoke Privacy Shield/provider drain, verify an encrypted backup, and stage the candidate; they never invoke bootstrap verification. For enabled-to-absent search they stop the prior service, obtain fresh local owner proof, and invoke the still-installed feature manager to withdraw dispatch, revoke unconsumed children, drain/cancel and conservatively settle begun attempts once, downgrade/remove both feature tables and its version table, and issue a signed content-minimal removal receipt. The deployer verifies that receipt and namespace absence, and records database restoration as the inverse, all before switching the artifact link; a failure during removal or any later candidate step restores the backup and prior runtime. Other transitions migrate only after switching to scripts that actually package their namespace. The same core/feature packaging/head gate runs before starting the candidate, followed by Privacy Shield generation/ack truth, exact listeners, SQLCipher/audit/roots, observed outbound DNS/socket policy, and commissioned Reachy identity/transport probes before readiness and protocol verification. Failure recovery attempts every step even when an earlier step fails, persists each outcome, retains the original exception as the public failure, and ends `needs_owner_recovery` rather than claiming rollback when any inverse failed. `resume-recovery` accepts only the opaque durable record ID and repeats remaining idempotent inverses; it cannot stage or activate a candidate. Docs contain exact commands and preserving semantics.
+The signed candidate shell exposes clean `install` only with the four explicit bootstrap-kit/candidate paths above; installed `tuntunctl update` exposes only `apply|repair|resume-recovery|uninstall`. Neither accepts `--skip-preflight`, `--skip-init`, `--stage-only`, `--no-activate`, direct approval strings, serialized preflight results, or equivalent environment variables. The plist sets explicit current/config/log paths, `KeepAlive`, throttle 10, `SoftResourceLimits/Core=0`, files `1024`, processes `128`, and no secret environment. Clean install completes descriptor-verified bootstrap preflight before managed-state mutation and passes the one sealed `VerifiedBootstrapPreflight` unchanged through the same process. The lifecycle consumer verifies it read-only, then its first managed mutation exclusively publishes/fsyncs the full approval/report claim and only afterward consumes the seal and opens its durable record. It never reruns preflight or treats a nonce as sufficient authority; pre-claim crashes may safely retry and post-claim failures can never reuse the authorization. It creates owner-only purpose-separated roots and the target Keychain item, derives/publishes/reopens the installed-purpose authority plus owner pin, and only then provisions and migrates SQLCipher. It queries the actual core and feature-version rows and enumerates both packaged migration namespaces before any facade, handler, service load, installed command, or readiness side effect. Every build packages exactly the linear core revisions `0001_foundation` through sole `alembic_version` head `0008_prepared_mutations`, with every frozen parent edge and no branch label, dependency, extra base, fork, merge, or orphan. An absent-search build omits the search migration namespace and `alembic_version_experimental_search` table. An enabled build adds the independent one-revision namespace `search_0001_experimental_search` (`down_revision=None`) and that exact sole feature-table head; it never extends or forks the core graph. Any inventory, edge, metadata, feature-state, version-table, or head mismatch blocks. Only then does install append and reopen audit genesis, create the household CA, configure the age backup recipient, and complete a restore/recovery ceremony before linking or readiness. Every completed initialization boundary is fsync-recorded and has an idempotent inverse; the nonce claim intentionally survives every failure so the same authorization cannot restart. Upgrade/repair require the reopened installed authority and Keychain pin, invoke Privacy Shield/provider drain, verify an encrypted backup, and stage the candidate; they never invoke bootstrap verification. For enabled-to-absent search they stop the prior service, obtain fresh local owner proof, and invoke the still-installed feature manager to withdraw dispatch, revoke unconsumed children, drain/cancel and conservatively settle begun attempts once, downgrade/remove both feature tables and its version table, and issue a signed content-minimal removal receipt. The deployer verifies that receipt and namespace absence, and records database restoration as the inverse, all before switching the artifact link; a failure during removal or any later candidate step restores the backup and prior runtime. Other transitions migrate only after switching to scripts that actually package their namespace. The same core/feature packaging/head gate runs before starting the candidate, followed by Privacy Shield generation/ack truth, exact listeners, SQLCipher/audit/roots, observed outbound DNS/socket policy, and commissioned Reachy identity/transport probes before readiness and protocol verification. Failure recovery attempts every step even when an earlier step fails, persists each outcome, retains the original exception as the public failure, and ends `needs_owner_recovery` rather than claiming rollback when any inverse failed. `resume-recovery` accepts only the opaque durable record ID and repeats remaining idempotent inverses; it cannot stage or activate a candidate. Docs contain exact commands and preserving semantics.
 
 - [ ] **Step 4: Run green**
 
