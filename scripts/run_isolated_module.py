@@ -4,11 +4,96 @@ import importlib
 import os
 import stat
 import sys
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from os import PathLike
 from pathlib import Path
 from unittest import mock
 
 _RETAINED_SITE_MARKER = "__tuntun_retained_site_packages__"
+_MAX_MYPY_CONFIG_BYTES = 1_048_576
+
+
+@contextmanager
+def _retained_mypy_config(repository_root: Path, arguments: list[str]) -> Iterator[None]:
+    if (
+        arguments.count("--config-file") != 1
+        or arguments.count("--no-incremental") != 1
+        or arguments.count("--cache-dir") != 1
+        or arguments.count("--no-fast-exit") != 1
+    ):
+        raise SystemExit(97)
+    config_index = arguments.index("--config-file") + 1
+    cache_index = arguments.index("--cache-dir") + 1
+    expected = repository_root / "pyproject.toml"
+    if (
+        config_index >= len(arguments)
+        or arguments[config_index] != str(expected)
+        or cache_index >= len(arguments)
+        or arguments[cache_index] != os.devnull
+    ):
+        raise SystemExit(97)
+    descriptor = -1
+    try:
+        descriptor = os.open(expected, os.O_RDONLY | os.O_NOFOLLOW)
+        initial = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_uid != os.geteuid()
+            or initial.st_mode & 0o022
+            or not 0 < initial.st_size <= _MAX_MYPY_CONFIG_BYTES
+        ):
+            raise SystemExit(97)
+        remaining = initial.st_size
+        content = bytearray()
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                raise SystemExit(97)
+            content.extend(chunk)
+            remaining -= len(chunk)
+        final = os.fstat(descriptor)
+        if os.read(descriptor, 1) or (
+            final.st_dev,
+            final.st_ino,
+            final.st_mode,
+            final.st_uid,
+            final.st_size,
+        ) != (initial.st_dev, initial.st_ino, initial.st_mode, initial.st_uid, initial.st_size):
+            raise SystemExit(97)
+    except OSError as error:
+        raise SystemExit(97) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    original = arguments[config_index]
+    with tempfile.TemporaryDirectory(prefix="tuntun-mypy-config.") as temporary:
+        retained = Path(temporary) / "pyproject.toml"
+        output = -1
+        try:
+            output = os.open(
+                retained,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            view = memoryview(content)
+            while view:
+                written = os.write(output, view)
+                if written <= 0:
+                    raise SystemExit(97)
+                view = view[written:]
+        except OSError as error:
+            raise SystemExit(97) from error
+        finally:
+            if output >= 0:
+                os.close(output)
+        arguments[config_index] = str(retained)
+        try:
+            yield
+        finally:
+            arguments[config_index] = original
 
 
 def _run_from_retained_site(module: str) -> None:
@@ -94,7 +179,9 @@ def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] != "mypy":
         return 97
     module = sys.argv.pop(1)
-    _run_from_retained_site(module)
+    repository_root = Path(__file__).absolute().parent.parent
+    with _retained_mypy_config(repository_root, sys.argv):
+        _run_from_retained_site(module)
     return 0
 
 

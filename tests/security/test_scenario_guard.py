@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -44,6 +45,55 @@ def _descriptor_count() -> int:
         return len(entries) - (1 if str(descriptor) in entries else 0)
     finally:
         os.close(descriptor)
+
+
+def _scenario_typecheck_invocation(
+    source: Path,
+    *,
+    uv_cache: Path,
+    temp_root: Path | None = None,
+) -> tuple[list[str], subprocess.CompletedProcess[bytes]]:
+    rendered = subprocess.run(
+        ["make", "-n", "scenario-typecheck"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    assert rendered.returncode == 0, rendered.stderr.decode("utf-8", errors="replace")
+    lines = tuple(line for line in rendered.stdout.decode("utf-8").splitlines() if line)
+    assert len(lines) == 1
+    tokens = shlex.split(lines[0])
+    assignment = tokens.pop(0)
+    key, separator, value = assignment.partition("=")
+    assert (key, separator) == ("MYPYPATH", "=")
+    declared_sources = {
+        str(ROOT / relative)
+        for relative in (
+            "packages/testing/src",
+            "scripts/run_scenarios.py",
+            "tests/unit/testing/test_scenario.py",
+            "tests/unit/testing/test_scenario_cli.py",
+            "tests/integration/test_deterministic_turn.py",
+            "tests/security/test_scenario_guard.py",
+        )
+    }
+    assert declared_sources.issubset(tokens)
+    command = [token for token in tokens if token not in declared_sources]
+    command.append(str(source))
+    environment = os.environ.copy()
+    environment.update({key: value, "UV_CACHE_DIR": str(uv_cache)})
+    if temp_root is not None:
+        environment["TMPDIR"] = str(temp_root)
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    return command, result
 
 
 def test_guard_import_is_stdlib_only_and_allows_asyncio_local_wakeup() -> None:
@@ -808,6 +858,134 @@ def test_make_scenario_gate_uses_offline_no_sync_isolated_python(
     assert "-I" in arguments and "-S" in arguments
 
 
+def test_make_launcher_explicitly_enforces_root_mypy_config(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "untyped.py"
+    source.write_text(
+        "def missing_annotations(value):\n    return value\n",
+        encoding="utf-8",
+    )
+
+    command, result = _scenario_typecheck_invocation(
+        source,
+        uv_cache=tmp_path / "uv-cache",
+    )
+
+    assert result.returncode == 1, result.stdout.decode("utf-8", errors="replace")
+    assert b"no-untyped-def" in result.stdout + result.stderr
+    assert command.count("--config-file") == 1
+    config_index = command.index("--config-file")
+    assert command[config_index + 1] == str(ROOT / "pyproject.toml")
+    assert command.count("--no-incremental") == 1
+    assert command.count("--cache-dir") == 1
+    cache_index = command.index("--cache-dir")
+    assert command[cache_index + 1] == os.devnull
+    assert command.count("--no-fast-exit") == 1
+
+
+def test_make_launcher_does_not_modify_retained_site_mypy_cache(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "typed.py"
+    source.write_text("VALUE: int = 1\n", encoding="utf-8")
+    site_cache = (
+        ROOT
+        / ".venv/lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages/.mypy_cache"
+    )
+    preserved_cache = site_cache.with_name(f".mypy_cache.tuntun-preserved-{tmp_path.name}")
+    assert not preserved_cache.exists()
+    if site_cache.exists():
+        site_cache.rename(preserved_cache)
+    site_cache.mkdir()
+    sentinel = site_cache / "sentinel"
+    sentinel.write_bytes(b"unchanged")
+    before = tuple(
+        (path.relative_to(site_cache).as_posix(), path.stat().st_mtime_ns, path.read_bytes())
+        for path in sorted(site_cache.rglob("*"))
+        if path.is_file()
+    )
+    try:
+        _command, result = _scenario_typecheck_invocation(
+            source,
+            uv_cache=tmp_path / "uv-cache",
+        )
+        after = tuple(
+            (path.relative_to(site_cache).as_posix(), path.stat().st_mtime_ns, path.read_bytes())
+            for path in sorted(site_cache.rglob("*"))
+            if path.is_file()
+        )
+
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+        assert after == before
+    finally:
+        shutil.rmtree(site_cache)
+        if preserved_cache.exists():
+            preserved_cache.rename(site_cache)
+
+
+@pytest.mark.parametrize(
+    ("source_text", "expected_returncode"),
+    (("VALUE: int = 1\n", 0), ("def missing_annotations(value):\n    return value\n", 1)),
+)
+def test_make_launcher_cleans_retained_config_after_every_result(
+    tmp_path: Path,
+    source_text: str,
+    expected_returncode: int,
+) -> None:
+    source = tmp_path / "source.py"
+    source.write_text(source_text, encoding="utf-8")
+    temp_root = tmp_path / "tmp"
+    temp_root.mkdir()
+
+    _command, result = _scenario_typecheck_invocation(
+        source,
+        uv_cache=tmp_path / "uv-cache",
+        temp_root=temp_root,
+    )
+
+    assert result.returncode == expected_returncode
+    assert tuple(temp_root.glob("tuntun-mypy-config.*")) == ()
+
+
+def test_isolated_launcher_snapshots_the_validated_root_config(
+    tmp_path: Path,
+) -> None:
+    import importlib.util
+
+    launcher = ROOT / "scripts/run_isolated_module.py"
+    spec = importlib.util.spec_from_file_location("_isolated_module_retained_config", launcher)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    config = repository / "pyproject.toml"
+    config.write_text("[tool.mypy]\nstrict = true\n", encoding="utf-8")
+    arguments = [
+        "launcher",
+        "--config-file",
+        str(config),
+        "--no-incremental",
+        "--cache-dir",
+        os.devnull,
+        "--no-fast-exit",
+    ]
+    config_index = arguments.index("--config-file") + 1
+
+    with module._retained_mypy_config(repository, arguments):
+        retained_path = Path(arguments[config_index])
+        assert retained_path != config
+        config.rename(repository / "pyproject.original.toml")
+        config.write_text("[tool.mypy]\nstrict = false\n", encoding="utf-8")
+        assert retained_path.read_text(encoding="utf-8") == "[tool.mypy]\nstrict = true\n"
+
+    assert arguments[config_index] == str(config)
+    assert not retained_path.exists()
+
+
 def test_isolated_module_retains_validated_site_root_through_package_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -827,6 +1005,8 @@ def test_isolated_module_retains_validated_site_root_through_package_execution(
     executable = repository / ".venv/bin/python"
     executable.parent.mkdir(parents=True)
     executable.symlink_to(sys.executable)
+    config = repository / "pyproject.toml"
+    config.write_text("[tool.mypy]\nstrict = true\n", encoding="utf-8")
     site_packages = (
         repository
         / ".venv/lib"
@@ -856,7 +1036,20 @@ def test_isolated_module_retains_validated_site_root_through_package_execution(
     safe_path = [item for item in sys.path if "site-packages" not in item and str(ROOT) not in item]
     monkeypatch.setattr(module, "__file__", str(fake_launcher))
     monkeypatch.setattr(module.sys, "executable", str(executable))
-    monkeypatch.setattr(module.sys, "argv", [str(fake_launcher), "mypy"])
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            str(fake_launcher),
+            "mypy",
+            "--config-file",
+            str(config),
+            "--no-incremental",
+            "--cache-dir",
+            os.devnull,
+            "--no-fast-exit",
+        ],
+    )
     monkeypatch.setattr(module.sys, "path", safe_path)
     real_import_module = module.importlib.import_module
     moved_site = site_packages.with_name("site-packages.original")
