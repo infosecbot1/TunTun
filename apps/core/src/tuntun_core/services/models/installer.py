@@ -13,11 +13,14 @@ from urllib.parse import urlsplit
 
 from .fs import (
     OwnedDirectory,
+    _mark_publication_uncertain,
+    _resolve_publication_uncertainty,
     atomic_publish_dir_noreplace,
     close_preserving_primary,
     entry_exists_at,
     hash_exact_fd,
     open_regular_at,
+    publication_is_uncertain,
     recovery_pending_name,
 )
 from .network import PinnedHttpsTransport
@@ -171,7 +174,7 @@ class ModelInstaller:
         create: bool,
     ) -> int:
         name = recovery_pending_name(revision)
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL if create else os.O_RDONLY
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL if create else os.O_RDWR
         descriptor = open_regular_at(
             model,
             name,
@@ -180,18 +183,17 @@ class ModelInstaller:
             expected_mode=0o600,
         )
         try:
-            if os.fstat(descriptor).st_size != 0:
-                raise PermissionError("unsafe model recovery marker")
-            if create:
-                os.fsync(descriptor)
-                model.fsync()
+            ModelInstaller._require_recovery_marker(model, revision, descriptor)
+            os.fsync(descriptor)
+            model.fsync()
+            ModelInstaller._require_recovery_marker(model, revision, descriptor)
             return descriptor
         except BaseException as error:
             close_preserving_primary(descriptor, os.close, error)
             raise
 
     @staticmethod
-    def _clear_recovery_marker(
+    def _require_recovery_marker(
         model: OwnedDirectory,
         revision: str,
         descriptor: int,
@@ -208,8 +210,19 @@ class ModelInstaller:
             or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)
         ):
             raise PermissionError("unsafe model recovery marker")
+
+    @staticmethod
+    def _clear_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        descriptor: int,
+    ) -> None:
+        name = recovery_pending_name(revision)
+        ModelInstaller._require_recovery_marker(model, revision, descriptor)
+        _mark_publication_uncertain(model, revision)
         os.unlink(name, dir_fd=model.fd)
         model.fsync()
+        _resolve_publication_uncertainty(model, revision)
 
     def _reuse_or_recover_revision(
         self,
@@ -296,7 +309,11 @@ class ModelInstaller:
                 activated = ActivatedModel.from_manifest(entry, tuple(handles))
                 handles.clear()
         except BaseException as error:
-            if sealed_for_recovery and not transaction_complete:
+            if (
+                sealed_for_recovery
+                and not transaction_complete
+                and not publication_is_uncertain(model, entry.revision)
+            ):
                 try:
                     revision.chmod(0o700)
                     revision.fsync()

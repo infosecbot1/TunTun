@@ -8,6 +8,7 @@ import hashlib
 import os
 import stat
 import sys
+import threading
 import time
 from collections.abc import Callable, Hashable, Iterator
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _DESCRIPTOR_CLEANUP_NOTE = "additional descriptor cleanup failure"
+_UNCERTAIN_PUBLICATIONS: set[tuple[int, int, str]] = set()
+_UNCERTAIN_PUBLICATIONS_LOCK = threading.Lock()
 
 
 def close_preserving_primary[T](
@@ -57,6 +60,28 @@ def entry_exists_at(directory: OwnedDirectory, name: str) -> bool:
     except OSError as error:
         raise PermissionError("unsafe model filesystem path") from error
     return True
+
+
+def _publication_uncertainty_key(
+    model: OwnedDirectory,
+    revision: str,
+) -> tuple[int, int, str]:
+    return model.identity.device, model.identity.inode, revision
+
+
+def _mark_publication_uncertain(model: OwnedDirectory, revision: str) -> None:
+    with _UNCERTAIN_PUBLICATIONS_LOCK:
+        _UNCERTAIN_PUBLICATIONS.add(_publication_uncertainty_key(model, revision))
+
+
+def _resolve_publication_uncertainty(model: OwnedDirectory, revision: str) -> None:
+    with _UNCERTAIN_PUBLICATIONS_LOCK:
+        _UNCERTAIN_PUBLICATIONS.discard(_publication_uncertainty_key(model, revision))
+
+
+def publication_is_uncertain(model: OwnedDirectory, revision: str) -> bool:
+    with _UNCERTAIN_PUBLICATIONS_LOCK:
+        return _publication_uncertainty_key(model, revision) in _UNCERTAIN_PUBLICATIONS
 
 
 def _effective_user_id() -> int:

@@ -19,6 +19,7 @@ from .fs import (
     entry_exists_at,
     hash_exact_fd,
     open_regular_at,
+    publication_is_uncertain,
     read_bounded_strict_yaml,
     recovery_pending_name,
 )
@@ -499,6 +500,8 @@ class ModelRegistry:
             directories.append(root)
             model = root.child(entry.model_id)
             directories.append(model)
+            if publication_is_uncertain(model, entry.revision):
+                raise PermissionError("model revision commit is uncertain")
             pending_name = recovery_pending_name(entry.revision)
             if entry_exists_at(model, pending_name):
                 raise PermissionError("model revision recovery is pending")
@@ -521,6 +524,8 @@ class ModelRegistry:
                 raise PermissionError("unsafe model filesystem revision")
             if entry_exists_at(model, pending_name):
                 raise PermissionError("model revision recovery is pending")
+            if publication_is_uncertain(model, entry.revision):
+                raise PermissionError("model revision commit is uncertain")
             return ActivatedModel.from_manifest(entry, tuple(handles))
         except BaseException as error:
             for handle in handles:
