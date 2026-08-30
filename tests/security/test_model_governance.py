@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import errno
 import fcntl
+import gc
 import inspect
+import io
 import os
 import socket
 import stat
@@ -29,6 +33,35 @@ from tuntun_core.services.models.registry import (
     VerifiedModelFile,
 )
 from typer.testing import CliRunner
+
+
+def _fresh_activation_probe(governed_model_case: object) -> subprocess.CompletedProcess[str]:
+    program = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from tuntun_core.services.models.registry import ModelRegistry\n"
+        "registry=ModelRegistry.load(Path(sys.argv[1]),model_root=Path(sys.argv[2]))\n"
+        "try:\n"
+        "    activated=registry.activate(sys.argv[3])\n"
+        "except RuntimeError:\n"
+        "    raise SystemExit(1)\n"
+        "activated.close()\n"
+        "raise SystemExit(0)\n"
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            program,
+            str(governed_model_case.manifest),  # type: ignore[attr-defined]
+            str(governed_model_case.model_root),  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
 
 
 def test_floating_revision_and_pickle_are_rejected(tmp_path: Path) -> None:
@@ -1081,6 +1114,209 @@ def test_install_cleanup_failure_closes_unreturned_activation_once(
             real_activated_close(candidate)
 
 
+@pytest.mark.parametrize("entrypoint", ("installer", "registry"))
+@pytest.mark.parametrize(
+    "exception_type",
+    (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError),
+)
+def test_committed_reuse_preserves_control_flow_and_immutable_state(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    exception_type: type[BaseException],
+) -> None:
+    installed = governed_model_case.install()  # type: ignore[attr-defined]
+    installed.close()
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = exception_type(f"scripted {entrypoint} committed reuse interruption")
+
+    def interrupt_activation(*_args: object, **_kwargs: object) -> None:
+        raise primary
+
+    monkeypatch.setattr(
+        ModelRegistry,
+        "_activate_from_open_model",
+        staticmethod(interrupt_activation),
+    )
+
+    caught: BaseException | None = None
+    try:
+        if entrypoint == "installer":
+            unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+                governed_model_case.model_id  # type: ignore[attr-defined]
+            )
+        else:
+            unexpected = governed_model_case.registry.activate(  # type: ignore[attr-defined]
+                governed_model_case.model_id  # type: ignore[attr-defined]
+            )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+
+    assert caught is primary
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("entrypoint", ("installer", "registry"))
+def test_private_activation_return_interruption_closes_transaction_owned_result(
+    governed_model_case: object,
+    entrypoint: str,
+) -> None:
+    installed = governed_model_case.install()  # type: ignore[attr-defined]
+    installed.close()
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt(f"scripted {entrypoint} activation return interruption")
+    traced_method = ModelRegistry._activate_from_open_model
+    candidates: list[ActivatedModel] = []
+    artifact_descriptors: list[int] = []
+    trace_reached = False
+
+    def interrupt_activation_return(
+        frame: object,
+        event: str,
+        argument: object,
+    ) -> object:
+        nonlocal trace_reached
+        if event == "return" and frame.f_code is traced_method.__code__:  # type: ignore[attr-defined]
+            trace_reached = True
+            candidate = argument
+            if not isinstance(candidate, ActivatedModel):
+                assert argument is None
+                owner_slot = frame.f_locals["activated_slot"]  # type: ignore[attr-defined]
+                candidate = owner_slot.owner
+            assert isinstance(candidate, ActivatedModel)
+            candidates.append(candidate)
+            artifact_descriptors.extend(item.fd for item in candidate.files)
+            raise primary
+        return interrupt_activation_return
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_activation_return)
+        if entrypoint == "installer":
+            unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+                governed_model_case.model_id  # type: ignore[attr-defined]
+            )
+        else:
+            unexpected = governed_model_case.registry.activate(  # type: ignore[attr-defined]
+                governed_model_case.model_id  # type: ignore[attr-defined]
+            )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+    finally:
+        sys.settrace(previous_trace)
+
+    leaked_descriptors: list[int] = []
+    for descriptor in artifact_descriptors:
+        try:
+            os.fstat(descriptor)
+        except OSError as error:
+            assert error.errno == errno.EBADF
+        else:
+            leaked_descriptors.append(descriptor)
+    for candidate in candidates:
+        candidate.close()
+    if caught is not None:
+        caught.__traceback__ = None
+    gc.collect()
+
+    assert caught is primary
+    assert trace_reached
+    assert len(candidates) == 1
+    assert len(artifact_descriptors) == 1
+    assert leaked_descriptors == []
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_private_reuse_return_interruption_closes_transaction_owned_result(
+    governed_model_case: object,
+) -> None:
+    installed = governed_model_case.install()  # type: ignore[attr-defined]
+    installed.close()
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt("scripted private reuse return interruption")
+    traced_method = ModelInstaller._reuse_or_recover_revision
+    candidates: list[ActivatedModel] = []
+    artifact_descriptors: list[int] = []
+    trace_reached = False
+
+    def interrupt_reuse_return(
+        frame: object,
+        event: str,
+        argument: object,
+    ) -> object:
+        nonlocal trace_reached
+        if event == "return" and frame.f_code is traced_method.__code__:  # type: ignore[attr-defined]
+            trace_reached = True
+            candidate = argument
+            if not isinstance(candidate, ActivatedModel):
+                assert argument is True
+                owner_slot = frame.f_locals["activated_slot"]  # type: ignore[attr-defined]
+                candidate = owner_slot.owner
+            assert isinstance(candidate, ActivatedModel)
+            candidates.append(candidate)
+            artifact_descriptors.extend(item.fd for item in candidate.files)
+            raise primary
+        return interrupt_reuse_return
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_reuse_return)
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+    finally:
+        sys.settrace(previous_trace)
+
+    leaked_descriptors: list[int] = []
+    for descriptor in artifact_descriptors:
+        try:
+            os.fstat(descriptor)
+        except OSError as error:
+            assert error.errno == errno.EBADF
+        else:
+            leaked_descriptors.append(descriptor)
+    for candidate in candidates:
+        candidate.close()
+    if caught is not None:
+        caught.__traceback__ = None
+    gc.collect()
+
+    assert caught is primary
+    assert trace_reached
+    assert len(candidates) == 1
+    assert len(artifact_descriptors) == 1
+    assert leaked_descriptors == []
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
 def test_unrelated_installed_model_activates_while_download_is_paused(
     governed_model_case: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -1384,6 +1620,1000 @@ def test_recovery_marker_inode_is_durable_before_atomic_read_only_authority(
 
 
 @pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_atomic_marker_publish_rejects_source_swap_without_unsealing_ambiguity(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    displaced_path = marker_path.with_name(f".displaced-prepared-marker-{phase}")
+    real_atomic_publish = installer_module.atomic_publish_dir_noreplace
+    prepared_identity: tuple[int, int] | None = None
+    replacement_identity: tuple[int, int] | None = None
+
+    def swap_source_immediately_before_native_publish(
+        parent: OwnedDirectory,
+        source: str,
+        target: str,
+        **kwargs: object,
+    ) -> None:
+        nonlocal prepared_identity, replacement_identity
+        if source == marker_path.name and target == proof_path.name:
+            prepared = marker_path.stat(follow_symlinks=False)
+            prepared_identity = (prepared.st_dev, prepared.st_ino)
+            marker_path.rename(displaced_path)
+            marker_path.write_bytes(b"")
+            marker_path.chmod(0o400)
+            replacement = marker_path.stat(follow_symlinks=False)
+            replacement_identity = (replacement.st_dev, replacement.st_ino)
+        real_atomic_publish(parent, source, target, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        installer_module,
+        "atomic_publish_dir_noreplace",
+        swap_source_immediately_before_native_publish,
+    )
+
+    caught: BaseException | None = None
+    try:
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert prepared_identity is not None
+    assert replacement_identity is not None
+    assert prepared_identity != replacement_identity
+    assert fresh.returncode == 1, fresh.stderr
+    assert isinstance(caught, PermissionError)
+    assert getattr(caught, "__notes__", []) == ["additional publication commit resolution failure"]
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    assert marker_path.exists()
+    assert not proof_path.exists()
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+@pytest.mark.parametrize("mutation", ("mode", "size", "link"))
+def test_atomic_marker_publish_revalidates_exact_source_properties_at_native_boundary(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    mutation: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    linked_path = marker_path.with_name(f".linked-prepared-marker-{phase}")
+    real_atomic_publish = installer_module.atomic_publish_dir_noreplace
+    real_cdll = fs_module.ctypes.CDLL
+    native_libc = real_cdll(None, use_errno=True)
+    native_name = "renameatx_np" if sys.platform == "darwin" else "renameat2"
+    real_native_publish = getattr(native_libc, native_name)
+    transaction_witness: object | None = None
+    marker_native_calls = 0
+
+    def track_native_publish(*args: object) -> int:
+        nonlocal marker_native_calls
+        if args[1] == os.fsencode(marker_path.name):
+            marker_native_calls += 1
+        return real_native_publish(*args)
+
+    class TrackedLibc:
+        def __getattr__(self, name: str) -> object:
+            if name == native_name:
+                return track_native_publish
+            return getattr(native_libc, name)
+
+    def mutate_source_immediately_before_native_publish(
+        parent: OwnedDirectory,
+        source: str,
+        target: str,
+        **kwargs: object,
+    ) -> None:
+        nonlocal transaction_witness
+        if source == marker_path.name and target == proof_path.name:
+            transaction_witness = kwargs.get("witness")
+            descriptor = kwargs.get("expected_source_fd")
+            assert isinstance(descriptor, int)
+            if mutation == "mode":
+                marker_path.chmod(0o600)
+            elif mutation == "size":
+                assert os.pwrite(descriptor, b"x", 0) == 1
+            else:
+                os.link(marker_path, linked_path)
+        real_atomic_publish(parent, source, target, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fs_module.ctypes, "CDLL", lambda *_args, **_kwargs: TrackedLibc())
+    monkeypatch.setattr(
+        installer_module,
+        "atomic_publish_dir_noreplace",
+        mutate_source_immediately_before_native_publish,
+    )
+
+    caught: BaseException | None = None
+    try:
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert isinstance(caught, PermissionError)
+    assert marker_native_calls == 0
+    assert transaction_witness is not None
+    assert transaction_witness.committed is False  # type: ignore[attr-defined]
+    assert marker_path.exists()
+    assert not proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
+    assert fresh.returncode == 1, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_exact_fallback_proves_commit_when_wrapper_does_not_forward_witness(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    real_atomic_publish = installer_module.atomic_publish_dir_noreplace
+    prepared_identity: tuple[int, int] | None = None
+
+    def publish_without_forwarding_witness(
+        parent: OwnedDirectory,
+        source: str,
+        target: str,
+        **kwargs: object,
+    ) -> None:
+        nonlocal prepared_identity
+        if source == marker_path.name and target == proof_path.name:
+            prepared = marker_path.stat(follow_symlinks=False)
+            prepared_identity = (prepared.st_dev, prepared.st_ino)
+            kwargs.pop("witness", None)
+        real_atomic_publish(parent, source, target, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        installer_module,
+        "atomic_publish_dir_noreplace",
+        publish_without_forwarding_witness,
+    )
+
+    activated = governed_model_case._installer().install(  # type: ignore[attr-defined]
+        governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    activated.close()
+
+    assert prepared_identity is not None
+    proof = proof_path.stat(follow_symlinks=False)
+    assert (proof.st_dev, proof.st_ino) == prepared_identity
+    assert not marker_path.exists()
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_conforming_publish_return_interruption_propagates_after_commit(
+    governed_model_case: object,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt("scripted conforming publish return interruption")
+    traced_method = fs_module.atomic_publish_dir_noreplace
+    trace_reached = False
+
+    def interrupt_committed_return(
+        frame: object,
+        event: str,
+        argument: object,
+    ) -> object:
+        nonlocal trace_reached
+        if (
+            event == "return"
+            and frame.f_code is traced_method.__code__  # type: ignore[attr-defined]
+            and frame.f_locals.get("source") == marker_path.name  # type: ignore[attr-defined]
+            and frame.f_locals.get("target") == proof_path.name  # type: ignore[attr-defined]
+        ):
+            trace_reached = True
+            assert argument is None
+            witness = frame.f_locals["witness"]  # type: ignore[attr-defined]
+            assert witness is not None
+            assert witness.committed  # type: ignore[attr-defined]
+            raise primary
+        return interrupt_committed_return
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_committed_return)
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+    finally:
+        sys.settrace(previous_trace)
+
+    assert caught is primary
+    assert trace_reached
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_nonforwarding_publish_control_flow_interruption_propagates_after_fallback(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt("scripted non-forwarding publish interruption")
+    real_atomic_publish = installer_module.atomic_publish_dir_noreplace
+    interruption_injected = False
+
+    def publish_without_witness_then_interrupt(
+        parent: OwnedDirectory,
+        source: str,
+        target: str,
+        **kwargs: object,
+    ) -> None:
+        nonlocal interruption_injected
+        if source == marker_path.name and target == proof_path.name:
+            kwargs.pop("witness", None)
+            real_atomic_publish(parent, source, target, **kwargs)  # type: ignore[arg-type]
+            interruption_injected = True
+            raise primary
+        real_atomic_publish(parent, source, target, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        installer_module,
+        "atomic_publish_dir_noreplace",
+        publish_without_witness_then_interrupt,
+    )
+
+    caught: BaseException | None = None
+    try:
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+
+    assert caught is primary
+    assert interruption_injected
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_exception_path_reresolves_commit_before_fallback_witness_rollback(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt("scripted fallback witness assignment interruption")
+    real_atomic_publish = installer_module.atomic_publish_dir_noreplace
+    traced_method = ModelInstaller._publish_prepared_recovery_marker
+    source_lines, first_line = inspect.getsourcelines(traced_method)
+    target_offset = next(
+        index
+        for index, line in enumerate(source_lines)
+        if line.strip() == "witness.committed = True"
+    )
+    target_line = first_line + target_offset
+    trace_reached = False
+
+    def publish_without_forwarding_witness(
+        parent: OwnedDirectory,
+        source: str,
+        target: str,
+        **kwargs: object,
+    ) -> None:
+        if source == marker_path.name and target == proof_path.name:
+            kwargs.pop("witness", None)
+        real_atomic_publish(parent, source, target, **kwargs)  # type: ignore[arg-type]
+
+    def interrupt_fallback_witness_assignment(
+        frame: object,
+        event: str,
+        _argument: object,
+    ) -> object:
+        nonlocal trace_reached
+        if (
+            not trace_reached
+            and event == "line"
+            and frame.f_code is traced_method.__code__  # type: ignore[attr-defined]
+            and frame.f_lineno == target_line  # type: ignore[attr-defined]
+        ):
+            trace_reached = True
+            assert frame.f_locals["witness"].committed is False  # type: ignore[attr-defined]
+            raise primary
+        return interrupt_fallback_witness_assignment
+
+    monkeypatch.setattr(
+        installer_module,
+        "atomic_publish_dir_noreplace",
+        publish_without_forwarding_witness,
+    )
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_fallback_witness_assignment)
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+    finally:
+        sys.settrace(previous_trace)
+
+    assert caught is primary
+    assert trace_reached
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_repeated_witness_interruption_preserves_inconclusive_sealed_state(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt("scripted first witness interruption")
+    secondary = KeyboardInterrupt("scripted repeated witness interruption")
+    real_atomic_publish = installer_module.atomic_publish_dir_noreplace
+
+    class InterruptingWitness:
+        def __init__(self) -> None:
+            self.assignment_attempts = 0
+
+        @property
+        def committed(self) -> bool:
+            return False
+
+        @committed.setter
+        def committed(self, _value: bool) -> None:
+            self.assignment_attempts += 1
+            if self.assignment_attempts == 1:
+                raise primary
+            raise secondary
+
+    witness = InterruptingWitness()
+
+    def publish_without_forwarding_witness(
+        parent: OwnedDirectory,
+        source: str,
+        target: str,
+        **kwargs: object,
+    ) -> None:
+        if source == marker_path.name and target == proof_path.name:
+            kwargs.pop("witness", None)
+        real_atomic_publish(parent, source, target, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(installer_module, "AtomicPublishWitness", lambda: witness)
+    monkeypatch.setattr(
+        installer_module,
+        "atomic_publish_dir_noreplace",
+        publish_without_forwarding_witness,
+    )
+
+    caught: BaseException | None = None
+    try:
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+
+    assert caught is primary
+    assert witness.assignment_attempts == 2
+    assert getattr(primary, "__notes__", []) == ["additional publication commit resolution failure"]
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_post_helper_interruption_uses_transaction_owned_commit_witness(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt("scripted post-helper interruption")
+    real_publish = ModelInstaller._publish_prepared_recovery_marker
+    transaction_witness: object | None = None
+
+    def publish_then_interrupt(*args: object, **kwargs: object) -> None:
+        nonlocal transaction_witness
+        transaction_witness = kwargs.get("witness")
+        real_publish(*args, **kwargs)  # type: ignore[arg-type]
+        raise primary
+
+    monkeypatch.setattr(
+        ModelInstaller,
+        "_publish_prepared_recovery_marker",
+        staticmethod(publish_then_interrupt),
+    )
+
+    caught: BaseException | None = None
+    try:
+        governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+
+    assert caught is primary
+    assert transaction_witness is not None
+    assert transaction_witness.committed is True  # type: ignore[attr-defined]
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_marker_descriptor_close_failure_after_commit_does_not_roll_back(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = OSError("scripted committed marker descriptor close failure")
+    real_acquire_marker = ModelInstaller._acquire_recovery_marker
+    owner_type = installer_module._PublicationMarkerOwner
+    real_owner_close = owner_type.close
+    real_close = os.close
+    marker_descriptors: set[int] = set()
+    marker_identity: tuple[int, int] | None = None
+    close_injected = False
+    marker_close_argument: object | None = None
+    marker_close_attempts = 0
+    replacement_fd: int | None = None
+
+    def capture_marker(
+        model: OwnedDirectory,
+        revision: str,
+        owner_slot: installer_module._PublicationMarkerOwnerSlot,
+        *,
+        create: bool,
+    ) -> None:
+        nonlocal marker_identity
+        real_acquire_marker(
+            model,
+            revision,
+            owner_slot,
+            create=create,
+        )
+        assert owner_slot.owner is not None
+        descriptor = owner_slot.owner.fileno()
+        identity = os.fstat(descriptor)
+        marker_descriptors.add(descriptor)
+        marker_identity = (identity.st_dev, identity.st_ino)
+
+    def fail_committed_marker_close(owner: object) -> None:
+        nonlocal close_injected, marker_close_argument, marker_close_attempts, replacement_fd
+        descriptor = None if owner.closed else owner.fileno()  # type: ignore[attr-defined]
+        target = descriptor in marker_descriptors or owner is marker_close_argument
+        if target and descriptor is not None:
+            marker_close_argument = owner
+            marker_close_attempts += 1
+        first_target = target and not close_injected
+        released_fd = descriptor if first_target else None
+        real_owner_close(owner)  # type: ignore[arg-type]
+        if first_target:
+            assert released_fd is not None
+            replacement_fd = os.open(proof_path, os.O_RDONLY)
+            assert replacement_fd == released_fd
+            close_injected = True
+            raise primary
+
+    monkeypatch.setattr(
+        ModelInstaller,
+        "_acquire_recovery_marker",
+        staticmethod(capture_marker),
+    )
+    monkeypatch.setattr(owner_type, "close", fail_committed_marker_close)
+
+    caught: BaseException | None = None
+    try:
+        governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+
+    replacement_survived = False
+    if replacement_fd is not None:
+        try:
+            os.fstat(replacement_fd)
+        except OSError as error:
+            assert error.errno == errno.EBADF
+        else:
+            replacement_survived = True
+            real_close(replacement_fd)
+
+    assert caught is primary
+    assert close_injected
+    assert marker_close_attempts == 1
+    assert marker_identity is not None
+    proof = proof_path.stat(follow_symlinks=False)
+    assert (proof.st_dev, proof.st_ino) == marker_identity
+    assert not marker_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    assert replacement_fd is not None
+    assert replacement_survived
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+@pytest.mark.parametrize("timing", ("before", "after"))
+def test_committed_marker_close_fault_has_explicit_descriptor_ownership(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    timing: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt(f"scripted {timing}-close interruption")
+    real_acquire_marker = ModelInstaller._acquire_recovery_marker
+    owner_type = installer_module._PublicationMarkerOwner
+    real_owner_close = owner_type.close
+    marker_descriptors: set[int] = set()
+    marker_close_attempts: list[int] = []
+    hook_reached = False
+
+    def capture_marker(
+        model: OwnedDirectory,
+        revision: str,
+        owner_slot: installer_module._PublicationMarkerOwnerSlot,
+        *,
+        create: bool,
+    ) -> None:
+        real_acquire_marker(
+            model,
+            revision,
+            owner_slot,
+            create=create,
+        )
+        assert owner_slot.owner is not None
+        descriptor = owner_slot.owner.fileno()
+        marker_descriptors.add(descriptor)
+
+    def track_marker_close(owner: object) -> None:
+        if not owner.closed:  # type: ignore[attr-defined]
+            descriptor = owner.fileno()  # type: ignore[attr-defined]
+            if descriptor in marker_descriptors:
+                marker_close_attempts.append(descriptor)
+        real_owner_close(owner)  # type: ignore[arg-type]
+
+    def interrupt_close_boundary(point: str) -> None:
+        nonlocal hook_reached
+        if point == f"{timing}_publication_marker_close":
+            hook_reached = True
+            raise primary
+
+    monkeypatch.setattr(
+        ModelInstaller,
+        "_acquire_recovery_marker",
+        staticmethod(capture_marker),
+    )
+    monkeypatch.setattr(owner_type, "close", track_marker_close)
+
+    caught: BaseException | None = None
+    try:
+        unexpected = governed_model_case._installer(  # type: ignore[attr-defined]
+            fault_hook=interrupt_close_boundary
+        ).install(governed_model_case.model_id)  # type: ignore[attr-defined]
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+
+    assert caught is primary
+    assert hook_reached
+    assert len(marker_close_attempts) == 1
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+@pytest.mark.parametrize("timing", ("before_call", "after_call"))
+def test_trace_interruption_at_committed_marker_close_keeps_descriptor_owned(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    timing: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt(f"scripted trace interruption {timing}")
+    real_acquire_marker = ModelInstaller._acquire_recovery_marker
+    real_close = os.close
+    marker_descriptors: list[int] = []
+    traced_method = (
+        ModelInstaller._reuse_or_recover_revision if phase == "recovery" else ModelInstaller.install
+    )
+    source, first_line = inspect.getsourcelines(traced_method)
+    target_text = (
+        "marker_owner.close()"
+        if timing == "before_call"
+        else 'self._fault_hook("after_publication_marker_close")'
+    )
+    target_offset = next(index for index, line in enumerate(source) if target_text in line)
+    target_line = first_line + target_offset
+    trace_reached = False
+
+    def capture_marker(
+        model: OwnedDirectory,
+        revision: str,
+        owner_slot: installer_module._PublicationMarkerOwnerSlot,
+        *,
+        create: bool,
+    ) -> None:
+        real_acquire_marker(
+            model,
+            revision,
+            owner_slot,
+            create=create,
+        )
+        assert owner_slot.owner is not None
+        descriptor = owner_slot.owner.fileno()
+        marker_descriptors.append(descriptor)
+
+    def interrupt_at_close_line(
+        frame: object,
+        event: str,
+        _argument: object,
+    ) -> object:
+        nonlocal trace_reached
+        if (
+            event == "line"
+            and frame.f_code is traced_method.__code__  # type: ignore[attr-defined]
+            and frame.f_lineno == target_line  # type: ignore[attr-defined]
+        ):
+            trace_reached = True
+            raise primary
+        return interrupt_at_close_line
+
+    monkeypatch.setattr(
+        ModelInstaller,
+        "_acquire_recovery_marker",
+        staticmethod(capture_marker),
+    )
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_at_close_line)
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+    finally:
+        sys.settrace(previous_trace)
+
+    assert len(marker_descriptors) == 1
+    descriptor_was_open = True
+    try:
+        os.fstat(marker_descriptors[0])
+    except OSError as error:
+        assert error.errno == errno.EBADF
+        descriptor_was_open = False
+    if descriptor_was_open:
+        real_close(marker_descriptors[0])
+
+    assert caught is primary
+    assert trace_reached
+    assert not descriptor_was_open
+    assert not marker_path.exists()
+    assert proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    fresh = _fresh_activation_probe(governed_model_case)
+    assert fresh.returncode == 0, fresh.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_publication_marker_owner_has_no_python_descriptor_transfer_callback() -> None:
+    owner_type = installer_module._PublicationMarkerOwner
+
+    assert issubclass(owner_type, io.FileIO)
+    assert owner_type.close is io.FileIO.close
+    assert not any("__index__" in base.__dict__ for base in owner_type.__mro__)
+    assert not hasattr(ModelInstaller, "_open_recovery_marker")
+    assert not hasattr(ModelInstaller, "_open_recovery_marker_owner")
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_trace_interruption_at_marker_slot_acquisition_return_closes_descriptor(
+    governed_model_case: object,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    primary = KeyboardInterrupt("scripted marker-slot acquisition interruption")
+    traced_method = ModelInstaller._acquire_recovery_marker
+    marker_descriptors: list[int] = []
+    trace_reached = False
+
+    def interrupt_return(
+        frame: object,
+        event: str,
+        argument: object,
+    ) -> object:
+        nonlocal trace_reached
+        if event == "return" and frame.f_code is traced_method.__code__:  # type: ignore[attr-defined]
+            trace_reached = True
+            assert argument is None
+            owner_slot = frame.f_locals["owner_slot"]  # type: ignore[attr-defined]
+            owner = owner_slot.owner
+            assert owner is not None
+            marker_descriptors.append(owner.fileno())
+            raise primary
+        return interrupt_return
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_return)
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+    finally:
+        sys.settrace(previous_trace)
+
+    assert caught is primary
+    assert trace_reached
+    assert len(marker_descriptors) == 1
+    descriptor = marker_descriptors[0]
+    try:
+        os.fstat(descriptor)
+    except OSError as error:
+        assert error.errno == errno.EBADF
+    else:
+        os.close(descriptor)
+        raise AssertionError("marker descriptor remained open in retained exception traceback")
+
+    caught.__traceback__ = None
+    gc.collect()
+    assert marker_path.exists()
+    assert not proof_path.exists()
+    assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("create", (True, False), ids=("fresh", "recovery"))
+def test_fileio_marker_opener_uses_exact_modes_and_cloexec(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    create: bool,
+) -> None:
+    if not create:
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+        governed_model_case.create_interrupted_recovery_marker()  # type: ignore[attr-defined]
+    marker_name = governed_model_case.recovery_marker_path.name  # type: ignore[attr-defined]
+    real_open = os.open
+    observed: list[tuple[int, int, int, bool]] = []
+
+    def capture_marker_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == marker_name and dir_fd is not None:
+            observed.append((flags, mode, dir_fd, os.get_inheritable(descriptor)))
+        return descriptor
+
+    monkeypatch.setattr(os, "open", capture_marker_open)
+
+    activated = governed_model_case._installer().install(  # type: ignore[attr-defined]
+        governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    activated.close()
+
+    assert len(observed) == 1
+    flags, mode, dir_fd, inheritable = observed[0]
+    assert flags & os.O_ACCMODE == (os.O_RDWR if create else os.O_RDONLY)
+    assert bool(flags & os.O_CREAT) is create
+    assert bool(flags & os.O_EXCL) is create
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if cloexec:
+        assert flags & cloexec
+    assert mode == 0o600
+    assert dir_fd >= 0
+    assert not inheritable
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("mutation", ("symlink", "fifo"))
+def test_fileio_recovery_marker_opener_rejects_hostile_names_without_blocking(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_seal"
+    )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    if mutation == "symlink":
+        target = marker_path.with_name(".attacker-marker-target")
+        target.write_bytes(b"")
+        target.chmod(0o600)
+        marker_path.symlink_to(target.name)
+    elif mutation == "fifo":
+        os.mkfifo(marker_path, mode=0o600)
+    else:  # pragma: no cover - closed parametrization
+        raise AssertionError(f"unknown hostile marker mutation: {mutation}")
+    real_open = os.open
+    marker_open_attempts = 0
+
+    def track_marker_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal marker_open_attempts
+        if path == marker_path.name and dir_fd is not None:
+            marker_open_attempts += 1
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", track_marker_open)
+
+    started = time.monotonic()
+    with pytest.raises(PermissionError):
+        governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+
+    assert time.monotonic() - started < 2
+    assert marker_open_attempts == 0
+    assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_non_linux_non_darwin_platform_rejects_renameat2_even_when_exported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    parent = OwnedDirectory.open(tmp_path)
+    renameat2_called = False
+
+    class RenameAt2OnlyLibc:
+        def renameat2(self, *_args: object) -> int:
+            nonlocal renameat2_called
+            renameat2_called = True
+            return 0
+
+    monkeypatch.setattr(fs_module.sys, "platform", "freebsd14")
+    monkeypatch.setattr(
+        fs_module.ctypes,
+        "CDLL",
+        lambda *_args, **_kwargs: RenameAt2OnlyLibc(),
+    )
+    try:
+        with pytest.raises(OSError) as caught:
+            fs_module.atomic_publish_dir_noreplace(parent, "source", "target")
+    finally:
+        parent.close()
+
+    assert caught.value.errno == errno.ENOTSUP
+    assert not renameat2_called
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
 @pytest.mark.parametrize(
     "precommit_fault",
     (
@@ -1391,7 +2621,6 @@ def test_recovery_marker_inode_is_durable_before_atomic_read_only_authority(
         "prepared_fsync",
         "prepared_parent_fsync",
         "prepared_validation",
-        "prepared_close",
         "atomic_rename",
     ),
 )
@@ -1420,7 +2649,8 @@ def test_precommit_marker_fault_stays_authoritative_when_mode_rollback_fails(
     marker_close_attempts = 0
     real_fchmod = os.fchmod
     real_fsync = os.fsync
-    real_close = os.close
+    owner_type = installer_module._PublicationMarkerOwner
+    real_owner_close = owner_type.close
     real_chmod = OwnedDirectory.chmod
     real_directory_fsync = OwnedDirectory.fsync
     real_require_marker = ModelInstaller._require_recovery_marker
@@ -1508,22 +2738,13 @@ def test_precommit_marker_fault_stays_authoritative_when_mode_rollback_fails(
             fault_injected = True
             raise primary
 
-    def fail_prepared_close(descriptor: int) -> None:
-        nonlocal fault_injected, marker_close_attempts
-        target_marker = marker_matches_descriptor(descriptor)
-        if target_marker:
-            marker_close_attempts += 1
-        target = (
-            faults_active
-            and precommit_fault == "prepared_close"
-            and target_marker
-            and stat.S_IMODE(os.fstat(descriptor).st_mode) == 0o400
-            and not fault_injected
-        )
-        real_close(descriptor)
-        if target:
-            fault_injected = True
-            raise primary
+    def track_precommit_marker_close(owner: object) -> None:
+        nonlocal marker_close_attempts
+        if not owner.closed:  # type: ignore[attr-defined]
+            descriptor = owner.fileno()  # type: ignore[attr-defined]
+            if marker_matches_descriptor(descriptor):
+                marker_close_attempts += 1
+        real_owner_close(owner)  # type: ignore[arg-type]
 
     def fail_atomic_marker_publish(
         parent: OwnedDirectory,
@@ -1552,7 +2773,7 @@ def test_precommit_marker_fault_stays_authoritative_when_mode_rollback_fails(
 
     monkeypatch.setattr(os, "fchmod", fail_prepared_mode)
     monkeypatch.setattr(os, "fsync", fail_prepared_fsync)
-    monkeypatch.setattr(os, "close", fail_prepared_close)
+    monkeypatch.setattr(owner_type, "close", track_precommit_marker_close)
     monkeypatch.setattr(
         ModelInstaller,
         "_require_recovery_marker",
@@ -1943,7 +3164,7 @@ def test_postcommit_directory_close_failure_keeps_marker_inode_authoritative_as_
     fault_injected = False
     activation_close_attempts = 0
     artifact_descriptors: list[int] = []
-    real_open_marker = ModelInstaller._open_recovery_marker
+    real_acquire_marker = ModelInstaller._acquire_recovery_marker
     real_directory_close = OwnedDirectory.close
     real_activated_close = ActivatedModel.close
     real_from_manifest = ActivatedModel.from_manifest
@@ -1951,14 +3172,21 @@ def test_postcommit_directory_close_failure_keeps_marker_inode_authoritative_as_
     def capture_marker(
         model: OwnedDirectory,
         revision: str,
+        owner_slot: installer_module._PublicationMarkerOwnerSlot,
         *,
         create: bool,
-    ) -> int:
+    ) -> None:
         nonlocal marker_identity
-        descriptor = real_open_marker(model, revision, create=create)
+        real_acquire_marker(
+            model,
+            revision,
+            owner_slot,
+            create=create,
+        )
+        assert owner_slot.owner is not None
+        descriptor = owner_slot.owner.fileno()
         identity = os.fstat(descriptor)
         marker_identity = (identity.st_dev, identity.st_ino)
-        return descriptor
 
     def capture_activation(
         _cls: type[ActivatedModel],
@@ -1990,7 +3218,7 @@ def test_postcommit_directory_close_failure_keeps_marker_inode_authoritative_as_
 
     monkeypatch.setattr(
         ModelInstaller,
-        "_open_recovery_marker",
+        "_acquire_recovery_marker",
         staticmethod(capture_marker),
     )
     monkeypatch.setattr(
@@ -2466,51 +3694,6 @@ def test_successful_recovery_promotes_prepared_marker_atomically_after_verify(
     assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
 
 
-def test_activation_rechecks_publication_uncertainty_after_verification(
-    governed_model_case: object,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    installed = governed_model_case.install()  # type: ignore[attr-defined]
-    installed.close()
-    model_path = (
-        governed_model_case.model_root  # type: ignore[attr-defined]
-        / governed_model_case.model_id  # type: ignore[attr-defined]
-    )
-    revision = "a" * 40
-    real_hash = registry_module.hash_exact_fd
-    uncertainty_marked = False
-
-    def mark_uncertain_during_verification(
-        descriptor: int,
-        size: int,
-        expected_sha256: str,
-    ) -> str:
-        nonlocal uncertainty_marked
-        if not uncertainty_marked:
-            model = OwnedDirectory.open(model_path)
-            try:
-                fs_module._mark_publication_uncertain(model, revision)
-            finally:
-                model.close()
-            uncertainty_marked = True
-        return real_hash(descriptor, size, expected_sha256)
-
-    monkeypatch.setattr(registry_module, "hash_exact_fd", mark_uncertain_during_verification)
-
-    try:
-        with pytest.raises(RuntimeError) as caught:
-            ModelRegistry.load(
-                governed_model_case.manifest,  # type: ignore[attr-defined]
-                model_root=governed_model_case.model_root,  # type: ignore[attr-defined]
-            ).activate(governed_model_case.model_id)  # type: ignore[attr-defined]
-        assert uncertainty_marked
-        assert isinstance(caught.value.__cause__, PermissionError)
-        assert str(caught.value.__cause__) == "model revision commit is uncertain"
-        assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
-    finally:
-        governed_model_case.clear_process_publication_uncertainty()  # type: ignore[attr-defined]
-
-
 @pytest.mark.parametrize("durability_fault", ("marker_fsync", "parent_fsync"))
 @pytest.mark.parametrize("initial_mode", (0o700, 0o500), ids=("unsealed", "sealed"))
 def test_existing_marker_is_redurably_synced_before_recovery(
@@ -2545,7 +3728,8 @@ def test_existing_marker_is_redurably_synced_before_recovery(
     marker_close_attempts: list[int] = []
     close_fault_injected = False
     real_fsync = os.fsync
-    real_close = os.close
+    owner_type = installer_module._PublicationMarkerOwner
+    real_owner_close = owner_type.close
 
     def fail_durability_fsync(descriptor: int) -> None:
         nonlocal marker_fsync_attempts
@@ -2570,17 +3754,19 @@ def test_existing_marker_is_redurably_synced_before_recovery(
                 raise primary
         real_fsync(descriptor)
 
-    def track_marker_close(descriptor: int) -> None:
+    def track_marker_close(owner: object) -> None:
         nonlocal close_fault_injected
-        if descriptor in marker_descriptors:
+        descriptor = None if owner.closed else owner.fileno()  # type: ignore[attr-defined]
+        target = descriptor in marker_descriptors
+        if target and descriptor is not None:
             marker_close_attempts.append(descriptor)
-        real_close(descriptor)
-        if descriptor in marker_descriptors and not close_fault_injected:
+        real_owner_close(owner)  # type: ignore[arg-type]
+        if target and not close_fault_injected:
             close_fault_injected = True
             raise secondary
 
     monkeypatch.setattr(os, "fsync", fail_durability_fsync)
-    monkeypatch.setattr(os, "close", track_marker_close)
+    monkeypatch.setattr(owner_type, "close", track_marker_close)
 
     caught: BaseException | None = None
     try:
@@ -2642,7 +3828,8 @@ def test_existing_marker_identity_is_revalidated_after_parent_fsync_before_recov
     marker_close_attempts = 0
     real_fsync = OwnedDirectory.fsync
     real_chmod = OwnedDirectory.chmod
-    real_close = os.close
+    owner_type = installer_module._PublicationMarkerOwner
+    real_owner_close = owner_type.close
 
     def mutate_marker_after_durability_fsync(directory: OwnedDirectory) -> None:
         nonlocal model_fsyncs
@@ -2666,16 +3853,17 @@ def test_existing_marker_identity_is_revalidated_after_parent_fsync_before_recov
             seal_attempts += 1
         real_chmod(directory, mode)
 
-    def track_marker_close(descriptor: int) -> None:
+    def track_marker_close(owner: object) -> None:
         nonlocal marker_close_attempts
+        descriptor = owner.fileno()  # type: ignore[attr-defined]
         identity = os.fstat(descriptor)
         if (identity.st_dev, identity.st_ino) == marker_identity:
             marker_close_attempts += 1
-        real_close(descriptor)
+        real_owner_close(owner)  # type: ignore[arg-type]
 
     monkeypatch.setattr(OwnedDirectory, "fsync", mutate_marker_after_durability_fsync)
     monkeypatch.setattr(OwnedDirectory, "chmod", track_seal)
-    monkeypatch.setattr(os, "close", track_marker_close)
+    monkeypatch.setattr(owner_type, "close", track_marker_close)
 
     with pytest.raises(PermissionError) as caught:
         governed_model_case._installer().install(  # type: ignore[attr-defined]
@@ -2686,7 +3874,11 @@ def test_existing_marker_identity_is_revalidated_after_parent_fsync_before_recov
     assert marker_mutated
     assert seal_attempts == 0
     assert marker_close_attempts == 1
-    assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_mode == initial_mode  # type: ignore[attr-defined]
+    expected_notes = (
+        ["additional publication commit resolution failure"] if initial_mode == 0o500 else []
+    )
+    assert getattr(caught.value.__cause__, "__notes__", []) == expected_notes
     assert governed_model_case.recovery_marker_exists is (  # type: ignore[attr-defined]
         identity_fault == "swap"
     )

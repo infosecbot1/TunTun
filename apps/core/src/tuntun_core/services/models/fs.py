@@ -8,7 +8,6 @@ import hashlib
 import os
 import stat
 import sys
-import threading
 import time
 from collections.abc import Callable, Hashable, Iterator
 from dataclasses import dataclass
@@ -27,8 +26,6 @@ _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _DESCRIPTOR_CLEANUP_NOTE = "additional descriptor cleanup failure"
-_UNCERTAIN_PUBLICATIONS: set[tuple[int, int, str]] = set()
-_UNCERTAIN_PUBLICATIONS_LOCK = threading.Lock()
 
 
 def close_preserving_primary[T](
@@ -122,28 +119,6 @@ def entry_exists_at(directory: OwnedDirectory, name: str) -> bool:
     except OSError as error:
         raise PermissionError("unsafe model filesystem path") from error
     return True
-
-
-def _publication_uncertainty_key(
-    model: OwnedDirectory,
-    revision: str,
-) -> tuple[int, int, str]:
-    return model.identity.device, model.identity.inode, revision
-
-
-def _mark_publication_uncertain(model: OwnedDirectory, revision: str) -> None:
-    with _UNCERTAIN_PUBLICATIONS_LOCK:
-        _UNCERTAIN_PUBLICATIONS.add(_publication_uncertainty_key(model, revision))
-
-
-def _resolve_publication_uncertainty(model: OwnedDirectory, revision: str) -> None:
-    with _UNCERTAIN_PUBLICATIONS_LOCK:
-        _UNCERTAIN_PUBLICATIONS.discard(_publication_uncertainty_key(model, revision))
-
-
-def publication_is_uncertain(model: OwnedDirectory, revision: str) -> bool:
-    with _UNCERTAIN_PUBLICATIONS_LOCK:
-        return _publication_uncertainty_key(model, revision) in _UNCERTAIN_PUBLICATIONS
 
 
 def _effective_user_id() -> int:
@@ -544,21 +519,45 @@ def atomic_publish_dir_noreplace(
     source: str,
     target: str,
     *,
+    expected_source_fd: int | None = None,
+    expected_source_identity: tuple[int, int] | None = None,
     witness: AtomicPublishWitness | None = None,
 ) -> None:
     if not _safe_component(source) or not _safe_component(target):
         raise PermissionError("unsafe model filesystem path")
     if witness is not None and witness.committed:
         raise ValueError("atomic publication witness already committed")
+    if (expected_source_fd is None) != (expected_source_identity is None):
+        raise ValueError("atomic publication source identity is incomplete")
     libc = ctypes.CDLL(None, use_errno=True)
     source_bytes = os.fsencode(source)
     target_bytes = os.fsencode(target)
-    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
-        result = libc.renameatx_np(parent.fd, source_bytes, parent.fd, target_bytes, 0x00000004)
-    elif hasattr(libc, "renameat2"):
-        result = libc.renameat2(parent.fd, source_bytes, parent.fd, target_bytes, 1)
+    if sys.platform == "darwin":
+        if not hasattr(libc, "renameatx_np"):
+            raise OSError(errno.ENOTSUP, "exclusive directory publication unsupported")
+        native_rename = libc.renameatx_np
+        flags = 0x00000004
+    elif sys.platform.startswith("linux"):
+        if not hasattr(libc, "renameat2"):
+            raise OSError(errno.ENOTSUP, "exclusive directory publication unsupported")
+        native_rename = libc.renameat2
+        flags = 1
     else:
         raise OSError(errno.ENOTSUP, "exclusive directory publication unsupported")
+    if expected_source_fd is not None and expected_source_identity is not None:
+        retained = os.fstat(expected_source_fd)
+        named = os.stat(source, dir_fd=parent.fd, follow_symlinks=False)
+        if any(
+            not stat.S_ISREG(candidate.st_mode)
+            or candidate.st_uid != _effective_user_id()
+            or stat.S_IMODE(candidate.st_mode) != 0o400
+            or candidate.st_nlink != 1
+            or candidate.st_size != 0
+            or (candidate.st_dev, candidate.st_ino) != expected_source_identity
+            for candidate in (retained, named)
+        ):
+            raise PermissionError("atomic publication source changed")
+    result = native_rename(parent.fd, source_bytes, parent.fd, target_bytes, flags)
     if result != 0:
         value = ctypes.get_errno()
         raise OSError(value, os.strerror(value), target)

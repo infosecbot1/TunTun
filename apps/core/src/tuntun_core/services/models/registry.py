@@ -21,7 +21,6 @@ from .fs import (
     model_install_lock_name,
     open_publication_commit,
     open_regular_at,
-    publication_is_uncertain,
     read_bounded_strict_yaml,
     recovery_pending_name,
     require_publication_commit,
@@ -438,6 +437,15 @@ class ActivatedModel:
                     item.close()
 
 
+class _ActivatedModelOwnerSlot:
+    """Transaction-visible ownership for one unreturned activated model."""
+
+    __slots__ = ("owner",)
+
+    def __init__(self) -> None:
+        self.owner: ActivatedModel | None = None
+
+
 class ModelRegistry:
     def __init__(self, entries: dict[str, ModelEntry], model_root: Path) -> None:
         self._entries = dict(entries)
@@ -496,7 +504,7 @@ class ModelRegistry:
 
     def activate(self, model_id: str) -> ActivatedModel:
         entry = self.entry(model_id)
-        activated: ActivatedModel | None = None
+        activated_slot = _ActivatedModelOwnerSlot()
         root: OwnedDirectory | None = None
         model: OwnedDirectory | None = None
         try:
@@ -507,35 +515,39 @@ class ModelRegistry:
                 shared=True,
             ):
                 model = root.child(entry.model_id)
-                activated = self._activate_from_open_model(model, entry)
+                self._activate_from_open_model(model, entry, activated_slot)
                 model.close()
                 model = None
             root.close()
             root = None
         except BaseException as error:
-            if activated is not None:
-                close_preserving_primary(activated, ActivatedModel.close, error)
+            if activated_slot.owner is not None:
+                close_preserving_primary(activated_slot.owner, ActivatedModel.close, error)
             if model is not None:
                 close_preserving_primary(model, OwnedDirectory.close, error)
             if root is not None:
                 close_preserving_primary(root, OwnedDirectory.close, error)
+            if not isinstance(error, Exception):
+                raise
             raise RuntimeError("model is not installed and verified") from error
+        activated = activated_slot.owner
         if activated is None:
             raise RuntimeError("model is not installed and verified")
+        activated_slot.owner = None
         return activated
 
     @staticmethod
     def _activate_from_open_model(
         model: OwnedDirectory,
         entry: ModelEntry,
-    ) -> ActivatedModel:
+        activated_slot: _ActivatedModelOwnerSlot,
+    ) -> None:
+        if activated_slot.owner is not None:
+            raise ValueError("activated model owner slot already populated")
         handles: list[VerifiedModelFile] = []
         revision: OwnedDirectory | None = None
-        activated: ActivatedModel | None = None
         commit_fd: int | None = None
         try:
-            if publication_is_uncertain(model, entry.revision):
-                raise PermissionError("model revision commit is uncertain")
             pending_name = recovery_pending_name(entry.revision)
             if entry_exists_at(model, pending_name):
                 raise PermissionError("model revision recovery is pending")
@@ -565,13 +577,12 @@ class ModelRegistry:
                 expected_mode=0o400,
                 require_read_only=True,
             )
-            if publication_is_uncertain(model, entry.revision):
-                raise PermissionError("model revision commit is uncertain")
-            activated = ActivatedModel.from_manifest(entry, tuple(handles))
+            activated_slot.owner = ActivatedModel.from_manifest(entry, tuple(handles))
             handles.clear()
         except BaseException as error:
-            for handle in handles:
-                close_preserving_primary(handle, VerifiedModelFile.close, error)
+            if activated_slot.owner is None:
+                for handle in handles:
+                    close_preserving_primary(handle, VerifiedModelFile.close, error)
             if revision is not None:
                 close_preserving_primary(revision, OwnedDirectory.close, error)
             if commit_fd is not None:
@@ -579,7 +590,7 @@ class ModelRegistry:
                 commit_fd = None
                 close_preserving_primary(descriptor_to_close, os.close, error)
             raise
-        if activated is None or revision is None or commit_fd is None:
+        if activated_slot.owner is None or revision is None or commit_fd is None:
             raise RuntimeError("model activation did not retain verified files")
         try:
             revision.close()
@@ -587,13 +598,7 @@ class ModelRegistry:
             descriptor_to_close = commit_fd
             commit_fd = None
             close_preserving_primary(descriptor_to_close, os.close, error)
-            close_preserving_primary(activated, ActivatedModel.close, error)
             raise
-        try:
-            descriptor_to_close = commit_fd
-            commit_fd = None
-            os.close(descriptor_to_close)
-        except BaseException as error:
-            close_preserving_primary(activated, ActivatedModel.close, error)
-            raise
-        return activated
+        descriptor_to_close = commit_fd
+        commit_fd = None
+        os.close(descriptor_to_close)

@@ -27852,7 +27852,7 @@ Task 10.
 **Interfaces:**
 - Consumes: owner-invoked immutable HTTPS URL on an exact host allowlist, declared bounded byte size/SHA-256, a bounded duplicate-free manifest, and owner-only no-follow model directory descriptors.
 - Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only a verified exact nonempty tuple of stable read-only file descriptors; immutable private `_ManifestBoundFile(path, size, sha256, device, inode)` expectations; frozen `VerifiedModelFile`/`ActivatedModel`; derived read-only property `ActivatedModel.all_files_verified: bool`; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. Public `fd`, `size`, `sha256`, and `files` are getter-only views. `all_files_verified` and runtime receipt comparison use the sealed private manifest tuple and recheck descriptor access/type/mode/device/inode/size/hash; they never derive trust from a caller-replaceable public field. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
-- Darwin filesystems may reject renaming a write-disabled directory even when source and destination share one parent. The installer therefore keeps the already-complete owner-only stage at `0700` through the exclusive no-replace directory rename, creates and durably binds an owner-only descriptor-relative `.recovery-pending-{REVISION}` marker, then seals the retained revision descriptor to exact `0500`, fsyncs it, and fsyncs the parent in the accepted publication order. A new marker is exact owner-owned `0600`; recovery also accepts an interrupted prepared marker at exact `0400`. Both forms must be zero-length, single-link regular inodes with descriptor/name identity equality, and every newly created or reopened marker descriptor plus its parent is fsynced and revalidated before recovery proceeds. Public activation holds the target model's per-model lock shared across model open and exact verification, while installation/recovery holds that lock exclusively; different model IDs remain independent. After repeated exact artifact inventory/hash verification plus revision and parent fsync, the installer validates the retained marker, changes `0600` to exact `0400` when necessary, fsyncs the marker inode, fsyncs its parent, revalidates the same name/inode/mode, records its device/inode identity, and closes it. The marker name remains the authoritative on-disk deny state through every fallible preparation and close operation. The installer then uses the same Darwin `renameatx_np(RENAME_EXCL)` or Linux `renameat2(RENAME_NOREPLACE)` primitive, with no fallback, to atomically rename that exact marker name to `.publication-verified-{REVISION}`. That atomic marker-to-proof rename is the irreversible commit point; because the exact marker inode and parent were fsynced before it, a crash yields either the old deny-marker name or the new positive-proof name. There is deliberately no fallible parent fsync after the commit point. The platform helper receives a fresh caller-owned witness and sets it only after the exclusive rename syscall returns zero, before returning to any outer wrapper. If a wrapper delegates the real rename and then raises, the installer therefore classifies the retained-inode transition as committed without a fallible namespace probe; a defensive exact marker-absent/proof-identity check remains only for a nonconforming wrapper that fails to forward the witness. That proven outcome continues to activation construction and returns success. An unproven rename failure remains precommit, leaves the marker authoritative, and may additionally attempt `0700` rollback without depending on rollback for denial. A later retry accepts and re-durabilizes a prepared `0400` marker, removes any stale proof collision, re-verifies the artifacts, and converges. Activation retains and revalidates the exact stable `0400` proof `O_RDONLY` before and after artifact verification; marker-present, missing, symlinked, special, writable, nonempty, multiply linked, identity-swapped, or content-mismatched states deny. `ActivatedModel` construction occurs after the commit flag; a construction error closes the still-installer-owned artifact handles once and leaves the committed disk state intact. Fresh or reused successful results remain installer-owned until stage/model/root close, exclusive unlock, and lock-FD close all succeed, with exact-once cleanup and primary-error preservation. There is no ordinary rename fallback, path reopen, or unverified byte that can become active.
+- Darwin filesystems may reject renaming a write-disabled directory even when source and destination share one parent. The installer therefore keeps the already-complete owner-only stage at `0700` through the exclusive no-replace directory rename, creates and durably binds an owner-only descriptor-relative `.recovery-pending-{REVISION}` marker, then seals the retained revision descriptor to exact `0500`, fsyncs it, and fsyncs the parent in the accepted publication order. A new marker is exact owner-owned `0600`; recovery also accepts an interrupted prepared marker at exact `0400`. Both forms must be zero-length, single-link regular inodes with descriptor/name identity equality, and every newly created or reopened marker descriptor plus its parent is fsynced and revalidated before recovery proceeds. Public activation holds the target model's per-model lock shared across model open and exact verification, while installation/recovery holds that lock exclusively; different model IDs remain independent. After repeated exact artifact inventory/hash verification plus revision and parent fsync, the installer validates the retained marker, changes `0600` to exact `0400` when necessary, fsyncs the marker inode, fsyncs its parent, revalidates the same name/inode/mode, records its device/inode identity, and retains that exact descriptor through publication. The marker name remains the authoritative on-disk deny state through every fallible precommit operation. The platform helper supports only Darwin `renameatx_np(RENAME_EXCL)` and Linux `renameat2(RENAME_NOREPLACE)`; every other platform returns `ENOTSUP` even if its libc exports a similarly named symbol. Immediately before the native syscall, the helper requires both the retained descriptor and source name to remain the exact recorded regular, owner-owned, `0400`, single-link, zero-length inode. A zero syscall result is the irreversible commit point, and the first state transition after it sets the transaction-owned witness before any postcommit validation, descriptor close, wrapper return, or other fallible work. There is deliberately no fallible parent fsync after the commit point. If a wrapper delegates the real rename and then raises, the outer transaction therefore classifies the transition as committed without a namespace probe. If a nonconforming wrapper fails to forward the witness, an exact marker-absent/proof-equals-retained-inode fallback may set the same outer witness on either normal return or exception. False-witness exception re-resolution is explicitly tri-state: exact retained proof is `COMMITTED`, the exact retained pending name is `DEFINITELY_PRECOMMIT`, and every secondary interruption, replacement, or identity/namespace ambiguity is `INCONCLUSIVE`. Only `DEFINITELY_PRECOMMIT` permits a `0700` rollback; `COMMITTED` and `INCONCLUSIVE` preserve the sealed revision and current durable marker/proof namespace for a safe retry. Acquisition has no Python function that returns a live raw descriptor or FileIO owner. Under the exclusive per-model lock, a descriptor-relative no-follow stat first requires an existing recovery name to be the exact regular, owner-owned, `0400`/`0600`, single-link, zero-length marker, while fresh creation requires absence; a symlink or FIFO is rejected before any open and therefore cannot redirect or block. A `_PublicationMarkerOwnerSlot` is created in transaction scope and passed into acquisition. C-backed `io.FileIO` constructs directly into that slot using `x+b` for fresh `O_RDWR|O_CREAT|O_EXCL` or `rb` for recovery `O_RDONLY`, with C `functools.partial(os.open, mode=0600, dir_fd=model.fd)` and close-on-exec/non-inheritable ownership. FileIO's opener flags need not carry `O_NOFOLLOW` or `O_NONBLOCK` because hostile existing names are statically rejected before the open while cooperating writers honor the lock; noncooperative same-EUID/root swaps inside that name-based interval remain outside the repository's filesystem trust boundary. Once stored, exact descriptor access, owner, regular type, mode, links, size, name identity, inode fsync, parent fsync, and final identity are revalidated before use. An interruption before slot storage destroys the C object; after storage, every Python return or retained traceback leaves the outer transaction able to close the owner. Raw descriptor integers are only transient `fileno()` borrows. The owner remains stored through `owner.close()`: a trace/signal before C call entry leaves it owning the FD for idempotent cleanup, while any return or error after entry leaves FileIO's consumed-or-retained state authoritative, so cleanup never acts on a recycled integer. An after-close fault observes a closed owner. A later retry accepts and re-durabilizes a prepared `0400` marker, removes any stale proof collision, re-verifies the artifacts, and converges. Activation retains and revalidates the exact stable `0400` proof `O_RDONLY` before and after artifact verification; marker-present, missing, symlinked, special, writable, nonempty, multiply linked, identity-swapped, or content-mismatched states deny. Registry activation and every installer path populate one transaction-visible `_ActivatedModelOwnerSlot`; private activation/reuse helpers return only inert `None`/boolean status, and the outer owner closes an unreturned result exactly once on any catchable cleanup or control-flow failure. A proof-backed revision recognized as committed on entry is never unsealed by a later activation failure. `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, and cancellation-like non-`Exception` control flow propagate unchanged after cleanup; ordinary verification `Exception` values may retain the documented generic public error. The unavoidable final return event of public `activate()`/`install()` is the caller's resource-lease boundary: internal ownership remains exact through all prior fallible cleanup, the caller must close the returned model, and no `__del__` claim is made. There is no ordinary rename fallback, path reopen, process-local uncertainty cache, or unverified byte that can become active.
 
 - [ ] **Step 1: Write red model-governance tests**
 
@@ -28167,7 +28167,7 @@ def concurrent_model_case(governed_model_case):
     return governed_model_case.concurrent_view()
 ```
 
-`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`; each mutation/race/fault string has one closed dispatch entry and filesystem mutations use real missing entries, symlinks, FIFOs, modes, sizes, hashes, and inode replacements. Cleanup matrices inject raw-descriptor, wrapper, directory, unlock, and lock-FD failures and prove primary preservation, one ownership-release attempt, closed artifact descriptors, and zero FD delta. The publication durability fixture proves the same marker inode is fsynced at `0600`, parent-synced while authoritative, prepared and fsynced at `0400`, parent-synced again, and atomically promoted to the proof name without a postcommit fsync. The fresh/recovery precommit matrix independently injects prepared-marker fchmod, marker fsync, parent fsync, final validation, close, and atomic-rename failure while also failing `0700` rollback; every case leaves the exact `0400` marker authoritative, denies a fresh interpreter, leaks no descriptor, and converges on retry. A real no-replace proof collision likewise retains the marker and recovers after stale-proof removal. Success-then-error atomic-wrapper probes prove the syscall-success witness treats the retained-inode transition as committed without a namespace probe even when that probe and `0700` rollback are both faulted; both variants perform no rollback, return the verified activation, and are immediately fresh-process activatable. A postcommit `ActivatedModel` construction error and fresh/recovery revision-close faults prove committed disk state is not rolled back while all unreturned artifact handles close exactly once. Existing `0600` and prepared `0400` marker durability/identity matrices reject fsync, parent-fsync, swap, and disappearance faults before sealing/recovery. Exact proof mutations cover missing, symlinked, FIFO, writable, nonempty, multiply linked, and verification-window identity-swap states. Same-model activation remains excluded by the shared/exclusive per-model lock until the atomic transaction has an outcome, while a paused 900-second download for one model does not block another installed model. Every retry verifies real disk state and stable descriptors rather than test-only booleans.
+`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`; each mutation/race/fault string has one closed dispatch entry and filesystem mutations use real missing entries, symlinks, FIFOs, modes, sizes, hashes, and inode replacements. Cleanup matrices inject raw-descriptor, wrapper, directory, unlock, and lock-FD failures and prove primary preservation, one ownership-release attempt, closed artifact descriptors, and zero FD delta. The publication durability fixture proves the same marker inode is fsynced at `0600`, parent-synced while authoritative, prepared and fsynced at `0400`, parent-synced again, and atomically promoted to the proof name without a postcommit fsync. The fresh/recovery precommit matrix independently injects prepared-marker fchmod, marker fsync, parent fsync, final validation, and atomic-rename failure while also failing `0700` rollback; every case leaves the exact `0400` marker authoritative, denies a fresh interpreter, leaks no descriptor, and converges on retry. Fresh/recovery close-to-rename swaps prove a replacement marker cannot become proof; a mode/size/link mutation matrix proves the exact retained and named source properties are rechecked before any native call or witness transition; every case denies a fresh interpreter. A real no-replace proof collision likewise retains the marker and recovers after stale-proof removal. Success-then-error and non-forwarding atomic-wrapper probes prove the transaction witness or exact retained-FD fallback classifies the transition as committed. Conforming-helper return and non-forwarding post-rename `KeyboardInterrupt` probes prove committed control flow still propagates, while one-shot and repeated interruptions around fallback witness assignment prove tri-state re-resolution preserves exact proof-backed or inconclusive sealed state before any rollback. A deliberately Python-defined `__index__` transfer first fails under `sys.settrace` after detaching and before returning the FD, proving that design merely moves the close window. Separate fresh/recovery RED cases then interrupt both the raw-descriptor helper return and FileIO factory return: raw FDs remain leaked even after traceback collection, while retained exception tracebacks keep an unassigned owner live. The green design removes both live-return factories, guards that the owner is C-backed `io.FileIO` with no Python transfer callback, and traces the slot-populating acquisition return while retaining the propagated exception; outer transaction cleanup has already closed the descriptor. Fresh/recovery trace interruptions immediately before `owner.close()` and immediately after C close returns likewise prove committed disk state is not rolled back and the marker FD is closed. The FileIO opener flag matrix proves actual descriptor-relative `x+b` `O_RDWR|O_CREAT|O_EXCL` for fresh creation and `rb` `O_RDONLY` for recovery, plus close-on-exec/non-inheritable ownership. Hostile existing symlink/FIFO marker names are rejected by no-follow stat before the opener is called, so recovery cannot follow or block on them. A real-close-then-error test recycles the original's exact FD number and proves idempotent owner cleanup leaves the replacement open. Constructor and revision-close faults likewise preserve committed state and exact ownership. A mocked FreeBSD libc exporting `renameat2` still receives `ENOTSUP` without a native call. Existing `0600` and prepared `0400` marker durability/identity matrices reject fsync, parent-fsync, swap, and disappearance faults before sealing/recovery. Exact proof mutations cover missing, symlinked, FIFO, writable, nonempty, multiply linked, and verification-window identity-swap states. The committed-reuse matrix injects `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, and `asyncio.CancelledError` through installer and public registry activation, requires exact primary identity, unchanged `0500`/proof state, and zero FD delta. Retained-traceback `sys.settrace` return probes at `_activate_from_open_model` and `_reuse_or_recover_revision` prove private helpers return only inert status while the transaction-visible activation slot owns and closes every artifact FD on interruption. Same-model activation remains excluded by the shared/exclusive per-model lock until the atomic transaction has an outcome, while a paused 900-second download for one model does not block another installed model. Every retry verifies real disk state and stable descriptors rather than test-only booleans.
 
 `InstalledModel` exposes only `registry`, `model_id`, `expected_bytes`, `expected_sha256`, and `replace_every_named_path_with_attacker_bytes()`. `ScriptedRuntimeAdapter.load_verified_reader` consumes the bounded reader to EOF, records bytes and open duplicate count, returns an exact per-file receipt, and never accepts a path; `finish_model` returns an unpublished signed candidate; the verifier publishes only after checking the exact domain/generation/expiry/model/revision/ordered file tuple. `mutate_receipt`, `fail_at`, and `abort_model` are closed dispatch methods for the test strings and maintain the asserted `path_opens`, `open_duplicate_fd_count`, `abort_calls`, `published_runtime_count`, and `last_loaded_bytes`. The concurrent view uses two real `ModelInstaller` instances plus a barrier only before lock acquisition, measures lock ownership around the production lock, and derives publication/stage results from disk. This helper contains no pass-through fake of `ModelRegistry`, `ModelInstaller`, descriptor hashing, publication, or receipt comparison.
 
@@ -28181,7 +28181,7 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 
 ```python
 # apps/core/src/tuntun_core/services/models/fs.py
-import contextlib,ctypes,fcntl,hashlib,os,stat,sys,threading,time
+import contextlib,ctypes,errno,fcntl,hashlib,os,stat,sys,time
 from pathlib import Path
 import yaml
 from yaml.events import AliasEvent,CollectionEndEvent,CollectionStartEvent
@@ -28403,24 +28403,6 @@ def entry_exists_at(directory:OwnedDirectory,name:str):
     except OSError as error: raise PermissionError("unsafe model filesystem path") from error
     return True
 
-_UNCERTAIN_PUBLICATIONS:set[tuple[int,int,str]]=set()
-_UNCERTAIN_PUBLICATIONS_LOCK=threading.Lock()
-
-def _publication_uncertainty_key(model:OwnedDirectory,revision:str):
-    return model.identity.device,model.identity.inode,revision
-
-def _mark_publication_uncertain(model:OwnedDirectory,revision:str):
-    with _UNCERTAIN_PUBLICATIONS_LOCK:
-        _UNCERTAIN_PUBLICATIONS.add(_publication_uncertainty_key(model,revision))
-
-def _resolve_publication_uncertainty(model:OwnedDirectory,revision:str):
-    with _UNCERTAIN_PUBLICATIONS_LOCK:
-        _UNCERTAIN_PUBLICATIONS.discard(_publication_uncertainty_key(model,revision))
-
-def publication_is_uncertain(model:OwnedDirectory,revision:str):
-    with _UNCERTAIN_PUBLICATIONS_LOCK:
-        return _publication_uncertainty_key(model,revision) in _UNCERTAIN_PUBLICATIONS
-
 def open_regular_at(
     directory:OwnedDirectory,name:str,flags:int,*,mode:int=0o600,
     expected_mode:int|None=None,
@@ -28482,19 +28464,37 @@ class AtomicPublishWitness:
     def __init__(self): self.committed=False
 
 def atomic_publish_dir_noreplace(
-    parent:OwnedDirectory,source:str,destination:str,*,witness=None,
+    parent:OwnedDirectory,source:str,destination:str,*,
+    expected_source_fd=None,expected_source_identity=None,witness=None,
 ):
     # Platform adapter uses renameat2(RENAME_NOREPLACE) on Linux or
     # renameatx_np(RENAME_EXCL) on macOS. ENOTSUP is fail-closed; there is no
     # existence-check + rename fallback.
     if witness is not None and witness.committed:
         raise ValueError("atomic publication witness already committed")
+    if (expected_source_fd is None)!=(expected_source_identity is None):
+        raise ValueError("atomic publication source identity is incomplete")
     libc=ctypes.CDLL(None,use_errno=True)
     if sys.platform=="darwin":
-        result=libc.renameatx_np(parent.fd,source.encode(),parent.fd,destination.encode(),0x00000004)
-    elif sys.platform.startswith("linux") and hasattr(libc,"renameat2"):
-        result=libc.renameat2(parent.fd,source.encode(),parent.fd,destination.encode(),0x1)
-    else: raise OSError("exclusive directory publication unsupported")
+        if not hasattr(libc,"renameatx_np"): raise OSError(errno.ENOTSUP,"exclusive directory publication unsupported")
+        native_rename=libc.renameatx_np; flags=0x00000004
+    elif sys.platform.startswith("linux"):
+        if not hasattr(libc,"renameat2"): raise OSError(errno.ENOTSUP,"exclusive directory publication unsupported")
+        native_rename=libc.renameat2; flags=0x1
+    else: raise OSError(errno.ENOTSUP,"exclusive directory publication unsupported")
+    if expected_source_fd is not None:
+        retained=os.fstat(expected_source_fd)
+        named=os.stat(source,dir_fd=parent.fd,follow_symlinks=False)
+        if any(
+            not stat.S_ISREG(candidate.st_mode)
+            or candidate.st_uid!=_effective_user_id()
+            or stat.S_IMODE(candidate.st_mode)!=0o400
+            or candidate.st_nlink!=1
+            or candidate.st_size!=0
+            or (candidate.st_dev,candidate.st_ino)!=expected_source_identity
+            for candidate in (retained,named)
+        ): raise PermissionError("atomic publication source changed")
+    result=native_rename(parent.fd,source.encode(),parent.fd,destination.encode(),flags)
     if result!=0:
         error=ctypes.get_errno(); raise OSError(error,os.strerror(error))
     if witness is not None: witness.committed=True
@@ -28523,7 +28523,7 @@ import fcntl,os,re,stat
 from .fs import (
     OwnedDirectory,close_preserving_primary,entry_exists_at,hash_exact_fd,
     model_install_lock_name,open_publication_commit,open_regular_at,
-    publication_is_uncertain,read_bounded_strict_yaml,recovery_pending_name,
+    read_bounded_strict_yaml,recovery_pending_name,
     require_publication_commit,
 )
 
@@ -28698,6 +28698,10 @@ class ActivatedModel:
     def close(self):
         for file in self.__files: os.close(file.fd)
 
+class _ActivatedModelOwnerSlot:
+    """Transaction-visible ownership for one unreturned activated model."""
+    def __init__(self): self.owner:ActivatedModel|None=None
+
 class ModelRegistry:
     def __init__(self,entries,model_root): self._entries,self._root=entries,model_root
     @classmethod
@@ -28724,7 +28728,7 @@ class ModelRegistry:
         except KeyError as error: raise LookupError("model is not registered") from error
     def activate(self,model_id):
         entry=self.entry(model_id)
-        activated=None; root=None; model=None
+        activated_slot=_ActivatedModelOwnerSlot(); root=None; model=None
         try:
             root=OwnedDirectory.open(self._root)
             with root.lock(
@@ -28732,29 +28736,32 @@ class ModelRegistry:
                 timeout_seconds=30,shared=True,
             ):
                 model=root.child(entry.model_id)
-                activated=self._activate_from_open_model(model,entry)
+                self._activate_from_open_model(model,entry,activated_slot)
                 model.close(); model=None
             root.close(); root=None
         except BaseException as error:
-            if activated is not None:
-                close_preserving_primary(activated,ActivatedModel.close,error)
+            if activated_slot.owner is not None:
+                close_preserving_primary(activated_slot.owner,ActivatedModel.close,error)
             if model is not None:
                 close_preserving_primary(model,OwnedDirectory.close,error)
             if root is not None:
                 close_preserving_primary(root,OwnedDirectory.close,error)
+            if not isinstance(error,Exception): raise
             raise RuntimeError("model is not installed and verified") from error
+        activated=activated_slot.owner
         if activated is None:
             raise RuntimeError("model is not installed and verified")
+        activated_slot.owner=None
         return activated
 
     @staticmethod
-    def _activate_from_open_model(model,entry):
+    def _activate_from_open_model(model,entry,activated_slot):
         # Installer calls this retained-dirfd verifier while already holding the
         # exclusive per-model lock; it never recursively acquires the public lock.
-        handles=[]; revision=None; activated=None; commit_fd=None
+        if activated_slot.owner is not None:
+            raise ValueError("activated model owner slot already populated")
+        handles=[]; revision=None; commit_fd=None
         try:
-            if publication_is_uncertain(model,entry.revision):
-                raise PermissionError("model revision commit is uncertain")
             pending_name=recovery_pending_name(entry.revision)
             if entry_exists_at(model,pending_name):
                 raise PermissionError("model revision recovery is pending")
@@ -28778,32 +28785,28 @@ class ModelRegistry:
                 model,entry.revision,commit_fd,
                 expected_mode=0o400,require_read_only=True,
             )
-            if publication_is_uncertain(model,entry.revision):
-                raise PermissionError("model revision commit is uncertain")
-            activated=ActivatedModel.from_manifest(entry,tuple(handles))
+            activated_slot.owner=ActivatedModel.from_manifest(entry,tuple(handles))
             handles.clear()
         except BaseException as error:
-            for handle in handles:
-                close_preserving_primary(handle,VerifiedModelFile.close,error)
+            if activated_slot.owner is None:
+                for handle in handles:
+                    close_preserving_primary(handle,VerifiedModelFile.close,error)
             if revision is not None:
                 close_preserving_primary(revision,OwnedDirectory.close,error)
             if commit_fd is not None:
                 descriptor_to_close=commit_fd; commit_fd=None
                 close_preserving_primary(descriptor_to_close,os.close,error)
             raise
-        if activated is None or revision is None or commit_fd is None:
+        if activated_slot.owner is None or revision is None or commit_fd is None:
             raise RuntimeError("model activation did not retain verified files")
         try: revision.close()
         except BaseException as error:
             descriptor_to_close=commit_fd; commit_fd=None
             close_preserving_primary(descriptor_to_close,os.close,error)
-            close_preserving_primary(activated,ActivatedModel.close,error); raise
-        try:
-            descriptor_to_close=commit_fd; commit_fd=None
-            os.close(descriptor_to_close)
-        except BaseException as error:
-            close_preserving_primary(activated,ActivatedModel.close,error); raise
-        return activated
+            raise
+        descriptor_to_close=commit_fd; commit_fd=None
+        os.close(descriptor_to_close)
+        return None
 ```
 
 ```python
@@ -28912,13 +28915,17 @@ class PinnedHttpsTransport:
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
+import functools
 import hashlib
+import io
 import os
 import secrets
 import stat
 import time
 from collections.abc import Callable, Iterator
+from enum import Enum, auto
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -28933,13 +28940,22 @@ from .fs import (
     open_regular_at,
     publication_commit_name,
     recovery_pending_name,
+    require_publication_commit,
 )
 from .network import PinnedHttpsTransport
-from .registry import ActivatedModel, ModelEntry, ModelFile, ModelRegistry, VerifiedModelFile
+from .registry import (
+    ActivatedModel,
+    ModelEntry,
+    ModelFile,
+    ModelRegistry,
+    VerifiedModelFile,
+    _ActivatedModelOwnerSlot,
+)
 
 WriteOnce = Callable[[int, bytes | memoryview], int]
 FaultHook = Callable[[str], None]
 _RECOVERY_ROLLBACK_NOTE = "additional recovery rollback failure"
+_PUBLICATION_RESOLUTION_NOTE = "additional publication commit resolution failure"
 
 
 def _write_once(descriptor: int, data: bytes | memoryview) -> int:
@@ -28948,6 +28964,25 @@ def _write_once(descriptor: int, data: bytes | memoryview) -> int:
 
 def _no_fault(_point: str) -> None:
     return None
+
+
+class _PublicationMarkerOwner(io.FileIO):
+    """C-backed, idempotent ownership for the retained publication marker FD."""
+
+
+class _PublicationMarkerOwnerSlot:
+    """Transaction-visible marker ownership populated before acquisition returns."""
+
+    __slots__ = ("owner",)
+
+    def __init__(self) -> None:
+        self.owner: _PublicationMarkerOwner | None = None
+
+
+class _PublicationResolution(Enum):
+    COMMITTED = auto()
+    DEFINITELY_PRECOMMIT = auto()
+    INCONCLUSIVE = auto()
 
 
 @contextlib.contextmanager
@@ -29090,44 +29125,74 @@ class ModelInstaller:
             raise PermissionError("unsafe model filesystem revision") from error
 
     @staticmethod
-    def _open_recovery_marker(
+    def _require_recovery_marker_name_before_open(
         model: OwnedDirectory,
         revision: str,
         *,
         create: bool,
-    ) -> int:
+    ) -> None:
         name = recovery_pending_name(revision)
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL if create else os.O_RDONLY
-        descriptor = open_regular_at(
-            model,
-            name,
-            flags,
-            mode=0o600,
-            expected_mode=None,
-        )
         try:
-            observed_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
-            allowed_modes = {0o600} if create else {0o400, 0o600}
-            if observed_mode not in allowed_modes:
-                raise PermissionError("unsafe model recovery marker")
-            ModelInstaller._require_recovery_marker(
-                model,
-                revision,
-                descriptor,
-                expected_mode=observed_mode,
-            )
-            os.fsync(descriptor)
-            model.fsync()
-            ModelInstaller._require_recovery_marker(
-                model,
-                revision,
-                descriptor,
-                expected_mode=observed_mode,
-            )
-            return descriptor
-        except BaseException as error:
-            close_preserving_primary(descriptor, os.close, error)
+            identity = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if create:
+                return
             raise
+        if create:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), name)
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or identity.st_uid != os.geteuid()
+            or stat.S_IMODE(identity.st_mode) not in {0o400, 0o600}
+            or identity.st_nlink != 1
+            or identity.st_size != 0
+        ):
+            raise PermissionError("unsafe model recovery marker")
+
+    @staticmethod
+    def _acquire_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        owner_slot: _PublicationMarkerOwnerSlot,
+        *,
+        create: bool,
+    ) -> None:
+        if owner_slot.owner is not None:
+            raise ValueError("publication marker owner slot already populated")
+        ModelInstaller._require_recovery_marker_name_before_open(
+            model,
+            revision,
+            create=create,
+        )
+        owner_slot.owner = _PublicationMarkerOwner(
+            recovery_pending_name(revision),
+            "x+b" if create else "rb",
+            opener=functools.partial(os.open, mode=0o600, dir_fd=model.fd),
+        )
+        descriptor = owner_slot.owner.fileno()
+        observed_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        allowed_modes = {0o600} if create else {0o400, 0o600}
+        expected_access = os.O_RDWR if create else os.O_RDONLY
+        if (
+            observed_mode not in allowed_modes
+            or fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != expected_access
+            or os.get_inheritable(descriptor)
+        ):
+            raise PermissionError("unsafe model recovery marker")
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=observed_mode,
+        )
+        os.fsync(descriptor)
+        model.fsync()
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=observed_mode,
+        )
 
     @staticmethod
     def _require_recovery_marker(
@@ -29180,50 +29245,84 @@ class ModelInstaller:
     def _publish_prepared_recovery_marker(
         model: OwnedDirectory,
         revision: str,
+        descriptor: int,
         expected_identity: tuple[int, int],
+        *,
+        witness: AtomicPublishWitness,
     ) -> None:
         pending_name = recovery_pending_name(revision)
         commit_name = publication_commit_name(revision)
-        witness = AtomicPublishWitness()
+        publication_error: BaseException | None = None
         try:
             atomic_publish_dir_noreplace(
                 model,
                 pending_name,
                 commit_name,
+                expected_source_fd=descriptor,
+                expected_source_identity=expected_identity,
                 witness=witness,
             )
         except BaseException as error:
             if witness.committed:
-                return
-            try:
-                pending = os.stat(
-                    pending_name,
-                    dir_fd=model.fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                pending = None
-            except BaseException:
-                raise error from None
-            try:
-                committed = os.stat(
-                    commit_name,
-                    dir_fd=model.fd,
-                    follow_symlinks=False,
-                )
-            except BaseException:
-                raise error from None
-            if pending is not None or (
-                not stat.S_ISREG(committed.st_mode)
-                or committed.st_uid != os.geteuid()
-                or stat.S_IMODE(committed.st_mode) != 0o400
-                or committed.st_nlink != 1
-                or committed.st_size != 0
-                or (committed.st_dev, committed.st_ino) != expected_identity
-            ):
-                raise error
+                if isinstance(error, Exception):
+                    return
+                raise
+            publication_error = error
         if not witness.committed:
-            raise RuntimeError("model publication outcome missing")
+            try:
+                if entry_exists_at(model, pending_name):
+                    raise PermissionError("model publication is still pending")
+                require_publication_commit(
+                    model,
+                    revision,
+                    descriptor,
+                    expected_mode=0o400,
+                    require_read_only=False,
+                )
+            except BaseException:
+                if publication_error is not None:
+                    raise publication_error from None
+                raise RuntimeError("model publication outcome missing") from None
+            witness.committed = True
+        if publication_error is not None and not isinstance(publication_error, Exception):
+            raise publication_error
+
+    @staticmethod
+    def _reresolve_publication_witness_after_exception(
+        model: OwnedDirectory,
+        revision: str,
+        marker_owner: _PublicationMarkerOwner,
+        witness: AtomicPublishWitness,
+        primary_error: BaseException,
+    ) -> _PublicationResolution:
+        if witness.committed:
+            return _PublicationResolution.COMMITTED
+        descriptor = marker_owner.fileno()
+        retained = os.fstat(descriptor)
+        pending_name = recovery_pending_name(revision)
+        try:
+            named = os.stat(pending_name, dir_fd=model.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            require_publication_commit(
+                model,
+                revision,
+                descriptor,
+                expected_mode=0o400,
+                require_read_only=False,
+            )
+            resolution = _PublicationResolution.COMMITTED
+        else:
+            if (retained.st_dev, retained.st_ino) == (named.st_dev, named.st_ino):
+                return _PublicationResolution.DEFINITELY_PRECOMMIT
+            resolution = _PublicationResolution.INCONCLUSIVE
+        if resolution is _PublicationResolution.COMMITTED:
+            try:
+                witness.committed = True
+            except BaseException:
+                primary_error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+        elif resolution is _PublicationResolution.INCONCLUSIVE:
+            primary_error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+        return resolution
 
     @staticmethod
     def _remove_publication_commit(model: OwnedDirectory, revision: str) -> None:
@@ -29257,7 +29356,10 @@ class ModelInstaller:
         self,
         model: OwnedDirectory,
         entry: ModelEntry,
-    ) -> ActivatedModel | None:
+        activated_slot: _ActivatedModelOwnerSlot,
+    ) -> bool:
+        if activated_slot.owner is not None:
+            raise ValueError("activated model owner slot already populated")
         pending_name = recovery_pending_name(entry.revision)
         pending_exists = entry_exists_at(model, pending_name)
         commit_exists = entry_exists_at(model, publication_commit_name(entry.revision))
@@ -29265,29 +29367,33 @@ class ModelInstaller:
         if revision is None:
             if pending_exists or commit_exists:
                 raise PermissionError("unsafe model recovery marker")
-            return None
+            return False
         handles: list[VerifiedModelFile] = []
-        activated: ActivatedModel | None = None
-        marker_fd: int | None = None
+        marker_owner_slot = _PublicationMarkerOwnerSlot()
         sealed_for_recovery = False
+        committed_on_entry = False
         post_seal_phase = False
-        transaction_complete = False
+        publication_witness = AtomicPublishWitness()
         try:
             mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
             sealed_for_recovery = mode == 0o500
             if mode == 0o500 and not pending_exists and commit_exists:
+                committed_on_entry = True
                 try:
-                    activated = self.registry._activate_from_open_model(model, entry)
+                    self.registry._activate_from_open_model(model, entry, activated_slot)
                 except BaseException as error:
+                    if not isinstance(error, Exception):
+                        raise
                     raise RuntimeError("model is not installed and verified") from error
             else:
                 if mode not in {0o500, 0o700}:
                     raise PermissionError("unsafe model filesystem revision")
 
                 if pending_exists:
-                    marker_fd = self._open_recovery_marker(
+                    self._acquire_recovery_marker(
                         model,
                         entry.revision,
+                        marker_owner_slot,
                         create=False,
                     )
 
@@ -29315,12 +29421,17 @@ class ModelInstaller:
                         close_preserving_primary(handle, VerifiedModelFile.close, error)
                         raise
 
-                if marker_fd is None:
-                    marker_fd = self._open_recovery_marker(
+                if marker_owner_slot.owner is None:
+                    self._acquire_recovery_marker(
                         model,
                         entry.revision,
+                        marker_owner_slot,
                         create=True,
                     )
+                marker_owner = marker_owner_slot.owner
+                if marker_owner is None:
+                    raise RuntimeError("model recovery marker acquisition missing")
+                marker_fd = marker_owner.fileno()
                 self._remove_publication_commit(model, entry.revision)
                 if mode == 0o700:
                     revision.chmod(0o500)
@@ -29346,47 +29457,63 @@ class ModelInstaller:
                     prepared_marker.st_dev,
                     prepared_marker.st_ino,
                 )
-                descriptor_to_close = marker_fd
-                marker_fd = None
-                os.close(descriptor_to_close)
                 self._publish_prepared_recovery_marker(
                     model,
                     entry.revision,
+                    marker_fd,
                     prepared_marker_identity,
+                    witness=publication_witness,
                 )
-                transaction_complete = True
-                activated = ActivatedModel.from_manifest(entry, tuple(handles))
+                self._fault_hook("before_publication_marker_close")
+                marker_owner.close()
+                self._fault_hook("after_publication_marker_close")
+                activated_slot.owner = ActivatedModel.from_manifest(entry, tuple(handles))
                 handles.clear()
         except BaseException as error:
-            if sealed_for_recovery and not transaction_complete:
-                try:
-                    revision.chmod(0o700)
-                    revision.fsync()
-                except BaseException:
-                    error.add_note(_RECOVERY_ROLLBACK_NOTE)
-            for handle in handles:
-                close_preserving_primary(handle, VerifiedModelFile.close, error)
-            if marker_fd is not None:
-                descriptor_to_close = marker_fd
-                marker_fd = None
-                close_preserving_primary(descriptor_to_close, os.close, error)
+            if sealed_for_recovery and not committed_on_entry and not publication_witness.committed:
+                resolution = _PublicationResolution.INCONCLUSIVE
+                if marker_owner_slot.owner is not None:
+                    try:
+                        resolution = self._reresolve_publication_witness_after_exception(
+                            model,
+                            entry.revision,
+                            marker_owner_slot.owner,
+                            publication_witness,
+                            error,
+                        )
+                    except BaseException:
+                        error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                else:
+                    error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                if resolution is _PublicationResolution.DEFINITELY_PRECOMMIT:
+                    try:
+                        revision.chmod(0o700)
+                        revision.fsync()
+                    except BaseException:
+                        error.add_note(_RECOVERY_ROLLBACK_NOTE)
+            if activated_slot.owner is None:
+                for handle in handles:
+                    close_preserving_primary(handle, VerifiedModelFile.close, error)
+            if marker_owner_slot.owner is not None:
+                close_preserving_primary(
+                    marker_owner_slot.owner,
+                    _PublicationMarkerOwner.close,
+                    error,
+                )
             close_preserving_primary(revision, OwnedDirectory.close, error)
             if isinstance(error, OSError) and not post_seal_phase:
                 raise PermissionError("unsafe unsealed model revision") from error
             raise
-        if activated is None:
+        if activated_slot.owner is None:
             revision.close()
             raise RuntimeError("model revision recovery did not activate")
-        try:
-            revision.close()
-        except BaseException as error:
-            close_preserving_primary(activated, ActivatedModel.close, error)
-            raise
-        return activated
+        revision.close()
+        return True
 
     def install(self, model_id: str) -> ActivatedModel:
         entry = self.registry.entry(model_id)
-        activated: ActivatedModel | None = None
+        activated_slot = _ActivatedModelOwnerSlot()
+        resolve_publication = self._reresolve_publication_witness_after_exception
         try:
             root = OwnedDirectory.open_or_create(self.registry._root)
             with (
@@ -29401,19 +29528,21 @@ class ModelInstaller:
                     prefix = f".stage-{entry.revision}-"
                     model.remove_private_stages(prefix)
                     model.fsync()
-                    existing = self._reuse_or_recover_revision(model, entry)
-                    if existing is not None:
-                        activated = existing
-                    else:
+                    reused = self._reuse_or_recover_revision(
+                        model,
+                        entry,
+                        activated_slot,
+                    )
+                    if not reused:
                         stage_name = f"{prefix}{secrets.token_hex(8)}"
                         stage = model.child(stage_name, create=True)
                         with _close_owned_directory(stage):
                             stage_identity = stage.identity
                             published = False
                             sealed_for_publication = False
-                            transaction_complete = False
+                            publication_witness = AtomicPublishWitness()
                             handles: list[VerifiedModelFile] = []
-                            marker_fd: int | None = None
+                            marker_owner_slot = _PublicationMarkerOwnerSlot()
                             try:
                                 deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
                                 for item in entry.files:
@@ -29462,11 +29591,16 @@ class ModelInstaller:
                                 )
                                 published = True
                                 self._fault_hook("after_publish_before_seal")
-                                marker_fd = self._open_recovery_marker(
+                                self._acquire_recovery_marker(
                                     model,
                                     entry.revision,
+                                    marker_owner_slot,
                                     create=True,
                                 )
+                                marker_owner = marker_owner_slot.owner
+                                if marker_owner is None:
+                                    raise RuntimeError("model recovery marker acquisition missing")
+                                marker_fd = marker_owner.fileno()
                                 stage.chmod(0o500)
                                 sealed_for_publication = True
                                 stage.fsync()
@@ -29495,40 +29629,58 @@ class ModelInstaller:
                                     prepared_marker.st_dev,
                                     prepared_marker.st_ino,
                                 )
-                                descriptor_to_close = marker_fd
-                                marker_fd = None
-                                os.close(descriptor_to_close)
                                 self._publish_prepared_recovery_marker(
                                     model,
                                     entry.revision,
+                                    marker_fd,
                                     prepared_marker_identity,
+                                    witness=publication_witness,
                                 )
-                                transaction_complete = True
-                                activated = ActivatedModel.from_manifest(
+                                self._fault_hook("before_publication_marker_close")
+                                marker_owner.close()
+                                self._fault_hook("after_publication_marker_close")
+                                activated_slot.owner = ActivatedModel.from_manifest(
                                     entry,
                                     tuple(handles),
                                 )
                                 handles.clear()
                             except FileExistsError as error:
                                 if published:
-                                    if sealed_for_publication and not transaction_complete:
-                                        try:
-                                            stage.chmod(0o700)
-                                            stage.fsync()
-                                        except BaseException:
-                                            error.add_note(_RECOVERY_ROLLBACK_NOTE)
-                                    for handle in handles:
+                                    if sealed_for_publication and not publication_witness.committed:
+                                        resolution = _PublicationResolution.INCONCLUSIVE
+                                        if marker_owner_slot.owner is not None:
+                                            try:
+                                                resolution = resolve_publication(
+                                                    model,
+                                                    entry.revision,
+                                                    marker_owner_slot.owner,
+                                                    publication_witness,
+                                                    error,
+                                                )
+                                            except BaseException:
+                                                error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                                        else:
+                                            error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                                        if (
+                                            resolution
+                                            is _PublicationResolution.DEFINITELY_PRECOMMIT
+                                        ):
+                                            try:
+                                                stage.chmod(0o700)
+                                                stage.fsync()
+                                            except BaseException:
+                                                error.add_note(_RECOVERY_ROLLBACK_NOTE)
+                                    if activated_slot.owner is None:
+                                        for handle in handles:
+                                            close_preserving_primary(
+                                                handle,
+                                                VerifiedModelFile.close,
+                                                error,
+                                            )
+                                    if marker_owner_slot.owner is not None:
                                         close_preserving_primary(
-                                            handle,
-                                            VerifiedModelFile.close,
-                                            error,
-                                        )
-                                    if marker_fd is not None:
-                                        descriptor_to_close = marker_fd
-                                        marker_fd = None
-                                        close_preserving_primary(
-                                            descriptor_to_close,
-                                            os.close,
+                                            marker_owner_slot.owner,
+                                            _PublicationMarkerOwner.close,
                                             error,
                                         )
                                     raise
@@ -29540,34 +29692,48 @@ class ModelInstaller:
                                     stage_identity,
                                 )
                                 model.fsync()
-                                existing = self._reuse_or_recover_revision(
+                                reused = self._reuse_or_recover_revision(
                                     model,
                                     entry,
+                                    activated_slot,
                                 )
-                                if existing is None:
+                                if not reused:
                                     raise RuntimeError(
                                         "model install publication disappeared"
                                     ) from None
-                                activated = existing
                             except BaseException as error:
-                                if sealed_for_publication and not transaction_complete:
-                                    try:
-                                        stage.chmod(0o700)
-                                        stage.fsync()
-                                    except BaseException:
-                                        error.add_note(_RECOVERY_ROLLBACK_NOTE)
-                                for handle in handles:
+                                if sealed_for_publication and not publication_witness.committed:
+                                    resolution = _PublicationResolution.INCONCLUSIVE
+                                    if marker_owner_slot.owner is not None:
+                                        try:
+                                            resolution = resolve_publication(
+                                                model,
+                                                entry.revision,
+                                                marker_owner_slot.owner,
+                                                publication_witness,
+                                                error,
+                                            )
+                                        except BaseException:
+                                            error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                                    else:
+                                        error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                                    if resolution is _PublicationResolution.DEFINITELY_PRECOMMIT:
+                                        try:
+                                            stage.chmod(0o700)
+                                            stage.fsync()
+                                        except BaseException:
+                                            error.add_note(_RECOVERY_ROLLBACK_NOTE)
+                                if activated_slot.owner is None:
+                                    for handle in handles:
+                                        close_preserving_primary(
+                                            handle,
+                                            VerifiedModelFile.close,
+                                            error,
+                                        )
+                                if marker_owner_slot.owner is not None:
                                     close_preserving_primary(
-                                        handle,
-                                        VerifiedModelFile.close,
-                                        error,
-                                    )
-                                if marker_fd is not None:
-                                    descriptor_to_close = marker_fd
-                                    marker_fd = None
-                                    close_preserving_primary(
-                                        descriptor_to_close,
-                                        os.close,
+                                        marker_owner_slot.owner,
+                                        _PublicationMarkerOwner.close,
                                         error,
                                     )
                                 if not published:
@@ -29581,26 +29747,27 @@ class ModelInstaller:
                                         pass
                                 raise
         except BaseException as error:
-            if activated is not None:
+            if activated_slot.owner is not None:
                 close_preserving_primary(
-                    activated,
+                    activated_slot.owner,
                     ActivatedModel.close,
                     error,
                 )
-                activated = None
             raise
+        activated = activated_slot.owner
         if activated is None:
             raise RuntimeError("model install did not activate")
+        activated_slot.owner = None
         return activated
 ```
 
-`models/manifest.schema.json` is JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry`/file fields, the same closed ID/revision/file/hash/size/URL bounds, and bounded model/file counts. Schema validation is defense in depth beside the runtime loader's independent closed checks. The installer uses one 900-second monotonic deadline and holds only the target model's exclusive lock, so unrelated installed models remain available. Fresh and recovered revisions create or reopen an exact durable `0600`/prepared-`0400` recovery marker before sealing. After repeated artifact verification, that retained marker is prepared to exact `0400`, fsynced with its parent, identity-revalidated, closed, and atomically renamed no-replace to the positive-proof name. This marker-to-proof rename is the commit point; no fallible durability operation follows it, and the helper's caller-owned syscall-success witness makes a success-then-error outcome committed without fallible reclassification. Every precommit fault leaves the marker name authoritative regardless of best-effort `0700` rollback, while every postcommit constructor or cleanup fault leaves the exact proof and `0500` revision committed. Recovery re-durabilizes prepared markers, removes stale proof collisions under lock, re-verifies all artifacts, and retries the same transition. Activation opens the exact stable `0400` proof `O_RDONLY` and revalidates descriptor/name identity after artifact verification. Fresh and reused results remain installer-owned until every directory and lock cleanup succeeds; cleanup failures close unreturned activations once without replacing the primary. Missing, rejected, unverified, pending, proofless, or mismatched models produce a disabled capability.
+`models/manifest.schema.json` is JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry`/file fields, the same closed ID/revision/file/hash/size/URL bounds, and bounded model/file counts. Schema validation is defense in depth beside the runtime loader's independent closed checks. The installer uses one 900-second monotonic deadline and holds only the target model's exclusive lock, so unrelated installed models remain available. Fresh and recovered revisions create or reopen an exact durable `0600`/prepared-`0400` recovery marker before sealing. After repeated artifact verification, that retained marker is prepared to exact `0400`, fsynced with its parent, identity-revalidated, and kept open. Immediately before the Darwin/Linux exclusive rename, the native helper requires the source name and retained descriptor to remain the same recorded regular, owner-owned, `0400`, single-link, zero-length inode; unsupported platforms return `ENOTSUP`. A zero marker-to-proof syscall is the commit point, and its caller-owned transaction witness is set before any postcommit descriptor close or outer callback can fail. A non-forwarding wrapper is accepted only when marker absence plus the proof's exact identity against the retained descriptor establishes the same commit on return or exception. Ordinary postcommit `Exception` diagnostics remain non-fatal, but non-`Exception` control flow always propagates after either witness path proves the commit. False-witness exception re-resolution returns `COMMITTED`, `DEFINITELY_PRECOMMIT`, or `INCONCLUSIVE`; only exact retained pending state permits rollback, while exact retained proof and every secondary interruption or ambiguous namespace preserve the sealed `0500` revision for safe retry. Every proven post-helper, descriptor-close, constructor, or cleanup fault leaves the exact proof and `0500` revision committed. Marker acquisition first statically qualifies the descriptor-relative name without following it, then stores a C-backed FileIO directly in a transaction-owned slot using `x+b`/`rb` and C `functools.partial(os.open, mode=0600, dir_fd=...)`, and finally performs exact descriptor/name/property/access/CLOEXEC/durability revalidation. No Python function returns a live raw marker FD or owner. A helper-return interruption therefore reaches outer cleanup with the slot already populated, even while its traceback is retained. Before-close faults leave the FileIO owner available for cleanup, while post-entry return/error uses FileIO's own consumed-or-retained state and never retries a recycled integer. Recovery re-durabilizes prepared markers, removes stale proof collisions under lock, re-verifies all artifacts, and retries the same transition. Activation opens the exact stable `0400` proof `O_RDONLY` and revalidates descriptor/name identity after artifact verification; no process-local uncertainty state participates. Registry activation and fresh/recovery/reuse installation share transaction-visible ActivatedModel owner slots. Private helpers return only inert status, committed-on-entry state is never rolled back, and all catchable control-flow/cleanup failures close unreturned activations exactly once without replacing the primary. The final public return is explicitly the caller-owned resource-lease boundary; callers close returned models and the implementation does not depend on `__del__`. Cooperating same-EUID processes honor the model lock; hostile noncooperative same-EUID/root mutation inside either name-based primitive is outside this stated filesystem boundary. Missing, rejected, unverified, pending, proofless, or mismatched models produce a disabled capability.
 
 - [ ] **Step 4: Lock and run the green model gate**
 
 Run: `uv lock && uv run pytest tests/security/test_model_governance.py -q && uv run python scripts/check_model_manifest.py models/manifest.yaml && uv run tuntunctl models list`
 
-Expected: PASS with the full manifest/filesystem/network/race/fault/ownership-transfer/lock-cleanup/rollback/marker-durability/atomic-positive-proof/cross-process-commit matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, cleanup failure, and conflicting publication never expose unverified runtime bytes. The stage directory remains `0700` through Darwin/Linux exclusive no-replace publication; every accepted `0600` or prepared `0400` marker is re-durably fsynced and identity-revalidated before recovery. Same-model activation blocks on the shared/exclusive lock through marker preparation and the atomic marker-to-proof commit, while different models remain available. Fresh/recovery prepared-marker fchmod, marker-fsync, parent-fsync, validation, close, rename, proof-collision, and compound rollback faults retain an on-disk marker, deny a fresh interpreter, close descriptors once, and converge. A real-rename-then-error diagnostic returns a successful owned activation from the syscall-success witness even with namespace-probe and rollback faults; postcommit constructor and cleanup failures never roll back the `0500`/proof state and close every unreturned artifact descriptor exactly once. Missing, special, writable, nonempty, multiply linked, or identity-swapped proofs deny. Two installers for one model serialize and converge on one immutable revision, and runtime loads repeatedly consume the exact bytes through stable read-only descriptors.
+Expected: PASS with the full manifest/filesystem/network/race/fault/ownership-transfer/lock-cleanup/rollback/marker-durability/atomic-positive-proof/cross-process-commit matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, cleanup failure, and conflicting publication never expose unverified runtime bytes. The stage directory remains `0700` through Darwin/Linux exclusive no-replace publication; every accepted `0600` or prepared `0400` marker is re-durably fsynced and identity-revalidated before recovery. Same-model activation blocks on the shared/exclusive lock through marker preparation and the atomic marker-to-proof commit, while different models remain available. Fresh/recovery prepared-marker fchmod, marker-fsync, parent-fsync, validation, source identity/mode/size/link mutation, rename, proof-collision, and compound rollback faults deny a fresh interpreter, close descriptors once, and converge. The platform gate proves mocked FreeBSD returns `ENOTSUP` without calling an exported `renameat2`. A real-rename-then-error diagnostic and a non-forwarding-witness wrapper both preserve the exact committed inode; conforming/non-forwarding control-flow interruptions propagate after commit, and repeated fallback-witness interruptions resolve to committed or inconclusive sealed state before rollback. Raw/helper-owner return RED cases, retained-traceback slot-return cleanup, actual FileIO mode/CLOEXEC flags, hostile symlink/FIFO pre-open rejection, trace interruption before and after committed marker-owner close, real-close-then-error FD recycling, constructor, and cleanup failures never roll back the `0500`/proof state or retry a consumed raw FD. Committed-reuse `KeyboardInterrupt`/`SystemExit`/`GeneratorExit`/cancellation matrices preserve exact primary identity and immutable state through installer and registry. Private activation and reuse return-event traces retain the exception traceback yet observe only inert status, with the transaction slot closing every unreturned artifact FD and zero FD delta. Missing, special, writable, nonempty, multiply linked, or identity-swapped proofs deny. Two installers for one model serialize and converge on one immutable revision, and runtime loads repeatedly consume the exact bytes through stable read-only descriptors.
 
 - [ ] **Step 5: Commit exact Task 10 paths**
 

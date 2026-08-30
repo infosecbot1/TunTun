@@ -603,16 +603,6 @@ class GovernedModelCase:
     def recovery_marker_exists(self) -> bool:
         return self.recovery_marker_path.exists()
 
-    def clear_process_publication_uncertainty(self) -> None:
-        resolver = getattr(fs_module, "_resolve_publication_uncertainty", None)
-        if resolver is None or not (self.model_root / self.model_id).exists():
-            return
-        model = fs_module.OwnedDirectory.open(self.model_root / self.model_id)
-        try:
-            resolver(model, REVISION)
-        finally:
-            model.close()
-
     def create_interrupted_recovery_marker(self) -> None:
         self.recovery_marker_path.write_bytes(b"")
         self.recovery_marker_path.chmod(0o600)
