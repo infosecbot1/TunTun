@@ -481,6 +481,11 @@ budget_reservations = Table(
         "settled_at",
         name="uq_budget_ledger_evidence",
     ),
+    UniqueConstraint(
+        "id",
+        "primary_accounting_basis",
+        name="uq_budget_ledger_accounting_basis",
+    ),
 )
 Index("ix_budget_request", budget_reservations.c.request_id)
 Index(
@@ -577,6 +582,8 @@ provider_calls = Table(
         "authorization_id",
         "provider",
         "model",
+        "response_hmac_key_id",
+        "response_hmac_b64",
         name="uq_provider_call_response_evidence",
     ),
 )
@@ -602,13 +609,23 @@ provider_response_receipts = Table(
     Column("receipt_hmac_b64", String(128), nullable=False),
     _utc_text("produced_at"),
     ForeignKeyConstraint(
-        ["request_id", "attempt_id", "authorization_id", "provider", "model"],
+        [
+            "request_id",
+            "attempt_id",
+            "authorization_id",
+            "provider",
+            "model",
+            "response_hmac_key_id",
+            "response_hmac_b64",
+        ],
         [
             "provider_calls.request_id",
             "provider_calls.attempt_id",
             "provider_calls.authorization_id",
             "provider_calls.provider",
             "provider_calls.model",
+            "provider_calls.response_hmac_key_id",
+            "provider_calls.response_hmac_b64",
         ],
         name="fk_provider_response_exact_call",
     ),
@@ -662,6 +679,11 @@ cost_ledger = Table(
             "budget_reservations.settled_at",
         ],
         name="fk_cost_ledger_exact_reservation",
+    ),
+    ForeignKeyConstraint(
+        ["reservation_id", "accounting_basis"],
+        ["budget_reservations.id", "budget_reservations.primary_accounting_basis"],
+        name="fk_cost_ledger_accounting_basis",
     ),
     _integer_storage_constraint("reserved_micros_sgd"),
     _integer_storage_constraint("charged_micros_sgd"),
