@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import socket
 import subprocess
@@ -88,23 +89,95 @@ def test_testing_is_an_optional_core_extra_and_imports_are_lazy() -> None:
         assert all("tuntun_testing" not in ast.unparse(node) for node in imports)
 
 
-def test_core_wheel_smoke_exports_private_uv_cache_for_dependency_resolution() -> None:
+def test_core_wheel_smoke_uses_private_cache_and_highest_current_ranges(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "calls.jsonl"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        '''#!/usr/bin/env python3
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+record = {
+    "argv": sys.argv[1:],
+    "cache": os.environ.get("UV_CACHE_DIR"),
+    "pythonpath": os.environ.get("PYTHONPATH"),
+    "tool": "uv",
+}
+with Path(os.environ["TUNTUN_UV_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True) + "\\n")
+
+if sys.argv[1] == "build":
+    output = Path(sys.argv[sys.argv.index("--out-dir") + 1])
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "tuntun_core-0.1.0.dev0-py3-none-any.whl").write_bytes(b"synthetic-wheel")
+elif sys.argv[1] == "venv":
+    executable = Path(sys.argv[-1]) / "bin" / "python"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+record = {
+    "argv": [],
+    "cache": os.environ.get("UV_CACHE_DIR"),
+    "pythonpath": os.environ.get("PYTHONPATH"),
+    "tool": "python",
+}
+with Path(os.environ["TUNTUN_UV_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True) + "\\\\n")
+""",
+        encoding="utf-8",
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+''',
+        encoding="utf-8",
+    )
+    fake_uv.chmod(fake_uv.stat().st_mode | 0o100)
+    temp_root = tmp_path / "tmp"
+    temp_root.mkdir()
+    ambient_cache = tmp_path / "ambient-cache"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": os.pathsep.join((str(fake_bin), environment["PATH"])),
+            "TMPDIR": str(temp_root),
+            "TUNTUN_UV_LOG": str(log),
+            "UV_CACHE_DIR": str(ambient_cache),
+        }
+    )
+
     result = subprocess.run(
-        ["make", "-n", "core-wheel-smoke"],
+        ["make", "core-wheel-smoke"],
         cwd=ROOT,
+        env=environment,
         capture_output=True,
         check=False,
-        timeout=20,
+        timeout=30,
     )
-    assert result.returncode == 0
-    recipe = result.stdout.decode("utf-8")
-    assert 'dependency_intent="current-range-compatibility"' in recipe
-    assert 'export UV_CACHE_DIR="${UV_CACHE_DIR:-$smoke/uv-cache}"' in recipe
-    assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-$smoke/uv-cache}" uv build' not in recipe
-    export_position = recipe.index("export UV_CACHE_DIR")
-    assert export_position < recipe.index("uv build")
-    assert export_position < recipe.index("uv venv")
-    assert export_position < recipe.index("uv pip install")
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    records = tuple(json.loads(line) for line in log.read_text(encoding="utf-8").splitlines())
+    assert [record["tool"] for record in records] == ["uv", "uv", "uv", "python"]
+    caches = {record["cache"] for record in records}
+    assert len(caches) == 1
+    cache = next(iter(caches))
+    assert cache != str(ambient_cache)
+    assert cache.startswith(str(temp_root / "tuntun-core-wheel."))
+    assert cache.endswith("/uv-cache")
+    pip_install = records[2]["argv"]
+    assert pip_install[:2] == ["pip", "install"]
+    assert pip_install[pip_install.index("--resolution") + 1] == "highest"
+    assert records[3]["pythonpath"] is None
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "current dependency ranges" in makefile
+    assert "dependency_intent=" not in makefile
 
 
 def test_guard_is_active_before_a_failing_yaml_import_and_error_is_content_free(

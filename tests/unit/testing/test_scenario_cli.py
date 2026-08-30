@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -148,6 +149,33 @@ def test_json_is_canonical_and_process_deterministic() -> None:
     assert canonical_mapping_bytes(decoded) + b"\n" == first.stdout
 
 
+def test_supervisor_accepts_records_in_normalized_path_order(tmp_path: Path) -> None:
+    first = tmp_path / "a" / "z-case.yaml"
+    second = tmp_path / "b" / "a-case.yaml"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(_yaml("z-case"))
+    second.write_bytes(_yaml("a-case"))
+
+    result = _run_at(
+        tmp_path,
+        "--scenario",
+        "a/z-case.yaml",
+        "--scenario",
+        "b/a-case.yaml",
+        "--turns",
+        "1",
+        "--json",
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == b""
+    assert [record["name"] for record in json.loads(result.stdout)["scenarios"]] == [
+        "z-case",
+        "a-case",
+    ]
+
+
 def test_core_simulate_command_runs_with_the_optional_workspace_package() -> None:
     code = """
 import json
@@ -189,6 +217,94 @@ def test_core_simulate_runs_in_child_without_mutating_parent_network_state() -> 
     probe = socket.socket()
     probe.close()
     assert socket.getaddrinfo("localhost", 0)
+
+
+@pytest.mark.parametrize(
+    "child_code",
+    [
+        "pass",
+        "import os; os.write(1, b'not-json\\n')",
+        "import os; os.write(1, b'\\xffprivate-output-sentinel\\n')",
+    ],
+)
+def test_core_simulate_rejects_malformed_child_success_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+    child_code: str,
+) -> None:
+    from typer.testing import CliRunner
+
+    module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    app = importlib.import_module("tuntun_core.cli.main").app
+    monkeypatch.setattr(module, "_SIMULATE_CHILD_CODE", child_code)
+
+    result = CliRunner().invoke(
+        app,
+        ["simulate", "--scenario", "tests/fixtures/scenarios/guest-hinglish.yaml", "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr == "simulation-invalid-input\n"
+    assert b"private-output-sentinel" not in result.stdout_bytes + result.stderr_bytes
+
+
+def test_core_simulate_requires_exact_schema_and_canonical_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    app = importlib.import_module("tuntun_core.cli.main").app
+    arguments = [
+        "simulate",
+        "--scenario",
+        "tests/fixtures/scenarios/guest-hinglish.yaml",
+        "--json",
+    ]
+    valid = CliRunner().invoke(app, arguments)
+    assert valid.exit_code == 0
+    document = json.loads(valid.stdout)
+    wrong_schema = dict(document)
+    wrong_schema["schema_version"] = "scenario_result.v2"
+    payloads = (
+        canonical_mapping_bytes(wrong_schema) + b"\n",
+        json.dumps(document, ensure_ascii=False, indent=1, sort_keys=True).encode("utf-8") + b"\n",
+    )
+
+    for payload in payloads:
+        monkeypatch.setattr(
+            module,
+            "_SIMULATE_CHILD_CODE",
+            f"import os; os.write(1, bytes.fromhex('{payload.hex()}'))",
+        )
+        result = CliRunner().invoke(app, arguments)
+
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        assert result.stderr == "simulation-invalid-input\n"
+
+
+def test_core_simulate_runtime_deadline_is_bounded_and_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    app = importlib.import_module("tuntun_core.cli.main").app
+    monkeypatch.setattr(module, "_SIMULATE_CHILD_CODE", "import time; time.sleep(2)")
+    monkeypatch.setattr(module, "_SIMULATION_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    started = time.monotonic()
+    result = CliRunner().invoke(
+        app,
+        ["simulate", "--scenario", "tests/fixtures/scenarios/guest-hinglish.yaml", "--json"],
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr == "simulation-invalid-input\n"
 
 
 @pytest.mark.parametrize(
@@ -291,6 +407,217 @@ def test_resource_gate_counts_task_leaks_from_warmup(
 
     monkeypatch.setattr(scenario_module, "ScenarioRunner", LeakyRunner)
     asyncio.run(run_case())
+
+
+def test_resource_gate_checks_fd_bounds_immediately_after_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tuntun_testing.scenario as scenario_module
+
+    runner = _load_runner_module()
+    original_runner = scenario_module.ScenarioRunner
+    held_descriptors: list[int] = []
+    call_count = 0
+
+    class WarmupCleanupRunner:
+        async def run_async(self, value: ScenarioInput, *, turn_index: int = 0) -> object:
+            nonlocal call_count
+            if call_count == 0:
+                held_descriptors.append(os.open("/dev/null", os.O_RDONLY))
+            elif call_count == 1:
+                os.close(held_descriptors.pop())
+            call_count += 1
+            return await original_runner().run_async(value, turn_index=turn_index)
+
+    monkeypatch.setattr(scenario_module, "ScenarioRunner", WarmupCleanupRunner)
+    value = read_scenario_input(
+        Path("tests/fixtures/scenarios/guest-hinglish.yaml"),
+        trusted_root=ROOT,
+    )
+    try:
+        with pytest.raises(AssertionError, match="resource-bound-failed"):
+            asyncio.run(runner._execute((value,), 1, True, None))
+        assert call_count == 1
+    finally:
+        for descriptor in held_descriptors:
+            os.close(descriptor)
+
+
+def test_resource_gate_checks_task_bounds_immediately_after_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tuntun_testing.scenario as scenario_module
+
+    runner = _load_runner_module()
+    original_runner = scenario_module.ScenarioRunner
+    held_tasks: list[asyncio.Task[object]] = []
+    call_count = 0
+
+    class WarmupCleanupRunner:
+        async def run_async(self, value: ScenarioInput, *, turn_index: int = 0) -> object:
+            nonlocal call_count
+            if call_count == 0:
+                held_tasks.append(asyncio.create_task(asyncio.Event().wait()))
+            elif call_count == 1:
+                held_tasks[0].cancel()
+                await asyncio.gather(*held_tasks, return_exceptions=True)
+                held_tasks.clear()
+            call_count += 1
+            return await original_runner().run_async(value, turn_index=turn_index)
+
+    async def run_case() -> None:
+        value = read_scenario_input(
+            Path("tests/fixtures/scenarios/guest-hinglish.yaml"),
+            trusted_root=ROOT,
+        )
+        try:
+            with pytest.raises(AssertionError, match="resource-bound-failed"):
+                await runner._execute((value,), 1, True, None)
+            assert call_count == 1
+        finally:
+            for task in held_tasks:
+                task.cancel()
+            await asyncio.gather(*held_tasks, return_exceptions=True)
+
+    monkeypatch.setattr(scenario_module, "ScenarioRunner", WarmupCleanupRunner)
+    asyncio.run(run_case())
+
+
+def test_ambient_child_marker_does_not_skip_the_supervisor() -> None:
+    environment = _environment()
+    environment["TUNTUN_SCENARIO_CHILD"] = "1"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == b""
+    assert json.loads(result.stdout)["schema_version"] == "scenario_gate.v1"
+
+
+def test_child_argument_without_matching_environment_is_normal_invalid_input() -> None:
+    environment = _environment()
+    environment["TUNTUN_SCENARIO_CHILD"] = "b" * 64
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--tuntun-scenario-child", "a" * 64],
+        cwd=ROOT,
+        env=environment,
+        input=b"malformed-child-configuration",
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == b""
+    assert result.stderr == b"scenario-gate: invalid-input\n"
+
+
+@pytest.mark.parametrize(
+    "startup_code",
+    [
+        "print('unexpected-startup-output')",
+        "import os; os.write(1, b'\\xffprivate-output-sentinel\\n')",
+        "import os; os.write(1, b'x' * 70000)",
+    ],
+)
+def test_scenario_supervisor_rejects_malformed_or_oversized_child_output(
+    tmp_path: Path,
+    startup_code: str,
+) -> None:
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "sitecustomize.py").write_text(
+        (f"import os\nif os.environ.get('TUNTUN_SCENARIO_CHILD'):\n    {startup_code}\n"),
+        encoding="utf-8",
+    )
+    environment = _environment()
+    environment["PYTHONPATH"] = os.pathsep.join((str(shadow), PYTHON_PATH))
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b"scenario-gate: failed\n"
+    assert b"private-output-sentinel" not in result.stdout + result.stderr
+
+
+def test_scenario_supervisor_requires_exact_schema_and_canonical_json(tmp_path: Path) -> None:
+    valid = _run("--turns", "1", "--json")
+    assert valid.returncode == 0
+    document = json.loads(valid.stdout)
+    wrong_schema = dict(document)
+    wrong_schema["schema_version"] = "scenario_gate.v2"
+    payloads = (
+        canonical_mapping_bytes(wrong_schema) + b"\n",
+        json.dumps(document, ensure_ascii=False, indent=1, sort_keys=True).encode("utf-8") + b"\n",
+    )
+
+    for index, payload in enumerate(payloads):
+        shadow = tmp_path / f"shadow-{index}"
+        shadow.mkdir()
+        (shadow / "sitecustomize.py").write_text(
+            (
+                "import os\n"
+                "if os.environ.get('TUNTUN_SCENARIO_CHILD'):\n"
+                f"    os.write(1, bytes.fromhex('{payload.hex()}'))\n"
+                "    os._exit(0)\n"
+            ),
+            encoding="utf-8",
+        )
+        environment = _environment()
+        environment["PYTHONPATH"] = os.pathsep.join((str(shadow), PYTHON_PATH))
+
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+
+        assert result.returncode == 1
+        assert result.stdout == b""
+        assert result.stderr == b"scenario-gate: failed\n"
+
+
+def test_scenario_supervisor_runtime_deadline_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "sitecustomize.py").write_text(
+        "import os, time\nif os.environ.get('TUNTUN_SCENARIO_CHILD'):\n    time.sleep(2)\n",
+        encoding="utf-8",
+    )
+    runner = _load_runner_module()
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(shadow), PYTHON_PATH)))
+    monkeypatch.setattr(runner, "_CHILD_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    started = time.monotonic()
+    result = runner._run_gate_child(("--turns", "1", "--json"), ROOT)
+    elapsed = time.monotonic() - started
+    captured = capsys.readouterr()
+
+    assert elapsed < 1.0
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "scenario-gate: failed\n"
 
 
 @pytest.mark.parametrize(
