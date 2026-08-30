@@ -298,12 +298,27 @@ def test_invalid_operational_settings_fail_closed(
 
 
 def test_checked_in_yaml_example_exactly_spells_out_defaults() -> None:
-    raw = read_bounded_strict_yaml(
-        PROJECT_ROOT / "config/tuntun.example.yaml",
-        require_private=False,
+    example = PROJECT_ROOT / "config/tuntun.example.yaml"
+    with example.open("rb") as stream:
+        encoded = stream.read(loader.MAX_SETTINGS_BYTES + 1)
+    assert len(encoded) <= loader.MAX_SETTINGS_BYTES
+
+    raw = loader.parse_bounded_strict_yaml(
+        encoded,
+        max_bytes=loader.MAX_SETTINGS_BYTES,
     )
 
     assert raw == Settings().model_dump(mode="python")
+
+
+def test_public_yaml_file_accepts_read_only_shared_mode(tmp_path: Path) -> None:
+    config = tmp_path / "public.yaml"
+    config.write_text("network:\n  admin_port: 8787\n", encoding="utf-8")
+    config.chmod(0o644)
+
+    assert read_bounded_strict_yaml(config, require_private=False) == {
+        "network": {"admin_port": 8787}
+    }
 
 
 def _supported_override_names() -> list[str]:

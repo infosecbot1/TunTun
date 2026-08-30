@@ -1824,7 +1824,10 @@ def test_json_limits_are_enforced_before_object_graph_materialization(
         assurance_common.parse_json_object(raw, **limits)
 
 
-def test_backup_sandbox_and_sql_clis_exercise_all_exit_classes(tmp_path: Path) -> None:
+def test_backup_sandbox_and_sql_clis_exercise_all_exit_classes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     backup = tmp_path / "backup"
     backup.mkdir()
     (backup / "manifest.json").write_text(
@@ -1853,6 +1856,22 @@ def test_backup_sandbox_and_sql_clis_exercise_all_exit_classes(tmp_path: Path) -
 
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
+
+    def no_process_handles(
+        root: Path,
+        scanner_handle: tuple[int, int],
+    ) -> tuple[str, ...]:
+        assert root == sandbox
+        scanner_pid, descriptor = scanner_handle
+        assert scanner_pid == os.getpid()
+        assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+        return ()
+
+    monkeypatch.setattr(
+        scan_sandbox_residue,
+        "_process_handles",
+        no_process_handles,
+    )
     assert scan_sandbox_residue.main(["--root", str(sandbox), "--require-empty"]) == 0
     (sandbox / "residue.txt").write_text("synthetic", encoding="utf-8")
     assert scan_sandbox_residue.main(["--root", str(sandbox), "--require-empty"]) == 1
