@@ -8,16 +8,14 @@ import ast
 import contextlib
 import ipaddress
 import json
-import os
 import re
 import shlex
 import subprocess
 import sys
 import tempfile
-import xml.etree.ElementTree as element_tree
 from collections import Counter
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 import yaml
@@ -28,9 +26,11 @@ try:
         MaterializationError,
         PlanDocument,
         Snippet,
+        Task,
         foundation_snapshot_from_ref,
         materialize_document,
         plan_document_from_ref,
+        run_isolated_process,
         run_materialized_python,
         write_materialized_tree,
     )
@@ -41,9 +41,11 @@ except ModuleNotFoundError as error:
         MaterializationError,
         PlanDocument,
         Snippet,
+        Task,
         foundation_snapshot_from_ref,
         materialize_document,
         plan_document_from_ref,
+        run_isolated_process,
         run_materialized_python,
         write_materialized_tree,
     )
@@ -618,7 +620,22 @@ def validate_bilingual_report_model_files(files: dict[str, bytes]) -> list[str]:
         probe = root / ".bilingual-report-model-probe.py"
         probe.write_text(_BILINGUAL_REPORT_MODEL_PROBE, encoding="utf-8")
         try:
-            result = run_materialized_python((probe.name, str(root)), root=root, timeout_seconds=15)
+            result = run_isolated_process(
+                (
+                    "uv",
+                    "run",
+                    "--project",
+                    "evals",
+                    "--locked",
+                    "python",
+                    probe.name,
+                    str(root),
+                ),
+                root=root,
+                timeout_seconds=15,
+            )
+        except MaterializationError as error:
+            return [f"bilingual report runtime locked environment failed: {error}"]
         except subprocess.TimeoutExpired:
             return ["bilingual report runtime behavioral probe exceeded 15 seconds"]
     if result.returncode == 0:
@@ -758,9 +775,11 @@ def validate_wake_benchmark_bytes(
                     root=root,
                     timeout_seconds=15,
                 )
-            except subprocess.TimeoutExpired:
+            except (MaterializationError, subprocess.TimeoutExpired) as error:
+                if isinstance(error, MaterializationError):
+                    return False, f"locked runtime unavailable: {error}"
                 return False, "exceeded 15 seconds"
-        diagnostic = result.diagnostic[-4096:].decode(errors="replace")
+        diagnostic = result.diagnostic[-16_384:].decode(errors="replace")
         return result.returncode == 0, f"exit {result.returncode}: {diagnostic}"
 
     passed, diagnostic = execute(baseline_files, "baseline")
@@ -1263,54 +1282,61 @@ def _validate_foundation(
         _run_foundation_behavioral_probe(foundation_files, errors)
 
 
-def _junit_is_complete_pass(path: Path) -> tuple[bool, str]:
-    try:
-        root = element_tree.parse(path).getroot()
-    except (OSError, element_tree.ParseError) as error:
-        return False, f"JUnit evidence is absent or invalid: {error}"
-    cases = list(root.iter("testcase"))
-    skipped = sum(case.find("skipped") is not None for case in cases)
-    failed = sum(
-        case.find("failure") is not None or case.find("error") is not None for case in cases
-    )
-    if not cases or skipped or failed:
-        return (
-            False,
-            f"JUnit evidence tests={len(cases)} skipped={skipped} failed={failed}",
-        )
-    return True, f"JUnit evidence tests={len(cases)} skipped=0 failed=0"
-
-
 def _run_foundation_behavioral_probe(foundation_files: dict[str, bytes], errors: list[str]) -> None:
     def execute(candidate: dict[str, bytes], label: str) -> tuple[bool, str]:
         with tempfile.TemporaryDirectory(prefix=f"tuntun-foundation-task13-{label}-") as temporary:
             root = Path(temporary)
-            junit = root / ".foundation-task13.junit.xml"
+            plugin = root / "__tuntun_plan_pytest_plugin.py"
+            evidence = root / ".tuntun-executed-nodes.json"
             write_materialized_tree(root, candidate)
+            plugin.write_text(_PYTEST_EVIDENCE_PLUGIN, encoding="utf-8")
             try:
-                result = subprocess.run(
+                result = run_isolated_process(
                     (
                         sys.executable,
                         "-m",
                         "pytest",
+                        "--rootdir=.",
+                        "-p",
+                        "__tuntun_plan_pytest_plugin",
+                        "-p",
+                        "no:cacheprovider",
                         "-q",
                         "--maxfail=1",
-                        f"--junitxml={junit}",
                         FOUNDATION_MIGRATION_PATHS[2],
                     ),
-                    cwd=root,
-                    env=_pytest_environment(root),
-                    check=False,
-                    capture_output=True,
-                    timeout=120,
+                    root=root,
+                    timeout_seconds=120,
+                    writable_paths=(evidence,),
                 )
-            except subprocess.TimeoutExpired:
+            except (MaterializationError, subprocess.TimeoutExpired) as error:
+                if isinstance(error, MaterializationError):
+                    return False, f"locked runtime unavailable: {error}"
                 return False, "exceeded 120 seconds"
-            complete, junit_diagnostic = _junit_is_complete_pass(junit)
-        diagnostic = (result.stdout + result.stderr)[-4096:].decode(errors="replace")
+            try:
+                records = json.loads(evidence.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                complete = False
+                evidence_diagnostic = f"execution evidence is absent or invalid: {error}"
+            else:
+                complete = (
+                    type(records) is dict
+                    and bool(records)
+                    and all(
+                        type(record) is dict
+                        and record == {"call": True, "failed": False, "skipped": False}
+                        for record in records.values()
+                    )
+                )
+                evidence_diagnostic = (
+                    f"execution evidence tests={len(records)} complete={complete}"
+                    if type(records) is dict
+                    else "execution evidence is not an object"
+                )
+        diagnostic = result.diagnostic[-16_384:].decode(errors="replace")
         return (
             result.returncode == 0 and complete,
-            f"exit {result.returncode}; {junit_diagnostic}: {diagnostic}",
+            f"exit {result.returncode}; {evidence_diagnostic}: {diagnostic}",
         )
 
     passed, diagnostic = execute(foundation_files, "baseline")
@@ -1757,6 +1783,24 @@ def _command_invocations(command: str) -> tuple[tuple[str, ...], ...]:
     return tuple(invocations)
 
 
+def _closed_uv_run_payload(words: Sequence[str]) -> tuple[str, ...] | None:
+    """Return the command behind an exact, auditable uv wrapper."""
+
+    if len(words) < 3 or words[0] != "uv" or words[1] != "run":
+        return None
+    if tuple(words[2:5]) == ("--project", "evals", "--locked"):
+        if len(words) < 6 or words[5].startswith("-"):
+            return None
+        return tuple(words[5:])
+    if words[2] == "--locked":
+        if len(words) < 4 or words[3].startswith("-"):
+            return None
+        return tuple(words[3:])
+    if words[2].startswith("-"):
+        return None
+    return tuple(words[2:])
+
+
 def _unwrap_invocation(invocation: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
     words = list(invocation)
     while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
@@ -1764,29 +1808,149 @@ def _unwrap_invocation(invocation: tuple[str, ...]) -> tuple[str, tuple[str, ...
     if not words:
         return "", ()
     if words[0] == "uv":
-        if len(words) < 3 or words[1] != "run":
+        payload = _closed_uv_run_payload(words)
+        if payload is None:
             return "", ()
-        words = words[2:]
-        options_with_values = {"--directory", "--project", "--python"}
-        while words and words[0].startswith("-"):
-            option = words.pop(0)
-            if option in options_with_values and words:
-                words.pop(0)
-        if not words:
-            return "", ()
+        words = list(payload)
     return words[0], tuple(words[1:])
+
+
+_EXTERNAL_ALLOW_VARIABLES = frozenset({"TUNTUN_ALLOW_REACHY_HARDWARE", "TUNTUN_ALLOW_LIVE_CLOUD"})
+
+
+def _external_assignment(
+    invocation: tuple[str, ...],
+) -> tuple[str | None, str | None, tuple[str, ...]]:
+    """Parse the one optional, exact external-lane authorization assignment."""
+
+    assignments: list[tuple[str, str]] = []
+    index = 0
+    while index < len(invocation) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", invocation[index]):
+        name, _, value = invocation[index].partition("=")
+        if name not in _EXTERNAL_ALLOW_VARIABLES or value not in {"0", "1"}:
+            raise ValueError("external authorization assignment is outside the closed grammar")
+        assignments.append((name, value))
+        index += 1
+    if any(
+        word.partition("=")[0] in _EXTERNAL_ALLOW_VARIABLES
+        and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word)
+        for word in invocation[index:]
+    ):
+        raise ValueError("external authorization assignment must precede the command")
+    if len(assignments) > 1:
+        raise ValueError("external authorization assignment is duplicate or mixed")
+    if not assignments:
+        return None, None, invocation
+    name, value = assignments[0]
+    return name, value, invocation[index:]
+
+
+def _external_targets_are_canonical(targets: Sequence[str], *, prefix: str) -> bool:
+    for target in targets:
+        path_text, separator, node_id = target.partition("::")
+        path = PurePosixPath(path_text)
+        if (
+            path.is_absolute()
+            or not path.parts
+            or ".." in path.parts
+            or path.as_posix() != path_text
+            or not path_text.startswith(prefix)
+            or (separator and not node_id)
+        ):
+            return False
+    return True
+
+
+def _external_lane(invocation: tuple[str, ...]) -> str | None:
+    """Classify only exact authorized external pytest or physical-hardware commands."""
+
+    variable, value, payload = _external_assignment(invocation)
+    if variable is None or value == "0":
+        return None
+    executable, arguments = _unwrap_invocation(payload)
+    if variable == "TUNTUN_ALLOW_REACHY_HARDWARE":
+        if executable != "/venvs/apps_venv/bin/python3":
+            return None
+        if arguments == (
+            "tests/hardware/bench_wakeword.py",
+            "--frames",
+            "360000",
+            "--max-one-core-percent",
+            "25",
+        ):
+            return "reachy_hardware_command"
+        if arguments[:2] != ("-m", "pytest"):
+            return None
+        pytest_arguments = arguments[2:]
+        if (
+            len(pytest_arguments) >= 6
+            and pytest_arguments[:4]
+            == (
+                "-c",
+                "tools/reachy-hardware-probe/pytest.ini",
+                "-m",
+                "reachy_hardware",
+            )
+            and pytest_arguments[-1] == "-q"
+            and all(not target.startswith("-") for target in pytest_arguments[4:-1])
+            and pytest_arguments[4:-1]
+        ):
+            targets = pytest_arguments[4:-1]
+            if _external_targets_are_canonical(targets, prefix="tests/hardware/"):
+                return "reachy_hardware_pytest"
+        return None
+    if executable == "python" and arguments[:2] == ("-m", "pytest"):
+        pytest_arguments = arguments[2:]
+    else:
+        return None
+    if (
+        len(pytest_arguments) >= 4
+        and pytest_arguments[:2] == ("-m", "live_cloud")
+        and pytest_arguments[-1] == "-q"
+        and pytest_arguments[2:-1]
+        and all(not target.startswith("-") for target in pytest_arguments[2:-1])
+        and _external_targets_are_canonical(
+            pytest_arguments[2:-1], prefix="tests/integration/providers/"
+        )
+    ):
+        return "live_cloud_pytest"
+    return None
 
 
 def _pytest_arguments(invocation: tuple[str, ...]) -> tuple[str, ...] | None:
     executable, arguments = _unwrap_invocation(invocation)
-    if Path(executable).name == "pytest":
+    if executable == "pytest":
         return arguments
-    if Path(executable).name.startswith("python") and arguments[:2] == ("-m", "pytest"):
+    if executable == "python" and arguments[:2] == ("-m", "pytest"):
+        return arguments[2:]
+    if executable == "/venvs/apps_venv/bin/python3" and arguments[:2] == (
+        "-m",
+        "pytest",
+    ):
+        if _external_lane(invocation) != "reachy_hardware_pytest":
+            return None
         return arguments[2:]
     return None
 
 
-def _pytest_targets(arguments: tuple[str, ...]) -> tuple[str, ...]:
+def _is_pytest_shaped(invocation: tuple[str, ...]) -> bool:
+    executable, arguments = _unwrap_invocation(invocation)
+    return Path(executable).name == "pytest" or arguments[:2] == ("-m", "pytest")
+
+
+def _pytest_target_indexes(arguments: tuple[str, ...]) -> frozenset[int]:
+    safe_flags = {
+        "--disable-warnings",
+        "--no-header",
+        "--no-summary",
+        "--showlocals",
+        "--strict-config",
+        "--strict-markers",
+        "-q",
+        "-s",
+        "-v",
+        "-x",
+    }
     options_with_values = {
         "--basetemp",
         "--capture",
@@ -1800,36 +1964,130 @@ def _pytest_targets(arguments: tuple[str, ...]) -> tuple[str, ...]:
         "--junitxml",
         "--log-level",
         "--maxfail",
-        "--override-ini",
         "--rootdir",
         "--tb",
         "-c",
         "-m",
-        "-o",
         "-r",
     }
-    targets: list[str] = []
+    unsafe_options = {
+        "--co",
+        "--collect-only",
+        "--deselect",
+        "--failed-first",
+        "--ff",
+        "--ignore",
+        "--ignore-glob",
+        "--last-failed",
+        "--lf",
+        "--markers",
+        "--pyargs",
+        "--stepwise",
+        "--stepwise-skip",
+        "--sw",
+        "-k",
+    }
+    targets: set[int] = set()
     index = 0
     while index < len(arguments):
         word = arguments[index]
         if word == "--":
-            targets.extend(arguments[index + 1 :])
+            targets.update(range(index + 1, len(arguments)))
             break
+        if word in unsafe_options or any(
+            word.startswith(f"{option}=") for option in unsafe_options if option.startswith("--")
+        ):
+            raise ValueError(f"target-affecting pytest option is forbidden: {word}")
+        if word.startswith("-k"):
+            raise ValueError(f"target-affecting pytest option is forbidden: {word}")
         if word in options_with_values:
+            if index + 1 >= len(arguments):
+                raise ValueError(f"pytest option lacks its required value: {word}")
             index += 2
             continue
-        if word.startswith("-"):
+        matching_equals = next(
+            (
+                option
+                for option in options_with_values
+                if option.startswith("--") and word.startswith(f"{option}=")
+            ),
+            None,
+        )
+        if matching_equals is not None:
+            if not word.partition("=")[2]:
+                raise ValueError(f"pytest option lacks its required value: {word}")
             index += 1
             continue
-        targets.append(word)
+        if word in safe_flags or re.fullmatch(r"-[qv]{2,}", word):
+            index += 1
+            continue
+        if word.startswith("-"):
+            raise ValueError(f"pytest option is outside the closed plan grammar: {word}")
+        targets.add(index)
         index += 1
-    return tuple(targets)
+    return frozenset(targets)
+
+
+def _pytest_targets(arguments: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(arguments[index] for index in sorted(_pytest_target_indexes(arguments)))
+
+
+def _declared_pytest_command(
+    invocation: tuple[str, ...],
+    targets: Sequence[str],
+    *,
+    additions: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Preserve the declared pytest executable/options while selecting exact nodes."""
+
+    words = list(invocation)
+    while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+        words.pop(0)
+    arguments = _pytest_arguments(tuple(words))
+    if arguments is None:
+        raise ValueError("invocation is not pytest")
+    prefix_length = len(words) - len(arguments)
+    target_indexes = _pytest_target_indexes(arguments)
+    preserved = tuple(word for index, word in enumerate(arguments) if index not in target_indexes)
+    return (*words[:prefix_length], *preserved, *additions, *targets)
+
+
+def _task_pytest_invocations(
+    task: object, paths: Sequence[str]
+) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
+    """Group owned paths under the first declared command that truthfully covers each."""
+
+    commands = tuple(
+        invocation
+        for command in getattr(task, "green_commands", ())
+        if _green_command_is_fail_closed(command)
+        for invocation in _command_invocations(command)
+        if _pytest_arguments(invocation) is not None and _external_lane(invocation) is None
+    )
+    grouped: dict[tuple[str, ...], list[str]] = {}
+    for path in paths:
+        selected = next(
+            (
+                invocation
+                for invocation in commands
+                if (arguments := _pytest_arguments(invocation)) is not None
+                and _arguments_cover_path(arguments, path)
+            ),
+            None,
+        )
+        if selected is not None:
+            grouped.setdefault(selected, []).append(path)
+    return tuple((command, tuple(selected)) for command, selected in grouped.items())
 
 
 def _arguments_cover_path(arguments: tuple[str, ...], path: str) -> bool:
+    try:
+        targets = _pytest_targets(arguments)
+    except ValueError:
+        return False
     return any(
         "::" not in target and (target == path or path.startswith(target.rstrip("/") + "/"))
-        for target in _pytest_targets(arguments)
+        for target in targets
     )
 
 
@@ -1839,7 +2097,10 @@ def _green_command_is_fail_closed(command: str) -> bool:
     words = tuple(lexer)
     if any(word in {"||", "|", ";", "&"} for word in words):
         return False
-    if any(re.fullmatch(r"(?:PYTEST_ADDOPTS|PYTEST_PLUGINS)=.*", word) for word in words):
+    assignments = {
+        word.partition("=")[0] for word in words if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word)
+    }
+    if assignments - {"TUNTUN_ALLOW_REACHY_HARDWARE", "TUNTUN_ALLOW_LIVE_CLOUD"}:
         return False
     if any(word in {"--help", "-h"} for word in words):
         return False
@@ -1853,29 +2114,83 @@ def _green_command_is_fail_closed(command: str) -> bool:
         "--ignore-glob",
         "--last-failed",
         "--lf",
+        "--markers",
         "--stepwise",
         "--stepwise-skip",
         "--sw",
         "-k",
     }
     for invocation in _command_invocations(command):
+        try:
+            external_lane = _external_lane(invocation)
+        except ValueError:
+            return False
+        bare_words = list(invocation)
+        while bare_words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", bare_words[0]):
+            bare_words.pop(0)
+        bare_invocation = tuple(bare_words)
+        if bare_invocation and Path(bare_invocation[0]).name == "uv" and bare_invocation[0] != "uv":
+            return False
+        if (
+            bare_invocation
+            and bare_invocation[0] == "uv"
+            and _closed_uv_run_payload(bare_invocation) is None
+        ):
+            return False
         arguments = _pytest_arguments(invocation)
+        if arguments is None and _is_pytest_shaped(invocation):
+            return False
         if arguments is None:
             continue
+        try:
+            target_indexes = _pytest_target_indexes(arguments)
+        except ValueError:
+            return False
+        if not target_indexes:
+            return False
         if any(
             word in unsafe_pytest_options
             or any(word.startswith(f"{option}=") for option in unsafe_pytest_options)
             for word in arguments
         ):
             return False
+        if any(word == "-k" or word.startswith("-k") for word in arguments):
+            return False
+        authorized_markers = {
+            "reachy_hardware"
+            if external_lane == "reachy_hardware_pytest"
+            else "live_cloud"
+            if external_lane == "live_cloud_pytest"
+            else ""
+        } - {""}
+        for index, word in enumerate(arguments):
+            marker_expression: str | None = None
+            if word == "-m":
+                if index + 1 >= len(arguments):
+                    return False
+                marker_expression = arguments[index + 1]
+            elif word.startswith("-m"):
+                marker_expression = word[2:]
+            if marker_expression is not None and marker_expression not in authorized_markers:
+                return False
     return True
 
 
-def _python_entry_point_invoked(path: str, invocations: tuple[tuple[str, ...], ...]) -> bool:
+def _python_entry_point_invoked(
+    path: str,
+    invocations: tuple[tuple[str, ...], ...],
+    *,
+    allow_reachy_hardware: bool = False,
+) -> bool:
     module = path.removesuffix(".py").replace("/", ".")
     for invocation in invocations:
         executable, arguments = _unwrap_invocation(invocation)
-        if not Path(executable).name.startswith("python"):
+        authorized_reachy = (
+            allow_reachy_hardware
+            and executable == "/venvs/apps_venv/bin/python3"
+            and _external_lane(invocation) in {"reachy_hardware_pytest", "reachy_hardware_command"}
+        )
+        if executable != "python" and not authorized_reachy:
             continue
         if arguments and arguments[0] == path:
             return True
@@ -1894,6 +2209,7 @@ def _validate_green_commands(document: PlanDocument, errors: list[str]) -> None:
         invocations = tuple(
             invocation
             for command in task.green_commands
+            if _green_command_is_fail_closed(command)
             for invocation in _command_invocations(command)
         )
         pytest_commands = tuple(
@@ -1909,7 +2225,9 @@ def _validate_green_commands(document: PlanDocument, errors: list[str]) -> None:
             )
             executed_benchmark = Path(declaration.path).name.startswith(
                 "bench_"
-            ) and _python_entry_point_invoked(declaration.path, invocations)
+            ) and _python_entry_point_invoked(
+                declaration.path, invocations, allow_reachy_hardware=True
+            )
             if not executed_by_pytest and not executed_benchmark:
                 errors.append(
                     f"Task {task.number:02d}: green command does not execute owned test "
@@ -1935,9 +2253,7 @@ def _validate_green_commands(document: PlanDocument, errors: list[str]) -> None:
                 arguments
                 for invocation in invocations
                 for executable, arguments in [_unwrap_invocation(invocation)]
-                if Path(executable).name.startswith("python")
-                and arguments
-                and arguments[0] == generator.entry_point
+                if executable == "python" and arguments and arguments[0] == generator.entry_point
             ]
             if not matching or not any("--check" in words for words in matching):
                 errors.append(
@@ -1952,7 +2268,7 @@ def _validate_green_commands(document: PlanDocument, errors: list[str]) -> None:
             )
             if not all(
                 any(
-                    Path(executable).name.startswith("python")
+                    executable == "python"
                     and arguments
                     and arguments[0] == checker
                     and path in arguments[1:]
@@ -1997,14 +2313,14 @@ def _execute_owned_green_commands(
                 if not _green_command_is_fail_closed(command):
                     continue
                 for invocation in _command_invocations(command):
-                    if any(
-                        word.startswith("TUNTUN_ALLOW_REACHY_HARDWARE=")
-                        or word.startswith("TUNTUN_ALLOW_LIVE_CLOUD=")
-                        for word in invocation
-                    ):
+                    try:
+                        external_lane = _external_lane(invocation)
+                    except ValueError:
+                        continue
+                    if external_lane is not None:
                         continue
                     executable, arguments = _unwrap_invocation(invocation)
-                    if not Path(executable).name.startswith("python"):
+                    if executable != "python":
                         continue
                     if arguments[:2] == ("-m", "pytest"):
                         continue
@@ -2016,16 +2332,24 @@ def _execute_owned_green_commands(
                         entry_path = arguments[0]
                     if entry_path not in files:
                         continue
+                    execution = list(invocation)
+                    while execution and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", execution[0]):
+                        execution.pop(0)
                     try:
-                        result = run_materialized_python(
-                            arguments,
+                        result = run_isolated_process(
+                            tuple(execution),
                             root=root,
                             timeout_seconds=45,
                         )
-                    except subprocess.TimeoutExpired:
+                    except (MaterializationError, subprocess.TimeoutExpired) as error:
+                        diagnostic = (
+                            "exceeded 45 seconds"
+                            if isinstance(error, subprocess.TimeoutExpired)
+                            else str(error)
+                        )
                         errors.append(
                             f"Task {task.number:02d}: owned green command failed: "
-                            f"exceeded 45 seconds: {command}"
+                            f"{diagnostic}: {command}"
                         )
                         continue
                     if result.returncode != 0:
@@ -2034,6 +2358,205 @@ def _execute_owned_green_commands(
                             f"Task {task.number:02d}: owned green command failed with "
                             f"exit {result.returncode}: {command}: {diagnostic}"
                         )
+
+
+def _task_snippet_text(task: Task, path: str, errors: list[str]) -> str:
+    matches = [snippet.body.decode("utf-8") for snippet in task.snippets if snippet.path == path]
+    if len(matches) != 1:
+        errors.append(f"Task 15 portable evaluator contract requires exactly one {path} snippet")
+        return ""
+    return matches[0]
+
+
+def _validate_task15_portability_contract(task: Task, errors: list[str]) -> None:
+    """Bind the reviewed FastText supply chain and Darwin-safe evaluator I/O."""
+
+    raw = task.raw_text
+    reviewed_wheels = (
+        (
+            "arm64",
+            "fasttext_predict-0.9.2.4-cp312-cp312-macosx_11_0_arm64.whl",
+            "99dbfcc3f353da2639fd04fc574a65ff4195b018311f790583147cdc6eb122f4",
+        ),
+        (
+            "x86_64",
+            "fasttext_predict-0.9.2.4-cp312-cp312-macosx_10_13_x86_64.whl",
+            "dcf8661da4f515551523470a745df246121f7e19736fcf3f48f04287963e6279",
+        ),
+    )
+    if "fasttext-predict==0.9.2.4" not in raw or "fasttext-wheel" in raw:
+        errors.append("Task 15 must pin the reviewed fasttext-predict==0.9.2.4 release")
+    for architecture, filename, digest in reviewed_wheels:
+        if filename not in raw or digest not in raw:
+            errors.append(
+                f"Task 15 fasttext-predict {architecture} wheel evidence is absent or changed"
+            )
+    if not all(
+        term in raw
+        for term in ("PyPI provenance", "MIT license", "CPython-3.12", "fasttext_pybind")
+    ):
+        errors.append(
+            "Task 15 fasttext-predict provenance, license, and CPython-3.12 review is incomplete"
+        )
+
+    generator = _task_snippet_text(task, "evals/generate_bilingual_report_schema.py", errors)
+    control = _task_snippet_text(task, "evals/control_json.py", errors)
+    language = _task_snippet_text(task, "evals/judges/pinned_language.py", errors)
+    leakage = _task_snippet_text(task, "evals/judges/multilingual_leakage.py", errors)
+    try:
+        generator_tree = ast.parse(generator, filename="evals/generate_bilingual_report_schema.py")
+    except SyntaxError:
+        generator_tree = ast.Module(body=[], type_ignores=[])
+    try:
+        control_tree = ast.parse(control, filename="evals/control_json.py")
+    except SyntaxError:
+        control_tree = ast.Module(body=[], type_ignores=[])
+
+    def named_function(tree: ast.Module, name: str) -> ast.FunctionDef | None:
+        return next(
+            (node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name),
+            None,
+        )
+
+    def call_matches(node: ast.AST, name: str, arguments: tuple[str, ...]) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and _decorator_name(node.func) == name
+            and not node.keywords
+            and len(node.args) == len(arguments)
+            and all(
+                isinstance(argument, ast.Name) and argument.id == expected
+                for argument, expected in zip(node.args, arguments, strict=True)
+            )
+        )
+
+    generator_function = named_function(generator_tree, "write_schema")
+    generator_write_all = generator_function is not None and any(
+        isinstance(node, ast.Call)
+        and _decorator_name(node.func) == "_write_all"
+        and len(node.args) == 2
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "descriptor"
+        and isinstance(node.args[1], ast.Call)
+        and _decorator_name(node.args[1].func) == "canonical_schema_bytes"
+        and not node.args[1].args
+        and not node.args[1].keywords
+        for node in ast.walk(generator_function)
+    )
+    generator_direct_write = generator_function is not None and any(
+        isinstance(node, ast.Call) and _decorator_name(node.func) == "os.write"
+        for node in ast.walk(generator_function)
+    )
+    parse_function = named_function(control_tree, "parse_control_json")
+    parse_read_all = parse_function is not None and any(
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "raw"
+        and call_matches(node.value, "_read_all_bounded", ("descriptor", "max_bytes"))
+        for node in ast.walk(parse_function)
+    )
+    parse_direct_read = parse_function is not None and any(
+        isinstance(node, ast.Call) and _decorator_name(node.func) == "os.read"
+        for node in ast.walk(parse_function)
+    )
+    copy_function = named_function(control_tree, "_copy_content_addressed")
+    copy_write_all = copy_function is not None and any(
+        call_matches(node, "_write_all", ("target_descriptor", "chunk"))
+        for loop in ast.walk(copy_function)
+        if isinstance(loop, ast.While)
+        for node in ast.walk(loop)
+    )
+    copy_direct_write = copy_function is not None and any(
+        isinstance(node, ast.Call) and _decorator_name(node.func) == "os.write"
+        for node in ast.walk(copy_function)
+    )
+    write_all_function = named_function(control_tree, "_write_all")
+    write_all_nodes = tuple(ast.walk(write_all_function)) if write_all_function is not None else ()
+    write_all_calls = {
+        _decorator_name(node.func) for node in write_all_nodes if isinstance(node, ast.Call)
+    }
+    expected_write_all = ast.parse(
+        """\
+def _write_all(descriptor: int, payload: bytes | bytearray | memoryview) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("zero-length artifact write")
+        remaining = remaining[written:]
+"""
+    ).body[0]
+    write_all_is_structural = (
+        write_all_function is not None
+        and "os.write" in write_all_calls
+        and ast.dump(write_all_function, include_attributes=False)
+        == ast.dump(expected_write_all, include_attributes=False)
+    )
+    if any(term in control + language for term in ("memfd_create", "/proc/self/fd")):
+        errors.append("Task 15 private artifact loader must be Darwin-safe")
+    if not all(
+        term in language
+        for term in (
+            "import fasttext",
+            "fasttext.load_model(str(artifact_path))",
+            "load_private_artifact",
+        )
+    ):
+        errors.append("Task 15 must retain the reviewed fasttext API and path loader")
+    if not all(
+        term in control
+        for term in (
+            "def materialize_private_artifact(",
+            "def load_private_artifact(",
+            "TemporaryDirectory",
+            "os.geteuid()",
+            "stat.S_IMODE",
+            "stat.S_ISREG",
+            "os.fsync",
+            "os.chmod",
+            "_normalize_created_private_directory",
+            "_normalize_created_private_file",
+            "_verify_private_file",
+        )
+    ):
+        errors.append(
+            "Task 15 private artifact lifecycle must verify owner-only regular temporary files"
+        )
+    if "def _read_all_bounded(" not in control or not parse_read_all or parse_direct_read:
+        errors.append("Task 15 control JSON requires bounded read-all semantics")
+    if (
+        not all(
+            term in control
+            for term in (
+                "def _write_all(",
+                "written = os.write(descriptor, remaining)",
+                "if written <= 0:",
+                "_write_all(target_descriptor, chunk)",
+            )
+        )
+        or "from evals.control_json import _write_all" not in generator
+        or not generator_write_all
+        or generator_direct_write
+        or not copy_write_all
+        or copy_direct_write
+        or not write_all_is_structural
+    ):
+        errors.append("Task 15 model, tree, and schema writes require write-all semantics")
+    if (
+        not all(
+            term in control
+            for term in (
+                "def _copy_content_addressed(",
+                "while True:",
+                "def materialize_locked_tree(",
+                "max_bytes=max_total_bytes - total",
+            )
+        )
+        or "read_bytes()" in leakage
+        or "while chunk := stream.read(" not in leakage
+    ):
+        errors.append("Task 15 locked model tree must stream within its total byte bound")
 
 
 def _validate_model_and_eval_contracts(
@@ -2099,6 +2622,7 @@ def _validate_model_and_eval_contracts(
             )
     task_15 = by_number.get(15)
     if task_15 is not None:
+        _validate_task15_portability_contract(task_15, errors)
         declarations = {declaration.path for declaration in task_15.declarations}
         generator = "evals/generate_bilingual_report_schema.py"
         if generator not in declarations:
@@ -2123,75 +2647,112 @@ def _validate_model_and_eval_contracts(
                 )
 
 
-def _pytest_environment(root: Path) -> dict[str, str]:
-    environment = dict(os.environ)
-    environment.pop("PYTEST_ADDOPTS", None)
-    environment.pop("PYTEST_PLUGINS", None)
-    environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (
-            str(root),
-            str(root / "apps/core/src"),
-            str(root / "apps/edge/src"),
-            str(root / "packages/contracts/src"),
-            str(root / "packages/testing/src"),
-        )
-    )
-    return environment
-
-
-_COLLECTION_PLUGIN = """import json
+_PYTEST_EVIDENCE_PLUGIN = """import json
 from pathlib import Path
+import pytest
 
-def pytest_collection_finish(session):
-    records = []
-    for item in session.items:
-        records.append({
+_reports = {}
+_collected = {}
+
+def _remember_collected(items):
+    for item in items:
+        _collected[item.nodeid] = {
             "nodeid": item.nodeid,
             "markers": sorted({marker.name for marker in item.iter_markers()}),
-        })
+        }
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(session, config, items):
+    _remember_collected(items)
+
+def pytest_deselected(items):
+    _remember_collected(items)
+
+def pytest_collection_finish(session):
+    if not session.config.option.collectonly:
+        return
+    _remember_collected(session.items)
+    records = [_collected[nodeid] for nodeid in sorted(_collected)]
     Path(".tuntun-collected-nodes.json").write_text(
         json.dumps(records, sort_keys=True, separators=(",", ":")),
         encoding="utf-8",
     )
+
+def pytest_runtest_logreport(report):
+    record = _reports.setdefault(report.nodeid, {"failed": False, "skipped": False, "call": False})
+    record["failed"] = record["failed"] or report.failed
+    record["skipped"] = record["skipped"] or report.skipped
+    record["call"] = record["call"] or (report.when == "call" and report.passed)
+
+def pytest_sessionfinish(session, exitstatus):
+    if session.config.option.collectonly:
+        return
+    Path(".tuntun-executed-nodes.json").write_text(
+        json.dumps(_reports, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
 """
+
+
+def _ensure_pytest_root_config(root: Path) -> str:
+    for name in ("pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"):
+        if (root / name).is_file():
+            return name
+    (root / "pytest.ini").write_text(
+        "[pytest]\nmarkers =\n"
+        "    reachy_hardware: explicit physical Reachy tests\n"
+        "    live_cloud: explicit paid-provider tests\n",
+        encoding="utf-8",
+    )
+    return "pytest.ini"
 
 
 def _collect_software_pytest_nodes(
     root: Path,
     paths: Sequence[str],
     *,
+    invocation: tuple[str, ...],
     task_number: int,
     label: str,
     errors: list[str],
 ) -> tuple[str, ...] | None:
     """Return every non-external node after pytest applies real inheritance/fixtures."""
 
-    plugin = root / "__tuntun_plan_collection_plugin.py"
+    plugin = root / "__tuntun_plan_pytest_plugin.py"
     evidence = root / ".tuntun-collected-nodes.json"
-    plugin.write_text(_COLLECTION_PLUGIN, encoding="utf-8")
+    config = _ensure_pytest_root_config(root)
+    plugin.write_text(_PYTEST_EVIDENCE_PLUGIN, encoding="utf-8")
     with contextlib.suppress(FileNotFoundError):
         evidence.unlink()
     try:
-        result = run_materialized_python(
-            (
-                "-m",
-                "pytest",
+        declared_arguments = _pytest_arguments(invocation) or ()
+        config_arguments = () if "-c" in declared_arguments else ("-c", config)
+        command = _declared_pytest_command(
+            invocation,
+            paths,
+            additions=(
+                *config_arguments,
+                "--rootdir=.",
                 "--collect-only",
-                "-q",
                 "-p",
-                "__tuntun_plan_collection_plugin",
-                *paths,
+                "__tuntun_plan_pytest_plugin",
+                "-p",
+                "no:cacheprovider",
             ),
+        )
+        result = run_isolated_process(
+            command,
             root=root,
             timeout_seconds=45,
-            restrict_host_apis=False,
+            writable_paths=(evidence,),
         )
-    except subprocess.TimeoutExpired:
+    except (MaterializationError, subprocess.TimeoutExpired) as error:
         errors.append(f"Task {task_number:02d}: {label} collection failed: exceeded 45 seconds")
+        if isinstance(error, MaterializationError):
+            errors[-1] = f"Task {task_number:02d}: {label} collection failed: {error}"
         return None
     if result.returncode != 0 or not evidence.is_file():
-        diagnostic = result.diagnostic[-4096:].decode(errors="replace")
+        diagnostic = result.diagnostic[-16_384:].decode(errors="replace")
         errors.append(
             f"Task {task_number:02d}: {label} collection failed with exit "
             f"{result.returncode}: {diagnostic}"
@@ -2228,41 +2789,73 @@ def _collect_software_pytest_nodes(
 
 def _execute_pytest_boundary_probe(
     root: Path,
-    paths: Sequence[str],
+    nodes: Sequence[str],
     *,
+    invocation: tuple[str, ...],
     task_number: int,
     label: str,
     errors: list[str],
 ) -> None:
-    junit = root / f".{label}.junit.xml"
+    plugin = root / "__tuntun_plan_pytest_plugin.py"
+    config = _ensure_pytest_root_config(root)
+    plugin.write_text(_PYTEST_EVIDENCE_PLUGIN, encoding="utf-8")
+    evidence = root / ".tuntun-executed-nodes.json"
+    with contextlib.suppress(FileNotFoundError):
+        evidence.unlink()
     try:
-        result = subprocess.run(
-            (
-                sys.executable,
-                "-m",
-                "pytest",
-                "-q",
-                "--maxfail=1",
-                f"--junitxml={junit}",
-                "-m",
-                "not reachy_hardware and not live_cloud",
-                *paths,
+        declared_arguments = _pytest_arguments(invocation) or ()
+        config_arguments = () if "-c" in declared_arguments else ("-c", config)
+        command = _declared_pytest_command(
+            invocation,
+            nodes,
+            additions=(
+                *config_arguments,
+                "--rootdir=.",
+                "-p",
+                "__tuntun_plan_pytest_plugin",
+                "-p",
+                "no:cacheprovider",
             ),
-            cwd=root,
-            env=_pytest_environment(root),
-            check=False,
-            capture_output=True,
-            timeout=45,
         )
-    except subprocess.TimeoutExpired:
-        errors.append(f"Task {task_number:02d}: {label} failed: exceeded 45 seconds")
+        result = run_isolated_process(
+            command,
+            root=root,
+            timeout_seconds=45,
+            writable_paths=(evidence,),
+        )
+    except (MaterializationError, subprocess.TimeoutExpired) as error:
+        diagnostic = (
+            "exceeded 45 seconds" if isinstance(error, subprocess.TimeoutExpired) else str(error)
+        )
+        errors.append(f"Task {task_number:02d}: {label} failed: {diagnostic}")
         return
-    complete, junit_diagnostic = _junit_is_complete_pass(junit)
-    if result.returncode != 0 or not complete:
-        diagnostic = (result.stdout + result.stderr)[-4096:].decode(errors="replace")
+    try:
+        records = json.loads(evidence.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        records = None
+        evidence_diagnostic = f"execution evidence absent or invalid: {error}"
+    else:
+        expected = set(nodes)
+        valid = (
+            type(records) is dict
+            and set(records) == expected
+            and all(
+                type(record) is dict and record == {"call": True, "failed": False, "skipped": False}
+                for record in records.values()
+            )
+        )
+        evidence_diagnostic = (
+            f"execution evidence nodes={len(records)} complete={valid}"
+            if type(records) is dict
+            else "execution evidence is not an object"
+        )
+        if not valid:
+            records = None
+    if result.returncode != 0 or records is None:
+        diagnostic = result.diagnostic[-4096:].decode(errors="replace")
         errors.append(
             f"Task {task_number:02d}: {label} failed with exit {result.returncode}; "
-            f"{junit_diagnostic}: {diagnostic}"
+            f"{evidence_diagnostic}: {diagnostic}"
         )
 
 
@@ -2270,7 +2863,7 @@ def _validate_pytest_task_boundaries(
     document: PlanDocument, foundation_files: dict[str, bytes], errors: list[str]
 ) -> None:
     files = dict(foundation_files)
-    cumulative_test_paths: list[str] = []
+    final_probes: list[tuple[int, tuple[str, ...], tuple[str, ...]]] = []
     for task in document.tasks:
         try:
             files = materialize_document(PlanDocument((task,)), foundation_files=files)
@@ -2290,16 +2883,26 @@ def _validate_pytest_task_boundaries(
         test_paths = [
             declaration.path for declaration in task.declarations if declaration.kind == "Test"
         ]
-        for declaration in task.declarations:
-            if (
-                declaration.path.startswith("tests/")
-                and declaration.path.endswith(".py")
-                and declaration.path not in cumulative_test_paths
-                and declaration.kind in {"Test", "Modify"}
-            ):
-                cumulative_test_paths.append(declaration.path)
         if not test_paths and not producer_names:
             continue
+        command_groups = _task_pytest_invocations(task, test_paths)
+        all_pytest_invocations = tuple(
+            invocation
+            for command in task.green_commands
+            if _green_command_is_fail_closed(command)
+            for invocation in _command_invocations(command)
+            if _pytest_arguments(invocation) is not None
+        )
+        diagnostic_fallback = ("python", "-m", "pytest")
+        if test_paths and not command_groups:
+            command_groups = ((diagnostic_fallback, tuple(test_paths)),)
+        if not all_pytest_invocations:
+            all_pytest_invocations = (diagnostic_fallback,)
+        local_pytest_invocations = tuple(
+            invocation
+            for invocation in all_pytest_invocations
+            if _external_lane(invocation) is None
+        )
         prefix = f"tuntun-plan-task-{task.number:02d}-"
         with tempfile.TemporaryDirectory(prefix=prefix) as temporary:
             root = Path(temporary)
@@ -2322,17 +2925,30 @@ def _validate_pytest_task_boundaries(
                         "    assert value is not None and type(value) is not object\n",
                         encoding="utf-8",
                     )
-                    _execute_pytest_boundary_probe(
-                        root,
-                        (probe_path,),
-                        task_number=task.number,
-                        label="fixture-producer discovery probe",
-                        errors=errors,
-                    )
-            if test_paths:
+                    if local_pytest_invocations:
+                        fixture_command = local_pytest_invocations[0]
+                        fixture_nodes = _collect_software_pytest_nodes(
+                            root,
+                            (probe_path,),
+                            invocation=fixture_command,
+                            task_number=task.number,
+                            label="fixture-producer discovery probe",
+                            errors=errors,
+                        )
+                        if fixture_nodes:
+                            _execute_pytest_boundary_probe(
+                                root,
+                                fixture_nodes,
+                                invocation=fixture_command,
+                                task_number=task.number,
+                                label="fixture-producer discovery probe",
+                                errors=errors,
+                            )
+            for invocation, selected_paths in command_groups:
                 nodes = _collect_software_pytest_nodes(
                     root,
-                    test_paths,
+                    selected_paths,
+                    invocation=invocation,
                     task_number=task.number,
                     label="pytest task-boundary probe",
                     errors=errors,
@@ -2341,29 +2957,34 @@ def _validate_pytest_task_boundaries(
                     _execute_pytest_boundary_probe(
                         root,
                         nodes,
+                        invocation=invocation,
                         task_number=task.number,
                         label="pytest task-boundary probe",
                         errors=errors,
                     )
-    if cumulative_test_paths:
+                final_probes.append((task.number, invocation, selected_paths))
+    if final_probes:
         with tempfile.TemporaryDirectory(prefix="tuntun-plan-final-pytest-") as temporary:
             root = Path(temporary)
             write_materialized_tree(root, files)
-            nodes = _collect_software_pytest_nodes(
-                root,
-                cumulative_test_paths,
-                task_number=document.tasks[-1].number,
-                label="final cumulative pytest probe",
-                errors=errors,
-            )
-            if nodes:
-                _execute_pytest_boundary_probe(
+            for task_number, invocation, selected_paths in final_probes:
+                nodes = _collect_software_pytest_nodes(
                     root,
-                    nodes,
-                    task_number=document.tasks[-1].number,
+                    selected_paths,
+                    invocation=invocation,
+                    task_number=task_number,
                     label="final cumulative pytest probe",
                     errors=errors,
                 )
+                if nodes:
+                    _execute_pytest_boundary_probe(
+                        root,
+                        nodes,
+                        invocation=invocation,
+                        task_number=task_number,
+                        label="final cumulative pytest probe",
+                        errors=errors,
+                    )
 
 
 def validate_plan_document(

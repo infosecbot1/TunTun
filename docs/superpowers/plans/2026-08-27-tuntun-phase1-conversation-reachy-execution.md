@@ -24423,7 +24423,7 @@ git commit -m "feat(persona): add pseudonymous bilingual turn behavior"
 
 **Blocking external-artifact prerequisite (complete before Task 15 starts):** an owner-reviewed artifact commit must already track exact nonempty bytes at `evals/cases/bilingual-family.jsonl`, `evals/cases/child-safety-v1.jsonl`, `evals/cases/evaluator-calibration-v1.jsonl`, `evals/cases/corpora.lock.json`, and `evals/models/evaluator-models.lock.json`, plus every content-addressed local evaluator artifact named by the model lock. `corpora.lock.json` is strict canonical JSON mapping each of the three corpus paths to its SHA-256 and row count. The prerequisite commit is independently reviewed and named in Task-15 evidence. If any artifact is absent, untracked, empty, hash-mismatched, or lacks license/source review, Task 15 does not begin and no RED/GREEN claim is made. These large reviewed bytes are prerequisites, not task-generated fixtures and not staged by Task 15.
 
-Task 15 owns an isolated evaluator project. `evals/pyproject.toml` requires Python `==3.12.*`, local path/editable=false `tuntun-core` and `tuntun-contracts` project wheels, and exact `pydantic==2.13.5`, `pytest==8.4.2`, `fasttext-wheel==0.9.2`, `transformers==4.56.2`, and `torch==2.8.0`; generate `evals/uv.lock` with `uv lock --project evals`, then use `uv run --project evals --locked`. It never mutates the workspace-root `uv.lock`. All Task-15 Python commands below use this isolated project.
+Task 15 owns an isolated evaluator project. `evals/pyproject.toml` requires Python `==3.12.*`; exact source-bound, `editable=false` local candidates `tuntun-core` → `../apps/core` → `apps/core/src/tuntun_core` and `tuntun-contracts` → `../packages/contracts` → `packages/contracts/src/tuntun_contracts`; and exact `pydantic==2.13.5`, `pytest==8.4.2`, `fasttext-predict==0.9.2.4`, `transformers==4.56.2`, and `torch==2.8.0`. The `fasttext-predict` release is reviewed from its PyPI provenance and MIT license record and keeps the upstream `import fasttext` / `fasttext.load_model(path)` prediction API without the training dependency closure; its reviewed installed import surface is exactly the `fasttext` package plus its `fasttext_pybind` native binding. Offline installation must retain both reviewed CPython-3.12 Darwin distributions: `fasttext_predict-0.9.2.4-cp312-cp312-macosx_11_0_arm64.whl` with SHA-256 `99dbfcc3f353da2639fd04fc574a65ff4195b018311f790583147cdc6eb122f4`, and `fasttext_predict-0.9.2.4-cp312-cp312-macosx_10_13_x86_64.whl` with SHA-256 `dcf8661da4f515551523470a745df246121f7e19736fcf3f48f04287963e6279`; the active Mac installs only its compatible reviewed wheel, while lock review preserves evidence for both Apple Silicon and Intel deployment targets. The matching `[tool.uv.sources]` entries and `evals/uv.lock` directory records bind only those two nonsymlink, root-contained candidates; they are imported from those exact source roots after the verified external site-packages and are not installed or treated as registry wheels. This evaluator selects no dependency extras: installed wheel `Requires-Dist` metadata is evaluated in a deterministic no-extras marker environment, only marker-inactive optional-extra edges are excluded, and every URL, VCS, path, selected-extra, malformed, or version-incompatible requirement fails closed. Generate `evals/uv.lock` with `uv lock --project evals`, then use `uv run --project evals --locked`. It never mutates the workspace-root `uv.lock`. All Task-15 Python commands below use this isolated project.
 
 The score schema is generated, never hand-maintained. The generator below imports the strict report model, assigns one stable `$id`, serializes sorted keys with fixed compact separators and one LF, and either writes atomically or byte-compares the committed schema. Unknown fields, missing fields, a wrong schema-version literal, and changed candidate/model/corpus binding fields are negative gates. Any missing corpus, evaluator model, or license approval remains the blocking external-artifact prerequisite above and is never converted to a skip.
 
@@ -24434,6 +24434,7 @@ import json
 import os
 from pathlib import Path
 
+from evals.control_json import _write_all
 from evals.verify_bilingual_report import BilingualScoreReportV1
 
 
@@ -24465,14 +24466,16 @@ def write_schema(path: Path = SCHEMA_PATH) -> None:
         0o600,
     )
     try:
-        payload = canonical_schema_bytes()
-        written = os.write(descriptor, payload)
-        if written != len(payload):
-            raise OSError("short schema write")
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    os.replace(temporary, path)
+        try:
+            os.chmod(temporary, 0o600)
+            _write_all(descriptor, canonical_schema_bytes())
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def verify_schema(path: Path = SCHEMA_PATH) -> None:
@@ -24897,73 +24900,331 @@ class ChildSafetyCaseV1(BaseModel):
 
 ```python
 # evals/control_json.py
+import hashlib
 import json
-import hashlib,os,stat,tempfile
+import os
+import stat
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 
-def parse_control_json(path:Path,*,max_bytes:int,require_canonical:bool):
-    fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC|getattr(os,"O_NOFOLLOW",0))
+def _read_all_bounded(descriptor: int, max_bytes: int) -> bytes:
+    if max_bytes < 1:
+        raise ValueError("read bound must be positive")
+    chunks = bytearray()
+    while len(chunks) <= max_bytes:
+        remaining = max_bytes + 1 - len(chunks)
+        if remaining <= 0:
+            break
+        chunk = os.read(descriptor, min(1_048_576, remaining))
+        if not chunk:
+            break
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def _write_all(descriptor: int, payload: bytes | bytearray | memoryview) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("zero-length artifact write")
+        remaining = remaining[written:]
+
+
+def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
+    return (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    )
+
+
+def _verified_source(path: Path) -> tuple[int, os.stat_result]:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
-        before=os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or not 1<=before.st_size<=max_bytes:
-            raise ValueError("eval control JSON size invalid")
-        raw=os.read(fd,max_bytes+1)
-        after=os.fstat(fd); named=os.lstat(path)
-        if (before.st_dev,before.st_ino,before.st_size)!=(after.st_dev,after.st_ino,len(raw)):
-            raise PermissionError("eval control JSON changed")
-        if (after.st_dev,after.st_ino)!=(named.st_dev,named.st_ino):
-            raise PermissionError("eval control JSON replaced")
+        metadata = os.fstat(descriptor)
+        named = os.lstat(path)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(named.st_mode)
+            or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise PermissionError("evaluator artifact must be a stable regular file")
+        return descriptor, metadata
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _copy_content_addressed(
+    source: Path,
+    target_descriptor: int,
+    expected_sha256: str,
+    *,
+    max_bytes: int,
+) -> int:
+    descriptor, before = _verified_source(source)
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        if not 1 <= before.st_size <= max_bytes:
+            raise PermissionError("evaluator artifact size invalid")
+        while True:
+            chunk = os.read(descriptor, min(1_048_576, max_bytes + 1 - copied))
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > max_bytes:
+                raise PermissionError("evaluator artifact size invalid")
+            digest.update(chunk)
+            _write_all(target_descriptor, chunk)
+        after = os.fstat(descriptor)
+        named = os.lstat(source)
     finally:
-        os.close(fd)
-    if not 1<=len(raw)<=max_bytes or b"\x00" in raw:
+        os.close(descriptor)
+    if (
+        copied != before.st_size
+        or not _same_file(before, after)
+        or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
+        or digest.hexdigest() != expected_sha256
+    ):
+        raise PermissionError("evaluator artifact digest mismatch")
+    return copied
+
+
+def parse_control_json(path: Path, *, max_bytes: int, require_canonical: bool):
+    descriptor, before = _verified_source(path)
+    try:
+        if not 1 <= before.st_size <= max_bytes:
+            raise ValueError("eval control JSON size invalid")
+        raw = _read_all_bounded(descriptor, max_bytes)
+        after = os.fstat(descriptor)
+        named = os.lstat(path)
+    finally:
+        os.close(descriptor)
+    if (
+        not 1 <= len(raw) <= max_bytes
+        or b"\x00" in raw
+        or not _same_file(before, after)
+        or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
+    ):
         raise ValueError("eval control JSON size invalid")
-    value=json.loads(raw,parse_constant=lambda _value: (_ for _ in ()).throw(
-        ValueError("nonfinite eval control JSON")
-    ))
-    canonical=(json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n").encode()
+    value = json.loads(
+        raw,
+        parse_constant=lambda _value: (_ for _ in ()).throw(
+            ValueError("nonfinite eval control JSON")
+        ),
+    )
+    canonical = (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        + "\n"
+    ).encode()
     if require_canonical and raw!=canonical:
         raise ValueError("noncanonical eval control JSON")
     return value
 
-def read_content_addressed(path:Path,sha256:str,*,max_bytes:int)->bytes:
-    fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
+
+def read_content_addressed(path: Path, sha256: str, *, max_bytes: int) -> bytes:
+    descriptor, before = _verified_source(path)
     try:
-        before=os.fstat(fd); data=bytearray()
-        if not stat.S_ISREG(before.st_mode) or not 1<=before.st_size<=max_bytes:
+        if not 1 <= before.st_size <= max_bytes:
             raise PermissionError("evaluator artifact invalid")
-        while len(data)<=max_bytes:
-            chunk=os.read(fd,min(1_048_576,max_bytes+1-len(data)))
-            if not chunk: break
-            data.extend(chunk)
-        after=os.fstat(fd)
-    finally: os.close(fd)
+        data = _read_all_bounded(descriptor, max_bytes)
+        after = os.fstat(descriptor)
+        named = os.lstat(path)
+    finally:
+        os.close(descriptor)
     if (
-        len(data)!=before.st_size or before.st_dev!=after.st_dev
-        or before.st_ino!=after.st_ino or before.st_mtime_ns!=after.st_mtime_ns
-        or hashlib.sha256(data).hexdigest()!=sha256
-    ): raise PermissionError("evaluator artifact digest mismatch")
+        len(data) != before.st_size
+        or not _same_file(before, after)
+        or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
+        or hashlib.sha256(data).hexdigest() != sha256
+    ):
+        raise PermissionError("evaluator artifact digest mismatch")
     return bytes(data)
 
+
+def _verify_private_directory(path: Path) -> None:
+    metadata = os.lstat(path)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise PermissionError("temporary directory is not private owner-only storage")
+
+
+def _normalize_created_private_directory(path: Path) -> None:
+    metadata = os.lstat(path)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise PermissionError("temporary directory is not private owner-only storage")
+    os.chmod(path, 0o700)
+    _verify_private_directory(path)
+
+
+def _verify_private_file(path: Path, descriptor: int, expected_size: int) -> None:
+    metadata = os.fstat(descriptor)
+    named = os.lstat(path)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(named.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size != expected_size
+        or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        raise PermissionError("private artifact metadata is invalid")
+
+
+def _normalize_created_private_file(path: Path, descriptor: int) -> None:
+    metadata = os.fstat(descriptor)
+    named = os.lstat(path)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(named.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+        or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        raise PermissionError("private artifact metadata is invalid")
+    os.chmod(path, 0o600)
+    _verify_private_file(path, descriptor, 0)
+
+
 @contextmanager
-def materialize_locked_tree(root:Path,file_manifest:dict[str,str],*,max_total_bytes:int):
+def materialize_private_artifact(
+    source: Path,
+    sha256: str,
+    *,
+    max_bytes: int,
+):
+    with tempfile.TemporaryDirectory(prefix="tuntun-eval-model-") as temporary:
+        private_root = Path(temporary)
+        _normalize_created_private_directory(private_root)
+        target = private_root / "artifact.bin"
+        descriptor = os.open(
+            target,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_CLOEXEC
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            _normalize_created_private_file(target, descriptor)
+            copied = _copy_content_addressed(
+                source,
+                descriptor,
+                sha256,
+                max_bytes=max_bytes,
+            )
+            os.fsync(descriptor)
+            _verify_private_file(target, descriptor, copied)
+        finally:
+            os.close(descriptor)
+        yield target
+
+
+def load_private_artifact(source: Path, sha256: str, *, max_bytes: int, loader):
+    with materialize_private_artifact(source, sha256, max_bytes=max_bytes) as artifact:
+        return loader(artifact)
+
+
+def _private_parent(root: Path, relative: Path) -> Path:
+    parent = root
+    for part in relative.parts[:-1]:
+        parent = parent / part
+        try:
+            parent.mkdir(mode=0o700)
+            created = True
+        except FileExistsError:
+            created = False
+        if created:
+            _normalize_created_private_directory(parent)
+        else:
+            _verify_private_directory(parent)
+    return parent
+
+
+def _verified_manifest_path(root: Path, relative: Path) -> Path:
+    metadata = os.lstat(root)
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise PermissionError("evaluator artifact root invalid")
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        metadata = os.lstat(current)
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise PermissionError("evaluator artifact parent invalid")
+    return root / relative
+
+
+@contextmanager
+def materialize_locked_tree(
+    root: Path,
+    file_manifest: dict[str, str],
+    *,
+    max_total_bytes: int,
+):
     if type(file_manifest) is not dict or not file_manifest:
         raise PermissionError("evaluator artifact manifest invalid")
-    items=[]; total=0
-    for relative,digest in sorted(file_manifest.items()):
-        if (type(relative) is not str or Path(relative).is_absolute()
-            or ".." in Path(relative).parts or type(digest) is not str):
-            raise PermissionError("evaluator artifact manifest invalid")
-        data=read_content_addressed(root/relative,digest,max_bytes=max_total_bytes-total)
-        total+=len(data); items.append((relative,data))
     with tempfile.TemporaryDirectory(prefix="tuntun-eval-model-") as temporary:
-        target=Path(temporary)
-        for relative,data in items:
-            path=target/relative; path.parent.mkdir(parents=True,exist_ok=True)
-            fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)
-            try: os.write(fd,data); os.fsync(fd)
-            finally: os.close(fd)
+        target = Path(temporary)
+        _normalize_created_private_directory(target)
+        total = 0
+        for raw_relative, expected_sha256 in sorted(file_manifest.items()):
+            relative = Path(raw_relative) if type(raw_relative) is str else Path("..")
+            if (
+                type(raw_relative) is not str
+                or relative.is_absolute()
+                or not relative.parts
+                or ".." in relative.parts
+                or type(expected_sha256) is not str
+                or len(expected_sha256) != 64
+            ):
+                raise PermissionError("evaluator artifact manifest invalid")
+            _private_parent(target, relative)
+            output = target / relative
+            descriptor = os.open(
+                output,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_CLOEXEC
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                _normalize_created_private_file(output, descriptor)
+                copied = _copy_content_addressed(
+                    _verified_manifest_path(root, relative),
+                    descriptor,
+                    expected_sha256,
+                    max_bytes=max_total_bytes - total,
+                )
+                total += copied
+                os.fsync(descriptor)
+                _verify_private_file(output, descriptor, copied)
+            finally:
+                os.close(descriptor)
         yield target
 ```
 
@@ -24971,12 +25232,10 @@ This evaluator-local helper is bounded to regular nofollow-reviewed files by its
 
 ```python
 # evals/judges/pinned_language.py
-import hashlib
-import os
 import re
 from pathlib import Path
 from typing import Literal, Protocol
-from evals.control_json import parse_control_json,read_content_addressed
+from evals.control_json import load_private_artifact,parse_control_json
 
 
 ReplyMode = Literal["en", "hi", "hi_romanized", "hinglish"]
@@ -24988,11 +25247,10 @@ class SpanLanguageModel(Protocol):
 
 
 class FastTextSpanModel:
-    def __init__(self, artifact_bytes:bytes) -> None:
+    def __init__(self, artifact_path: Path) -> None:
         import fasttext
-        self._fd=os.memfd_create("tuntun-language-model",os.MFD_CLOEXEC)
-        os.write(self._fd,artifact_bytes); os.lseek(self._fd,0,os.SEEK_SET)
-        self._model=fasttext.load_model(f"/proc/self/fd/{self._fd}")
+
+        self._model = fasttext.load_model(str(artifact_path))
 
     def predict(self, spans: tuple[str, ...]) -> tuple[tuple[str, int], ...]:
         predictions = []
@@ -25024,14 +25282,16 @@ class PinnedLanguageJudge:
         }:
             raise ValueError("language evaluator lock invalid")
         artifact = Path(lock["artifact_path"])
-        artifact_bytes=read_content_addressed(
-            artifact,lock["artifact_sha256"],max_bytes=1_073_741_824,
+        model = load_private_artifact(
+            artifact,
+            lock["artifact_sha256"],
+            max_bytes=1_073_741_824,
+            loader=FastTextSpanModel,
         )
-        observed=hashlib.sha256(artifact_bytes).hexdigest()
         return cls(
-            FastTextSpanModel(artifact_bytes),
+            model,
             threshold_micros=lock["minimum_span_confidence_micros"],
-            artifact_sha256=observed,
+            artifact_sha256=lock["artifact_sha256"],
         )
 
     def classify(self, answer: str) -> ReplyMode:
@@ -25077,7 +25337,9 @@ def _tree_sha256(root: Path) -> str:
         if path.is_symlink():
             raise PermissionError("evaluator model tree cannot contain symlinks")
         digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
-        digest.update(path.read_bytes())
+        with path.open("rb") as stream:
+            while chunk := stream.read(1_048_576):
+                digest.update(chunk)
     return digest.hexdigest()
 
 
