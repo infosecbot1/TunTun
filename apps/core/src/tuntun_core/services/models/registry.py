@@ -14,15 +14,17 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from .fs import (
-    MODEL_INSTALL_LOCK_NAME,
     OwnedDirectory,
     close_preserving_primary,
     entry_exists_at,
     hash_exact_fd,
+    model_install_lock_name,
+    open_publication_commit,
     open_regular_at,
     publication_is_uncertain,
     read_bounded_strict_yaml,
     recovery_pending_name,
+    require_publication_commit,
 )
 
 SAFE_SUFFIXES = {".json", ".onnx", ".safetensors", ".tflite", ".txt"}
@@ -500,7 +502,7 @@ class ModelRegistry:
         try:
             root = OwnedDirectory.open(self._root)
             with root.lock(
-                MODEL_INSTALL_LOCK_NAME,
+                model_install_lock_name(entry.model_id),
                 timeout_seconds=30.0,
                 shared=True,
             ):
@@ -530,12 +532,14 @@ class ModelRegistry:
         handles: list[VerifiedModelFile] = []
         revision: OwnedDirectory | None = None
         activated: ActivatedModel | None = None
+        commit_fd: int | None = None
         try:
             if publication_is_uncertain(model, entry.revision):
                 raise PermissionError("model revision commit is uncertain")
             pending_name = recovery_pending_name(entry.revision)
             if entry_exists_at(model, pending_name):
                 raise PermissionError("model revision recovery is pending")
+            commit_fd = open_publication_commit(model, entry.revision)
             revision = model.child(entry.revision, mode=0o500)
             expected_names = tuple(sorted(item.path for item in entry.files))
             if tuple(sorted(os.listdir(revision.fd))) != expected_names:
@@ -554,6 +558,13 @@ class ModelRegistry:
                 raise PermissionError("unsafe model filesystem revision")
             if entry_exists_at(model, pending_name):
                 raise PermissionError("model revision recovery is pending")
+            require_publication_commit(
+                model,
+                entry.revision,
+                commit_fd,
+                expected_mode=0o400,
+                require_read_only=True,
+            )
             if publication_is_uncertain(model, entry.revision):
                 raise PermissionError("model revision commit is uncertain")
             activated = ActivatedModel.from_manifest(entry, tuple(handles))
@@ -563,11 +574,25 @@ class ModelRegistry:
                 close_preserving_primary(handle, VerifiedModelFile.close, error)
             if revision is not None:
                 close_preserving_primary(revision, OwnedDirectory.close, error)
+            if commit_fd is not None:
+                descriptor_to_close = commit_fd
+                commit_fd = None
+                close_preserving_primary(descriptor_to_close, os.close, error)
             raise
-        if activated is None or revision is None:
+        if activated is None or revision is None or commit_fd is None:
             raise RuntimeError("model activation did not retain verified files")
         try:
             revision.close()
+        except BaseException as error:
+            descriptor_to_close = commit_fd
+            commit_fd = None
+            close_preserving_primary(descriptor_to_close, os.close, error)
+            close_preserving_primary(activated, ActivatedModel.close, error)
+            raise
+        try:
+            descriptor_to_close = commit_fd
+            commit_fd = None
+            os.close(descriptor_to_close)
         except BaseException as error:
             close_preserving_primary(activated, ActivatedModel.close, error)
             raise

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import inspect
 import os
@@ -815,6 +816,391 @@ def test_two_installers_publish_one_complete_immutable_revision(
     assert concurrent_model_case.no_stage_directory_remains()  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("body_fails", (False, True), ids=("success", "body-failure"))
+@pytest.mark.parametrize("cleanup_fault", ("unlock", "close"))
+def test_owned_directory_lock_cleanup_preserves_primary_and_releases_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body_fails: bool,
+    cleanup_fault: str,
+) -> None:
+    root_path = tmp_path / "model-root"
+    root_path.mkdir(mode=0o700)
+    root = OwnedDirectory.open(root_path)
+    lock_name = ".cleanup-fault.lock"
+    primary = RuntimeError("scripted protected-body failure")
+    secondary = OSError(f"scripted lock {cleanup_fault} failure")
+    lock_descriptor: int | None = None
+    unlock_attempts = 0
+    close_attempts = 0
+    fault_active = True
+    real_open_regular = fs_module.open_regular_at
+    real_flock = fcntl.flock
+    real_close = os.close
+
+    def capture_lock_descriptor(
+        directory: OwnedDirectory,
+        name: str,
+        flags: int,
+        *,
+        mode: int = 0o600,
+        expected_mode: int | None = None,
+    ) -> int:
+        nonlocal lock_descriptor
+        descriptor = real_open_regular(
+            directory,
+            name,
+            flags,
+            mode=mode,
+            expected_mode=expected_mode,
+        )
+        if fault_active and name == lock_name:
+            lock_descriptor = descriptor
+        return descriptor
+
+    def fail_unlock(descriptor: int, operation: int) -> None:
+        nonlocal unlock_attempts
+        real_flock(descriptor, operation)
+        if fault_active and descriptor == lock_descriptor and operation == fcntl.LOCK_UN:
+            unlock_attempts += 1
+            if cleanup_fault == "unlock":
+                raise secondary
+
+    def fail_lock_close(descriptor: int) -> None:
+        nonlocal close_attempts
+        is_target = fault_active and descriptor == lock_descriptor
+        real_close(descriptor)
+        if is_target:
+            close_attempts += 1
+            if cleanup_fault == "close":
+                raise secondary
+
+    monkeypatch.setattr(fs_module, "open_regular_at", capture_lock_descriptor)
+    monkeypatch.setattr(fcntl, "flock", fail_unlock)
+    monkeypatch.setattr(os, "close", fail_lock_close)
+
+    caught: BaseException | None = None
+    try:
+        with root.lock(lock_name, timeout_seconds=1.0):
+            if body_fails:
+                raise primary
+    except BaseException as error:
+        caught = error
+    finally:
+        fault_active = False
+
+    if body_fails:
+        assert caught is primary
+        assert getattr(primary, "__notes__", []) == ["additional descriptor cleanup failure"]
+    else:
+        assert caught is secondary
+        assert getattr(secondary, "__notes__", []) == []
+    assert unlock_attempts == 1
+    assert close_attempts == 1
+    assert lock_descriptor is not None
+    with pytest.raises(OSError):
+        os.fstat(lock_descriptor)
+
+    with root.lock(lock_name, timeout_seconds=1.0):
+        pass
+    root.close()
+
+
+def test_unrelated_installed_model_activates_while_download_is_paused(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    peer_model_id = governed_model_case.install_peer_model()  # type: ignore[attr-defined]
+    download_paused = threading.Event()
+    release_download = threading.Event()
+    shared_lock_attempted = threading.Event()
+    activation_done = threading.Event()
+    install_results: list[object] = []
+    activation_results: list[object] = []
+    failures: list[BaseException] = []
+    lock_names: list[str] = []
+    real_lock = OwnedDirectory.lock
+
+    @contextlib.contextmanager
+    def track_lock(
+        directory: OwnedDirectory,
+        name: str,
+        *,
+        timeout_seconds: float,
+        shared: bool = False,
+    ):
+        lock_names.append(name)
+        if shared:
+            shared_lock_attempted.set()
+        with real_lock(
+            directory,
+            name,
+            timeout_seconds=timeout_seconds,
+            shared=shared,
+        ):
+            yield
+
+    monkeypatch.setattr(OwnedDirectory, "lock", track_lock)
+
+    def pause_download(point: str) -> None:
+        if point != "after_each_file":
+            return
+        download_paused.set()
+        if not release_download.wait(timeout=10):
+            raise TimeoutError("scripted download pause timed out")
+
+    def install_target() -> None:
+        try:
+            install_results.append(
+                governed_model_case._installer(  # type: ignore[attr-defined]
+                    fault_hook=pause_download
+                ).install(governed_model_case.model_id)  # type: ignore[attr-defined]
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    def activate_peer() -> None:
+        try:
+            activation_results.append(
+                governed_model_case.registry.activate(peer_model_id)  # type: ignore[attr-defined]
+            )
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            activation_done.set()
+
+    installer_thread = threading.Thread(target=install_target)
+    activation_thread = threading.Thread(target=activate_peer)
+    installer_thread.start()
+    assert download_paused.wait(timeout=10)
+    activation_thread.start()
+    assert shared_lock_attempted.wait(timeout=10)
+    completed_while_paused = activation_done.wait(timeout=2)
+    release_download.set()
+    installer_thread.join(timeout=10)
+    activation_thread.join(timeout=10)
+
+    try:
+        assert not installer_thread.is_alive()
+        assert not activation_thread.is_alive()
+        if failures:
+            raise failures[0]
+        assert completed_while_paused
+        assert len(install_results) == 1
+        assert len(activation_results) == 1
+        assert set(lock_names) == {
+            fs_module.model_install_lock_name(governed_model_case.model_id),  # type: ignore[attr-defined]
+            fs_module.model_install_lock_name(peer_model_id),
+        }
+    finally:
+        for result in (*install_results, *activation_results):
+            result.close()  # type: ignore[attr-defined]
+
+
+def test_same_model_activation_waits_for_paused_install_commit(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    download_paused = threading.Event()
+    release_download = threading.Event()
+    shared_lock_attempted = threading.Event()
+    activation_done = threading.Event()
+    install_results: list[object] = []
+    activation_results: list[object] = []
+    failures: list[BaseException] = []
+    lock_names: list[str] = []
+    real_lock = OwnedDirectory.lock
+
+    @contextlib.contextmanager
+    def track_lock(
+        directory: OwnedDirectory,
+        name: str,
+        *,
+        timeout_seconds: float,
+        shared: bool = False,
+    ):
+        lock_names.append(name)
+        if shared:
+            shared_lock_attempted.set()
+        with real_lock(
+            directory,
+            name,
+            timeout_seconds=timeout_seconds,
+            shared=shared,
+        ):
+            yield
+
+    monkeypatch.setattr(OwnedDirectory, "lock", track_lock)
+
+    def pause_download(point: str) -> None:
+        if point != "after_each_file":
+            return
+        download_paused.set()
+        if not release_download.wait(timeout=10):
+            raise TimeoutError("scripted download pause timed out")
+
+    def install_target() -> None:
+        try:
+            install_results.append(
+                governed_model_case._installer(  # type: ignore[attr-defined]
+                    fault_hook=pause_download
+                ).install(governed_model_case.model_id)  # type: ignore[attr-defined]
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    def activate_target() -> None:
+        try:
+            activation_results.append(
+                governed_model_case.registry.activate(  # type: ignore[attr-defined]
+                    governed_model_case.model_id  # type: ignore[attr-defined]
+                )
+            )
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            activation_done.set()
+
+    installer_thread = threading.Thread(target=install_target)
+    activation_thread = threading.Thread(target=activate_target)
+    installer_thread.start()
+    assert download_paused.wait(timeout=10)
+    activation_thread.start()
+    assert shared_lock_attempted.wait(timeout=10)
+    remained_excluded = not activation_done.wait(timeout=0.3)
+    release_download.set()
+    installer_thread.join(timeout=10)
+    activation_thread.join(timeout=10)
+
+    try:
+        assert not installer_thread.is_alive()
+        assert not activation_thread.is_alive()
+        if failures:
+            raise failures[0]
+        assert remained_excluded
+        assert len(install_results) == 1
+        assert len(activation_results) == 1
+        assert lock_names == [
+            fs_module.model_install_lock_name(governed_model_case.model_id),  # type: ignore[attr-defined]
+            fs_module.model_install_lock_name(governed_model_case.model_id),  # type: ignore[attr-defined]
+        ]
+    finally:
+        for result in (*install_results, *activation_results):
+            result.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing", "symlink", "fifo", "writable", "wrong_size", "hardlink"),
+)
+def test_activation_requires_exact_positive_publication_commit(
+    governed_model_case: object,
+    mutation: str,
+) -> None:
+    installed = governed_model_case.install()  # type: ignore[attr-defined]
+    installed.close()
+    commit_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+
+    if mutation == "missing":
+        commit_path.unlink()
+    elif mutation == "symlink":
+        displaced = commit_path.with_name(".displaced-publication-proof")
+        commit_path.rename(displaced)
+        commit_path.symlink_to(displaced.name)
+    elif mutation == "fifo":
+        commit_path.unlink()
+        os.mkfifo(commit_path, mode=0o400)
+        commit_path.chmod(0o400)
+    elif mutation == "writable":
+        commit_path.chmod(0o600)
+    elif mutation == "wrong_size":
+        commit_path.chmod(0o600)
+        commit_path.write_bytes(b"not-empty")
+        commit_path.chmod(0o400)
+    elif mutation == "hardlink":
+        os.link(commit_path, commit_path.with_name(".linked-publication-proof"))
+    else:  # pragma: no cover - closed parametrization
+        raise AssertionError(f"unknown publication proof mutation: {mutation}")
+
+    with pytest.raises(RuntimeError, match="model is not installed and verified"):
+        governed_model_case.registry.activate(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_activation_revalidates_publication_commit_identity_after_artifact_hash(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed = governed_model_case.install()  # type: ignore[attr-defined]
+    installed.close()
+    commit_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    displaced = commit_path.with_name(".displaced-publication-proof")
+    real_hash = registry_module.hash_exact_fd
+    swapped = False
+
+    def swap_commit_after_hash(
+        descriptor: int,
+        size: int,
+        expected_sha256: str,
+    ) -> str:
+        nonlocal swapped
+        result = real_hash(descriptor, size, expected_sha256)
+        if not swapped:
+            commit_path.rename(displaced)
+            commit_path.write_bytes(b"")
+            commit_path.chmod(0o400)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(registry_module, "hash_exact_fd", swap_commit_after_hash)
+
+    with pytest.raises(RuntimeError, match="model is not installed and verified"):
+        governed_model_case.registry.activate(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    assert swapped
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_publication_commit_inode_is_durable_before_read_only_authority(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    model_path = commit_path.parent
+    model_metadata = model_path.stat(follow_symlinks=False)
+    model_identity = (model_metadata.st_dev, model_metadata.st_ino)
+    commit_fsync_modes: list[int] = []
+    parent_fsync_modes: list[int] = []
+    real_fsync = os.fsync
+    real_directory_fsync = OwnedDirectory.fsync
+
+    def track_fsync(descriptor: int) -> None:
+        identity = os.fstat(descriptor)
+        if commit_path.exists():
+            commit = commit_path.stat(follow_symlinks=False)
+            if (identity.st_dev, identity.st_ino) == (commit.st_dev, commit.st_ino):
+                commit_fsync_modes.append(stat.S_IMODE(identity.st_mode))
+        real_fsync(descriptor)
+
+    def track_parent_fsync(directory: OwnedDirectory) -> None:
+        identity = (directory.identity.device, directory.identity.inode)
+        if identity == model_identity and commit_path.exists():
+            parent_fsync_modes.append(stat.S_IMODE(commit_path.stat(follow_symlinks=False).st_mode))
+        real_directory_fsync(directory)
+
+    monkeypatch.setattr(os, "fsync", track_fsync)
+    monkeypatch.setattr(OwnedDirectory, "fsync", track_parent_fsync)
+
+    activated = governed_model_case.install()  # type: ignore[attr-defined]
+    activated.close()
+
+    assert commit_fsync_modes == [0o600, 0o400]
+    assert parent_fsync_modes == [0o600]
+
+
 def test_publication_supports_filesystems_that_cannot_rename_read_only_directories(
     governed_model_case: object,
 ) -> None:
@@ -1177,6 +1563,7 @@ def test_successful_recovery_persists_marker_before_seal_and_removal_after_verif
     )
     revision_path = model_path / ("a" * 40)
     marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    commit_path = model_path / f".publication-verified-{'a' * 40}"
     model_metadata = model_path.stat(follow_symlinks=False)
     revision_metadata = revision_path.stat(follow_symlinks=False)
     model_identity = (model_metadata.st_dev, model_metadata.st_ino)
@@ -1190,7 +1577,15 @@ def test_successful_recovery_persists_marker_before_seal_and_removal_after_verif
     def track_fsync(descriptor: int) -> None:
         identity = os.fstat(descriptor)
         descriptor_identity = (identity.st_dev, identity.st_ino)
-        if marker_path.exists():
+        if commit_path.exists():
+            commit = commit_path.stat(follow_symlinks=False)
+            if descriptor_identity == (commit.st_dev, commit.st_ino):
+                events.append(f"commit_fsync_{stat.S_IMODE(identity.st_mode):03o}")
+            elif descriptor_identity == model_identity:
+                events.append("model_fsync")
+            elif descriptor_identity == revision_identity:
+                events.append("revision_fsync")
+        elif marker_path.exists():
             marker = marker_path.stat(follow_symlinks=False)
             if descriptor_identity == (marker.st_dev, marker.st_ino):
                 events.append("marker_fsync")
@@ -1240,6 +1635,9 @@ def test_successful_recovery_persists_marker_before_seal_and_removal_after_verif
         "model_fsync",
         "marker_unlink",
         "model_fsync",
+        "commit_fsync_600",
+        "model_fsync",
+        "commit_fsync_400",
     ]
     assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
 
@@ -1843,6 +2241,165 @@ def test_marker_restoration_and_mode_rollback_fault_reestablishes_quarantine(
 
     governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
     assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_total_quarantine_fallback_exhaustion_requires_positive_commit_proof(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    model_path = (
+        governed_model_case.model_root  # type: ignore[attr-defined]
+        / governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    commit_path = model_path / f".publication-verified-{'a' * 40}"
+    model_metadata = model_path.stat(follow_symlinks=False)
+    model_identity = (model_metadata.st_dev, model_metadata.st_ino)
+    primary = OSError("scripted marker-clear parent fsync failure")
+    restoration_error = OSError("scripted total marker restoration failure")
+    rollback_error = OSError("scripted total rollback chmod failure")
+    marker_unlinked = False
+    primary_injected = False
+    faults_active = True
+    restoration_open_calls: list[bool] = []
+    rollback_attempts = 0
+    real_unlink = os.unlink
+    real_fsync = OwnedDirectory.fsync
+    real_chmod = OwnedDirectory.chmod
+    real_open_marker = ModelInstaller._open_recovery_marker
+
+    def track_marker_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        nonlocal marker_unlinked
+        real_unlink(path, dir_fd=dir_fd)
+        if path == marker_path.name:
+            marker_unlinked = True
+
+    def fail_clear_parent_fsync(directory: OwnedDirectory) -> None:
+        nonlocal primary_injected
+        identity = (directory.identity.device, directory.identity.inode)
+        if (
+            faults_active
+            and marker_unlinked
+            and identity == model_identity
+            and not primary_injected
+        ):
+            primary_injected = True
+            raise primary
+        real_fsync(directory)
+
+    def fail_rollback_chmod(directory: OwnedDirectory, mode: int) -> None:
+        nonlocal rollback_attempts
+        identity = (directory.identity.device, directory.identity.inode)
+        if faults_active and marker_unlinked and identity != model_identity and mode == 0o700:
+            rollback_attempts += 1
+            raise rollback_error
+        real_chmod(directory, mode)
+
+    def fail_every_marker_restore(
+        model: OwnedDirectory,
+        revision: str,
+        *,
+        create: bool,
+    ) -> int:
+        if faults_active and marker_unlinked:
+            restoration_open_calls.append(create)
+            if create:
+                raise restoration_error
+        return real_open_marker(model, revision, create=create)
+
+    monkeypatch.setattr(os, "unlink", track_marker_unlink)
+    monkeypatch.setattr(OwnedDirectory, "fsync", fail_clear_parent_fsync)
+    monkeypatch.setattr(OwnedDirectory, "chmod", fail_rollback_chmod)
+    monkeypatch.setattr(
+        ModelInstaller,
+        "_open_recovery_marker",
+        staticmethod(fail_every_marker_restore),
+    )
+
+    caught: BaseException | None = None
+    try:
+        governed_model_case.install()  # type: ignore[attr-defined]
+    except BaseException as error:
+        caught = error
+
+    assert caught is primary
+    assert primary_injected
+    assert restoration_open_calls == [True, False, True, False]
+    assert rollback_attempts == 1
+    assert getattr(primary, "__notes__", []) == [
+        "additional recovery marker restoration failure",
+        "additional recovery rollback failure",
+        "additional recovery marker restoration failure",
+    ]
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert not commit_path.exists()
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+    activation_probe = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from tuntun_core.services.models.registry import ModelRegistry\n"
+        "registry=ModelRegistry.load(Path(sys.argv[1]),model_root=Path(sys.argv[2]))\n"
+        "try:\n"
+        "    activated=registry.activate(sys.argv[3])\n"
+        "except RuntimeError:\n"
+        "    raise SystemExit(0)\n"
+        "activated.close()\n"
+        "raise SystemExit(1)\n"
+    )
+    denied = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            activation_probe,
+            str(governed_model_case.manifest),  # type: ignore[attr-defined]
+            str(governed_model_case.model_root),  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert denied.returncode == 0, denied.stderr
+
+    faults_active = False
+    governed_model_case.clear_process_publication_uncertainty()  # type: ignore[attr-defined]
+    with pytest.raises(RuntimeError, match="model is not installed and verified"):
+        ModelRegistry.load(
+            governed_model_case.manifest,  # type: ignore[attr-defined]
+            model_root=governed_model_case.model_root,  # type: ignore[attr-defined]
+        ).activate(governed_model_case.model_id)  # type: ignore[attr-defined]
+
+    recovered = governed_model_case._installer().install(  # type: ignore[attr-defined]
+        governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    recovered.close()
+    assert commit_path.exists()
+    assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+
+    available = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            activation_probe,
+            str(governed_model_case.manifest),  # type: ignore[attr-defined]
+            str(governed_model_case.model_root),  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert available.returncode == 1, available.stderr
 
 
 def test_activation_rechecks_publication_uncertainty_after_verification(

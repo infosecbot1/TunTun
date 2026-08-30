@@ -25,7 +25,9 @@ from tuntun_core.services.models.registry import (
 )
 
 MODEL_ID = "mini-model"
+PEER_MODEL_ID = "peer-model"
 REVISION = "a" * 40
+PEER_REVISION = "c" * 40
 PREVIOUS_REVISION = "b" * 40
 EXPECTED_BYTES = b"tuntun-governed-model-fixture-v1"
 EXPECTED_SHA256 = hashlib.sha256(EXPECTED_BYTES).hexdigest()
@@ -450,6 +452,17 @@ class GovernedModelCase:
         self.written_inode_identity = (metadata.st_dev, metadata.st_ino)
         return activated
 
+    def install_peer_model(self) -> str:
+        document = yaml.safe_load(self.manifest.read_text(encoding="utf-8"))
+        peer = _entry_document()
+        peer["id"] = PEER_MODEL_ID
+        peer["revision"] = PEER_REVISION
+        document["models"].append(peer)
+        _write_yaml(self.manifest, document)
+        activated = self._installer().install(PEER_MODEL_ID)
+        activated.close()
+        return PEER_MODEL_ID
+
     def require_write_enabled_publish_source(self) -> None:
         publish = installer_module.atomic_publish_dir_noreplace
 
@@ -575,6 +588,10 @@ class GovernedModelCase:
     @property
     def recovery_marker_path(self) -> Path:
         return self.model_root / self.model_id / f".recovery-pending-{REVISION}"
+
+    @property
+    def publication_commit_path(self) -> Path:
+        return self.model_root / self.model_id / f".publication-verified-{REVISION}"
 
     @property
     def recovery_marker_exists(self) -> bool:

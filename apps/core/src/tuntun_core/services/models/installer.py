@@ -12,7 +12,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .fs import (
-    MODEL_INSTALL_LOCK_NAME,
     OwnedDirectory,
     _mark_publication_uncertain,
     _resolve_publication_uncertainty,
@@ -20,9 +19,12 @@ from .fs import (
     close_preserving_primary,
     entry_exists_at,
     hash_exact_fd,
+    model_install_lock_name,
     open_regular_at,
+    publication_commit_name,
     publication_is_uncertain,
     recovery_pending_name,
+    require_publication_commit,
 )
 from .network import PinnedHttpsTransport
 from .registry import ActivatedModel, ModelEntry, ModelFile, ModelRegistry, VerifiedModelFile
@@ -263,6 +265,74 @@ class ModelInstaller:
         _resolve_publication_uncertainty(model, revision)
         return True
 
+    @staticmethod
+    def _create_publication_commit(model: OwnedDirectory, revision: str) -> int:
+        descriptor = open_regular_at(
+            model,
+            publication_commit_name(revision),
+            os.O_RDWR | os.O_CREAT | os.O_EXCL,
+            mode=0o600,
+            expected_mode=0o600,
+        )
+        try:
+            require_publication_commit(
+                model,
+                revision,
+                descriptor,
+                expected_mode=0o600,
+                require_read_only=False,
+            )
+            os.fsync(descriptor)
+            model.fsync()
+            require_publication_commit(
+                model,
+                revision,
+                descriptor,
+                expected_mode=0o600,
+                require_read_only=False,
+            )
+            os.fchmod(descriptor, 0o400)
+            os.fsync(descriptor)
+            require_publication_commit(
+                model,
+                revision,
+                descriptor,
+                expected_mode=0o400,
+                require_read_only=False,
+            )
+            return descriptor
+        except BaseException as error:
+            close_preserving_primary(descriptor, os.close, error)
+            raise
+
+    @staticmethod
+    def _remove_publication_commit(model: OwnedDirectory, revision: str) -> None:
+        name = publication_commit_name(revision)
+        try:
+            descriptor = open_regular_at(
+                model,
+                name,
+                os.O_RDONLY,
+                expected_mode=None,
+            )
+        except FileNotFoundError:
+            return
+        try:
+            identity = os.fstat(descriptor)
+            named = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
+            if (
+                stat.S_IMODE(identity.st_mode) not in {0o400, 0o600}
+                or identity.st_size != 0
+                or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise PermissionError("unsafe model publication commit")
+            os.unlink(name, dir_fd=model.fd)
+            model.fsync()
+        except BaseException as error:
+            close_preserving_primary(descriptor, os.close, error)
+            raise
+        os.close(descriptor)
+
     def _reuse_or_recover_revision(
         self,
         model: OwnedDirectory,
@@ -270,21 +340,23 @@ class ModelInstaller:
     ) -> ActivatedModel | None:
         pending_name = recovery_pending_name(entry.revision)
         pending_exists = entry_exists_at(model, pending_name)
+        commit_exists = entry_exists_at(model, publication_commit_name(entry.revision))
         revision = self._open_existing_revision(model, entry.revision)
         if revision is None:
-            if pending_exists:
+            if pending_exists or commit_exists:
                 raise PermissionError("unsafe model recovery marker")
             return None
         handles: list[VerifiedModelFile] = []
         activated: ActivatedModel | None = None
         marker_fd: int | None = None
+        commit_fd: int | None = None
         sealed_for_recovery = False
         post_seal_phase = False
         transaction_complete = False
         try:
             mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
             sealed_for_recovery = mode == 0o500
-            if mode == 0o500 and not pending_exists:
+            if mode == 0o500 and not pending_exists and commit_exists:
                 try:
                     activated = self.registry._activate_from_open_model(model, entry)
                 except BaseException as error:
@@ -330,6 +402,7 @@ class ModelInstaller:
                         entry.revision,
                         create=True,
                     )
+                self._remove_publication_commit(model, entry.revision)
                 if mode == 0o700:
                     revision.chmod(0o500)
                     sealed_for_recovery = True
@@ -345,9 +418,13 @@ class ModelInstaller:
                 revision.fsync()
                 model.fsync()
                 self._clear_recovery_marker(model, entry.revision, marker_fd)
-                transaction_complete = True
                 descriptor_to_close = marker_fd
                 marker_fd = None
+                os.close(descriptor_to_close)
+                commit_fd = self._create_publication_commit(model, entry.revision)
+                transaction_complete = True
+                descriptor_to_close = commit_fd
+                commit_fd = None
                 os.close(descriptor_to_close)
                 activated = ActivatedModel.from_manifest(entry, tuple(handles))
                 handles.clear()
@@ -365,6 +442,10 @@ class ModelInstaller:
             if marker_fd is not None:
                 descriptor_to_close = marker_fd
                 marker_fd = None
+                close_preserving_primary(descriptor_to_close, os.close, error)
+            if commit_fd is not None:
+                descriptor_to_close = commit_fd
+                commit_fd = None
                 close_preserving_primary(descriptor_to_close, os.close, error)
             close_preserving_primary(revision, OwnedDirectory.close, error)
             if isinstance(error, OSError) and not post_seal_phase:
@@ -384,7 +465,10 @@ class ModelInstaller:
         entry = self.registry.entry(model_id)
         root = OwnedDirectory.open_or_create(self.registry._root)
         try:
-            with root.lock(MODEL_INSTALL_LOCK_NAME, timeout_seconds=30.0):
+            with root.lock(
+                model_install_lock_name(entry.model_id),
+                timeout_seconds=30.0,
+            ):
                 model = root.child(entry.model_id, create=True, exist_ok=True)
                 try:
                     prefix = f".stage-{entry.revision}-"
@@ -400,6 +484,7 @@ class ModelInstaller:
                     sealed_for_publication = False
                     handles: list[VerifiedModelFile] = []
                     marker_fd: int | None = None
+                    commit_fd: int | None = None
                     try:
                         deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
                         for item in entry.files:
@@ -444,6 +529,10 @@ class ModelInstaller:
                         descriptor_to_close = marker_fd
                         marker_fd = None
                         os.close(descriptor_to_close)
+                        commit_fd = self._create_publication_commit(model, entry.revision)
+                        descriptor_to_close = commit_fd
+                        commit_fd = None
+                        os.close(descriptor_to_close)
                         return ActivatedModel.from_manifest(entry, tuple(handles))
                     except FileExistsError as error:
                         if published:
@@ -453,6 +542,14 @@ class ModelInstaller:
                                 descriptor_to_close = marker_fd
                                 marker_fd = None
                                 close_preserving_primary(descriptor_to_close, os.close, error)
+                            if commit_fd is not None:
+                                descriptor_to_close = commit_fd
+                                commit_fd = None
+                                close_preserving_primary(
+                                    descriptor_to_close,
+                                    os.close,
+                                    error,
+                                )
                             raise
                         for handle in handles:
                             with contextlib.suppress(OSError):
@@ -484,6 +581,10 @@ class ModelInstaller:
                         if marker_fd is not None:
                             descriptor_to_close = marker_fd
                             marker_fd = None
+                            close_preserving_primary(descriptor_to_close, os.close, error)
+                        if commit_fd is not None:
+                            descriptor_to_close = commit_fd
+                            commit_fd = None
                             close_preserving_primary(descriptor_to_close, os.close, error)
                         if not published:
                             try:

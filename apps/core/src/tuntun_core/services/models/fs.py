@@ -22,7 +22,6 @@ from yaml.nodes import MappingNode
 MAX_MANIFEST_BYTES = 1_048_576
 MAX_MANIFEST_EVENTS = 16_384
 MAX_MANIFEST_DEPTH = 32
-MODEL_INSTALL_LOCK_NAME = ".model-install.lock"
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
@@ -49,6 +48,68 @@ def recovery_pending_name(revision: str) -> str:
     if not _safe_component(name):
         raise PermissionError("unsafe model filesystem path")
     return name
+
+
+def model_install_lock_name(model_id: str) -> str:
+    name = f".model-install-{model_id}.lock"
+    if not _safe_component(name):
+        raise PermissionError("unsafe model filesystem path")
+    return name
+
+
+def publication_commit_name(revision: str) -> str:
+    name = f".publication-verified-{revision}"
+    if not _safe_component(name):
+        raise PermissionError("unsafe model filesystem path")
+    return name
+
+
+def require_publication_commit(
+    model: OwnedDirectory,
+    revision: str,
+    descriptor: int,
+    *,
+    expected_mode: int,
+    require_read_only: bool,
+) -> None:
+    name = publication_commit_name(revision)
+    identity = os.fstat(descriptor)
+    named = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(identity.st_mode)
+        or identity.st_uid != _effective_user_id()
+        or stat.S_IMODE(identity.st_mode) != expected_mode
+        or identity.st_nlink != 1
+        or identity.st_size != 0
+        or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)
+        or (
+            require_read_only
+            and fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY
+        )
+    ):
+        raise PermissionError("unsafe model publication commit")
+
+
+def open_publication_commit(model: OwnedDirectory, revision: str) -> int:
+    descriptor = open_regular_at(
+        model,
+        publication_commit_name(revision),
+        os.O_RDONLY,
+        mode=0o400,
+        expected_mode=0o400,
+    )
+    try:
+        require_publication_commit(
+            model,
+            revision,
+            descriptor,
+            expected_mode=0o400,
+            require_read_only=True,
+        )
+        return descriptor
+    except BaseException as error:
+        close_preserving_primary(descriptor, os.close, error)
+        raise
 
 
 def entry_exists_at(directory: OwnedDirectory, name: str) -> bool:
@@ -337,11 +398,14 @@ class OwnedDirectory:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("model install lock deadline") from None
                 time.sleep(0.01)
+        primary_error: BaseException | None = None
+        locked = False
         try:
             operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
             while True:
                 try:
                     fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
+                    locked = True
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
@@ -349,10 +413,40 @@ class OwnedDirectory:
                     time.sleep(0.01)
             try:
                 yield
-            finally:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except BaseException as error:
+                primary_error = error
+                raise
+        except BaseException as error:
+            if primary_error is None:
+                primary_error = error
+            raise
         finally:
-            os.close(descriptor)
+            release_error: BaseException | None = None
+            if locked:
+                if primary_error is None:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    except BaseException as error:
+                        primary_error = error
+                        release_error = error
+                else:
+                    close_preserving_primary(
+                        descriptor,
+                        lambda value: fcntl.flock(value, fcntl.LOCK_UN),
+                        primary_error,
+                    )
+            descriptor_to_close = descriptor
+            descriptor = -1
+            if primary_error is None:
+                os.close(descriptor_to_close)
+            else:
+                close_preserving_primary(
+                    descriptor_to_close,
+                    os.close,
+                    primary_error,
+                )
+            if release_error is not None:
+                raise release_error
 
     def remove_private_stages(self, prefix: str) -> None:
         for name in os.listdir(self.fd):
