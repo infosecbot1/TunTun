@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
 import weakref
 from collections.abc import AsyncGenerator, Callable, Coroutine, Generator
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, make_dataclass
+from datetime import datetime, timedelta, tzinfo
 from enum import Enum
 from pathlib import Path
 from threading import Barrier, Event, Lock, Thread, get_ident
 from typing import Protocol, cast
+from uuid import UUID, SafeUUID
 
 import pytest
+from pydantic_core import TzInfo
 from sqlalchemy import text
-from tuntun_contracts.base import Commitment
+from tuntun_contracts.base import Commitment, canonical_bytes
 from tuntun_contracts.events import EventType
+from tuntun_contracts.identity import IdentityDecision
 from tuntun_core.adapters.sqlcipher import repository_facade as repository_facade_module
 from tuntun_core.adapters.sqlcipher.async_unit_of_work import AsyncUnitOfWorkFactory
 from tuntun_core.adapters.sqlcipher.repository_facade import AsyncRepositoryFacade
@@ -109,6 +114,10 @@ def test_task_14_plan_does_not_overclaim_unowned_deferred_cleanup() -> None:
         not in task_14
     )
     assert "factory-owned bounded strong quarantine" in task_14
+    assert "owned recursive snapshot" in task_14
+    assert "module-owned `_SynchronousDataRecord`" in task_14
+    assert "64-source per-unit retention bound" in task_14
+    assert "trusted in-process Enum singleton residual" in task_14
     assert (
         "It never cancels, closes, awaits, calls, or otherwise runs arbitrary rejected" in task_14
     )
@@ -550,6 +559,43 @@ async def test_fixed_post_commit_signal_fires_only_after_successful_commit(
             rolled_back.signal_after_commit("subject_revocation")
             await rolled_back.rollback()
         assert nonblocking_commit_signal.offer_count == 1
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_commit_signal_record_source_is_retained_until_context_unlock(
+    migrated_database: object,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
+
+    class RecordTarget:
+        def offer_nowait(self) -> object:
+            return Record("signal")
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    observations: list[tuple[bool, bool]] = []
+    factory.register_commit_signal(
+        "subject_revocation",
+        cast(CommitSignalProbe, RecordTarget()),
+    )
+    try:
+        async with factory() as uow:
+            uow.signal_after_commit("subject_revocation")
+            await uow.commit()
+            assert len(uow._result_sources_until_unlock) == 1
+
+            def installed_finalizer(_value: object) -> None:
+                observations.append((factory._transaction_lock.locked(), uow._sync is None))
+
+            Record.__del__ = installed_finalizer  # type: ignore[attr-defined]
+            assert observations == []
+
+        assert observations == [(False, True)]
+        assert factory.failed_commit_signal_count("subject_revocation") == 0
     finally:
         await factory.aclose()
 
@@ -1214,6 +1260,11 @@ async def test_async_close_retry_keeps_lock_after_repeated_preterminal_failure(
     original_close = UnitOfWork.close
     close_failure = RuntimeError("synthetic explicit async close failure")
     close_attempts = 0
+    source_observations: list[tuple[bool, bool]] = []
+
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
 
     def fail_once_before_close(unit: UnitOfWork) -> None:
         nonlocal close_attempts
@@ -1230,16 +1281,24 @@ async def test_async_close_retry_keeps_lock_after_repeated_preterminal_failure(
                 "00000000-0000-0000-0000-000000000622",
             )
         )
+        await pending.run_sync(lambda _transaction: Record("retained"))
+
+        def installed_finalizer(_value: object) -> None:
+            source_observations.append((factory._transaction_lock.locked(), pending._sync is None))
+
+        Record.__del__ = installed_finalizer  # type: ignore[attr-defined]
         with pytest.raises(RuntimeError) as raised:
             await pending.aclose()
         assert raised.value is close_failure
         assert pending._sync is not None
         assert pending._sync.active
         assert factory._transaction_lock.locked()
+        assert source_observations == []
 
         await pending.aclose()
         assert pending._sync is None
         assert not factory._transaction_lock.locked()
+        assert source_observations == [(False, True)]
         assert _count_households(engine) == 0
     finally:
         monkeypatch.setattr(UnitOfWork, "close", original_close)
@@ -1289,10 +1348,14 @@ async def test_owner_release_failure_retains_lock_until_explicit_close_retry(
     factory = AsyncUnitOfWorkFactory(engine)
     pending = factory()
     await pending.__aenter__()
-    await pending.rollback()
     original_release = pending._release_owner
     release_failure = RuntimeError("synthetic owner release failure")
     release_count = 0
+    source_observations: list[tuple[bool, bool]] = []
+
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
 
     def fail_once() -> None:
         nonlocal release_count
@@ -1303,17 +1366,26 @@ async def test_owner_release_failure_retains_lock_until_explicit_close_retry(
 
     pending._release_owner = fail_once
     try:
+        await pending.run_sync(lambda _transaction: Record("retained"))
+        await pending.rollback()
+
+        def installed_finalizer(_value: object) -> None:
+            source_observations.append((factory._transaction_lock.locked(), pending._sync is None))
+
+        Record.__del__ = installed_finalizer  # type: ignore[attr-defined]
         with pytest.raises(RuntimeError) as raised:
             await pending.__aexit__(None, None, None)
 
         assert raised.value is release_failure
         assert factory._transaction_lock.locked()
         assert pending._owns_lock
+        assert source_observations == []
 
         await pending.aclose()
         assert release_count == 2
         assert not factory._transaction_lock.locked()
         assert not pending._owns_lock
+        assert source_observations == [(False, True)]
     finally:
         pending._release_owner = original_release
         if factory._transaction_lock.locked():
@@ -2709,11 +2781,12 @@ async def test_discovered_nested_generator_survives_concurrent_container_removal
 
     original_inspect = repository_facade_module._inspect_data_value
 
-    def inspect_with_mutation_window(value: object, inspection: object) -> None:
-        original_inspect(value, inspection)  # type: ignore[arg-type]
+    def inspect_with_mutation_window(value: object, inspection: object) -> object:
+        result = original_inspect(value, inspection)  # type: ignore[arg-type]
         if inspect.isgenerator(value):
             discovered.set()
             assert inspection_release.wait(timeout=5)
+        return result
 
     monkeypatch.setattr(
         repository_facade_module,
@@ -2753,3 +2826,1795 @@ async def test_discovered_nested_generator_survives_concurrent_container_removal
             retained_generator.close()
 
     assert observations == [(True, False)]
+
+
+@pytest.mark.asyncio
+async def test_run_sync_returns_owned_snapshot_before_alias_can_add_future(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    shared: list[object] = [1]
+    validated = Event()
+    inspection_release = Event()
+    returned: list[object] = []
+    entered_uow: list[object] = []
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    original_inspect = repository_facade_module._inspect_data_value
+
+    def inspect_with_post_validation_window(value: object, inspection: object) -> object:
+        result = original_inspect(value, inspection)  # type: ignore[arg-type]
+        if value is shared:
+            validated.set()
+            assert inspection_release.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_inspect_data_value",
+        inspect_with_post_validation_window,
+    )
+
+    async def return_shared_result() -> None:
+        async with factory() as uow:
+            entered_uow.append(uow)
+            returned.append(await uow.run_sync(lambda _transaction: shared))
+            await uow.rollback()
+
+    operation = asyncio.create_task(return_shared_result())
+    try:
+        assert await asyncio.to_thread(validated.wait, 5)
+        shared.append(future)
+        inspection_release.set()
+        await operation
+
+        assert returned == [[1]]
+        assert returned[0] is not shared
+        assert not future.done()
+        assert entered_uow and entered_uow[0]._sync is None  # type: ignore[attr-defined]
+        assert not factory._transaction_lock.locked()
+        assert factory.quarantined_result_count() == 0
+    finally:
+        inspection_release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(BaseException):
+            await operation
+        await factory.aclose()
+        future.cancel()
+
+
+@pytest.mark.asyncio
+async def test_dict_mutation_after_discovery_is_terminally_quarantined(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    boundary_returned = Event()
+    discovered = Event()
+    inspection_release = Event()
+    observations: list[tuple[bool, bool]] = []
+    entered_uow: list[object] = []
+
+    def nested_generator() -> Generator[object, None, None]:
+        try:
+            yield object()
+        finally:
+            observations.append((boundary_returned.is_set(), factory._transaction_lock.locked()))
+
+    generator = nested_generator()
+    next(generator)
+    generator_ref = weakref.ref(generator)
+    shared: dict[str, object] = {"unsafe": generator, "tail": 1}
+    del generator
+
+    original_inspect = repository_facade_module._inspect_data_value
+
+    def inspect_with_mutation_window(value: object, inspection: object) -> object:
+        result = original_inspect(value, inspection)  # type: ignore[arg-type]
+        if inspect.isgenerator(value):
+            discovered.set()
+            assert inspection_release.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_inspect_data_value",
+        inspect_with_mutation_window,
+    )
+
+    async def reject_shared_result() -> None:
+        async with factory() as uow:
+            entered_uow.append(uow)
+            try:
+                with pytest.raises(TypeError, match="synchronous data value"):
+                    await uow.run_sync(lambda _transaction: shared)
+            finally:
+                boundary_returned.set()
+
+    rejection = asyncio.create_task(reject_shared_result())
+    try:
+        assert await asyncio.to_thread(discovered.wait, 5)
+        del shared["unsafe"]
+        inspection_release.set()
+        await rejection
+
+        assert observations == []
+        assert generator_ref() is not None
+        assert factory.quarantined_result_count() == 2
+        assert entered_uow and entered_uow[0]._sync is None  # type: ignore[attr-defined]
+        assert not factory._transaction_lock.locked()
+
+        async with factory() as next_uow:
+            assert (
+                await next_uow.run_sync(
+                    lambda transaction: transaction.exec_driver_sql("SELECT 1").scalar_one()
+                )
+                == 1
+            )
+            await next_uow.rollback()
+    finally:
+        boundary_returned.set()
+        inspection_release.set()
+        if not rejection.done():
+            rejection.cancel()
+        with suppress(BaseException):
+            await rejection
+        await factory.aclose()
+        retained_generator = generator_ref()
+        if retained_generator is not None:
+            retained_generator.close()
+
+    assert observations == [(True, False)]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_failure_after_discovery_is_terminally_quarantined(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    boundary_returned = Event()
+    observations: list[tuple[bool, bool]] = []
+
+    def nested_generator() -> Generator[object, None, None]:
+        try:
+            yield object()
+        finally:
+            observations.append((boundary_returned.is_set(), factory._transaction_lock.locked()))
+
+    generator = nested_generator()
+    next(generator)
+    generator_ref = weakref.ref(generator)
+    source: list[object] = [generator]
+    del generator
+    original_inspect = repository_facade_module._inspect_data_value
+
+    def fail_after_discovery(value: object, inspection: object) -> object:
+        result = original_inspect(value, inspection)  # type: ignore[arg-type]
+        if inspect.isgenerator(value):
+            raise RuntimeError("synthetic result snapshot failure")
+        return result
+
+    monkeypatch.setattr(repository_facade_module, "_inspect_data_value", fail_after_discovery)
+
+    try:
+        async with factory() as uow:
+            try:
+                with pytest.raises(TypeError, match="synchronous data value") as raised:
+                    await uow.run_sync(lambda _transaction: source)
+            finally:
+                boundary_returned.set()
+
+            assert raised.value.__cause__ is not None
+            assert "synthetic result snapshot failure" in str(raised.value.__cause__)
+            assert any("snapshot failed" in note for note in getattr(raised.value, "__notes__", ()))
+            assert observations == []
+            assert generator_ref() is not None
+            assert factory.quarantined_result_count() == 2
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+
+        async with factory() as next_uow:
+            assert (
+                await next_uow.run_sync(
+                    lambda transaction: transaction.exec_driver_sql("SELECT 1").scalar_one()
+                )
+                == 1
+            )
+            await next_uow.rollback()
+    finally:
+        boundary_returned.set()
+        await factory.aclose()
+        retained_generator = generator_ref()
+        if retained_generator is not None:
+            retained_generator.close()
+
+    assert observations == [(True, False)]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_failure_transfers_nested_source_removed_by_concurrent_alias(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    boundary_returned = Event()
+    nested_discovered = Event()
+    traversal_release = Event()
+    observations: list[tuple[bool, bool]] = []
+
+    class FinalizableNestedSource:
+        def __del__(self) -> None:
+            observations.append((boundary_returned.is_set(), factory._transaction_lock.locked()))
+
+    nested = FinalizableNestedSource()
+    nested_identity = id(nested)
+    nested_ref = weakref.ref(nested)
+    source: dict[str, object] = {"nested": nested}
+    del nested
+    original_exact_type_in = repository_facade_module._exact_type_in
+
+    def fail_after_source_discovery(
+        value_type: type[object],
+        candidates: tuple[type[object], ...],
+    ) -> bool:
+        if value_type is FinalizableNestedSource:
+            nested_discovered.set()
+            assert traversal_release.wait(timeout=5)
+            raise RuntimeError("synthetic nested snapshot failure")
+        return original_exact_type_in(value_type, candidates)
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_exact_type_in",
+        fail_after_source_discovery,
+    )
+
+    async def reject_source() -> None:
+        async with factory() as uow:
+            try:
+                with pytest.raises(TypeError, match="synchronous data value") as raised:
+                    await uow.run_sync(lambda _transaction: source)
+            finally:
+                boundary_returned.set()
+
+            retained = cast(tuple[object, ...], raised.value.values)  # type: ignore[attr-defined]
+            assert any(id(value) == nested_identity for value in retained)
+            assert raised.value.__cause__ is not None
+            assert "synthetic nested snapshot failure" in str(raised.value.__cause__)
+            assert observations == []
+            assert nested_ref() is not None
+            assert factory.quarantined_result_count() == 3
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+
+    operation = asyncio.create_task(reject_source())
+    try:
+        assert await asyncio.to_thread(nested_discovered.wait, 5)
+        del source["nested"]
+        traversal_release.set()
+        await operation
+
+        assert observations == []
+        assert nested_ref() is not None
+    finally:
+        boundary_returned.set()
+        traversal_release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(BaseException):
+            await operation
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_supported_composites_are_rebuilt_with_owned_mutable_members(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    shared: list[object] = ["before"]
+
+    @dataclass(frozen=True, slots=True)
+    class MutableRecord:
+        payload: object
+
+    record = MutableRecord(shared)
+    contract = Commitment(
+        algorithm="HMAC-SHA-256",
+        key_id="audit-v1",
+        value_b64="A" * 43 + "=",
+    )
+    object.__setattr__(contract, "key_id", shared)
+    source = {
+        "record": record,
+        "contract": contract,
+        "aliases": [shared, shared],
+    }
+
+    try:
+        async with factory() as uow:
+            snapshot = await uow.run_sync(lambda _transaction: source)
+            shared.append("after")
+
+            assert snapshot is not source
+            snapshot_record = cast(MutableRecord, snapshot["record"])
+            snapshot_contract = cast(Commitment, snapshot["contract"])
+            snapshot_aliases = cast(list[object], snapshot["aliases"])
+            assert snapshot_record is not record
+            assert type(snapshot_record) is not MutableRecord
+            assert type(snapshot_record).__name__ == "_SynchronousDataRecord"
+            assert snapshot_contract is not contract
+            assert snapshot_record.payload == ["before"]
+            assert snapshot_record.payload is snapshot_contract.key_id
+            assert snapshot_record.payload is snapshot_aliases[0]
+            assert snapshot_aliases[0] is snapshot_aliases[1]
+            assert snapshot_record.payload is not shared
+            second_record = await uow.run_sync(lambda _transaction: record)
+            assert type(second_record) is type(snapshot_record)
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    (
+        "2026-08-27T00:00:00.000000Z",
+        "2026-08-27T05:30:00.000000+05:30",
+    ),
+)
+@pytest.mark.asyncio
+async def test_pydantic_parsed_timezone_contract_is_snapshotted(
+    migrated_database: object,
+    expires_at: str,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    contract = IdentityDecision.model_validate_json(
+        f'{{"status":"unknown","subject_id":null,"reason_code":"test","expires_at":"{expires_at}"}}'
+    )
+    expected_canonical = canonical_bytes(contract)
+
+    assert type(contract.expires_at.tzinfo) is TzInfo
+
+    try:
+        async with factory() as uow:
+            snapshot = await uow.run_sync(lambda _transaction: contract)
+
+            assert snapshot is not contract
+            assert type(snapshot) is IdentityDecision
+            assert snapshot == contract
+            assert type(snapshot.expires_at.tzinfo) is TzInfo
+            assert canonical_bytes(snapshot) == expected_canonical
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_caller_defined_timezone_remains_rejected(
+    migrated_database: object,
+) -> None:
+    class CallerTimezone(tzinfo):
+        def utcoffset(self, value: datetime | None) -> timedelta:
+            return timedelta(hours=5, minutes=30)
+
+        def dst(self, value: datetime | None) -> timedelta:
+            return timedelta(0)
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    value = datetime(2026, 8, 27, tzinfo=CallerTimezone())
+
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: value)
+
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_result_classification_does_not_invoke_custom_metaclass(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    hook_started = Event()
+    hook_release = Event()
+    hooks_armed = Event()
+    observations: list[tuple[str, bool, bool]] = []
+    entered_uow: list[object] = []
+
+    class BlockingMetaclass(type):
+        def __getattribute__(cls, name: str) -> object:
+            if hooks_armed.is_set():
+                observations.append(
+                    (
+                        name,
+                        factory._transaction_lock.locked(),
+                        entered_uow[0]._sync is not None,  # type: ignore[attr-defined]
+                    )
+                )
+                hook_started.set()
+                assert hook_release.wait(timeout=5)
+            return type.__getattribute__(cls, name)
+
+    class CallerOwnedValue(metaclass=BlockingMetaclass):
+        pass
+
+    value = CallerOwnedValue()
+    hooks_armed.set()
+    watchdog = _start_cleanup_watchdog(hook_started, hook_release)
+    try:
+        async with factory() as uow:
+            entered_uow.append(uow)
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: value)
+
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        hooks_armed.clear()
+        hook_release.set()
+        watchdog.join(timeout=5)
+        await factory.aclose()
+
+    assert observations == []
+
+
+@pytest.mark.asyncio
+async def test_result_classification_does_not_invoke_instance_getattribute(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    hook_started = Event()
+    hook_release = Event()
+    hooks_armed = Event()
+    observations: list[tuple[str, bool, bool]] = []
+    entered_uow: list[object] = []
+
+    class CallerOwnedValue:
+        def __getattribute__(self, name: str) -> object:
+            if hooks_armed.is_set():
+                observations.append(
+                    (
+                        name,
+                        factory._transaction_lock.locked(),
+                        entered_uow[0]._sync is not None,  # type: ignore[attr-defined]
+                    )
+                )
+                hook_started.set()
+                assert hook_release.wait(timeout=5)
+            return object.__getattribute__(self, name)
+
+    value = CallerOwnedValue()
+    hooks_armed.set()
+    watchdog = _start_cleanup_watchdog(hook_started, hook_release)
+    try:
+        async with factory() as uow:
+            entered_uow.append(uow)
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: value)
+
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        hooks_armed.clear()
+        hook_release.set()
+        watchdog.join(timeout=5)
+        await factory.aclose()
+
+    assert observations == []
+
+
+@pytest.mark.asyncio
+async def test_registered_contract_hidden_state_is_terminally_quarantined(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    boundary_returned = Event()
+    observations: list[tuple[bool, bool]] = []
+    probe_refs: list[weakref.ReferenceType[object]] = []
+
+    class Probe:
+        def __del__(self) -> None:
+            observations.append((boundary_returned.is_set(), factory._transaction_lock.locked()))
+
+    def contract_with_hidden_state(_transaction: UnitOfWorkProtocol) -> Commitment:
+        contract = Commitment(
+            algorithm="HMAC-SHA-256",
+            key_id="audit-v1",
+            value_b64="A" * 43 + "=",
+        )
+        probe = Probe()
+        probe_refs.append(weakref.ref(probe))
+        contract.__dict__["hidden"] = probe
+        return contract
+
+    try:
+        async with factory() as uow:
+            try:
+                with pytest.raises(TypeError, match="synchronous data value"):
+                    await uow.run_sync(contract_with_hidden_state)
+            finally:
+                boundary_returned.set()
+
+            assert observations == []
+            assert probe_refs and probe_refs[0]() is not None
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        boundary_returned.set()
+        await factory.aclose()
+
+
+@pytest.mark.parametrize("model_first", (True, False), ids=("model-first", "state-first"))
+@pytest.mark.asyncio
+async def test_registered_contract_snapshot_preserves_state_container_aliases(
+    migrated_database: object,
+    model_first: bool,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    contract = Commitment(
+        algorithm="HMAC-SHA-256",
+        key_id="audit-v1",
+        value_b64="A" * 43 + "=",
+    )
+    source = (
+        [contract, contract.__dict__, contract.__pydantic_fields_set__]
+        if model_first
+        else [contract.__dict__, contract.__pydantic_fields_set__, contract]
+    )
+
+    try:
+        async with factory() as uow:
+            snapshot = await uow.run_sync(lambda _transaction: source)
+            snapshot_contract = cast(Commitment, snapshot[0 if model_first else 2])
+            snapshot_dict = cast(dict[str, object], snapshot[1 if model_first else 0])
+            snapshot_fields_set = cast(set[str], snapshot[2 if model_first else 1])
+
+            assert snapshot_contract is not contract
+            assert snapshot_contract.__dict__ is snapshot_dict
+            assert snapshot_contract.__pydantic_fields_set__ is snapshot_fields_set
+            assert snapshot_dict is not contract.__dict__
+            assert snapshot_fields_set is not contract.__pydantic_fields_set__
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_exported_enum_state_drift_is_terminally_quarantined(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    member = EventType.WAKE_DETECTED
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    member.__dict__["hidden"] = future
+
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: member)
+
+            assert not future.done()
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        member.__dict__.pop("hidden", None)
+        await factory.aclose()
+        future.cancel()
+
+
+@pytest.mark.asyncio
+async def test_clean_exported_enum_preserves_singleton_identity(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+
+    try:
+        async with factory() as uow:
+            assert (
+                await uow.run_sync(lambda _transaction: EventType.WAKE_DETECTED)
+                is EventType.WAKE_DETECTED
+            )
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_uuid_is_rebuilt_with_exact_safe_state_and_aliases(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    value = UUID("00000000-0000-0000-0000-000000000001", is_safe=SafeUUID.safe)
+
+    try:
+        async with factory() as uow:
+            snapshot = await uow.run_sync(lambda _transaction: [value, value])
+
+            assert snapshot[0] is snapshot[1]
+            assert snapshot[0] is not value
+            assert type(snapshot[0]) is UUID
+            assert snapshot[0] == value
+            assert hash(snapshot[0]) == hash(value)
+            assert str(snapshot[0]) == str(value)
+            assert snapshot[0].is_safe is SafeUUID.safe
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.parametrize("slot_name", ("int", "is_safe"))
+@pytest.mark.asyncio
+async def test_uuid_state_drift_is_terminally_quarantined(
+    migrated_database: object,
+    slot_name: str,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    value = UUID(int=1)
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    object.__setattr__(value, slot_name, future)
+
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: value)
+
+            assert not future.done()
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        await factory.aclose()
+        future.cancel()
+
+
+@pytest.mark.parametrize(
+    "mutation_kind",
+    ("function-slot", "match-args", "field-flag", "annotation-key"),
+)
+@pytest.mark.asyncio
+async def test_generated_record_shape_check_does_not_invoke_mutated_metadata(
+    migrated_database: object,
+    mutation_kind: str,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    hooks_armed = Event()
+    observations: list[str] = []
+
+    class Hook:
+        def __getattribute__(self, name: str) -> object:
+            if hooks_armed.is_set():
+                observations.append(f"getattribute:{name}")
+            return object.__getattribute__(self, name)
+
+        def __hash__(self) -> int:
+            if hooks_armed.is_set():
+                observations.append("hash")
+            return hash("marker")
+
+        def __eq__(self, other: object) -> bool:
+            if hooks_armed.is_set():
+                observations.append("eq")
+            return False
+
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
+
+    value = Record("safe")
+    hook = Hook()
+    if mutation_kind == "function-slot":
+        Record.__repr__ = hook  # type: ignore[assignment]
+    elif mutation_kind == "match-args":
+        Record.__match_args__ = (hook,)  # type: ignore[assignment]
+    elif mutation_kind == "field-flag":
+        Record.__dataclass_fields__["marker"].init = hook  # type: ignore[assignment]
+    else:
+        Record.__init__.__annotations__[hook] = str  # type: ignore[index]
+    hooks_armed.set()
+
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: value)
+
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        hooks_armed.clear()
+        await factory.aclose()
+
+    assert observations == []
+
+
+@pytest.mark.asyncio
+async def test_generated_record_classification_does_not_hash_or_compare_namespace_keys(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    hooks_armed = Event()
+    observations: list[str] = []
+
+    class HookKey(str):
+        def __hash__(self) -> int:
+            if hooks_armed.is_set():
+                observations.append("hash")
+            return hash("__dataclass_fields__")
+
+        def __eq__(self, other: object) -> bool:
+            if hooks_armed.is_set():
+                observations.append("eq")
+            return str.__eq__(self, other)
+
+    key = HookKey("hostile_metadata")
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    record_type = dataclass(frozen=True, slots=True)(
+        type(
+            "Record",
+            (),
+            {
+                "__annotations__": {"marker": "str"},
+                key: future,
+            },
+        )
+    )
+    assert any(type(name) is HookKey for name in vars(record_type))
+    hooks_armed.set()
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: record_type("safe"))
+
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        hooks_armed.clear()
+        await factory.aclose()
+        future.cancel()
+
+    assert observations == []
+
+
+@pytest.mark.asyncio
+async def test_repository_awaitable_check_does_not_invoke_instance_getattribute(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    hooks_armed = Event()
+    observations: list[str] = []
+
+    class Repository:
+        def __getattribute__(self, name: str) -> object:
+            if hooks_armed.is_set():
+                observations.append(name)
+            return object.__getattribute__(self, name)
+
+    repository = Repository()
+    hooks_armed.set()
+    try:
+        async with factory() as uow:
+            facade = AsyncRepositoryFacade(uow, lambda _transaction: repository)
+            assert await facade.run(lambda _repository: 1) == 1
+            await uow.rollback()
+    finally:
+        hooks_armed.clear()
+        await factory.aclose()
+
+    assert observations == []
+
+
+@pytest.mark.asyncio
+async def test_repository_awaitable_check_does_not_compare_custom_class_keys(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    hooks_armed = Event()
+    observations: list[str] = []
+
+    class HookKey(str):
+        def __hash__(self) -> int:
+            if hooks_armed.is_set():
+                observations.append("hash")
+            return hash("__await__")
+
+        def __eq__(self, other: object) -> bool:
+            if hooks_armed.is_set():
+                observations.append("eq")
+            return str.__eq__(self, other)
+
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    repository_type = type(
+        "Repository",
+        (),
+        {HookKey("hostile_metadata"): future},
+    )
+    assert any(type(name) is HookKey for name in vars(repository_type))
+    hooks_armed.set()
+    try:
+        async with factory() as uow:
+            facade = AsyncRepositoryFacade(uow, lambda _transaction: repository_type())
+            with pytest.raises(TypeError, match="synchronous"):
+                await facade.run(lambda _repository: 1)
+
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        hooks_armed.clear()
+        await factory.aclose()
+        future.cancel()
+
+    assert observations == []
+
+
+@pytest.mark.asyncio
+async def test_repository_facade_defers_the_single_result_snapshot_to_uow(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    duplicate_snapshot_calls: list[object] = []
+
+    def reject_duplicate_snapshot(value: object) -> object:
+        duplicate_snapshot_calls.append(value)
+        raise AssertionError("repository facade attempted a duplicate result snapshot")
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_reject_worker_result",
+        reject_duplicate_snapshot,
+    )
+
+    class Repository:
+        pass
+
+    try:
+        async with factory() as uow:
+            facade = AsyncRepositoryFacade(uow, lambda _transaction: Repository())
+            assert await facade.run(lambda _repository: {"values": [1]}) == {"values": [1]}
+            assert duplicate_snapshot_calls == []
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.parametrize(
+    "state_name",
+    ("__pydantic_extra__", "__pydantic_private__"),
+)
+@pytest.mark.asyncio
+async def test_registered_contract_hidden_state_channels_are_fully_traversed(
+    migrated_database: object,
+    state_name: str,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    contract = Commitment(
+        algorithm="HMAC-SHA-256",
+        key_id="audit-v1",
+        value_b64="A" * 43 + "=",
+    )
+    object.__setattr__(contract, state_name, {"hidden": [future]})
+
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: contract)
+
+            cast(dict[str, list[object]], object.__getattribute__(contract, state_name)).clear()
+            assert not future.done()
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        await factory.aclose()
+        future.cancel()
+
+
+@pytest.mark.asyncio
+async def test_owned_snapshot_rebuilds_all_container_kinds_and_key_aliases(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    shared: list[object] = ["shared"]
+    tuple_key = ("key",)
+    frozen_element = frozenset({"element"})
+    source = {
+        "aliases": (shared, shared),
+        "mapping": {tuple_key: tuple_key},
+        "set": {frozen_element},
+        "frozenset": frozenset({("nested",)}),
+    }
+
+    try:
+        async with factory() as uow:
+            snapshot = await uow.run_sync(lambda _transaction: source)
+            snapshot_aliases = cast(tuple[list[object], list[object]], snapshot["aliases"])
+            snapshot_mapping = cast(dict[tuple[str], tuple[str]], snapshot["mapping"])
+            snapshot_key = next(iter(snapshot_mapping))
+            snapshot_set = cast(set[frozenset[str]], snapshot["set"])
+            snapshot_frozen = cast(frozenset[tuple[str]], snapshot["frozenset"])
+
+            assert snapshot is not source
+            assert snapshot_aliases is not source["aliases"]
+            assert snapshot_aliases[0] is snapshot_aliases[1]
+            assert snapshot_aliases[0] is not shared
+            assert snapshot_key is snapshot_mapping[snapshot_key]
+            assert snapshot_key is not tuple_key
+            assert next(iter(snapshot_set)) is not frozen_element
+            assert snapshot_frozen is not source["frozenset"]
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.parametrize(
+    "cycle_kind",
+    ("list", "dict", "tuple-list", "record-list"),
+)
+@pytest.mark.asyncio
+async def test_owned_snapshot_rejects_every_supported_cycle(
+    migrated_database: object,
+    cycle_kind: str,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        payload: object
+
+    if cycle_kind == "list":
+        root: object = []
+        cast(list[object], root).append(root)
+    elif cycle_kind == "dict":
+        root = {}
+        cast(dict[str, object], root)["self"] = root
+    elif cycle_kind == "tuple-list":
+        member: list[object] = []
+        root = (member,)
+        member.append(root)
+    else:
+        member = []
+        root = Record(member)
+        member.append(root)
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: root)
+
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_identity_memo_keeps_strong_source_references(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        first: object
+        second: object
+
+    old_holder: dict[str, list[object]] = {"old": []}
+    later: list[object] = []
+    root = Record(old_holder["old"], later)
+    old_identity = id(old_holder["old"])
+    candidate_reused_identity: list[bool] = []
+    mutated = False
+    original_inspect = repository_facade_module._inspect_data_value
+
+    def inspect_with_identity_reuse_window(value: object, inspection: object) -> object:
+        nonlocal mutated
+        was_old = not mutated and id(value) == old_identity
+        result = original_inspect(value, inspection)  # type: ignore[arg-type]
+        if was_old:
+            mutated = True
+            object.__setattr__(root, "first", None)
+            old_holder.clear()
+            value = None
+            candidate: list[object] = ["NEW"]
+            candidate_reused_identity.append(id(candidate) == old_identity)
+            later.append(candidate)
+        return result
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_inspect_data_value",
+        inspect_with_identity_reuse_window,
+    )
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    try:
+        async with factory() as uow:
+            snapshot = await uow.run_sync(lambda _transaction: root)
+            assert snapshot.first == []
+            assert snapshot.second == [["NEW"]]
+            assert snapshot.first is not snapshot.second[0]
+            assert candidate_reused_identity == [False]
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_record_class_mutation_after_validation_cannot_run_hash_hook(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class RecordKey:
+        marker: str
+
+    key = RecordKey("key")
+    source = {key: "value"}
+    validated = Event()
+    validation_release = Event()
+    observations: list[tuple[bool, bool]] = []
+    entered_uow: list[object] = []
+    original_shape_check = repository_facade_module._has_exact_generated_record_shape
+
+    def shape_check_with_mutation_window(
+        record_type: type[object],
+        field_names: tuple[str, ...],
+        namespace: dict[str, object],
+        inspection: object,
+    ) -> bool:
+        result = original_shape_check(
+            record_type,
+            field_names,
+            namespace,
+            inspection,  # type: ignore[arg-type]
+        )
+        if record_type is RecordKey:
+            validated.set()
+            assert validation_release.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_has_exact_generated_record_shape",
+        shape_check_with_mutation_window,
+    )
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+
+    async def snapshot_mapping() -> None:
+        async with factory() as uow:
+            entered_uow.append(uow)
+            snapshot = await uow.run_sync(lambda _transaction: source)
+            assert type(next(iter(snapshot))) is not RecordKey
+            await uow.rollback()
+
+    operation = asyncio.create_task(snapshot_mapping())
+    try:
+        assert await asyncio.to_thread(validated.wait, 5)
+
+        def mutated_hash(_value: object) -> int:
+            observations.append(
+                (
+                    factory._transaction_lock.locked(),
+                    entered_uow[0]._sync is not None,  # type: ignore[attr-defined]
+                )
+            )
+            return 1
+
+        RecordKey.__hash__ = mutated_hash  # type: ignore[assignment]
+        validation_release.set()
+        await operation
+
+        assert observations == []
+        assert not factory._transaction_lock.locked()
+    finally:
+        validation_release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(BaseException):
+            await operation
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_module_owned_record_type_is_sealed_and_resnapshots_idempotently(
+    migrated_database: object,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    try:
+        async with factory() as uow:
+            first = await uow.run_sync(lambda _transaction: Record("safe"))
+            owned_type = type(first)
+
+            def replacement(*_args: object) -> object:
+                raise AssertionError("sealed record method replacement ran")
+
+            for name in ("__hash__", "__eq__", "__repr__", "__del__"):
+                with pytest.raises(TypeError, match="record type is sealed"):
+                    setattr(owned_type, name, replacement)
+            for name in ("__hash__", "__eq__", "__repr__"):
+                with pytest.raises(TypeError, match="record type is sealed"):
+                    delattr(owned_type, name)
+
+            second = await uow.run_sync(lambda _transaction: first)
+            assert second is not first
+            assert type(second) is owned_type
+            assert second == first
+            assert hash(second) == hash(first)
+            assert repr(second) == repr(first)
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_owned_record_classifier_does_not_compare_hostile_namespace_keys(
+    migrated_database: object,
+) -> None:
+    hooks_armed = Event()
+    observations: list[str] = []
+
+    class HookKey(str):
+        def __hash__(self) -> int:
+            if hooks_armed.is_set():
+                observations.append("hash")
+            return hash(repository_facade_module._OWNED_RECORD_SEAL_ATTRIBUTE)
+
+        def __eq__(self, other: object) -> bool:
+            if hooks_armed.is_set():
+                observations.append("eq")
+            return str.__eq__(self, other)
+
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    hostile_type = repository_facade_module._SealedOwnedRecordMeta(
+        "HostileOwnedRecord",
+        (),
+        {HookKey("hostile_metadata"): future},
+    )
+    assert any(type(name) is HookKey for name in vars(hostile_type))
+    hooks_armed.set()
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: hostile_type())
+
+            assert observations == []
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        hooks_armed.clear()
+        await factory.aclose()
+        future.cancel()
+
+
+@pytest.mark.parametrize("container_kind", ("dict", "set"))
+@pytest.mark.asyncio
+async def test_sealed_owned_record_methods_cannot_change_during_later_key_snapshot(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+    container_kind: str,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    async with factory() as first_uow:
+        first = await first_uow.run_sync(lambda _transaction: Record("first"))
+        await first_uow.rollback()
+    owned_type = type(first)
+    record_snapshotted = Event()
+    snapshot_release = Event()
+    hooks_called: list[str] = []
+    original_inspect_record = repository_facade_module._inspect_frozen_record
+
+    def inspect_record_with_mutation_window(
+        value: object,
+        inspection: object,
+    ) -> object:
+        snapshot = original_inspect_record(value, inspection)  # type: ignore[arg-type]
+        if type(value) is Record:
+            record_snapshotted.set()
+            assert snapshot_release.wait(timeout=5)
+        return snapshot
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_inspect_frozen_record",
+        inspect_record_with_mutation_window,
+    )
+
+    def make_key_container(_transaction: object) -> object:
+        key = Record("key")
+        if container_kind == "dict":
+            return {key: "value"}
+        return {key}
+
+    async def snapshot_key_container() -> object:
+        async with factory() as uow:
+            result = await uow.run_sync(make_key_container)
+            await uow.rollback()
+            return result
+
+    operation = asyncio.create_task(snapshot_key_container())
+    try:
+        assert await asyncio.to_thread(record_snapshotted.wait, 5)
+        assert factory._transaction_lock.locked()
+
+        def replacement_hash(_value: object) -> int:
+            hooks_called.append("hash")
+            return 1
+
+        def replacement_eq(_value: object, _other: object) -> bool:
+            hooks_called.append("eq")
+            return True
+
+        def replacement_finalizer(_value: object) -> None:
+            hooks_called.append("del")
+
+        for name, replacement in (
+            ("__hash__", replacement_hash),
+            ("__eq__", replacement_eq),
+            ("__del__", replacement_finalizer),
+        ):
+            with pytest.raises(TypeError, match="record type is sealed"):
+                setattr(owned_type, name, replacement)
+        with pytest.raises(TypeError, match="record type is sealed"):
+            delattr(owned_type, "__repr__")
+
+        snapshot_release.set()
+        snapshot = await operation
+        key = next(iter(snapshot))
+        assert type(key) is owned_type
+        assert len(snapshot) == 1
+        assert hooks_called == []
+        assert not factory._transaction_lock.locked()
+    finally:
+        snapshot_release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(BaseException):
+            await operation
+        await factory.aclose()
+
+
+@pytest.mark.parametrize("container_kind", ("dict", "set"))
+@pytest.mark.asyncio
+async def test_normalized_record_keys_cannot_silently_collapse(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+    container_kind: str,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class LeftRecord:
+        marker: str
+
+    @dataclass(frozen=True, slots=True)
+    class RightRecord:
+        marker: str
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    both_snapshotted = Event()
+    snapshot_release = Event()
+    boundary_returned = Event()
+    entered_uow: list[object] = []
+    source_ids: list[int] = []
+    observations: list[tuple[bool, bool, bool]] = []
+    inspected_records = 0
+    original_inspect_record = repository_facade_module._inspect_frozen_record
+
+    def inspect_record_with_finalizer_window(
+        value: object,
+        inspection: object,
+    ) -> object:
+        nonlocal inspected_records
+        snapshot = original_inspect_record(value, inspection)  # type: ignore[arg-type]
+        if type(value) is LeftRecord or type(value) is RightRecord:
+            inspected_records += 1
+            if inspected_records == 2:
+                both_snapshotted.set()
+                assert snapshot_release.wait(timeout=5)
+        return snapshot
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_inspect_frozen_record",
+        inspect_record_with_finalizer_window,
+    )
+
+    def make_colliding_source(_transaction: object) -> object:
+        left = LeftRecord("same")
+        right = RightRecord("same")
+        source_ids.extend((id(left), id(right)))
+        if container_kind == "dict":
+            return {left: "left", right: "right"}
+        return {left, right}
+
+    async def reject_collision() -> None:
+        async with factory() as uow:
+            entered_uow.append(uow)
+            try:
+                with pytest.raises(TypeError, match="synchronous data value"):
+                    await uow.run_sync(make_colliding_source)
+            finally:
+                boundary_returned.set()
+
+            assert observations == []
+            retained_ids = {id(value) for value in factory._quarantined_results}
+            assert set(source_ids) <= retained_ids
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+
+    operation = asyncio.create_task(reject_collision())
+    try:
+        assert await asyncio.to_thread(both_snapshotted.wait, 5)
+
+        def installed_finalizer(_value: object) -> None:
+            observations.append(
+                (
+                    boundary_returned.is_set(),
+                    factory._transaction_lock.locked(),
+                    entered_uow[0]._sync is None,  # type: ignore[attr-defined]
+                )
+            )
+
+        LeftRecord.__del__ = installed_finalizer  # type: ignore[attr-defined]
+        RightRecord.__del__ = installed_finalizer  # type: ignore[attr-defined]
+        snapshot_release.set()
+        await operation
+
+        assert observations == []
+        retained_ids = {id(value) for value in factory._quarantined_results}
+        assert set(source_ids) <= retained_ids
+        assert factory.quarantined_result_count() >= 3
+    finally:
+        boundary_returned.set()
+        snapshot_release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(BaseException):
+            await operation
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_removed_record_metadata_finalizer_is_retained_until_boundary(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    boundary_returned = Event()
+    metadata_discovered = Event()
+    validation_release = Event()
+    observations: list[tuple[bool, bool]] = []
+
+    class FinalizableMetadata:
+        def __del__(self) -> None:
+            observations.append((boundary_returned.is_set(), factory._transaction_lock.locked()))
+
+    metadata = FinalizableMetadata()
+    metadata_identity = id(metadata)
+    metadata_ref = weakref.ref(metadata)
+    Record.__repr__ = metadata  # type: ignore[assignment]
+    del metadata
+    original_reject_metadata = repository_facade_module._reject_metadata_value
+
+    def reject_metadata_with_removal_window(
+        value: object,
+        inspection: object,
+    ) -> None:
+        original_reject_metadata(value, inspection)  # type: ignore[arg-type]
+        if id(value) == metadata_identity:
+            metadata_discovered.set()
+            assert validation_release.wait(timeout=5)
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_reject_metadata_value",
+        reject_metadata_with_removal_window,
+    )
+
+    async def reject_record() -> None:
+        async with factory() as uow:
+            try:
+                with pytest.raises(TypeError, match="synchronous data value"):
+                    await uow.run_sync(lambda _transaction: Record("safe"))
+            finally:
+                boundary_returned.set()
+
+            assert observations == []
+            assert metadata_ref() is not None
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+
+    operation = asyncio.create_task(reject_record())
+    try:
+        assert await asyncio.to_thread(metadata_discovered.wait, 5)
+        Record.__repr__ = lambda _self: "changed"  # type: ignore[assignment]
+        assert observations == []
+        validation_release.set()
+        await operation
+
+        assert observations == []
+        assert metadata_ref() is not None
+        assert not factory._transaction_lock.locked()
+    finally:
+        validation_release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(BaseException):
+            await operation
+        await factory.aclose()
+
+
+@pytest.mark.parametrize("cycle_kind", ("self-wrapped-function", "metadata-dict"))
+@pytest.mark.asyncio
+async def test_cyclic_record_function_metadata_is_rejected_without_recursion_leak(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+    cycle_kind: str,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    boundary_returned = Event()
+    payload_discovered = Event()
+    inspection_release = Event()
+    observations: list[tuple[bool, bool]] = []
+
+    class FinalizableMetadata:
+        def __del__(self) -> None:
+            observations.append((boundary_returned.is_set(), factory._transaction_lock.locked()))
+
+    payload = FinalizableMetadata()
+    payload_identity = id(payload)
+    payload_ref = weakref.ref(payload)
+    function = Record.__repr__
+    if cycle_kind == "self-wrapped-function":
+        function.__dict__["__wrapped__"] = function
+        function.__dict__["payload"] = payload
+    else:
+        cyclic_metadata: dict[str, object] = {}
+        cyclic_metadata["self"] = cyclic_metadata
+        cyclic_metadata["payload"] = payload
+        function.__dict__["cyclic_metadata"] = cyclic_metadata
+        del cyclic_metadata
+    del payload
+    original_reject_metadata = repository_facade_module._reject_metadata_value
+
+    def reject_metadata_with_removal_window(
+        value: object,
+        inspection: object,
+    ) -> None:
+        original_reject_metadata(value, inspection)  # type: ignore[arg-type]
+        if id(value) == payload_identity:
+            payload_discovered.set()
+            assert inspection_release.wait(timeout=5)
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_reject_metadata_value",
+        reject_metadata_with_removal_window,
+    )
+
+    async def reject_record() -> None:
+        async with factory() as uow:
+            try:
+                with pytest.raises(TypeError, match="synchronous data value") as raised:
+                    await uow.run_sync(lambda _transaction: Record("safe"))
+            finally:
+                boundary_returned.set()
+
+            assert not isinstance(raised.value.__cause__, RecursionError)
+            assert observations == []
+            assert payload_ref() is not None
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+
+    operation = asyncio.create_task(reject_record())
+    try:
+        assert await asyncio.to_thread(payload_discovered.wait, 5)
+        function.__dict__.clear()
+        inspection_release.set()
+        await operation
+
+        assert observations == []
+        assert payload_ref() is not None
+        assert not factory._transaction_lock.locked()
+    finally:
+        boundary_returned.set()
+        inspection_release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(BaseException):
+            await operation
+        await factory.aclose()
+
+
+@pytest.mark.parametrize(
+    "exit_kind",
+    ("normal", "rollback-aclose", "base-exception", "cancellation"),
+)
+@pytest.mark.asyncio
+async def test_operation_local_record_finalizer_runs_only_after_terminal_unlock(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_kind: str,
+) -> None:
+    class BodyFailure(BaseException):
+        pass
+
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    shape_validated = Event()
+    validation_release = Event()
+    run_returned = Event()
+    source_ids: list[int] = []
+    entered_uow: list[object] = []
+    observations: list[tuple[bool, bool, bool]] = []
+    original_shape_check = repository_facade_module._has_exact_generated_record_shape
+
+    def shape_check_with_finalizer_window(
+        record_type: type[object],
+        field_names: tuple[str, ...],
+        namespace: dict[str, object],
+        inspection: object,
+    ) -> bool:
+        result = original_shape_check(
+            record_type,
+            field_names,
+            namespace,
+            inspection,  # type: ignore[arg-type]
+        )
+        if record_type is Record:
+            shape_validated.set()
+            assert validation_release.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_has_exact_generated_record_shape",
+        shape_check_with_finalizer_window,
+    )
+
+    def make_operation_local_record(_transaction: object) -> object:
+        value = Record("safe")
+        source_ids.append(id(value))
+        return value
+
+    async def own_transaction() -> None:
+        async with factory() as uow:
+            entered_uow.append(uow)
+            await uow.run_sync(make_operation_local_record)
+            run_returned.set()
+            assert any(id(value) == source_ids[0] for value in uow._result_sources_until_unlock)
+            assert observations == []
+            if exit_kind == "base-exception":
+                raise BodyFailure("body failed")
+            if exit_kind == "rollback-aclose":
+                await uow.rollback()
+                await uow.aclose()
+
+    operation: asyncio.Task[None] | None = asyncio.create_task(own_transaction())
+    try:
+        assert await asyncio.to_thread(shape_validated.wait, 5)
+        assert operation is not None
+        if exit_kind == "cancellation":
+            operation.cancel()
+
+        def installed_finalizer(_value: object) -> None:
+            observations.append(
+                (
+                    factory._transaction_lock.locked(),
+                    entered_uow[0]._sync is None,  # type: ignore[attr-defined]
+                    run_returned.is_set(),
+                )
+            )
+
+        Record.__del__ = installed_finalizer  # type: ignore[attr-defined]
+        validation_release.set()
+        if exit_kind == "base-exception":
+            with pytest.raises(BodyFailure, match="body failed"):
+                await operation
+        elif exit_kind == "cancellation":
+            with pytest.raises(asyncio.CancelledError):
+                await operation
+        else:
+            await operation
+
+        completed_operation = operation
+        operation = None
+        del completed_operation
+        gc.collect()
+        assert observations == [
+            (False, True, exit_kind != "cancellation"),
+        ]
+        assert not factory._transaction_lock.locked()
+
+        async with factory() as next_uow:
+            assert await next_uow.run_sync(lambda _transaction: 1) == 1
+            await next_uow.rollback()
+    finally:
+        validation_release.set()
+        if operation is not None and not operation.done():
+            operation.cancel()
+        if operation is not None:
+            with suppress(BaseException):
+                await operation
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_record_source_retention_dedupes_across_calls_and_fails_closed_at_bound(
+    migrated_database: object,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: int
+
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    shared = Record(-1)
+    source_ids: list[int] = []
+
+    def make_record(_transaction: object, marker: int) -> object:
+        value = Record(marker)
+        source_ids.append(id(value))
+        return value
+
+    try:
+        async with factory() as uow:
+            for _ in range(3):
+                await uow.run_sync(lambda _transaction: shared)
+            assert len(uow._result_sources_until_unlock) == 1
+
+            for marker in range(63):
+                await uow.run_sync(
+                    lambda transaction, marker=marker: make_record(transaction, marker)
+                )
+            assert len(uow._result_sources_until_unlock) == 64
+            retained_ids = {id(value) for value in uow._result_sources_until_unlock}
+            assert set(source_ids) <= retained_ids
+
+            with pytest.raises(TypeError, match="record retention bound exceeded"):
+                await uow.run_sync(lambda transaction: make_record(transaction, 64))
+
+            assert uow._sync is None
+            assert uow._result_sources_until_unlock == []
+            assert not factory._transaction_lock.locked()
+
+        assert factory.quarantined_result_count() == 1
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.parametrize(
+    "field_names",
+    (
+        tuple(f"field_{index}" for index in range(65)),
+        ("x" * 129,),
+    ),
+)
+@pytest.mark.asyncio
+async def test_generated_record_shape_bounds_precede_internal_class_generation(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+    field_names: tuple[str, ...],
+) -> None:
+    record_type = make_dataclass(
+        "CallerRecord",
+        [(name, object) for name in field_names],
+        frozen=True,
+        slots=True,
+    )
+    record = record_type(*range(len(field_names)))
+    internal_generation_calls: list[tuple[object, ...]] = []
+    original_make_dataclass = repository_facade_module.make_dataclass
+
+    def observe_internal_generation(*args: object, **kwargs: object) -> type[object]:
+        internal_generation_calls.append(args)
+        return original_make_dataclass(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "make_dataclass",
+        observe_internal_generation,
+    )
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value"):
+                await uow.run_sync(lambda _transaction: record)
+
+            assert internal_generation_calls == []
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_owned_record_shape_cache_exhaustion_fails_before_class_generation(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        marker: str
+
+    field_names = ("marker",)
+    repository_facade_module._reference_record_type(field_names)
+    full_cache = {
+        (f"cached_shape_{index}",): object
+        for index in range(repository_facade_module._MAX_SYNCHRONOUS_RECORD_SHAPES)
+    }
+    monkeypatch.setattr(repository_facade_module, "_OWNED_RECORD_TYPES", full_cache)
+    generation_calls: list[tuple[object, ...]] = []
+    original_make_dataclass = repository_facade_module.make_dataclass
+
+    def observe_generation(*args: object, **kwargs: object) -> type[object]:
+        generation_calls.append(args)
+        return original_make_dataclass(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(repository_facade_module, "make_dataclass", observe_generation)
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    try:
+        async with factory() as uow:
+            with pytest.raises(TypeError, match="synchronous data value") as raised:
+                await uow.run_sync(lambda _transaction: Record("safe"))
+
+            assert raised.value.__cause__ is not None
+            assert "shape cache is exhausted" in str(raised.value.__cause__)
+            assert generation_calls == []
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        await factory.aclose()
