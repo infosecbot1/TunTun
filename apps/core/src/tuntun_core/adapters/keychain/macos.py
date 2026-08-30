@@ -36,7 +36,8 @@ def _bind_macos_backend(
         raise RuntimeError("production secret backend must be macOS Keychain")
     try:
         raw_priority = expected_type.priority
-        if type(raw_priority) not in {int, float}:
+        raw_priority_type = type(raw_priority)
+        if raw_priority_type is not int and raw_priority_type is not float:
             raise ValueError("macOS Keychain priority must be numeric")
         priority = float(raw_priority)
     except Exception:

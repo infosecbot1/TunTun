@@ -25,29 +25,35 @@ def probe_keychain_round_trip(
         occupied = provider.exists(service, account)
     except Exception:
         raise RuntimeError("Keychain probe preflight failed") from None
-    if occupied:
+    if type(occupied) is not bool:
+        raise RuntimeError("Keychain probe preflight failed") from None
+    if occupied is True:
         raise RuntimeError("Keychain probe slot already exists")
 
     operation_failure: str | None = None
     try:
-        provider.set(service, account, value)
-        readback = provider.get(service, account)
-        if not hmac.compare_digest(readback, value):
-            operation_failure = "Keychain probe readback mismatch"
-    except Exception:
-        operation_failure = "Keychain probe operation failed"
-
-    delete_failed = False
-    try:
-        provider.delete(service, account)
-    except Exception:
-        delete_failed = True
-    try:
-        present = provider.exists(service, account)
-    except Exception:
-        raise RuntimeError("Keychain probe cleanup could not be verified") from None
-    if present or delete_failed:
-        raise RuntimeError("Keychain probe cleanup failed") from None
+        try:
+            provider.set(service, account, value)
+            readback = provider.get(service, account)
+            if not hmac.compare_digest(readback, value):
+                operation_failure = "Keychain probe readback mismatch"
+        except Exception:
+            operation_failure = "Keychain probe operation failed"
+    finally:
+        delete_failed = False
+        try:
+            provider.delete(service, account)
+        except Exception:
+            delete_failed = True
+        finally:
+            try:
+                present = provider.exists(service, account)
+            except BaseException:
+                raise RuntimeError("Keychain probe cleanup could not be verified") from None
+            if type(present) is not bool:
+                raise RuntimeError("Keychain probe cleanup could not be verified") from None
+            if present is True or delete_failed:
+                raise RuntimeError("Keychain probe cleanup failed") from None
     if operation_failure is not None:
         raise RuntimeError(operation_failure) from None
 

@@ -276,6 +276,12 @@ def test_key_registries_are_exact_immutable_canonical_unique_and_disjoint() -> N
     assert logging_config.PUBLIC_BOOLEAN_KEYS == EXPECTED_PUBLIC_BOOLEAN_KEYS
     assert logging_config.PUBLIC_INTEGER_KEYS == EXPECTED_PUBLIC_INTEGER_KEYS
     assert logging_config.PUBLIC_LATENCY_KEYS == EXPECTED_PUBLIC_LATENCY_KEYS
+    assert logging_config.MAX_PUBLIC_TEXT_CHARS == 128
+    assert all(
+        1 <= len(value) <= logging_config.MAX_PUBLIC_TEXT_CHARS
+        for values in logging_config.PUBLIC_TEXT_VALUES.values()
+        for value in values
+    )
     public_policy_keys = (
         set(logging_config.PUBLIC_TEXT_VALUES)
         | logging_config.PUBLIC_BOOLEAN_KEYS
@@ -432,6 +438,16 @@ def test_every_textual_public_key_rejects_unregistered_token_shaped_values(
 ) -> None:
     redacted = redact_private_fields(None, "info", {key: value})
     assert redacted[key] == {"redacted": "unclassified"}
+
+
+@pytest.mark.parametrize("key", sorted(EXPECTED_PUBLIC_TEXT_VALUES))
+def test_every_textual_public_key_rejects_oversized_exact_strings(key: str) -> None:
+    oversized = "x" * 129
+    redacted = redact_private_fields(None, "info", {key: oversized})
+    rendered = json.dumps(redacted, sort_keys=True)
+    assert redacted[key] == {"redacted": "unclassified"}
+    assert oversized not in rendered
+    assert len(rendered) < 64
 
 
 @pytest.mark.parametrize(
@@ -705,6 +721,59 @@ def test_hostile_mapping_and_sequence_iterators_fail_closed() -> None:
     assert mapping_result["payload"] == {"redacted": "unsupported"}
     assert sequence_result["payload"] == {"redacted": "unsupported"}
     assert tuple_result["payload"] == {"redacted": "unsupported"}
+    assert effects == []
+
+
+@pytest.mark.parametrize("position", ("root", "structural", "public"))
+@pytest.mark.parametrize("raises", (False, True), ids=("recording", "raising"))
+def test_class_spies_are_never_consulted(position: str, raises: bool) -> None:
+    effects: list[str] = []
+
+    class ClassSpy:
+        @property
+        def __class__(self) -> type[object]:
+            effects.append("class-read")
+            if raises:
+                raise RuntimeError("private-class-sentinel")
+            return bytes
+
+    value = ClassSpy()
+    if position == "root":
+        result = redact_private_fields(None, "info", cast(Any, value))
+        assert result == {"event": "redaction.invalid_root", "redacted": "invalid_root"}
+    elif position == "structural":
+        result = redact_private_fields(None, "info", {"payload": value})
+        assert result["payload"] == {"redacted": "unsupported"}
+    else:
+        result = redact_private_fields(None, "info", {"status": value})
+        assert result["status"] == {"redacted": "unsupported"}
+    assert "private-class-sentinel" not in json.dumps(result, sort_keys=True)
+    assert effects == []
+
+
+@pytest.mark.parametrize("position", ("root", "structural", "public"))
+def test_hostile_type_hash_is_never_invoked(position: str) -> None:
+    effects: list[str] = []
+
+    class HostileMeta(type):
+        def __hash__(cls) -> int:
+            effects.append("type-hash")
+            raise RuntimeError("private-type-hash-sentinel")
+
+    class HashSpy(metaclass=HostileMeta):
+        pass
+
+    value = HashSpy()
+    if position == "root":
+        result = redact_private_fields(None, "info", cast(Any, value))
+        assert result == {"event": "redaction.invalid_root", "redacted": "invalid_root"}
+    elif position == "structural":
+        result = redact_private_fields(None, "info", {"payload": value})
+        assert result["payload"] == {"redacted": "unsupported"}
+    else:
+        result = redact_private_fields(None, "info", {"status": value})
+        assert result["status"] == {"redacted": "unsupported"}
+    assert "private-type-hash-sentinel" not in json.dumps(result, sort_keys=True)
     assert effects == []
 
 

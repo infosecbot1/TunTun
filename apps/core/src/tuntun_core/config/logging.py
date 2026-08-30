@@ -4,14 +4,15 @@ import math
 import re
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
-from typing import Any
+from types import MappingProxyType, NoneType
+from typing import Any, cast
 from unicodedata import normalize
 
 MAX_LOG_DEPTH = 32
 MAX_LOG_NODES = 4_096
 MAX_CONTAINER_ITEMS = 256
 MAX_LOG_KEY_CHARS = 256
+MAX_PUBLIC_TEXT_CHARS = 128
 MIN_PUBLIC_INTEGER = -(2**53 - 1)
 MAX_PUBLIC_INTEGER = 2**53 - 1
 
@@ -240,6 +241,12 @@ if len(PUBLIC_LOG_KEYS) != (
     + len(PUBLIC_LATENCY_KEYS)
 ):
     raise RuntimeError("public log key policies must be disjoint")
+if any(
+    type(value) is not str or not 1 <= len(value) <= MAX_PUBLIC_TEXT_CHARS
+    for values in PUBLIC_TEXT_VALUES.values()
+    for value in values
+):
+    raise RuntimeError("registered public log text must be nonempty and bounded")
 
 
 def _marker(category: str) -> dict[str, str]:
@@ -247,30 +254,38 @@ def _marker(category: str) -> dict[str, str]:
 
 
 def _safe_public_scalar(key: str, value: object) -> object:
-    if isinstance(value, (bytes, bytearray, memoryview)):
+    value_type = type(value)
+    if value_type is bytes or value_type is bytearray or value_type is memoryview:
         return _marker("binary")
     allowed_text = PUBLIC_TEXT_VALUES.get(key)
     if allowed_text is not None:
-        if type(value) is str:
-            return value if value in allowed_text else _marker("unclassified")
+        if value_type is str:
+            text_value = cast(str, value)
+            if not 1 <= len(text_value) <= MAX_PUBLIC_TEXT_CHARS:
+                return _marker("unclassified")
+            return text_value if text_value in allowed_text else _marker("unclassified")
         return _marker("unsupported")
     if key in PUBLIC_BOOLEAN_KEYS:
-        return value if type(value) is bool else _marker("unsupported")
+        return value if value_type is bool else _marker("unsupported")
     if key in PUBLIC_INTEGER_KEYS:
-        if type(value) is not int:
+        if value_type is not int:
             return _marker("unsupported")
-        if MIN_PUBLIC_INTEGER <= value <= MAX_PUBLIC_INTEGER:
-            return value
+        integer_value = cast(int, value)
+        if MIN_PUBLIC_INTEGER <= integer_value <= MAX_PUBLIC_INTEGER:
+            return integer_value
         return _marker("unsupported")
     if key in PUBLIC_LATENCY_KEYS:
-        if type(value) is int and MIN_PUBLIC_INTEGER <= value <= MAX_PUBLIC_INTEGER:
-            return value
-        if (
-            type(value) is float
-            and math.isfinite(value)
-            and MIN_PUBLIC_INTEGER <= value <= MAX_PUBLIC_INTEGER
-        ):
-            return value
+        if value_type is int:
+            integer_value = cast(int, value)
+            if MIN_PUBLIC_INTEGER <= integer_value <= MAX_PUBLIC_INTEGER:
+                return integer_value
+        if value_type is float:
+            float_value = cast(float, value)
+            if (
+                math.isfinite(float_value)
+                and MIN_PUBLIC_INTEGER <= float_value <= MAX_PUBLIC_INTEGER
+            ):
+                return float_value
         return _marker("unsupported")
     return _marker("unsupported")
 
@@ -292,13 +307,20 @@ class _RedactionTraversal:
             return _marker("limit")
         if public_key is not None:
             return _safe_public_scalar(public_key, value)
-        if type(value) is dict:
+        value_type = type(value)
+        if value_type is dict:
             return self._mapping(value, depth)
-        if type(value) in {list, tuple}:
+        if value_type is list or value_type is tuple:
             return self._sequence(value, depth)
-        if isinstance(value, (bytes, bytearray, memoryview)):
+        if value_type is bytes or value_type is bytearray or value_type is memoryview:
             return _marker("binary")
-        if type(value) in {str, int, float, bool, type(None)}:
+        if (
+            value_type is str
+            or value_type is int
+            or value_type is float
+            or value_type is bool
+            or value_type is NoneType
+        ):
             return _marker("unclassified")
         return _marker("unsupported")
 
@@ -379,6 +401,8 @@ def redact_private_fields(
     event: MutableMapping[str, object],
 ) -> MutableMapping[str, object]:
     del logger, method
+    if type(event) is not dict:
+        return {"event": "redaction.invalid_root", "redacted": "invalid_root"}
     redacted = _RedactionTraversal().redact(event)
     if type(redacted) is not dict:
         return {"event": "redaction.invalid_root", "redacted": "invalid_root"}

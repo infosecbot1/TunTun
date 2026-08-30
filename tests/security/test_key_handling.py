@@ -34,6 +34,10 @@ EXPECTED_SECRET_IDS = {
 }
 
 
+class ProbeControlFlow(BaseException):
+    pass
+
+
 class FakeMacOSBackend:
     priority = 5
 
@@ -278,6 +282,34 @@ def test_macos_provider_surfaces_backend_discovery_failure(
     monkeypatch.setattr(macos.keyring, "get_keyring", lambda: ZeroPriorityBackend())
     with pytest.raises(RuntimeError, match="backend is unavailable"):
         MacOSKeychainSecretProvider()
+
+
+def test_macos_priority_type_check_does_not_hash_hostile_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    effects: list[str] = []
+
+    class HostileMeta(type):
+        def __hash__(cls) -> int:
+            effects.append("type-hash")
+            raise RuntimeError("private-priority-hash-sentinel")
+
+    class PriorityValue(metaclass=HostileMeta):
+        pass
+
+    class HostilePriorityBackend(FakeMacOSBackend):
+        priority = PriorityValue()
+
+    monkeypatch.setattr(macos.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        macos,
+        "_load_macos_keyring_type",
+        lambda: HostilePriorityBackend,
+    )
+    monkeypatch.setattr(macos.keyring, "get_keyring", HostilePriorityBackend)
+    rendered = _format_runtime_error(MacOSKeychainSecretProvider)
+    assert "private-priority-hash-sentinel" not in rendered
+    assert effects == []
 
 
 def test_macos_provider_binds_validated_backend_and_round_trips_base64(
@@ -592,6 +624,163 @@ def test_target_probe_verifies_absence_after_delete_and_verification_exceptions(
         "tuntun.probe",
         "slot-v1",
     )
+
+
+@pytest.mark.parametrize("error_type", (KeyboardInterrupt, SystemExit, ProbeControlFlow))
+def test_target_probe_base_exception_after_partial_write_still_cleans_up(
+    error_type: type[BaseException],
+) -> None:
+    class PartialControlFlowProvider(InMemorySecretProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delete_calls = 0
+            self.exists_calls = 0
+
+        def exists(self, service: str, account: str) -> bool:
+            self.exists_calls += 1
+            return super().exists(service, account)
+
+        def set(self, service: str, account: str, value: bytes) -> None:
+            super().set(service, account, value)
+            raise error_type("private-control-flow-sentinel")
+
+        def delete(self, service: str, account: str) -> None:
+            self.delete_calls += 1
+            super().delete(service, account)
+
+    provider = PartialControlFlowProvider()
+    with pytest.raises(error_type, match="private-control-flow-sentinel"):
+        probe_script.probe_keychain_round_trip(
+            provider,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    assert provider.delete_calls == 1
+    assert provider.exists_calls == 2
+    assert not InMemorySecretProvider.exists(provider, "tuntun.probe", "slot-v1")
+
+
+def test_target_probe_base_exception_delete_still_verifies_and_cleanup_takes_precedence() -> None:
+    class RemovedThenInterruptedProvider(InMemorySecretProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.exists_calls = 0
+
+        def exists(self, service: str, account: str) -> bool:
+            self.exists_calls += 1
+            return super().exists(service, account)
+
+        def delete(self, service: str, account: str) -> None:
+            super().delete(service, account)
+            raise KeyboardInterrupt("private-delete-control-flow-sentinel")
+
+    removed = RemovedThenInterruptedProvider()
+    with pytest.raises(KeyboardInterrupt, match="private-delete-control-flow-sentinel"):
+        probe_script.probe_keychain_round_trip(
+            removed,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    assert removed.exists_calls == 2
+    assert not InMemorySecretProvider.exists(removed, "tuntun.probe", "slot-v1")
+
+    class StillPresentProvider(InMemorySecretProvider):
+        def delete(self, service: str, account: str) -> None:
+            raise KeyboardInterrupt("private-still-present-sentinel")
+
+    present = StillPresentProvider()
+    rendered = _format_runtime_error(
+        lambda: probe_script.probe_keychain_round_trip(
+            present,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    )
+    assert "Keychain probe cleanup failed" in rendered
+    assert "private-still-present-sentinel" not in rendered
+    assert InMemorySecretProvider.exists(present, "tuntun.probe", "slot-v1")
+
+
+def test_target_probe_base_exception_final_verification_is_fixed_and_content_free() -> None:
+    class VerificationInterruptedProvider(InMemorySecretProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.exists_calls = 0
+
+        def exists(self, service: str, account: str) -> bool:
+            self.exists_calls += 1
+            if self.exists_calls > 1:
+                raise KeyboardInterrupt("private-final-verification-sentinel")
+            return super().exists(service, account)
+
+    provider = VerificationInterruptedProvider()
+    rendered = _format_runtime_error(
+        lambda: probe_script.probe_keychain_round_trip(
+            provider,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    )
+    assert "Keychain probe cleanup could not be verified" in rendered
+    assert "private-final-verification-sentinel" not in rendered
+    assert provider.exists_calls == 2
+    assert not InMemorySecretProvider.exists(provider, "tuntun.probe", "slot-v1")
+
+
+def test_target_probe_exists_requires_exact_bool_without_truthiness() -> None:
+    effects: list[str] = []
+
+    class TruthinessTrap:
+        def __bool__(self) -> bool:
+            effects.append("truthiness")
+            raise RuntimeError("private-truthiness-sentinel")
+
+    class PreflightTrapProvider(InMemorySecretProvider):
+        def exists(self, service: str, account: str) -> Any:
+            return TruthinessTrap()
+
+        def delete(self, service: str, account: str) -> None:
+            raise AssertionError("collision cleanup must not run")
+
+    preflight = PreflightTrapProvider()
+    rendered = _format_runtime_error(
+        lambda: probe_script.probe_keychain_round_trip(
+            preflight,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    )
+    assert "Keychain probe preflight failed" in rendered
+
+    class FinalTrapProvider(InMemorySecretProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.exists_calls = 0
+
+        def exists(self, service: str, account: str) -> Any:
+            self.exists_calls += 1
+            if self.exists_calls > 1:
+                return TruthinessTrap()
+            return False
+
+    final = FinalTrapProvider()
+    rendered += _format_runtime_error(
+        lambda: probe_script.probe_keychain_round_trip(
+            final,
+            "tuntun.probe",
+            "slot-v1",
+            b"probe",
+        )
+    )
+    assert "Keychain probe cleanup could not be verified" in rendered
+    assert "private-truthiness-sentinel" not in rendered
+    assert effects == []
+    assert not InMemorySecretProvider.exists(final, "tuntun.probe", "slot-v1")
 
 
 def test_target_probe_fails_closed_on_mismatch_or_unverified_cleanup() -> None:
