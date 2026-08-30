@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import errno
 import fcntl
+import functools
 import gc
 import inspect
 import io
@@ -33,6 +34,205 @@ from tuntun_core.services.models.registry import (
     VerifiedModelFile,
 )
 from typer.testing import CliRunner
+
+
+def _owned_descriptor(value: object) -> int:
+    """Return the descriptor borrowed from one test-observed resource owner."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, OwnedDirectory):
+        return value.fd
+    if isinstance(value, VerifiedModelFile):
+        return value.fd
+    if isinstance(value, ActivatedModel):
+        return value.files[0].fd
+    if isinstance(value, registry_module.PreadOnlyModelReader):
+        return value._PreadOnlyModelReader__descriptor_owner.fileno()
+    owner = getattr(value, "owner", None)
+    if owner is not None:
+        return _owned_descriptor(owner)
+    fileno = getattr(value, "fileno", None)
+    if callable(fileno):
+        return int(fileno())
+    raise AssertionError(f"trace did not expose a descriptor owner: {type(value)!r}")
+
+
+def _assert_retained_traceback_closes_returned_owner(
+    invoke: object,
+    traced_method: object,
+    *,
+    owner_slot_name: str,
+    accept_frame: object | None = None,
+) -> None:
+    """Interrupt one resource factory return and prove its caller-owned slot cleans up."""
+    primary = KeyboardInterrupt(
+        f"scripted retained-traceback interruption in {traced_method.__qualname__}"  # type: ignore[attr-defined]
+    )
+    descriptors: list[int] = []
+    trace_reached = False
+
+    def interrupt_return(frame: object, event: str, argument: object) -> object:
+        nonlocal trace_reached
+        frame_matches = frame.f_code is traced_method.__code__  # type: ignore[attr-defined]
+        predicate_matches = frame_matches and (
+            accept_frame is None or accept_frame(frame)  # type: ignore[operator]
+        )
+        if not trace_reached and event == "return" and frame_matches and predicate_matches:
+            trace_reached = True
+            owner = argument
+            if owner is None or isinstance(owner, bool):
+                owner = frame.f_locals[owner_slot_name]  # type: ignore[attr-defined]
+            descriptors.append(_owned_descriptor(owner))
+            raise primary
+        return interrupt_return
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_return)
+        result = invoke()  # type: ignore[operator]
+    except BaseException as error:
+        caught = error
+    else:
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+    finally:
+        sys.settrace(previous_trace)
+
+    assert caught is primary
+    assert trace_reached
+    assert len(descriptors) == 1
+    caught.__traceback__ = None
+    gc.collect()
+
+    leaked: list[int] = []
+    for descriptor in descriptors:
+        try:
+            os.fstat(descriptor)
+        except OSError as error:
+            assert error.errno == errno.EBADF
+        else:
+            leaked.append(descriptor)
+            os.close(descriptor)
+    assert leaked == []
+
+
+def _assert_retained_traceback_closes_callsite_owner(
+    invoke: object,
+    traced_method: object,
+    owner_name: str,
+    *,
+    accept_frame: object | None = None,
+) -> None:
+    """Interrupt the first caller line that can observe an acquired owner."""
+    primary = KeyboardInterrupt(f"scripted first-caller-line interruption for {owner_name}")
+    descriptors: list[int] = []
+    trace_reached = False
+
+    def interrupt_first_caller_line(frame: object, event: str, _argument: object) -> object:
+        nonlocal trace_reached
+        if trace_reached or event != "line" or frame.f_code is not traced_method.__code__:  # type: ignore[attr-defined]
+            return interrupt_first_caller_line
+        if accept_frame is not None and not accept_frame(frame):  # type: ignore[operator]
+            return interrupt_first_caller_line
+        local = frame.f_locals  # type: ignore[attr-defined]
+        owner = local.get(owner_name)
+        if owner is None:
+            owner = local.get(f"{owner_name}_slot")
+        if owner is None:
+            return interrupt_first_caller_line
+        try:
+            descriptor = _owned_descriptor(owner)
+            os.fstat(descriptor)
+        except (AssertionError, OSError):
+            return interrupt_first_caller_line
+        trace_reached = True
+        descriptors.append(descriptor)
+        raise primary
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_first_caller_line)
+        result = invoke()  # type: ignore[operator]
+    except BaseException as error:
+        caught = error
+    else:
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+    finally:
+        sys.settrace(previous_trace)
+
+    assert caught is primary
+    assert trace_reached
+    assert len(descriptors) == 1
+    caught.__traceback__ = None
+    gc.collect()
+
+    leaked: list[int] = []
+    for descriptor in descriptors:
+        try:
+            os.fstat(descriptor)
+        except OSError as error:
+            assert error.errno == errno.EBADF
+        else:
+            leaked.append(descriptor)
+            os.close(descriptor)
+    assert leaked == []
+
+
+def _assert_trace_interrupted_close_is_retry_safe(
+    close: object,
+    traced_method: object,
+    descriptors: tuple[int, ...],
+    reports_closed: object,
+) -> None:
+    """Interrupt an ownership-erased/live-resource gap, or the safe close return."""
+    primary = KeyboardInterrupt(
+        f"scripted close transfer interruption in {traced_method.__qualname__}"  # type: ignore[attr-defined]
+    )
+    trace_reached = False
+
+    def descriptor_is_open(descriptor: int) -> bool:
+        try:
+            os.fstat(descriptor)
+        except OSError as error:
+            assert error.errno == errno.EBADF
+            return False
+        return True
+
+    def interrupt_close(frame: object, event: str, _argument: object) -> object:
+        nonlocal trace_reached
+        if trace_reached or frame.f_code is not traced_method.__code__:  # type: ignore[attr-defined]
+            return interrupt_close
+        unsafe_gap = (
+            event == "line"
+            and reports_closed()  # type: ignore[operator]
+            and any(descriptor_is_open(descriptor) for descriptor in descriptors)
+        )
+        if unsafe_gap or event == "return":
+            trace_reached = True
+            raise primary
+        return interrupt_close
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_close)
+        close()  # type: ignore[operator]
+    except BaseException as error:
+        caught = error
+    finally:
+        sys.settrace(previous_trace)
+
+    assert trace_reached
+    assert caught is primary
+    close()  # type: ignore[operator]
+    caught.__traceback__ = None
+    gc.collect()
+    assert not any(descriptor_is_open(descriptor) for descriptor in descriptors)
 
 
 def _fresh_activation_probe(governed_model_case: object) -> subprocess.CompletedProcess[str]:
@@ -282,9 +482,6 @@ def test_installer_retains_only_same_inode_read_only_verified_descriptor(
         os.write(handle.fd, b"mutation")
     receipt = activated.load_with(runtime_adapter, runtime_receipt_verifier)
     assert receipt.loaded_sha256 == governed_model_case.expected_sha256  # type: ignore[attr-defined]
-    source = inspect.getsource(ModelInstaller._download)
-    assert "return read_fd" in source
-    assert "return write_fd" not in source and "return fd" not in source
     assert runtime_adapter.path_opens == []  # type: ignore[attr-defined]
 
 
@@ -297,9 +494,12 @@ def test_fresh_install_wrapper_failure_closes_download_descriptor_once(
     real_close = os.close
 
     def fail_from_manifest(
-        _cls: type[VerifiedModelFile], _item: object, descriptor: int
-    ) -> VerifiedModelFile:
-        retained_descriptor.append(descriptor)
+        _cls: type[VerifiedModelFile],
+        _item: object,
+        descriptor_slot: object,
+        _owner_slot: object,
+    ) -> None:
+        retained_descriptor.append(_owned_descriptor(descriptor_slot))
         raise RuntimeError("scripted wrapper construction failure")
 
     def track_close(descriptor: int) -> None:
@@ -332,9 +532,12 @@ def test_fresh_install_raw_cleanup_failure_preserves_wrapper_error(
     real_close = os.close
 
     def fail_from_manifest(
-        _cls: type[VerifiedModelFile], _item: object, descriptor: int
-    ) -> VerifiedModelFile:
-        retained_descriptor.append(descriptor)
+        _cls: type[VerifiedModelFile],
+        _item: object,
+        descriptor_slot: object,
+        _owner_slot: object,
+    ) -> None:
+        retained_descriptor.append(_owned_descriptor(descriptor_slot))
         raise primary
 
     def fail_retained_close(descriptor: int) -> None:
@@ -371,11 +574,15 @@ def test_fresh_install_wrapper_cleanup_failure_preserves_transfer_error(
     real_close = VerifiedModelFile.close
 
     def capture_from_manifest(
-        _cls: type[VerifiedModelFile], item: object, descriptor: int
-    ) -> VerifiedModelFile:
-        handle = real_from_manifest(item, descriptor)  # type: ignore[arg-type]
+        _cls: type[VerifiedModelFile],
+        item: object,
+        descriptor_slot: object,
+        owner_slot: object,
+    ) -> None:
+        real_from_manifest(item, descriptor_slot, owner_slot)  # type: ignore[arg-type]
+        handle = owner_slot.owner  # type: ignore[attr-defined]
+        assert isinstance(handle, VerifiedModelFile)
         retained_handle.append(handle)
-        return handle
 
     def fail_transfer(point: str) -> None:
         if point == "before_retain_downloaded_file":
@@ -411,6 +618,23 @@ def test_fresh_install_wrapper_cleanup_failure_preserves_transfer_error(
     assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
 
 
+def test_fresh_install_file_exists_transfer_fault_closes_slot_owner(
+    governed_model_case: object,
+) -> None:
+    primary = FileExistsError("scripted pre-retention file-exists fault")
+
+    def fail_transfer(point: str) -> None:
+        if point == "before_retain_downloaded_file":
+            raise primary
+
+    with pytest.raises(RuntimeError, match="model install publication disappeared"):
+        governed_model_case._installer(fault_hook=fail_transfer).install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
 def test_download_write_descriptor_close_failure_is_not_retried(
     governed_model_case: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -424,20 +648,22 @@ def test_download_write_descriptor_close_failure_is_not_retried(
         directory: object,
         name: str,
         flags: int,
+        owner_slot: object,
         *,
         mode: int = 0o600,
         expected_mode: int | None = None,
-    ) -> int:
-        descriptor = real_open(  # type: ignore[arg-type]
+    ) -> None:
+        real_open(  # type: ignore[arg-type]
             directory,
             name,
             flags,
+            owner_slot,
             mode=mode,
             expected_mode=expected_mode,
         )
+        descriptor = _owned_descriptor(owner_slot)
         if flags & os.O_ACCMODE == os.O_WRONLY:
             write_descriptors.append(descriptor)
-        return descriptor
 
     def fail_first_write_close(descriptor: int) -> None:
         if write_descriptors and descriptor == write_descriptors[0]:
@@ -462,6 +688,47 @@ def test_download_write_descriptor_close_failure_is_not_retried(
     assert len(write_descriptors) == 1
     assert close_attempts == write_descriptors
     assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_close_then_error_never_retries_against_a_recycled_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owned_path = tmp_path / "owned.bin"
+    replacement_path = tmp_path / "replacement.bin"
+    owned_path.write_bytes(b"owned")
+    replacement_path.write_bytes(b"replacement")
+    owner = fs_module._FileDescriptorOwner()
+    owner.open_at(owned_path, owned_path, os.O_RDONLY, 0)
+    descriptor = owner.fileno()
+    real_close = os.close
+    real_open = os.open
+    injected = False
+    recycled = False
+
+    def close_then_recycle(candidate: int) -> None:
+        nonlocal injected, recycled
+        if candidate == descriptor and not injected:
+            injected = True
+            real_close(candidate)
+            replacement = real_open(replacement_path, os.O_RDONLY)
+            if replacement != descriptor:
+                os.dup2(replacement, descriptor)
+                real_close(replacement)
+            recycled = True
+            raise OSError("scripted close-after-consume failure")
+        real_close(candidate)
+
+    monkeypatch.setattr(os, "close", close_then_recycle)
+    primary = KeyboardInterrupt("scripted primary failure")
+    fs_module.close_preserving_primary(owner, fs_module._FileDescriptorOwner.close, primary)
+    owner.close()
+
+    assert injected
+    assert recycled
+    assert primary.__notes__ == ["additional descriptor cleanup failure"]
+    assert os.fstat(descriptor).st_size == len(b"replacement")
+    real_close(descriptor)
 
 
 def test_activated_manifest_expectations_and_file_tuple_cannot_be_rebased(
@@ -795,6 +1062,340 @@ class _HandshakeSocket:
         self.closed.set()
 
 
+class _ImmediateTlsContext:
+    def __init__(self, wrapped: _HandshakeSocket) -> None:
+        self.wrapped = wrapped
+
+    def wrap_socket(self, _raw: _HandshakeSocket, *, server_hostname: str) -> _HandshakeSocket:
+        assert server_hostname == "models.example.test"
+        return self.wrapped
+
+
+@pytest.mark.parametrize("owned_local", ("raw", "wrapped"))
+def test_pinned_https_connect_retained_traceback_closes_each_socket_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    owned_local: str,
+) -> None:
+    raw = _HandshakeSocket()
+    wrapped = _HandshakeSocket()
+    tls = _ImmediateTlsContext(wrapped)
+    monkeypatch.setattr(network_module.ssl, "create_default_context", lambda: tls)
+    monkeypatch.setattr(
+        network_module.socket,
+        "create_connection",
+        lambda _address, _timeout: raw,
+    )
+    connection = network_module._PinnedHTTPSConnection(
+        "models.example.test",
+        "8.8.8.8",
+        1.0,
+        time.monotonic() + 1.0,
+    )
+    primary = KeyboardInterrupt(f"scripted {owned_local} socket transfer interruption")
+    trace_reached = False
+
+    def interrupt_transfer(frame: object, event: str, _argument: object) -> object:
+        nonlocal trace_reached
+        if (
+            not trace_reached
+            and event == "line"
+            and frame.f_code is network_module._PinnedHTTPSConnection.connect.__code__  # type: ignore[attr-defined]
+            and frame.f_locals.get(owned_local) is (raw if owned_local == "raw" else wrapped)  # type: ignore[attr-defined]
+        ):
+            trace_reached = True
+            raise primary
+        return interrupt_transfer
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_transfer)
+        connection.connect()
+    except BaseException as error:
+        caught = error
+    finally:
+        sys.settrace(previous_trace)
+        connection.close()
+
+    assert trace_reached
+    assert caught is primary
+    caught.__traceback__ = None
+    gc.collect()
+    observed = raw if owned_local == "raw" else wrapped
+    assert observed.closed.is_set()
+
+
+@pytest.mark.parametrize("owned_local", ("raw", "wrapped"))
+def test_pinned_https_connect_traceback_release_leaves_no_socket_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+    owned_local: str,
+) -> None:
+    raw, peer = socket.socketpair()
+    wrapped = socket.socket(fileno=os.dup(raw.fileno()))
+    raw_descriptor = raw.fileno()
+    wrapped_descriptor = wrapped.fileno()
+    tls = _ImmediateTlsContext(wrapped)  # type: ignore[arg-type]
+    monkeypatch.setattr(network_module.ssl, "create_default_context", lambda: tls)
+    monkeypatch.setattr(
+        network_module.socket,
+        "create_connection",
+        lambda _address, _timeout: raw,
+    )
+    connection = network_module._PinnedHTTPSConnection(
+        "models.example.test",
+        "8.8.8.8",
+        1.0,
+        time.monotonic() + 1.0,
+    )
+    primary = KeyboardInterrupt(f"scripted {owned_local} socket descriptor interruption")
+    trace_reached = False
+
+    def interrupt_transfer(frame: object, event: str, _argument: object) -> object:
+        nonlocal trace_reached
+        expected = raw if owned_local == "raw" else wrapped
+        if (
+            not trace_reached
+            and event == "line"
+            and frame.f_code is network_module._PinnedHTTPSConnection.connect.__code__  # type: ignore[attr-defined]
+            and frame.f_locals.get(owned_local) is expected  # type: ignore[attr-defined]
+        ):
+            trace_reached = True
+            raise primary
+        return interrupt_transfer
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_transfer)
+        connection.connect()
+    except BaseException as error:
+        caught = error
+    finally:
+        sys.settrace(previous_trace)
+        connection.close()
+
+    try:
+        assert trace_reached
+        assert caught is primary
+        caught.__traceback__ = None
+        gc.collect()
+        checked = (
+            (raw_descriptor,)
+            if owned_local == "raw"
+            else (
+                raw_descriptor,
+                wrapped_descriptor,
+            )
+        )
+        for descriptor in checked:
+            with pytest.raises(OSError) as closed:
+                os.fstat(descriptor)
+            assert closed.value.errno == errno.EBADF
+    finally:
+        raw.close()
+        wrapped.close()
+        peer.close()
+
+
+class _TraceResponse:
+    status = 200
+    headers: dict[str, str] = {}
+
+
+class _TraceConnection:
+    instances: list[_TraceConnection] = []
+
+    def __init__(self, *_args: object) -> None:
+        self.closed = False
+        self.sock = _HandshakeSocket()
+        self.instances.append(self)
+
+    def request(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def getresponse(self) -> _TraceResponse:
+        return _TraceResponse()
+
+    def close(self) -> None:
+        self.closed = True
+        self.sock.close()
+
+
+class _TraceTimer:
+    instances: list[_TraceTimer] = []
+
+    def __init__(self, _remaining: float, _callback: object) -> None:
+        self.daemon = False
+        self.started = False
+        self.cancelled = False
+        self.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+@pytest.mark.parametrize(
+    "traced_method",
+    (
+        network_module.PinnedHttpsTransport.stream_exact.__wrapped__,
+        contextlib._GeneratorContextManager.__enter__,
+    ),
+    ids=("generator-yield", "contextmanager-enter"),
+)
+def test_stream_context_retained_traceback_releases_connection_and_timer(
+    monkeypatch: pytest.MonkeyPatch,
+    traced_method: object,
+) -> None:
+    _TraceConnection.instances.clear()
+    _TraceTimer.instances.clear()
+    monkeypatch.setattr(network_module, "_PinnedHTTPSConnection", _TraceConnection)
+    monkeypatch.setattr(network_module.threading, "Timer", _TraceTimer)
+    monkeypatch.setattr(
+        network_module,
+        "resolve_public_addresses_bounded",
+        lambda _hostname, _deadline: ("8.8.8.8",),
+    )
+    manager = network_module.PinnedHttpsTransport().stream_exact(
+        "https://models.example.test/mini.onnx",
+        frozenset({"models.example.test"}),
+        time.monotonic() + 1.0,
+    )
+    primary = KeyboardInterrupt("scripted stream context transfer interruption")
+    trace_reached = False
+
+    def interrupt_context_return(frame: object, event: str, argument: object) -> object:
+        nonlocal trace_reached
+        if (
+            not trace_reached
+            and event == "return"
+            and frame.f_code is traced_method.__code__  # type: ignore[attr-defined]
+            and isinstance(argument, network_module.DeadlineBoundResponse)
+        ):
+            trace_reached = True
+            raise primary
+        return interrupt_context_return
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_context_return)
+        manager.__enter__()
+    except BaseException as error:
+        caught = error
+    finally:
+        sys.settrace(previous_trace)
+
+    assert trace_reached
+    assert caught is primary
+    manager = None
+    caught.__traceback__ = None
+    gc.collect()
+    assert len(_TraceConnection.instances) == 1
+    assert _TraceConnection.instances[0].closed is True
+    assert len(_TraceTimer.instances) == 1
+    assert _TraceTimer.instances[0].cancelled is True
+
+
+def test_stream_context_cancel_failure_still_closes_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _TraceConnection.instances.clear()
+    _TraceTimer.instances.clear()
+    monkeypatch.setattr(network_module, "_PinnedHTTPSConnection", _TraceConnection)
+    monkeypatch.setattr(network_module.threading, "Timer", _TraceTimer)
+    monkeypatch.setattr(
+        network_module,
+        "resolve_public_addresses_bounded",
+        lambda _hostname, _deadline: ("8.8.8.8",),
+    )
+
+    def fail_cancel(timer: _TraceTimer) -> None:
+        timer.cancelled = True
+        raise OSError("scripted timer cancellation failure")
+
+    monkeypatch.setattr(_TraceTimer, "cancel", fail_cancel)
+    with (
+        pytest.raises(OSError, match="scripted timer cancellation failure"),
+        network_module.PinnedHttpsTransport().stream_exact(
+            "https://models.example.test/mini.onnx",
+            frozenset({"models.example.test"}),
+            time.monotonic() + 1.0,
+        ),
+    ):
+        pass
+
+    assert len(_TraceConnection.instances) == 1
+    assert _TraceConnection.instances[0].closed is True
+
+
+@pytest.mark.parametrize("stage", ("pipe", "process", "start"))
+def test_resolver_retained_traceback_closes_pipe_and_process_owners(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    context = _ResolverContext(
+        poll_result=True,
+        payload=("ok", ["8.8.8.8"]),
+        process_alive=stage == "start",
+    )
+    monkeypatch.setattr(network_module.multiprocessing, "get_context", lambda _kind: context)
+    primary = KeyboardInterrupt(f"scripted resolver {stage} transfer interruption")
+    trace_reached = False
+
+    def interrupt_resolver_transfer(frame: object, event: str, _argument: object) -> object:
+        nonlocal trace_reached
+        if (
+            trace_reached
+            or event != "line"
+            or frame.f_code is not network_module.resolve_public_addresses_bounded.__code__  # type: ignore[attr-defined]
+        ):
+            return interrupt_resolver_transfer
+        local = frame.f_locals  # type: ignore[attr-defined]
+        reached = (
+            (
+                stage == "pipe"
+                and local.get("receive") is context.receive
+                and local.get("process") is None
+            )
+            or (
+                stage == "process"
+                and local.get("process") is context.process
+                and not context.process.started
+            )
+            or (stage == "start" and context.process.started)
+        )
+        if reached:
+            trace_reached = True
+            raise primary
+        return interrupt_resolver_transfer
+
+    previous_trace = sys.gettrace()
+    caught: BaseException | None = None
+    try:
+        sys.settrace(interrupt_resolver_transfer)
+        network_module.resolve_public_addresses_bounded(
+            "models.example.test",
+            time.monotonic() + 1.0,
+        )
+    except BaseException as error:
+        caught = error
+    finally:
+        sys.settrace(previous_trace)
+
+    assert trace_reached
+    assert caught is primary
+    caught.__traceback__ = None
+    gc.collect()
+    assert context.receive.closed is True
+    assert context.send.closed is True
+    assert context.process.close_calls == (0 if stage == "pipe" else 1)
+    if stage == "start":
+        assert context.process.alive is False
+
+
 class _StalledTlsContext:
     def __init__(self) -> None:
         self.server_hostname: str | None = None
@@ -860,7 +1461,10 @@ def test_owned_directory_lock_cleanup_preserves_primary_and_releases_once(
 ) -> None:
     root_path = tmp_path / "model-root"
     root_path.mkdir(mode=0o700)
-    root = OwnedDirectory.open(root_path)
+    root_slot = fs_module._OwnedDirectoryOwnerSlot()
+    OwnedDirectory.open(root_path, root_slot)
+    root = root_slot.owner
+    assert root is not None
     lock_name = ".cleanup-fault.lock"
     primary = RuntimeError("scripted protected-body failure")
     secondary = OSError(f"scripted lock {cleanup_fault} failure")
@@ -876,21 +1480,23 @@ def test_owned_directory_lock_cleanup_preserves_primary_and_releases_once(
         directory: OwnedDirectory,
         name: str,
         flags: int,
+        owner_slot: object,
         *,
         mode: int = 0o600,
         expected_mode: int | None = None,
-    ) -> int:
+    ) -> None:
         nonlocal lock_descriptor
-        descriptor = real_open_regular(
+        real_open_regular(
             directory,
             name,
             flags,
+            owner_slot,  # type: ignore[arg-type]
             mode=mode,
             expected_mode=expected_mode,
         )
+        descriptor = _owned_descriptor(owner_slot)
         if fault_active and name == lock_name:
             lock_descriptor = descriptor
-        return descriptor
 
     def fail_unlock(descriptor: int, operation: int) -> None:
         nonlocal unlock_attempts
@@ -914,8 +1520,9 @@ def test_owned_directory_lock_cleanup_preserves_primary_and_releases_once(
     monkeypatch.setattr(os, "close", fail_lock_close)
 
     caught: BaseException | None = None
+    lock_slot = fs_module._FileDescriptorOwnerSlot()
     try:
-        with root.lock(lock_name, timeout_seconds=1.0):
+        with root.lock(lock_name, lock_slot, timeout_seconds=1.0):
             if body_fails:
                 raise primary
     except BaseException as error:
@@ -935,7 +1542,8 @@ def test_owned_directory_lock_cleanup_preserves_primary_and_releases_once(
     with pytest.raises(OSError):
         os.fstat(lock_descriptor)
 
-    with root.lock(lock_name, timeout_seconds=1.0):
+    retry_lock_slot = fs_module._FileDescriptorOwnerSlot()
+    with root.lock(lock_name, retry_lock_slot, timeout_seconds=1.0):
         pass
     root.close()
 
@@ -993,31 +1601,35 @@ def test_install_cleanup_failure_closes_unreturned_activation_once(
         _cls: type[ActivatedModel],
         entry: object,
         files: tuple[VerifiedModelFile, ...],
-    ) -> ActivatedModel:
-        candidate = real_from_manifest(entry, files)  # type: ignore[arg-type]
+        owner_slot: object,
+    ) -> None:
+        real_from_manifest(entry, files, owner_slot)  # type: ignore[arg-type]
+        candidate = owner_slot.owner  # type: ignore[attr-defined]
+        assert isinstance(candidate, ActivatedModel)
         candidates.append(candidate)
         candidate_descriptors.extend(item.fd for item in candidate.files)
-        return candidate
 
     def capture_lock_descriptor(
         directory: OwnedDirectory,
         name: str,
         flags: int,
+        owner_slot: object,
         *,
         mode: int = 0o600,
         expected_mode: int | None = None,
-    ) -> int:
+    ) -> None:
         nonlocal lock_descriptor
-        descriptor = real_open_regular(
+        real_open_regular(
             directory,
             name,
             flags,
+            owner_slot,  # type: ignore[arg-type]
             mode=mode,
             expected_mode=expected_mode,
         )
+        descriptor = _owned_descriptor(owner_slot)
         if name == lock_name:
             lock_descriptor = descriptor
-        return descriptor
 
     def fail_unlock(descriptor: int, operation: int) -> None:
         nonlocal fault_injected
@@ -1317,6 +1929,439 @@ def test_private_reuse_return_interruption_closes_transaction_owned_result(
     assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    ("resource_factory", "scenario"),
+    (
+        ("directory_walk", "fresh"),
+        ("directory_open_or_create", "fresh"),
+        ("directory_open", "activate"),
+        ("model_child", "fresh"),
+        ("stage_child", "fresh"),
+        ("revision_child", "activate"),
+        ("existing_revision", "reuse"),
+        ("lock_file", "fresh"),
+        ("download_write_file", "fresh"),
+        ("download_read_file", "fresh"),
+        ("publication_proof_file", "activate"),
+        ("activation_artifact_file", "activate"),
+        ("publication_proof", "activate"),
+        ("download", "fresh"),
+        ("verified_file_factory", "activate"),
+        ("runtime_duplicate", "verified"),
+        ("runtime_reader_factory", "load"),
+        ("manifest_file", "manifest"),
+    ),
+)
+def test_every_internal_resource_factory_survives_retained_return_traceback(
+    governed_model_case: object,
+    runtime_adapter: object,
+    resource_factory: str,
+    scenario: str,
+) -> None:
+    """A helper-return interruption must leave cleanup ownership outside that helper."""
+    installed: ActivatedModel | None = None
+    if scenario in {"activate", "reuse", "verified", "load"}:
+        installed = governed_model_case.install()  # type: ignore[attr-defined]
+        installed.close()
+
+    def accepts(frame: object) -> bool:
+        local = frame.f_locals  # type: ignore[attr-defined]
+        if resource_factory == "model_child":
+            return local.get("name") == governed_model_case.model_id  # type: ignore[attr-defined]
+        if resource_factory == "stage_child":
+            name = local.get("name")
+            return isinstance(name, str) and name.startswith(".stage-")
+        if resource_factory == "revision_child":
+            return local.get("name") == "a" * 40
+        if resource_factory == "lock_file":
+            name = local.get("name")
+            return isinstance(name, str) and name.startswith(".model-install-")
+        if resource_factory == "download_write_file":
+            return (
+                local.get("name") == "mini.onnx"
+                and (int(local["flags"]) & os.O_ACCMODE) == os.O_WRONLY
+            )
+        if resource_factory == "download_read_file":
+            return (
+                local.get("name") == "mini.onnx"
+                and (int(local["flags"]) & os.O_ACCMODE) == os.O_RDONLY
+                and local.get("expected_mode") == 0o600
+            )
+        if resource_factory == "publication_proof_file":
+            name = local.get("name")
+            return isinstance(name, str) and name.startswith(".publication-verified-")
+        if resource_factory == "activation_artifact_file":
+            return local.get("name") == "mini.onnx" and local.get("expected_mode") == 0o400
+        if resource_factory == "manifest_file":
+            return local.get("path") == governed_model_case.manifest  # type: ignore[attr-defined]
+        return True
+
+    if resource_factory == "directory_walk":
+        traced_method = OwnedDirectory._walk
+        slot_name = "owner_slot"
+    elif resource_factory == "directory_open_or_create":
+        traced_method = OwnedDirectory.open_or_create
+        slot_name = "owner_slot"
+    elif resource_factory == "directory_open":
+        traced_method = OwnedDirectory.open
+        slot_name = "owner_slot"
+    elif resource_factory in {"model_child", "stage_child", "revision_child"}:
+        traced_method = OwnedDirectory.child
+        slot_name = "owner_slot"
+    elif resource_factory == "existing_revision":
+        traced_method = ModelInstaller._open_existing_revision
+        slot_name = "owner_slot"
+    elif resource_factory in {
+        "lock_file",
+        "download_write_file",
+        "download_read_file",
+        "publication_proof_file",
+        "activation_artifact_file",
+    }:
+        traced_method = fs_module.open_regular_at
+        slot_name = "owner_slot"
+    elif resource_factory == "publication_proof":
+        traced_method = fs_module.open_publication_commit
+        slot_name = "owner_slot"
+    elif resource_factory == "download":
+        traced_method = ModelInstaller._download
+        slot_name = "owner_slot"
+    elif resource_factory == "verified_file_factory":
+        traced_method = VerifiedModelFile.from_manifest
+        slot_name = "owner_slot"
+    elif resource_factory == "runtime_duplicate":
+        traced_method = VerifiedModelFile._duplicate
+        slot_name = "owner_slot"
+    elif resource_factory == "runtime_reader_factory":
+        traced_method = registry_module.PreadOnlyModelReader.from_descriptor_owner
+        slot_name = "owner_slot"
+    else:
+        traced_method = fs_module._FileDescriptorOwner.open_at
+        slot_name = "self"
+
+    if scenario == "activate":
+        invoke = functools.partial(
+            governed_model_case.registry.activate,  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        )
+    elif scenario == "reuse":
+        invoke = functools.partial(
+            governed_model_case._installer().install,  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        )
+    elif scenario == "verified":
+        active = governed_model_case.registry.activate(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+        invoke = active.files[0].verified
+    elif scenario == "load":
+        active = governed_model_case.registry.activate(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+        invoke = functools.partial(active.files[0].load_with, runtime_adapter)
+    elif scenario == "manifest":
+        invoke = functools.partial(
+            ModelRegistry.load,
+            governed_model_case.manifest,  # type: ignore[attr-defined]
+        )
+    else:
+        invoke = functools.partial(
+            governed_model_case._installer().install,  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        )
+
+    try:
+        _assert_retained_traceback_closes_returned_owner(
+            invoke,
+            traced_method,
+            owner_slot_name=slot_name,
+            accept_frame=accepts,
+        )
+    finally:
+        if scenario in {"verified", "load"}:
+            active.close()
+
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("owner_name", ("root", "model", "stage"))
+def test_install_first_caller_line_retains_every_directory_owner_for_cleanup(
+    governed_model_case: object,
+    owner_name: str,
+) -> None:
+    invoke = functools.partial(
+        governed_model_case._installer().install,  # type: ignore[attr-defined]
+        governed_model_case.model_id,  # type: ignore[attr-defined]
+    )
+
+    _assert_retained_traceback_closes_callsite_owner(
+        invoke,
+        ModelInstaller.install,
+        owner_name,
+    )
+
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("operation", ("activate", "install"))
+def test_public_lease_pre_detach_line_retains_activation_for_cleanup(
+    governed_model_case: object,
+    operation: str,
+) -> None:
+    if operation == "activate":
+        installed = governed_model_case.install()  # type: ignore[attr-defined]
+        installed.close()
+        tracked_activate = ModelRegistry.activate
+        original_activate = inspect.getclosurevars(tracked_activate).nonlocals.get(
+            "original_activate",
+            tracked_activate,
+        )
+        invoke = functools.partial(
+            original_activate,
+            governed_model_case.registry,  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        )
+        traced_method = original_activate
+    else:
+        invoke = functools.partial(
+            governed_model_case._installer().install,  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        )
+        traced_method = ModelInstaller.install
+
+    _assert_retained_traceback_closes_callsite_owner(
+        invoke,
+        traced_method,
+        "activated",
+        accept_frame=lambda frame: isinstance(  # type: ignore[attr-defined]
+            frame.f_locals.get("activated"),
+            ActivatedModel,
+        ),
+    )
+
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_private_activation_success_tail_retains_local_owners_for_cleanup(
+    governed_model_case: object,
+) -> None:
+    installed = governed_model_case.install()  # type: ignore[attr-defined]
+    installed.close()
+    tracked_activate = ModelRegistry.activate
+    original_activate = inspect.getclosurevars(tracked_activate).nonlocals.get(
+        "original_activate",
+        tracked_activate,
+    )
+
+    def tail_reached(frame: object) -> bool:
+        local = frame.f_locals  # type: ignore[attr-defined]
+        activated_slot = local.get("activated_slot")
+        revision_slot = local.get("revision_slot")
+        return (
+            local.get("handles") == []
+            and activated_slot is not None
+            and activated_slot.owner is not None
+            and revision_slot is not None
+            and revision_slot.owner is not None
+        )
+
+    _assert_retained_traceback_closes_callsite_owner(
+        functools.partial(
+            original_activate,
+            governed_model_case.registry,  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ),
+        ModelRegistry._activate_from_open_model,
+        "revision",
+        accept_frame=tail_reached,
+    )
+
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_recovery_success_tail_retains_local_revision_for_cleanup(
+    governed_model_case: object,
+) -> None:
+    governed_model_case.crash_install_at("after_publish_before_seal")  # type: ignore[attr-defined]
+
+    def tail_reached(frame: object) -> bool:
+        local = frame.f_locals  # type: ignore[attr-defined]
+        activated_slot = local.get("activated_slot")
+        revision_slot = local.get("revision_slot")
+        return (
+            local.get("handles") == []
+            and activated_slot is not None
+            and activated_slot.owner is not None
+            and revision_slot is not None
+            and revision_slot.owner is not None
+        )
+
+    _assert_retained_traceback_closes_callsite_owner(
+        functools.partial(
+            governed_model_case._installer().install,  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ),
+        ModelInstaller._reuse_or_recover_revision,
+        "revision",
+        accept_frame=tail_reached,
+    )
+
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_stale_publication_cleanup_retains_proof_owner_before_use(
+    governed_model_case: object,
+) -> None:
+    governed_model_case.crash_install_at("after_publish_before_seal")  # type: ignore[attr-defined]
+    governed_model_case.create_interrupted_recovery_marker()  # type: ignore[attr-defined]
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    proof_path.write_bytes(b"")
+    proof_path.chmod(0o400)
+
+    _assert_retained_traceback_closes_callsite_owner(
+        functools.partial(
+            governed_model_case._installer().install,  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ),
+        ModelInstaller._remove_publication_commit,
+        "descriptor_owner",
+    )
+
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_cleanup_tree_child_factory_survives_retained_return_traceback(tmp_path: Path) -> None:
+    root_path = tmp_path / "model-root"
+    stage_path = root_path / ".stage-trace"
+    nested_path = stage_path / "nested"
+    nested_path.mkdir(parents=True, mode=0o700)
+    root_path.chmod(0o700)
+    stage_path.chmod(0o700)
+    nested_path.chmod(0o700)
+    expected_stat = stage_path.stat(follow_symlinks=False)
+    expected = fs_module.DirectoryIdentity(expected_stat.st_dev, expected_stat.st_ino)
+    root_slot = fs_module._OwnedDirectoryOwnerSlot()
+    OwnedDirectory.open(root_path, root_slot)
+    root = root_slot.owner
+    assert root is not None
+
+    def accepts(frame: object) -> bool:
+        return frame.f_locals.get("name") == "nested"  # type: ignore[attr-defined]
+
+    try:
+        _assert_retained_traceback_closes_returned_owner(
+            lambda: root.remove_private_stage(".stage-trace", expected),
+            OwnedDirectory.child,
+            owner_slot_name="owner_slot",
+            accept_frame=accepts,
+        )
+    finally:
+        root.close()
+
+
+@pytest.mark.parametrize(
+    "owner_kind",
+    ("descriptor", "directory", "reader", "verified-file", "activated-model"),
+)
+def test_every_descriptor_owner_close_is_safe_under_retained_line_traceback(
+    governed_model_case: object,
+    tmp_path: Path,
+    owner_kind: str,
+) -> None:
+    active: ActivatedModel | None = None
+    if owner_kind == "directory":
+        directory_path = tmp_path / "owned-directory"
+        directory_path.mkdir(mode=0o700)
+        directory_slot = fs_module._OwnedDirectoryOwnerSlot()
+        OwnedDirectory.open(directory_path, directory_slot)
+        directory = directory_slot.owner
+        assert directory is not None
+        descriptor = directory.fd
+
+        def reports_closed() -> bool:
+            try:
+                return directory.fd < 0
+            except OSError:
+                return True
+
+        _assert_trace_interrupted_close_is_retry_safe(
+            directory.close,
+            OwnedDirectory.close,
+            (descriptor,),
+            reports_closed,
+        )
+        return
+
+    active = governed_model_case.install()  # type: ignore[attr-defined]
+    handle = active.files[0]
+    if owner_kind == "activated-model":
+        descriptors = tuple(item.fd for item in active.files)
+        _assert_trace_interrupted_close_is_retry_safe(
+            active.close,
+            ActivatedModel.close,
+            descriptors,
+            lambda: active._ActivatedModel__closed[0],
+        )
+        return
+    if owner_kind == "verified-file":
+        descriptor = handle.fd
+
+        def verified_file_reports_closed() -> bool:
+            legacy = getattr(handle, "_VerifiedModelFile__descriptor", None)
+            if isinstance(legacy, list):
+                return bool(legacy) and legacy[0] < 0
+            owner = handle._VerifiedModelFile__descriptor_owner
+            return owner.fd < 0
+
+        try:
+            _assert_trace_interrupted_close_is_retry_safe(
+                handle.close,
+                VerifiedModelFile.close,
+                (descriptor,),
+                verified_file_reports_closed,
+            )
+        finally:
+            active.close()
+        return
+
+    duplicate_slot = fs_module._FileDescriptorOwnerSlot()
+    handle._duplicate(duplicate_slot)
+    descriptor_owner = duplicate_slot.owner
+    assert descriptor_owner is not None
+    if owner_kind == "descriptor":
+        descriptor = descriptor_owner.fileno()
+        try:
+            _assert_trace_interrupted_close_is_retry_safe(
+                descriptor_owner.close,
+                fs_module._FileDescriptorOwner.close,
+                (descriptor,),
+                lambda: descriptor_owner.fd < 0,
+            )
+        finally:
+            active.close()
+        return
+
+    reader_slot = registry_module._PreadOnlyModelReaderOwnerSlot()
+    registry_module.PreadOnlyModelReader.from_descriptor_owner(
+        duplicate_slot,
+        reader_slot,
+        handle.size,
+        handle.sha256,
+    )
+    reader = reader_slot.owner
+    assert reader is not None
+    descriptor = reader._PreadOnlyModelReader__descriptor_owner.fileno()
+    try:
+        _assert_trace_interrupted_close_is_retry_safe(
+            reader.close,
+            registry_module.PreadOnlyModelReader.close,
+            (descriptor,),
+            lambda: reader.closed,
+        )
+    finally:
+        active.close()
+
+
 def test_unrelated_installed_model_activates_while_download_is_paused(
     governed_model_case: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -1336,6 +2381,7 @@ def test_unrelated_installed_model_activates_while_download_is_paused(
     def track_lock(
         directory: OwnedDirectory,
         name: str,
+        owner_slot: fs_module._FileDescriptorOwnerSlot,
         *,
         timeout_seconds: float,
         shared: bool = False,
@@ -1346,6 +2392,7 @@ def test_unrelated_installed_model_activates_while_download_is_paused(
         with real_lock(
             directory,
             name,
+            owner_slot,
             timeout_seconds=timeout_seconds,
             shared=shared,
         ):
@@ -1426,6 +2473,7 @@ def test_same_model_activation_waits_for_paused_install_commit(
     def track_lock(
         directory: OwnedDirectory,
         name: str,
+        owner_slot: fs_module._FileDescriptorOwnerSlot,
         *,
         timeout_seconds: float,
         shared: bool = False,
@@ -1436,6 +2484,7 @@ def test_same_model_activation_waits_for_paused_install_commit(
         with real_lock(
             directory,
             name,
+            owner_slot,
             timeout_seconds=timeout_seconds,
             shared=shared,
         ):
@@ -2588,7 +3637,10 @@ def test_non_linux_non_darwin_platform_rejects_renameat2_even_when_exported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tmp_path.chmod(0o700)
-    parent = OwnedDirectory.open(tmp_path)
+    parent_slot = fs_module._OwnedDirectoryOwnerSlot()
+    OwnedDirectory.open(tmp_path, parent_slot)
+    parent = parent_slot.owner
+    assert parent is not None
     renameat2_called = False
 
     class RenameAt2OnlyLibc:
@@ -3093,7 +4145,8 @@ def test_activation_construction_failure_after_atomic_commit_does_not_roll_back(
         _cls: type[ActivatedModel],
         _entry: object,
         files: tuple[VerifiedModelFile, ...],
-    ) -> ActivatedModel:
+        _owner_slot: object,
+    ) -> None:
         artifact_descriptors.extend(item.fd for item in files)
         raise primary
 
@@ -3192,10 +4245,12 @@ def test_postcommit_directory_close_failure_keeps_marker_inode_authoritative_as_
         _cls: type[ActivatedModel],
         entry: object,
         files: tuple[VerifiedModelFile, ...],
-    ) -> ActivatedModel:
-        activated = real_from_manifest(entry, files)  # type: ignore[arg-type]
+        owner_slot: object,
+    ) -> None:
+        real_from_manifest(entry, files, owner_slot)  # type: ignore[arg-type]
+        activated = owner_slot.owner  # type: ignore[attr-defined]
+        assert isinstance(activated, ActivatedModel)
         artifact_descriptors.extend(item.fd for item in activated.files)
-        return activated
 
     def fail_postcommit_revision_close(directory: OwnedDirectory) -> None:
         nonlocal fault_injected
@@ -3290,9 +4345,12 @@ def test_recovery_raw_cleanup_failure_preserves_wrapper_error(
     real_close = os.close
 
     def fail_from_manifest(
-        _cls: type[VerifiedModelFile], _item: object, descriptor: int
-    ) -> VerifiedModelFile:
-        retained_descriptor.append(descriptor)
+        _cls: type[VerifiedModelFile],
+        _item: object,
+        descriptor_slot: object,
+        _owner_slot: object,
+    ) -> None:
+        retained_descriptor.append(_owned_descriptor(descriptor_slot))
         raise primary
 
     def fail_retained_close(descriptor: int) -> None:
@@ -3332,11 +4390,15 @@ def test_recovery_wrapper_cleanup_failure_preserves_transfer_error(
     real_close = VerifiedModelFile.close
 
     def capture_from_manifest(
-        _cls: type[VerifiedModelFile], item: object, descriptor: int
-    ) -> VerifiedModelFile:
-        handle = real_from_manifest(item, descriptor)  # type: ignore[arg-type]
+        _cls: type[VerifiedModelFile],
+        item: object,
+        descriptor_slot: object,
+        owner_slot: object,
+    ) -> None:
+        real_from_manifest(item, descriptor_slot, owner_slot)  # type: ignore[arg-type]
+        handle = owner_slot.owner  # type: ignore[attr-defined]
+        assert isinstance(handle, VerifiedModelFile)
         retained_handle.append(handle)
-        return handle
 
     def fail_transfer(point: str) -> None:
         if point == "before_retain_recovery_file":
@@ -3415,6 +4477,57 @@ def test_recovery_revision_close_failure_closes_every_artifact_once(
     assert directory_close_failed is True
     assert len(artifact_close_attempts) == 1
     assert len(set(artifact_close_attempts)) == 1
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_committed_reuse_tail_close_preserves_primary_oserror(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed = governed_model_case.install()  # type: ignore[attr-defined]
+    installed.close()
+    revision_path = (
+        governed_model_case.model_root  # type: ignore[attr-defined]
+        / governed_model_case.model_id  # type: ignore[attr-defined]
+        / ("a" * 40)
+    )
+    revision_metadata = revision_path.stat(follow_symlinks=False)
+    revision_identity = (revision_metadata.st_dev, revision_metadata.st_ino)
+    primary = OSError("scripted committed-reuse tail close failure")
+    revision_close_attempts = 0
+    real_close = OwnedDirectory.close
+
+    def fail_second_revision_close(directory: OwnedDirectory) -> None:
+        nonlocal revision_close_attempts
+        identity = (directory.identity.device, directory.identity.inode)
+        if identity == revision_identity:
+            try:
+                os.fstat(directory.fd)
+            except OSError as error:
+                assert error.errno == errno.EBADF
+                real_close(directory)
+                return
+            revision_close_attempts += 1
+            real_close(directory)
+            if revision_close_attempts == 2:
+                raise primary
+            return
+        real_close(directory)
+
+    monkeypatch.setattr(OwnedDirectory, "close", fail_second_revision_close)
+
+    caught: BaseException | None = None
+    try:
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+
+    assert caught is primary
+    assert revision_close_attempts == 2
     assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
 
 

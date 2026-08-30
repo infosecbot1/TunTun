@@ -396,13 +396,21 @@ class GovernedModelCase:
             directory: Any,
             name: str,
             flags: int,
+            owner_slot: Any,
             *,
             mode: int = 0o600,
             expected_mode: int | None = None,
-        ) -> int:
+        ) -> None:
             if name == "mini.onnx" and flags & os.O_ACCMODE == os.O_RDONLY:
                 case.reader_open_expected_modes.append(mode)
-            return original_open(directory, name, flags, mode=mode, expected_mode=expected_mode)
+            original_open(
+                directory,
+                name,
+                flags,
+                owner_slot,
+                mode=mode,
+                expected_mode=expected_mode,
+            )
 
         original_activate = ModelRegistry.activate
 
@@ -473,7 +481,11 @@ class GovernedModelCase:
             **kwargs: object,
         ) -> None:
             if source.startswith(".stage-"):
-                stage = parent.child(source)
+                stage_slot = fs_module._OwnedDirectoryOwnerSlot()
+                parent.child(source, stage_slot)
+                stage = stage_slot.owner
+                if stage is None:
+                    raise RuntimeError("model stage acquisition missing")
                 try:
                     if stat.S_IMODE(os.fstat(stage.fd).st_mode) != 0o700:
                         raise PermissionError("filesystem rejects renaming a read-only directory")
@@ -610,15 +622,29 @@ class GovernedModelCase:
     def create_sealed_pending_revision(self) -> None:
         self.crash_install_at("after_publish_before_seal")
         self.create_interrupted_recovery_marker()
-        model = fs_module.OwnedDirectory.open(self.model_root / self.model_id)
-        revision = model.child(REVISION)
-        marker_fd = fs_module.open_regular_at(
+        model_slot = fs_module._OwnedDirectoryOwnerSlot()
+        revision_slot = fs_module._OwnedDirectoryOwnerSlot()
+        marker_slot = fs_module._FileDescriptorOwnerSlot()
+        fs_module.OwnedDirectory.open(self.model_root / self.model_id, model_slot)
+        model = model_slot.owner
+        if model is None:
+            raise RuntimeError("model directory acquisition missing")
+        model.child(REVISION, revision_slot)
+        revision = revision_slot.owner
+        if revision is None:
+            raise RuntimeError("model revision acquisition missing")
+        fs_module.open_regular_at(
             model,
             self.recovery_marker_path.name,
             os.O_RDWR,
+            marker_slot,
             mode=0o600,
             expected_mode=0o600,
         )
+        marker_owner = marker_slot.owner
+        if marker_owner is None:
+            raise RuntimeError("model marker acquisition missing")
+        marker_fd = marker_owner.fileno()
         try:
             os.fsync(marker_fd)
             model.fsync()
@@ -626,7 +652,7 @@ class GovernedModelCase:
             revision.fsync()
             model.fsync()
         finally:
-            os.close(marker_fd)
+            marker_owner.close()
             revision.close()
             model.close()
 

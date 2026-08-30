@@ -13,6 +13,19 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from urllib.parse import urlsplit
 
+_NETWORK_CLEANUP_NOTE = "additional network resource cleanup failure"
+
+
+def _cleanup_preserving_primary(
+    resource: object,
+    closer: object,
+    primary_error: BaseException,
+) -> None:
+    try:
+        closer(resource)  # type: ignore[operator]
+    except BaseException:
+        primary_error.add_note(_NETWORK_CLEANUP_NOTE)
+
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, hostname: str, pinned_ip: str, timeout: float, deadline: float) -> None:
@@ -27,16 +40,21 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._deadline = deadline
 
     def connect(self) -> None:
-        raw = socket.create_connection((self._pinned_ip, 443), self.timeout)
-        self.sock = raw
+        raw: socket.socket | None = None
+        wrapped: ssl.SSLSocket | None = None
         try:
+            raw = socket.create_connection((self._pinned_ip, 443), self.timeout)
+            self.sock = raw
             wrapped = self._ssl_context.wrap_socket(raw, server_hostname=self.host)
             self.sock = wrapped
             if time.monotonic() >= self._deadline:
                 self.close()
                 raise TimeoutError("model download total deadline")
-        except BaseException:
-            raw.close()
+        except BaseException as error:
+            if wrapped is not None:
+                _cleanup_preserving_primary(wrapped, type(wrapped).close, error)
+            if raw is not None and raw is not wrapped:
+                _cleanup_preserving_primary(raw, type(raw).close, error)
             self.sock = None
             raise
 
@@ -79,15 +97,15 @@ def resolve_public_addresses_bounded(hostname: str, deadline: float) -> tuple[st
     if remaining <= 0:
         raise TimeoutError("model download total deadline")
     context = multiprocessing.get_context("spawn")
-    receive, send = context.Pipe(duplex=False)
-    process = context.Process(target=_resolver_child, args=(send, hostname), daemon=True)
-    started = False
+    receive: Connection | None = None
+    send: Connection | None = None
+    process: BaseProcess | None = None
+    primary_error: BaseException | None = None
     try:
-        try:
-            process.start()
-            started = True
-        finally:
-            send.close()
+        receive, send = context.Pipe(duplex=False)
+        process = context.Process(target=_resolver_child, args=(send, hostname), daemon=True)
+        process.start()
+        send.close()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("model download total deadline")
@@ -112,11 +130,30 @@ def resolve_public_addresses_bounded(hostname: str, deadline: float) -> tuple[st
         except ValueError as error:
             raise OSError("model DNS resolution failed") from error
         return addresses
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        receive.close()
-        if started:
-            _bounded_stop(process, deadline)
-        process.close()
+        cleanup_error = primary_error
+        cleanup_actions: list[tuple[object, object]] = []
+        if receive is not None and not receive.closed:
+            cleanup_actions.append((receive, type(receive).close))
+        if send is not None and not send.closed:
+            cleanup_actions.append((send, type(send).close))
+        if process is not None and process.pid is not None:
+            cleanup_actions.append((process, lambda value: _bounded_stop(value, deadline)))
+        if process is not None:
+            cleanup_actions.append((process, type(process).close))
+        for resource, closer in cleanup_actions:
+            try:
+                closer(resource)  # type: ignore[operator]
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+                else:
+                    cleanup_error.add_note(_NETWORK_CLEANUP_NOTE)
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 class DeadlineBoundResponse:
@@ -188,8 +225,9 @@ class PinnedHttpsTransport:
         )
         timer = threading.Timer(remaining, connection.close)
         timer.daemon = True
-        timer.start()
+        primary_error: BaseException | None = None
         try:
+            timer.start()
             connection.request(
                 "GET",
                 parsed.path or "/",
@@ -204,8 +242,28 @@ class PinnedHttpsTransport:
             )
         except OSError as error:
             if time.monotonic() >= deadline:
-                raise TimeoutError("model download total deadline") from error
+                primary_error = TimeoutError("model download total deadline")
+                raise primary_error from error
+            primary_error = error
+            raise
+        except BaseException as error:
+            primary_error = error
             raise
         finally:
-            timer.cancel()
-            connection.close()
+            cleanup_error = primary_error
+            try:
+                timer.cancel()
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+                else:
+                    cleanup_error.add_note(_NETWORK_CLEANUP_NOTE)
+            try:
+                connection.close()
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+                else:
+                    cleanup_error.add_note(_NETWORK_CLEANUP_NOTE)
+            if primary_error is None and cleanup_error is not None:
+                raise cleanup_error

@@ -18,6 +18,9 @@ from urllib.parse import urlsplit
 from .fs import (
     AtomicPublishWitness,
     OwnedDirectory,
+    _FileDescriptorOwner,
+    _FileDescriptorOwnerSlot,
+    _OwnedDirectoryOwnerSlot,
     atomic_publish_dir_noreplace,
     close_preserving_primary,
     entry_exists_at,
@@ -36,6 +39,7 @@ from .registry import (
     ModelRegistry,
     VerifiedModelFile,
     _ActivatedModelOwnerSlot,
+    _VerifiedModelFileOwnerSlot,
 )
 
 WriteOnce = Callable[[int, bytes | memoryview], int]
@@ -101,25 +105,47 @@ class ModelInstaller:
         self._write_once = write_once or _write_once
         self._fault_hook = fault_hook or _no_fault
 
-    def _download(self, stage: OwnedDirectory, item: ModelFile, deadline: float) -> int:
+    def _download(
+        self,
+        stage: OwnedDirectory,
+        item: ModelFile,
+        deadline: float,
+        owner_slot: _FileDescriptorOwnerSlot,
+    ) -> None:
+        if owner_slot.owner is not None:
+            raise ValueError("download descriptor owner slot already populated")
         try:
             hostname = urlsplit(item.url).hostname
         except ValueError as error:
             raise PermissionError("model URL is not allowlisted HTTPS") from error
         if hostname not in self.allowed_hosts:
             raise PermissionError("model URL is not allowlisted HTTPS")
-        write_fd = open_regular_at(
-            stage,
-            item.path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            mode=0o600,
-            expected_mode=0o600,
-        )
-        read_fd: int | None = None
+        write_slot = _FileDescriptorOwnerSlot()
         try:
-            read_fd = open_regular_at(
-                stage, item.path, os.O_RDONLY, mode=0o600, expected_mode=0o600
+            open_regular_at(
+                stage,
+                item.path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                write_slot,
+                mode=0o600,
+                expected_mode=0o600,
             )
+            write_owner = write_slot.owner
+            if write_owner is None:
+                raise RuntimeError("model write descriptor acquisition missing")
+            open_regular_at(
+                stage,
+                item.path,
+                os.O_RDONLY,
+                owner_slot,
+                mode=0o600,
+                expected_mode=0o600,
+            )
+            read_owner = owner_slot.owner
+            if read_owner is None:
+                raise RuntimeError("model read descriptor acquisition missing")
+            write_fd = write_owner.fileno()
+            read_fd = read_owner.fileno()
             written_identity = os.fstat(write_fd)
             read_identity = os.fstat(read_fd)
             if (
@@ -186,29 +212,35 @@ class ModelInstaller:
             ):
                 raise ValueError("model size/hash mismatch")
             hash_exact_fd(read_fd, item.size, item.sha256)
-            descriptor_to_close = write_fd
-            write_fd = -1
-            os.close(descriptor_to_close)
-            return read_fd
+            write_owner.close()
         except BaseException as error:
-            if read_fd is not None:
-                descriptor_to_close = read_fd
-                read_fd = None
-                close_preserving_primary(descriptor_to_close, os.close, error)
-            if write_fd >= 0:
-                descriptor_to_close = write_fd
-                write_fd = -1
-                close_preserving_primary(descriptor_to_close, os.close, error)
+            if owner_slot.owner is not None:
+                close_preserving_primary(
+                    owner_slot.owner,
+                    _FileDescriptorOwner.close,
+                    error,
+                )
+            if write_slot.owner is not None:
+                close_preserving_primary(
+                    write_slot.owner,
+                    _FileDescriptorOwner.close,
+                    error,
+                )
             raise
 
     @staticmethod
-    def _open_existing_revision(model: OwnedDirectory, revision: str) -> OwnedDirectory | None:
+    def _open_existing_revision(
+        model: OwnedDirectory,
+        revision: str,
+        owner_slot: _OwnedDirectoryOwnerSlot,
+    ) -> bool:
         try:
-            return model.child(revision)
+            model.child(revision, owner_slot)
         except FileNotFoundError:
-            return None
+            return False
         except OSError as error:
             raise PermissionError("unsafe model filesystem revision") from error
+        return True
 
     @staticmethod
     def _require_recovery_marker_name_before_open(
@@ -413,16 +445,22 @@ class ModelInstaller:
     @staticmethod
     def _remove_publication_commit(model: OwnedDirectory, revision: str) -> None:
         name = publication_commit_name(revision)
+        descriptor_slot = _FileDescriptorOwnerSlot()
         try:
-            descriptor = open_regular_at(
-                model,
-                name,
-                os.O_RDONLY,
-                expected_mode=None,
-            )
-        except FileNotFoundError:
-            return
-        try:
+            try:
+                open_regular_at(
+                    model,
+                    name,
+                    os.O_RDONLY,
+                    descriptor_slot,
+                    expected_mode=None,
+                )
+            except FileNotFoundError:
+                return
+            descriptor_owner = descriptor_slot.owner
+            if descriptor_owner is None:
+                raise RuntimeError("publication commit descriptor acquisition missing")
+            descriptor = descriptor_owner.fileno()
             identity = os.fstat(descriptor)
             named = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
             if (
@@ -433,10 +471,15 @@ class ModelInstaller:
                 raise PermissionError("unsafe model publication commit")
             os.unlink(name, dir_fd=model.fd)
             model.fsync()
+            descriptor_owner.close()
         except BaseException as error:
-            close_preserving_primary(descriptor, os.close, error)
+            if descriptor_slot.owner is not None:
+                close_preserving_primary(
+                    descriptor_slot.owner,
+                    _FileDescriptorOwner.close,
+                    error,
+                )
             raise
-        os.close(descriptor)
 
     def _reuse_or_recover_revision(
         self,
@@ -449,18 +492,28 @@ class ModelInstaller:
         pending_name = recovery_pending_name(entry.revision)
         pending_exists = entry_exists_at(model, pending_name)
         commit_exists = entry_exists_at(model, publication_commit_name(entry.revision))
-        revision = self._open_existing_revision(model, entry.revision)
-        if revision is None:
-            if pending_exists or commit_exists:
-                raise PermissionError("unsafe model recovery marker")
-            return False
         handles: list[VerifiedModelFile] = []
+        revision_slot = _OwnedDirectoryOwnerSlot()
+        descriptor_slot = _FileDescriptorOwnerSlot()
+        handle_slot = _VerifiedModelFileOwnerSlot()
         marker_owner_slot = _PublicationMarkerOwnerSlot()
         sealed_for_recovery = False
         committed_on_entry = False
         post_seal_phase = False
         publication_witness = AtomicPublishWitness()
         try:
+            revision_exists = self._open_existing_revision(
+                model,
+                entry.revision,
+                revision_slot,
+            )
+            if not revision_exists:
+                if pending_exists or commit_exists:
+                    raise PermissionError("unsafe model recovery marker")
+                return False
+            revision = revision_slot.owner
+            if revision is None:
+                raise RuntimeError("model revision acquisition missing")
             mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
             sealed_for_recovery = mode == 0o500
             if mode == 0o500 and not pending_exists and commit_exists:
@@ -487,25 +540,27 @@ class ModelInstaller:
                 if tuple(sorted(os.listdir(revision.fd))) != expected_names:
                     raise PermissionError("unsafe unsealed model revision")
                 for item in entry.files:
-                    descriptor = open_regular_at(
+                    descriptor_slot = _FileDescriptorOwnerSlot()
+                    handle_slot = _VerifiedModelFileOwnerSlot()
+                    open_regular_at(
                         revision,
                         item.path,
                         os.O_RDONLY,
+                        descriptor_slot,
                         mode=0o400,
                         expected_mode=0o400,
                     )
-                    try:
-                        hash_exact_fd(descriptor, item.size, item.sha256)
-                        handle = VerifiedModelFile.from_manifest(item, descriptor)
-                    except BaseException as error:
-                        close_preserving_primary(descriptor, os.close, error)
-                        raise
-                    try:
-                        self._fault_hook("before_retain_recovery_file")
-                        handles.append(handle)
-                    except BaseException as error:
-                        close_preserving_primary(handle, VerifiedModelFile.close, error)
-                        raise
+                    descriptor_owner = descriptor_slot.owner
+                    if descriptor_owner is None:
+                        raise RuntimeError("model artifact descriptor acquisition missing")
+                    hash_exact_fd(descriptor_owner.fileno(), item.size, item.sha256)
+                    VerifiedModelFile.from_manifest(item, descriptor_slot, handle_slot)
+                    handle = handle_slot.owner
+                    if handle is None:
+                        raise RuntimeError("verified model file acquisition missing")
+                    self._fault_hook("before_retain_recovery_file")
+                    handles.append(handle)
+                    handle_slot.owner = None
 
                 if marker_owner_slot.owner is None:
                     self._acquire_recovery_marker(
@@ -553,8 +608,16 @@ class ModelInstaller:
                 self._fault_hook("before_publication_marker_close")
                 marker_owner.close()
                 self._fault_hook("after_publication_marker_close")
-                activated_slot.owner = ActivatedModel.from_manifest(entry, tuple(handles))
+                ActivatedModel.from_manifest(entry, tuple(handles), activated_slot)
                 handles.clear()
+            if activated_slot.owner is None:
+                if revision_slot.owner is not None:
+                    revision_slot.owner.close()
+                raise RuntimeError("model revision recovery did not activate")
+            if revision_slot.owner is None:
+                raise RuntimeError("model revision recovery lost directory ownership")
+            revision_slot.owner.close()
+            return True
         except BaseException as error:
             if sealed_for_recovery and not committed_on_entry and not publication_witness.committed:
                 resolution = _PublicationResolution.INCONCLUSIVE
@@ -573,43 +636,70 @@ class ModelInstaller:
                     error.add_note(_PUBLICATION_RESOLUTION_NOTE)
                 if resolution is _PublicationResolution.DEFINITELY_PRECOMMIT:
                     try:
-                        revision.chmod(0o700)
-                        revision.fsync()
+                        if revision_slot.owner is None:
+                            raise RuntimeError("model revision recovery ownership missing")
+                        revision_slot.owner.chmod(0o700)
+                        revision_slot.owner.fsync()
                     except BaseException:
                         error.add_note(_RECOVERY_ROLLBACK_NOTE)
+            if handle_slot.owner is not None and any(
+                handle_slot.owner is retained for retained in handles
+            ):
+                handle_slot.owner = None
             if activated_slot.owner is None:
                 for handle in handles:
                     close_preserving_primary(handle, VerifiedModelFile.close, error)
+            if handle_slot.owner is not None:
+                close_preserving_primary(handle_slot.owner, VerifiedModelFile.close, error)
+            if descriptor_slot.owner is not None:
+                close_preserving_primary(
+                    descriptor_slot.owner,
+                    _FileDescriptorOwner.close,
+                    error,
+                )
             if marker_owner_slot.owner is not None:
                 close_preserving_primary(
                     marker_owner_slot.owner,
                     _PublicationMarkerOwner.close,
                     error,
                 )
-            close_preserving_primary(revision, OwnedDirectory.close, error)
-            if isinstance(error, OSError) and not post_seal_phase:
+            if revision_slot.owner is not None:
+                close_preserving_primary(revision_slot.owner, OwnedDirectory.close, error)
+            if isinstance(error, OSError) and not post_seal_phase and activated_slot.owner is None:
                 raise PermissionError("unsafe unsealed model revision") from error
             raise
-        if activated_slot.owner is None:
-            revision.close()
-            raise RuntimeError("model revision recovery did not activate")
-        revision.close()
-        return True
 
     def install(self, model_id: str) -> ActivatedModel:
+        """Install and return the caller-owned activated-model lease."""
         entry = self.registry.entry(model_id)
         activated_slot = _ActivatedModelOwnerSlot()
+        root_slot = _OwnedDirectoryOwnerSlot()
+        model_slot = _OwnedDirectoryOwnerSlot()
+        stage_slot = _OwnedDirectoryOwnerSlot()
+        lock_slot = _FileDescriptorOwnerSlot()
         resolve_publication = self._reresolve_publication_witness_after_exception
         try:
-            root = OwnedDirectory.open_or_create(self.registry._root)
+            OwnedDirectory.open_or_create(self.registry._root, root_slot)
+            root = root_slot.owner
+            if root is None:
+                raise RuntimeError("model root acquisition missing")
             with (
                 _close_owned_directory(root),
                 root.lock(
                     model_install_lock_name(entry.model_id),
+                    lock_slot,
                     timeout_seconds=30.0,
                 ),
             ):
-                model = root.child(entry.model_id, create=True, exist_ok=True)
+                root.child(
+                    entry.model_id,
+                    model_slot,
+                    create=True,
+                    exist_ok=True,
+                )
+                model = model_slot.owner
+                if model is None:
+                    raise RuntimeError("model directory acquisition missing")
                 with _close_owned_directory(model):
                     prefix = f".stage-{entry.revision}-"
                     model.remove_private_stages(prefix)
@@ -621,40 +711,38 @@ class ModelInstaller:
                     )
                     if not reused:
                         stage_name = f"{prefix}{secrets.token_hex(8)}"
-                        stage = model.child(stage_name, create=True)
+                        model.child(stage_name, stage_slot, create=True)
+                        stage = stage_slot.owner
+                        if stage is None:
+                            raise RuntimeError("model stage acquisition missing")
                         with _close_owned_directory(stage):
                             stage_identity = stage.identity
                             published = False
                             sealed_for_publication = False
                             publication_witness = AtomicPublishWitness()
                             handles: list[VerifiedModelFile] = []
+                            descriptor_slot = _FileDescriptorOwnerSlot()
+                            handle_slot = _VerifiedModelFileOwnerSlot()
                             marker_owner_slot = _PublicationMarkerOwnerSlot()
                             try:
                                 deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
                                 for item in entry.files:
-                                    descriptor = self._download(stage, item, deadline)
-                                    try:
-                                        handle = VerifiedModelFile.from_manifest(
-                                            item,
-                                            descriptor,
+                                    descriptor_slot = _FileDescriptorOwnerSlot()
+                                    handle_slot = _VerifiedModelFileOwnerSlot()
+                                    self._download(stage, item, deadline, descriptor_slot)
+                                    VerifiedModelFile.from_manifest(
+                                        item,
+                                        descriptor_slot,
+                                        handle_slot,
+                                    )
+                                    handle = handle_slot.owner
+                                    if handle is None:
+                                        raise RuntimeError(
+                                            "verified downloaded model file acquisition missing"
                                         )
-                                    except BaseException as error:
-                                        close_preserving_primary(
-                                            descriptor,
-                                            os.close,
-                                            error,
-                                        )
-                                        raise
-                                    try:
-                                        self._fault_hook("before_retain_downloaded_file")
-                                        handles.append(handle)
-                                    except BaseException as error:
-                                        close_preserving_primary(
-                                            handle,
-                                            VerifiedModelFile.close,
-                                            error,
-                                        )
-                                        raise
+                                    self._fault_hook("before_retain_downloaded_file")
+                                    handles.append(handle)
+                                    handle_slot.owner = None
                                     self._fault_hook("after_each_file")
                                 for item, handle in zip(
                                     entry.files,
@@ -725,12 +813,29 @@ class ModelInstaller:
                                 self._fault_hook("before_publication_marker_close")
                                 marker_owner.close()
                                 self._fault_hook("after_publication_marker_close")
-                                activated_slot.owner = ActivatedModel.from_manifest(
+                                ActivatedModel.from_manifest(
                                     entry,
                                     tuple(handles),
+                                    activated_slot,
                                 )
                                 handles.clear()
                             except FileExistsError as error:
+                                if handle_slot.owner is not None and any(
+                                    handle_slot.owner is retained for retained in handles
+                                ):
+                                    handle_slot.owner = None
+                                if handle_slot.owner is not None:
+                                    close_preserving_primary(
+                                        handle_slot.owner,
+                                        VerifiedModelFile.close,
+                                        error,
+                                    )
+                                if descriptor_slot.owner is not None:
+                                    close_preserving_primary(
+                                        descriptor_slot.owner,
+                                        _FileDescriptorOwner.close,
+                                        error,
+                                    )
                                 if published:
                                     if sealed_for_publication and not publication_witness.committed:
                                         resolution = _PublicationResolution.INCONCLUSIVE
@@ -809,6 +914,10 @@ class ModelInstaller:
                                             stage.fsync()
                                         except BaseException:
                                             error.add_note(_RECOVERY_ROLLBACK_NOTE)
+                                if handle_slot.owner is not None and any(
+                                    handle_slot.owner is retained for retained in handles
+                                ):
+                                    handle_slot.owner = None
                                 if activated_slot.owner is None:
                                     for handle in handles:
                                         close_preserving_primary(
@@ -816,6 +925,18 @@ class ModelInstaller:
                                             VerifiedModelFile.close,
                                             error,
                                         )
+                                if handle_slot.owner is not None:
+                                    close_preserving_primary(
+                                        handle_slot.owner,
+                                        VerifiedModelFile.close,
+                                        error,
+                                    )
+                                if descriptor_slot.owner is not None:
+                                    close_preserving_primary(
+                                        descriptor_slot.owner,
+                                        _FileDescriptorOwner.close,
+                                        error,
+                                    )
                                 if marker_owner_slot.owner is not None:
                                     close_preserving_primary(
                                         marker_owner_slot.owner,
@@ -832,6 +953,10 @@ class ModelInstaller:
                                     except FileNotFoundError:
                                         pass
                                 raise
+            activated = activated_slot.owner
+            if activated is None:
+                raise RuntimeError("model install did not activate")
+            return activated if setattr(activated_slot, "owner", None) is None else activated  # type: ignore[func-returns-value]
         except BaseException as error:
             if activated_slot.owner is not None:
                 close_preserving_primary(
@@ -839,9 +964,12 @@ class ModelInstaller:
                     ActivatedModel.close,
                     error,
                 )
+            if stage_slot.owner is not None:
+                close_preserving_primary(stage_slot.owner, OwnedDirectory.close, error)
+            if model_slot.owner is not None:
+                close_preserving_primary(model_slot.owner, OwnedDirectory.close, error)
+            if lock_slot.owner is not None:
+                close_preserving_primary(lock_slot.owner, _FileDescriptorOwner.close, error)
+            if root_slot.owner is not None:
+                close_preserving_primary(root_slot.owner, OwnedDirectory.close, error)
             raise
-        activated = activated_slot.owner
-        if activated is None:
-            raise RuntimeError("model install did not activate")
-        activated_slot.owner = None
-        return activated

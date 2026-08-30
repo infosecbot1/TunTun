@@ -15,6 +15,9 @@ from urllib.parse import urlsplit
 
 from .fs import (
     OwnedDirectory,
+    _FileDescriptorOwner,
+    _FileDescriptorOwnerSlot,
+    _OwnedDirectoryOwnerSlot,
     close_preserving_primary,
     entry_exists_at,
     hash_exact_fd,
@@ -192,23 +195,51 @@ class ReceiptVerifier(Protocol):
     ) -> RuntimeModelReceipt: ...
 
 
+class _PreadOnlyModelReaderOwnerSlot:
+    __slots__ = ("owner",)
+
+    def __init__(self) -> None:
+        self.owner: PreadOnlyModelReader | None = None
+
+
 class PreadOnlyModelReader:
     __slots__ = (
         "__closed",
         "__digest",
         "__expected_sha256",
-        "__fd",
+        "__descriptor_owner",
         "__next_offset",
         "size",
     )
 
-    def __init__(self, descriptor: int, size: int, expected_sha256: str) -> None:
-        self.__fd = descriptor
+    def __init__(
+        self,
+        descriptor_owner: _FileDescriptorOwner,
+        size: int,
+        expected_sha256: str,
+    ) -> None:
+        self.__descriptor_owner = descriptor_owner
         self.size = size
         self.__closed = False
         self.__next_offset = 0
         self.__digest = hashlib.sha256()
         self.__expected_sha256 = expected_sha256
+
+    @classmethod
+    def from_descriptor_owner(
+        cls,
+        descriptor_slot: _FileDescriptorOwnerSlot,
+        owner_slot: _PreadOnlyModelReaderOwnerSlot,
+        size: int,
+        expected_sha256: str,
+    ) -> None:
+        if owner_slot.owner is not None:
+            raise ValueError("model reader owner slot already populated")
+        descriptor_owner = descriptor_slot.owner
+        if descriptor_owner is None:
+            raise ValueError("model reader descriptor owner missing")
+        owner_slot.owner = cls(descriptor_owner, size, expected_sha256)
+        descriptor_slot.owner = None
 
     @property
     def closed(self) -> bool:
@@ -225,7 +256,11 @@ class PreadOnlyModelReader:
             or offset != self.__next_offset
         ):
             raise ValueError("invalid model reader range")
-        chunk = os.pread(self.__fd, min(length, self.size - offset), offset)
+        chunk = os.pread(
+            self.__descriptor_owner.fileno(),
+            min(length, self.size - offset),
+            offset,
+        )
         self.__digest.update(chunk)
         self.__next_offset += len(chunk)
         return chunk
@@ -245,8 +280,8 @@ class PreadOnlyModelReader:
 
     def close(self) -> None:
         if not self.__closed:
+            self.__descriptor_owner.close()
             self.__closed = True
-            os.close(self.__fd)
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,19 +293,37 @@ class _ManifestBoundFile:
     inode: int
 
 
+class _VerifiedModelFileOwnerSlot:
+    __slots__ = ("owner",)
+
+    def __init__(self) -> None:
+        self.owner: VerifiedModelFile | None = None
+
+
 @dataclass(frozen=True)
 class VerifiedModelFile:
-    __descriptor: list[int]
+    __descriptor_owner: _FileDescriptorOwner
     __expected: _ManifestBoundFile
     __lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
 
     @classmethod
-    def from_manifest(cls, item: ModelFile, descriptor: int) -> VerifiedModelFile:
-        metadata = os.fstat(descriptor)
-        return cls(
-            [descriptor],
+    def from_manifest(
+        cls,
+        item: ModelFile,
+        descriptor_slot: _FileDescriptorOwnerSlot,
+        owner_slot: _VerifiedModelFileOwnerSlot,
+    ) -> None:
+        if owner_slot.owner is not None:
+            raise ValueError("verified model file owner slot already populated")
+        descriptor_owner = descriptor_slot.owner
+        if descriptor_owner is None:
+            raise ValueError("verified model descriptor owner missing")
+        metadata = os.fstat(descriptor_owner.fileno())
+        owner_slot.owner = cls(
+            descriptor_owner,
             _ManifestBoundFile(item.path, item.size, item.sha256, metadata.st_dev, metadata.st_ino),
         )
+        descriptor_slot.owner = None
 
     @property
     def path(self) -> str:
@@ -287,22 +340,33 @@ class VerifiedModelFile:
     @property
     def fd(self) -> int:
         with self.__lock:
-            descriptor = self.__descriptor[0]
+            try:
+                descriptor = self.__descriptor_owner.fileno()
+            except OSError as error:
+                raise ModelVerificationError("verified model file is closed") from error
             if descriptor < 0:
                 raise ModelVerificationError("verified model file is closed")
             return descriptor
 
-    def _duplicate(self) -> int:
+    def _duplicate(self, owner_slot: _FileDescriptorOwnerSlot) -> None:
+        if owner_slot.owner is not None:
+            raise ValueError("duplicate descriptor owner slot already populated")
         with self.__lock:
-            descriptor = self.__descriptor[0]
-            if descriptor < 0:
-                raise ModelVerificationError("verified model file is closed")
-            return os.dup(descriptor)
+            try:
+                descriptor = self.__descriptor_owner.fileno()
+            except OSError as error:
+                raise ModelVerificationError("verified model file is closed") from error
+            owner_slot.owner = _FileDescriptorOwner()
+            owner_slot.owner.duplicate(descriptor)
 
     def verified(self) -> bool:
-        duplicate = -1
+        duplicate_slot = _FileDescriptorOwnerSlot()
         try:
-            duplicate = self._duplicate()
+            self._duplicate(duplicate_slot)
+            duplicate_owner = duplicate_slot.owner
+            if duplicate_owner is None:
+                raise RuntimeError("duplicate descriptor acquisition missing")
+            duplicate = duplicate_owner.fileno()
             metadata = os.fstat(duplicate)
             if (
                 fcntl.fcntl(duplicate, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY
@@ -318,14 +382,19 @@ class VerifiedModelFile:
         except (OSError, PermissionError, ValueError):
             return False
         finally:
-            if duplicate >= 0:
-                os.close(duplicate)
+            if duplicate_slot.owner is not None:
+                duplicate_slot.owner.close()
         return True
 
     def load_with(self, adapter: RuntimeAdapter) -> RuntimeFileReceipt:
-        duplicate = self._duplicate()
-        reader: PreadOnlyModelReader | None = None
+        duplicate_slot = _FileDescriptorOwnerSlot()
+        reader_slot = _PreadOnlyModelReaderOwnerSlot()
         try:
+            self._duplicate(duplicate_slot)
+            duplicate_owner = duplicate_slot.owner
+            if duplicate_owner is None:
+                raise RuntimeError("duplicate descriptor acquisition missing")
+            duplicate = duplicate_owner.fileno()
             duplicate_metadata = os.fstat(duplicate)
             if fcntl.fcntl(duplicate, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY or (
                 duplicate_metadata.st_dev,
@@ -333,8 +402,15 @@ class VerifiedModelFile:
             ) != (self.__expected.device, self.__expected.inode):
                 raise ModelVerificationError("runtime model descriptor mismatch")
             hash_exact_fd(duplicate, self.__expected.size, self.__expected.sha256)
-            reader = PreadOnlyModelReader(duplicate, self.__expected.size, self.__expected.sha256)
-            duplicate = -1
+            PreadOnlyModelReader.from_descriptor_owner(
+                duplicate_slot,
+                reader_slot,
+                self.__expected.size,
+                self.__expected.sha256,
+            )
+            reader = reader_slot.owner
+            if reader is None:
+                raise RuntimeError("model reader acquisition missing")
             receipt = adapter.load_verified_reader(
                 reader,
                 self.__expected.path,
@@ -344,17 +420,14 @@ class VerifiedModelFile:
             reader.require_complete()
             return receipt
         finally:
-            if duplicate >= 0:
-                os.close(duplicate)
-            if reader is not None:
-                reader.close()
+            if duplicate_slot.owner is not None:
+                duplicate_slot.owner.close()
+            if reader_slot.owner is not None:
+                reader_slot.owner.close()
 
     def close(self) -> None:
         with self.__lock:
-            descriptor = self.__descriptor[0]
-            self.__descriptor[0] = -1
-        if descriptor >= 0:
-            os.close(descriptor)
+            self.__descriptor_owner.close()
 
 
 @dataclass(frozen=True)
@@ -368,13 +441,18 @@ class ActivatedModel:
 
     @classmethod
     def from_manifest(
-        cls, entry: ModelEntry, files: tuple[VerifiedModelFile, ...]
-    ) -> ActivatedModel:
+        cls,
+        entry: ModelEntry,
+        files: tuple[VerifiedModelFile, ...],
+        owner_slot: _ActivatedModelOwnerSlot,
+    ) -> None:
+        if owner_slot.owner is not None:
+            raise ValueError("activated model owner slot already populated")
         expected = tuple((item.path, item.size, item.sha256) for item in entry.files)
         observed = tuple((item.path, item.size, item.sha256) for item in files)
         if not files or observed != expected:
             raise ModelVerificationError("activated model is not manifest-bound")
-        return cls(entry.model_id, entry.revision, files, expected)
+        owner_slot.owner = cls(entry.model_id, entry.revision, files, expected)
 
     @property
     def files(self) -> tuple[VerifiedModelFile, ...]:
@@ -431,10 +509,10 @@ class ActivatedModel:
         with self.__lock:
             if self.__closed[0]:
                 return
-            self.__closed[0] = True
             for item in self.__files:
                 with contextlib.suppress(OSError):
                     item.close()
+            self.__closed[0] = True
 
 
 class _ActivatedModelOwnerSlot:
@@ -503,38 +581,46 @@ class ModelRegistry:
             raise LookupError("model is not registered") from error
 
     def activate(self, model_id: str) -> ActivatedModel:
+        """Return a caller-owned lease over the activated model descriptors."""
         entry = self.entry(model_id)
         activated_slot = _ActivatedModelOwnerSlot()
-        root: OwnedDirectory | None = None
-        model: OwnedDirectory | None = None
+        root_slot = _OwnedDirectoryOwnerSlot()
+        model_slot = _OwnedDirectoryOwnerSlot()
+        lock_slot = _FileDescriptorOwnerSlot()
         try:
-            root = OwnedDirectory.open(self._root)
+            OwnedDirectory.open(self._root, root_slot)
+            root = root_slot.owner
+            if root is None:
+                raise RuntimeError("model root acquisition missing")
             with root.lock(
                 model_install_lock_name(entry.model_id),
+                lock_slot,
                 timeout_seconds=30.0,
                 shared=True,
             ):
-                model = root.child(entry.model_id)
+                root.child(entry.model_id, model_slot)
+                model = model_slot.owner
+                if model is None:
+                    raise RuntimeError("model directory acquisition missing")
                 self._activate_from_open_model(model, entry, activated_slot)
                 model.close()
-                model = None
             root.close()
-            root = None
+            activated = activated_slot.owner
+            if activated is None:
+                raise RuntimeError("model is not installed and verified")
+            return activated if setattr(activated_slot, "owner", None) is None else activated  # type: ignore[func-returns-value]
         except BaseException as error:
             if activated_slot.owner is not None:
                 close_preserving_primary(activated_slot.owner, ActivatedModel.close, error)
-            if model is not None:
-                close_preserving_primary(model, OwnedDirectory.close, error)
-            if root is not None:
-                close_preserving_primary(root, OwnedDirectory.close, error)
+            if model_slot.owner is not None:
+                close_preserving_primary(model_slot.owner, OwnedDirectory.close, error)
+            if lock_slot.owner is not None:
+                close_preserving_primary(lock_slot.owner, _FileDescriptorOwner.close, error)
+            if root_slot.owner is not None:
+                close_preserving_primary(root_slot.owner, OwnedDirectory.close, error)
             if not isinstance(error, Exception):
                 raise
             raise RuntimeError("model is not installed and verified") from error
-        activated = activated_slot.owner
-        if activated is None:
-            raise RuntimeError("model is not installed and verified")
-        activated_slot.owner = None
-        return activated
 
     @staticmethod
     def _activate_from_open_model(
@@ -545,27 +631,46 @@ class ModelRegistry:
         if activated_slot.owner is not None:
             raise ValueError("activated model owner slot already populated")
         handles: list[VerifiedModelFile] = []
-        revision: OwnedDirectory | None = None
-        commit_fd: int | None = None
+        revision_slot = _OwnedDirectoryOwnerSlot()
+        commit_slot = _FileDescriptorOwnerSlot()
+        descriptor_slot = _FileDescriptorOwnerSlot()
+        handle_slot = _VerifiedModelFileOwnerSlot()
         try:
             pending_name = recovery_pending_name(entry.revision)
             if entry_exists_at(model, pending_name):
                 raise PermissionError("model revision recovery is pending")
-            commit_fd = open_publication_commit(model, entry.revision)
-            revision = model.child(entry.revision, mode=0o500)
+            open_publication_commit(model, entry.revision, commit_slot)
+            commit_owner = commit_slot.owner
+            if commit_owner is None:
+                raise RuntimeError("publication commit acquisition missing")
+            model.child(entry.revision, revision_slot, mode=0o500)
+            revision = revision_slot.owner
+            if revision is None:
+                raise RuntimeError("model revision acquisition missing")
             expected_names = tuple(sorted(item.path for item in entry.files))
             if tuple(sorted(os.listdir(revision.fd))) != expected_names:
                 raise PermissionError("unsafe model filesystem revision")
             for item in entry.files:
-                descriptor = open_regular_at(
-                    revision, item.path, os.O_RDONLY, mode=0o400, expected_mode=0o400
+                descriptor_slot = _FileDescriptorOwnerSlot()
+                handle_slot = _VerifiedModelFileOwnerSlot()
+                open_regular_at(
+                    revision,
+                    item.path,
+                    os.O_RDONLY,
+                    descriptor_slot,
+                    mode=0o400,
+                    expected_mode=0o400,
                 )
-                try:
-                    hash_exact_fd(descriptor, item.size, item.sha256)
-                    handles.append(VerifiedModelFile.from_manifest(item, descriptor))
-                except BaseException as error:
-                    close_preserving_primary(descriptor, os.close, error)
-                    raise
+                descriptor_owner = descriptor_slot.owner
+                if descriptor_owner is None:
+                    raise RuntimeError("model artifact descriptor acquisition missing")
+                hash_exact_fd(descriptor_owner.fileno(), item.size, item.sha256)
+                VerifiedModelFile.from_manifest(item, descriptor_slot, handle_slot)
+                handle = handle_slot.owner
+                if handle is None:
+                    raise RuntimeError("verified model file acquisition missing")
+                handles.append(handle)
+                handle_slot.owner = None
             if tuple(sorted(os.listdir(revision.fd))) != expected_names:
                 raise PermissionError("unsafe model filesystem revision")
             if entry_exists_at(model, pending_name):
@@ -573,32 +678,34 @@ class ModelRegistry:
             require_publication_commit(
                 model,
                 entry.revision,
-                commit_fd,
+                commit_owner.fileno(),
                 expected_mode=0o400,
                 require_read_only=True,
             )
-            activated_slot.owner = ActivatedModel.from_manifest(entry, tuple(handles))
+            ActivatedModel.from_manifest(entry, tuple(handles), activated_slot)
             handles.clear()
+            if (
+                activated_slot.owner is None
+                or revision_slot.owner is None
+                or commit_slot.owner is None
+            ):
+                raise RuntimeError("model activation did not retain verified files")
+            revision_slot.owner.close()
+            commit_slot.owner.close()
         except BaseException as error:
             if activated_slot.owner is None:
                 for handle in handles:
                     close_preserving_primary(handle, VerifiedModelFile.close, error)
-            if revision is not None:
-                close_preserving_primary(revision, OwnedDirectory.close, error)
-            if commit_fd is not None:
-                descriptor_to_close = commit_fd
-                commit_fd = None
-                close_preserving_primary(descriptor_to_close, os.close, error)
+            if handle_slot.owner is not None:
+                close_preserving_primary(handle_slot.owner, VerifiedModelFile.close, error)
+            if descriptor_slot.owner is not None:
+                close_preserving_primary(
+                    descriptor_slot.owner,
+                    _FileDescriptorOwner.close,
+                    error,
+                )
+            if revision_slot.owner is not None:
+                close_preserving_primary(revision_slot.owner, OwnedDirectory.close, error)
+            if commit_slot.owner is not None:
+                close_preserving_primary(commit_slot.owner, _FileDescriptorOwner.close, error)
             raise
-        if activated_slot.owner is None or revision is None or commit_fd is None:
-            raise RuntimeError("model activation did not retain verified files")
-        try:
-            revision.close()
-        except BaseException as error:
-            descriptor_to_close = commit_fd
-            commit_fd = None
-            close_preserving_primary(descriptor_to_close, os.close, error)
-            raise
-        descriptor_to_close = commit_fd
-        commit_fd = None
-        os.close(descriptor_to_close)
