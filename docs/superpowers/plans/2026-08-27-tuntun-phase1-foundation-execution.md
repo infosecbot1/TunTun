@@ -27831,6 +27831,7 @@ Task 10.
 **Estimated effort:** 2 person-days.
 
 **Files:**
+- Modify: `docs/superpowers/plans/2026-08-27-tuntun-phase1-foundation-execution.md`
 - Modify: `Makefile`
 - Modify: `apps/core/pyproject.toml`
 - Modify: `uv.lock`
