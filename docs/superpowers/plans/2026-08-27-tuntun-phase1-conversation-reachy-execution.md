@@ -49,12 +49,16 @@
 
 The foundation DTOs and ports are immutable and authoritative. This plan imports, without redefining or extending, `RouteAuthorization`, `RouteAuthorizationRequest`, `RouteConsumption`, `Commitment`, `BudgetPort`, `BudgetReconciliationRequest`, `TransportProof`, `EventEnvelope`, `SignedEventEnvelope`, `CameraWindowGrant`, and the authorized provider DTOs. Stable provider methods are exactly `RouteAuthorizerPort.authorize(RouteAuthorizationRequest) -> RouteAuthorization` and `RouteAuthorizerPort.consume(UUID, RouteConsumption) -> None`; budget calls use the one finalized async `BudgetPort`. Public application signatures remain exactly `ConversationWorkflow.run(TurnInput) -> TurnOutput`, `ReachyPort.send(ReachyCommand) -> ReachyReceipt`, `ReachyPort.health() -> ReachyHealth`, `ReachyPort.stop_all(UUID | None) -> SafetyReceipt`, `StopInputPort.receive() -> StopSignal`, and `AudioConverterPort.convert(audio, source, target) -> AsyncIterator[bytes]`. `TurnRequest`/`TurnOutcome`, `play`, `set_state`, and cancellation are private engine seams behind explicit adapters; they are not competing public ports.
 
+Foundation Task 9 is an external serial prerequisite wherever this plan imports or extends its deterministic testing surface. Task 02 and Task 06 may use `FakeClock` only after the accepted Foundation Task 9 commit is merged into this branch; Task 06 may append recording provider fakes only after Foundation Task 9 owns `fake_providers.py`; Tasks 07 and 16 may use `guest_hinglish_scenario()` only after that scenario API is present; and Task 08 must follow Foundation Task 9 before extending `fake_reachy.py`, `apps/core/src/tuntun_core/cli/main.py`, `apps/core/pyproject.toml`, or `uv.lock`. Tasks 10 and 16 inherit the same lockfile/project-file serialization and must regenerate `uv.lock` only from the merged preceding task state. The concurrently executing Foundation Task 9 branch is not edited by this plan.
+
+Reachy commissioning authorization is controlled by an opaque owner-approved host-inventory record reference, not by a physical model or product string. The active household target record must attest Darwin arm64 local-host facts for the approved core host while distribution qualification also preserves mandatory Intel macOS/x86_64 support. Hardware names, purchase descriptions, marketing model names, architecture strings, or product-year labels may appear only as evidence fields inside signed inventory records; none may be accepted as authorization.
+
 ---
 
 ### Task 01: Master WP07 — Pure Conversation State Machine
 
 **Master package:** WP07
-**Depends on:** Foundation contracts and repository bootstrap
+**Depends on:** Foundation contracts and repository bootstrap. This task is stdlib-only and does not consume Task 02 output or Foundation Task 9 testing helpers.
 **Estimated effort:** 1.5 person-days
 
 **Files:**
@@ -62,8 +66,9 @@ The foundation DTOs and ports are immutable and authoritative. This plan imports
 - Test: `tests/unit/conversation/test_state_machine.py`
 
 **Interfaces:**
-- Consumes: `UUID`, aware UTC event timestamps from Task 02 contracts.
-- Produces: `TurnState`, `TurnEvent`, `Transition`, `transition(state: TurnState, event: TurnEvent) -> Transition`.
+- Consumes: no project runtime contract; only Python stdlib `dataclasses` and `enum`.
+- Produces: `TurnState`, `TurnEvent`, `Transition`, and `transition(state: TurnState, event: TurnEvent) -> Transition`, including declarative effect labels `finish_turn` and `clear_ephemeral` for the normal `SPEAKING + PLAYBACK_END -> IDLE` terminal transition.
+- Integration owner: Task 07 is the first executable owner of Task 01's transition output. It must dispatch `finish_turn` to Task 02's `TurnCoordinator.finish(turn_id)` and dispatch `clear_ephemeral` to `EphemeralTurnContext.clear(turn_id)` only after the finish barrier releases. Task 02 owns the locked finish/cancel safety barriers but does not import this pure state machine.
 
 - [ ] **Step 1: Write the failing transition tests**
 
@@ -75,20 +80,32 @@ from tuntun_core.domain.conversation import TurnEvent, TurnState, transition
 
 
 @pytest.mark.parametrize(
-    ("state", "event", "expected"),
+    ("state", "event", "expected_state", "expected_effects"),
     [
-        (TurnState.IDLE, TurnEvent.WAKE, TurnState.AWAKE),
-        (TurnState.AWAKE, TurnEvent.AUDIO_OPEN, TurnState.LISTENING),
-        (TurnState.LISTENING, TurnEvent.AUDIO_END, TurnState.TRANSCRIBING),
-        (TurnState.TRANSCRIBING, TurnEvent.TRANSCRIPT, TurnState.IDENTIFYING),
-        (TurnState.IDENTIFYING, TurnEvent.IDENTITY, TurnState.AUTHORIZING),
-        (TurnState.AUTHORIZING, TurnEvent.AUTHORIZED, TurnState.THINKING),
-        (TurnState.THINKING, TurnEvent.RESPONSE, TurnState.SPEAKING),
-        (TurnState.SPEAKING, TurnEvent.PLAYBACK_END, TurnState.IDLE),
+        (TurnState.IDLE, TurnEvent.WAKE, TurnState.AWAKE, ()),
+        (TurnState.AWAKE, TurnEvent.AUDIO_OPEN, TurnState.LISTENING, ()),
+        (TurnState.LISTENING, TurnEvent.AUDIO_END, TurnState.TRANSCRIBING, ()),
+        (TurnState.TRANSCRIBING, TurnEvent.TRANSCRIPT, TurnState.IDENTIFYING, ()),
+        (TurnState.IDENTIFYING, TurnEvent.IDENTITY, TurnState.AUTHORIZING, ()),
+        (TurnState.AUTHORIZING, TurnEvent.AUTHORIZED, TurnState.THINKING, ()),
+        (TurnState.THINKING, TurnEvent.RESPONSE, TurnState.SPEAKING, ()),
+        (
+            TurnState.SPEAKING,
+            TurnEvent.PLAYBACK_END,
+            TurnState.IDLE,
+            ("finish_turn", "clear_ephemeral"),
+        ),
     ],
 )
-def test_happy_path(state: TurnState, event: TurnEvent, expected: TurnState) -> None:
-    assert transition(state, event).state is expected
+def test_happy_path(
+    state: TurnState,
+    event: TurnEvent,
+    expected_state: TurnState,
+    expected_effects: tuple[str, ...],
+) -> None:
+    result = transition(state, event)
+    assert result.state is expected_state
+    assert result.effects == expected_effects
 
 
 @pytest.mark.parametrize("state", [state for state in TurnState if state is not TurnState.IDLE])
@@ -160,14 +177,17 @@ class Transition:
 
 
 _FORWARD = {
-    (TurnState.IDLE, TurnEvent.WAKE): TurnState.AWAKE,
-    (TurnState.AWAKE, TurnEvent.AUDIO_OPEN): TurnState.LISTENING,
-    (TurnState.LISTENING, TurnEvent.AUDIO_END): TurnState.TRANSCRIBING,
-    (TurnState.TRANSCRIBING, TurnEvent.TRANSCRIPT): TurnState.IDENTIFYING,
-    (TurnState.IDENTIFYING, TurnEvent.IDENTITY): TurnState.AUTHORIZING,
-    (TurnState.AUTHORIZING, TurnEvent.AUTHORIZED): TurnState.THINKING,
-    (TurnState.THINKING, TurnEvent.RESPONSE): TurnState.SPEAKING,
-    (TurnState.SPEAKING, TurnEvent.PLAYBACK_END): TurnState.IDLE,
+    (TurnState.IDLE, TurnEvent.WAKE): Transition(TurnState.AWAKE, ()),
+    (TurnState.AWAKE, TurnEvent.AUDIO_OPEN): Transition(TurnState.LISTENING, ()),
+    (TurnState.LISTENING, TurnEvent.AUDIO_END): Transition(TurnState.TRANSCRIBING, ()),
+    (TurnState.TRANSCRIBING, TurnEvent.TRANSCRIPT): Transition(TurnState.IDENTIFYING, ()),
+    (TurnState.IDENTIFYING, TurnEvent.IDENTITY): Transition(TurnState.AUTHORIZING, ()),
+    (TurnState.AUTHORIZING, TurnEvent.AUTHORIZED): Transition(TurnState.THINKING, ()),
+    (TurnState.THINKING, TurnEvent.RESPONSE): Transition(TurnState.SPEAKING, ()),
+    (
+        TurnState.SPEAKING,
+        TurnEvent.PLAYBACK_END,
+    ): Transition(TurnState.IDLE, ("finish_turn", "clear_ephemeral")),
 }
 
 
@@ -195,11 +215,13 @@ def transition(state: TurnState, event: TurnEvent) -> Transition:
         )
     if state is not TurnState.IDLE and event is TurnEvent.INVARIANT_FAILURE:
         return Transition(TurnState.ERROR_SAFE, ("close_media_egress", "stop_reachy"))
-    next_state = _FORWARD.get((state, event))
-    if next_state is None:
+    forward = _FORWARD.get((state, event))
+    if forward is None:
         raise ValueError(f"illegal transition {state.name} + {event.name}")
-    return Transition(next_state, ())
+    return forward
 ```
+
+`finish_turn` and `clear_ephemeral` are declarative effect labels, not local side effects in Task 01. Task 07 must be the first task to execute them, and Task 02's `TurnCoordinator.finish` remains the only normal-terminal owner of Reachy output silence, motion stop, buffer clear, unsettled-attempt rejection, and turn release.
 
 - [ ] **Step 4: Run the green test and static checks**
 
@@ -222,7 +244,7 @@ git commit -m "feat(conversation): add fail-closed turn state machine"
 ### Task 02: Master WP07 — Single-Session Coordinator and Safe Cancellation
 
 **Master package:** WP07
-**Depends on:** Task 01 and foundation `BudgetPort`/`ReachyPort` contracts
+**Depends on:** Task 01, accepted Foundation Task 9 for `FakeClock` test support, and foundation `BudgetPort`/`ReachyPort` contracts
 **Estimated effort:** 2 person-days
 
 **Files:**
@@ -234,8 +256,8 @@ git commit -m "feat(conversation): add fail-closed turn state machine"
 - Test: `tests/integration/test_turn_cancellation.py`
 
 **Interfaces:**
-- Consumes: `transition`, `BudgetPort`, `ReachyPort`, monotonic `ClockPort`.
-- Produces: `SessionManager.open(household_id, turn_id)`, `TurnCoordinator.start`, `track_reservation`/`complete_reservation`, full-barrier `TurnCoordinator.finish`, shielded `TurnCoordinator.cancel`, fresh-local-owner-only `TurnCoordinator.recover_safety_block`, closed `CoordinatorState`, bounded `CancellationHealthRecorder`, and `IdempotencyStore.claim`. The coordinator consumes only the exact frozen `ReachyPort.stop_all(...) -> SafetyReceipt`: exact type and turn binding plus `playback_stopped`, `motion_stopped`, and `buffers_cleared` all true are the complete output-silenced/motion-stopped/buffer-cleared proof. Any false, subclass/private DTO, malformed, wrong-turn, raised, or timed-out result latches error-safe `SAFETY_BLOCKED` with the active turn retained. Cancellation releases ownership only after tracked work is joined, Reachy safety is exact, and every tracked budget attempt is successfully reconciled; a reconciliation failure retains the same attempts for verified-owner retry. Ordinary finish rejects any tracked unsettled attempt, then owns the same exact Reachy/output barrier before release.
+- Consumes: foundation `BudgetPort`, foundation `ReachyPort`, monotonic `ClockPort`, and Foundation Task 9's `FakeClock` in tests only. It does not import or execute Task 01's `transition`; Task 07 owns that executable integration.
+- Produces: `TurnCoordinator.start`, synchronous `track_reservation`/`complete_reservation` methods that satisfy Task 06's structural `TurnAttemptTracker` Protocol, full-barrier `TurnCoordinator.finish`, shielded `TurnCoordinator.cancel`, fresh-local-owner-only `TurnCoordinator.recover_safety_block`, closed `CoordinatorState`, bounded `CancellationHealthRecorder`, `IdempotencyStore.claim`, and a `manager.py` compatibility module that re-exports `TurnCoordinator`. There is no separate public `SessionManager` class or `SessionManager.open` method in Phase 1. The coordinator consumes only the exact frozen `ReachyPort.stop_all(...) -> SafetyReceipt`: exact type and turn binding plus `playback_stopped`, `motion_stopped`, and `buffers_cleared` all true are the complete output-silenced/motion-stopped/buffer-cleared proof. Any false, subclass/private DTO, malformed, wrong-turn, raised, or timed-out result latches error-safe `SAFETY_BLOCKED` with the active turn retained. Cancellation releases ownership only after tracked work is joined, Reachy safety is exact, and every tracked budget attempt is successfully reconciled; a reconciliation failure retains the same attempts for verified-owner retry. Ordinary finish rejects any tracked unsettled attempt, then owns the same exact Reachy/output barrier before release. Task 07 maps Task 01's normal-terminal `finish_turn` effect to this `finish` method and maps `clear_ephemeral` to its workflow context only after `finish` releases.
 
 - [ ] **Step 1: Write failing exclusivity and cancellation tests**
 
@@ -582,9 +604,62 @@ async def test_forever_hung_reconciliation_times_out_blocked_and_retries_same_at
     assert case.coordinator.active_turn_id() is None
 ```
 
+```python
+# tests/integration/test_session_exclusivity.py
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+
+from tuntun_contracts.reachy import SafetyReceipt
+from tuntun_core.services.sessions import manager as session_manager
+from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
+from tuntun_testing.fake_clock import FakeClock
+
+
+class BudgetFake:
+    async def reconcile_turn(self, _request):
+        return ()
+
+
+class ReachyFake:
+    def __init__(self) -> None:
+        self.stopped_turns = []
+
+    async def stop_all(self, turn_id):
+        self.stopped_turns.append(turn_id)
+        return SafetyReceipt(
+            turn_id=turn_id,
+            playback_stopped=True,
+            motion_stopped=True,
+            buffers_cleared=True,
+        )
+
+
+def test_manager_module_is_a_compatibility_export_not_a_second_session_api() -> None:
+    assert session_manager.TurnCoordinator is TurnCoordinator
+    assert not hasattr(session_manager, "SessionManager")
+
+
+@pytest.mark.asyncio
+async def test_single_household_turn_admits_successor_only_after_finish_barrier() -> None:
+    coordinator = TurnCoordinator(
+        budget=BudgetFake(),
+        reachy=ReachyFake(),
+        clock=FakeClock(datetime(2026, 8, 27, tzinfo=UTC)),
+    )
+    first, second = uuid4(), uuid4()
+    await coordinator.start(first)
+    with pytest.raises(RuntimeError, match="household conversation busy"):
+        await coordinator.start(second)
+    assert await coordinator.finish(first) is True
+    await coordinator.start(second)
+    assert coordinator.is_current(second) is True
+```
+
 - [ ] **Step 2: Run the test and observe the red result**
 
-Run: `uv run pytest tests/integration/test_turn_cancellation.py -q`
+Run: `uv run pytest tests/integration/test_turn_cancellation.py tests/integration/test_session_exclusivity.py -q`
 
 Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tuntun_core.services.sessions.turn_coordinator'`.
 
@@ -996,6 +1071,8 @@ from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
 
 __all__ = ["TurnCoordinator"]
 ```
+
+`manager.py` is retained only as a compatibility import path for the coordinator. Adding a second `SessionManager.open(...)` abstraction is explicitly out of scope for Phase 1 unless a later specification update introduces a real second session-management boundary.
 
 ```python
 # apps/core/src/tuntun_core/services/sessions/idempotency.py
@@ -5731,7 +5808,7 @@ git commit -m "feat(budget): reserve and settle every provider attempt"
 ### Task 06: Master WP10 — Retry Owner and OpenAI Adapters
 
 **Master package:** WP10
-**Depends on:** Tasks 03–05
+**Depends on:** Tasks 03–05 plus accepted Foundation Task 9 for `FakeClock`, `packages/testing/src/tuntun_testing/fake_providers.py`, `apps/core/pyproject.toml`, and `uv.lock`
 **Estimated effort:** 3.5 person-days
 
 **Files:**
@@ -5756,6 +5833,7 @@ git commit -m "feat(budget): reserve and settle every provider attempt"
 - Test: `tests/integration/providers/test_response_receipts.py`
 - Test: `tests/contract/openai/test_transcribe_request.py`
 - Test: `tests/contract/openai/test_responses_request.py`
+- Test: `tests/contract/openai/test_authorized_signatures.py`
 - Test: `tests/contract/openai/test_tts_request.py`
 - Test: `tests/contract/tts/test_macos_say_offline.py`
 - Test: `tests/integration/providers/test_tts_activation.py`
@@ -5764,7 +5842,7 @@ git commit -m "feat(budget): reserve and settle every provider attempt"
 - Test: `tests/security/test_no_external_telemetry.py`
 
 **Interfaces:**
-- Consumes: foundation `RouteAuthorizerPort`, `RouteAuthorizationRequest`, `RouteConsumption`, and the sole foundation `BudgetPort`, the Task-02 `TurnAttemptTracker`, plus frozen authorized speech/provider DTOs and the Keychain OpenAI key.
+- Consumes: foundation `RouteAuthorizerPort`, `RouteAuthorizationRequest`, `RouteConsumption`, and the sole foundation `BudgetPort`, the local structural `TurnAttemptTracker` Protocol implemented by Task 02's synchronous `TurnCoordinator.track_reservation`/`complete_reservation` methods, plus frozen authorized speech/provider DTOs and the Keychain OpenAI key. Task 06 appends only its recording provider fakes to Foundation Task 9's accepted `fake_providers.py` after that branch is merged; it does not edit Foundation Task 9's branch.
 - Produces: `AttemptRunner.run`, `AttemptRunner.stream`, exact reserve → synchronous turn-track → durable terminal budget commit → synchronous turn-complete ordering, `OpenAITranscriber.transcribe(AuthorizedTranscriptionRequest, AsyncIterator[bytes])`, `OpenAISol.complete(SanitizedProviderRequest)`, `OpenAITTS.synthesize(AuthorizedSynthesisRequest)`, concrete `MacOSSayOfflineTTS.synthesize(OfflineSynthesisRequest)`, `TtsActivationGate.require_family_voice()`, and `ProviderResponseReceiptService.record(route, validated_turn) -> ProviderResponseReceipt`; no public cloud adapter method accepts raw audio, message dictionaries, schemas, plain text, a money estimate, or caller-supplied actual usage. A final `ProviderResponse` contains only `provider_usage_receipt_id: UUID|None`, never raw usage or a usage-present authority flag, and cannot return until the Task-05 gateway has terminalized the call and persisted the matching usage receipt (or failed closed on unknown usage). `GatewayStreamLease.finalize()` is the explicit EOF barrier; Sol calls it after the final response and TTS calls it before exposing its sole `final=True` chunk. Early close/cancellation exposes no terminal chunk and reconciles one attempt/charge. The output receipt is created only after closed-schema validation and before proposal mapping; it binds request/attempt/authorization/household/subject/session/turn/provider/model plus a commitment to the canonical validated `AssistantTurn`.
 - Output handling parses the closed provider-facing intent unions, maps them locally to frozen internal proposal unions, runs a second output DLP and current TTS-consent check, then gives every bounded sentence segment a fresh reservation/authorization before its gateway-only call. PCM is capped at 8 MiB per segment and emitted in ≤64 KiB chunks.
 - Retry limits: STT upload `1` attempt; reasoning `2` attempts total; each TTS sentence segment `2` attempts total. Only pre-response connection failure, HTTP 408, 409, 429, 500, 502, 503, and 504 are retryable. Cancellation, validation errors, other 4xx responses, and a settled turn are never retried.
@@ -7586,7 +7664,7 @@ git commit -m "feat(providers): add explicitly budgeted OpenAI attempts"
 ### Task 07: Master WP11 — Simulated Guest Conversation Slice
 
 **Master package:** WP11
-**Depends on:** Tasks 01–06
+**Depends on:** Tasks 01–06 plus accepted Foundation Task 9 for `guest_hinglish_scenario()`
 **Estimated effort:** 2 person-days
 
 **Files:**
@@ -7609,8 +7687,8 @@ git commit -m "feat(providers): add explicitly budgeted OpenAI attempts"
 - Test: `tests/integration/api/test_guest_bootstrap.py`
 
 **Interfaces:**
-- Consumes: foundation `TurnInput`/`TurnOutput`, Task 02 coordinator, Task 04 gateway, Task 05 budget, Task 06 adapters, a bounded RAM-only `CompletedTurnAudioPort`, fake Guest identity, and empty memory context.
-- Produces: public `ContractConversationWorkflow.run(turn: TurnInput) -> TurnOutput`; private deterministic `LinearConversationEngine.run(turn: TurnRequest) -> TurnOutcome`; `EphemeralTurnContext.put/pop/clear`; and the first-owned minimal FastAPI composition (`api/app.py`, `dependencies.py`, `routes/session.py`, `routes/health.py`) exposing only the simulated local session and readiness surface. Cancellation remains `TurnCoordinator.cancel(turn_id, reason)` and is triggered by the stop loop; it is not added to the frozen public workflow port. Every later phase modifies this one app/composition root rather than assuming an anchor-only file.
+- Consumes: foundation `TurnInput`/`TurnOutput`, Task 01 `TurnState`/`TurnEvent`/`transition`, Task 02 coordinator, Task 04 gateway, Task 05 budget, Task 06 adapters, a bounded RAM-only `CompletedTurnAudioPort`, Foundation Task 9's fake Guest identity/scenario API, and empty memory context.
+- Produces: public `ContractConversationWorkflow.run(turn: TurnInput) -> TurnOutput`; private deterministic `LinearConversationEngine.run(turn: TurnRequest) -> TurnOutcome`; the executable Task-01 effect dispatcher for `finish_turn` and `clear_ephemeral`; `EphemeralTurnContext.put/pop/clear`; the integration-test fixture evidence surface that records `effect_order`; and the first-owned minimal FastAPI composition (`api/app.py`, `dependencies.py`, `routes/session.py`, `routes/health.py`) exposing only the simulated local session and readiness surface. `finish_turn` maps only to `TurnCoordinator.finish(turn_id)` and `clear_ephemeral` maps only to `EphemeralTurnContext.clear(turn_id)`, in that order for the normal `PLAYBACK_END` terminal. Cancellation remains `TurnCoordinator.cancel(turn_id, reason)` and is triggered by the stop loop; it is not added to the frozen public workflow port. Every later phase modifies this one app/composition root rather than assuming an anchor-only file.
 
 - [ ] **Step 1: Write the failing order and cleanup test**
 
@@ -7774,6 +7852,8 @@ async def test_failed_budget_barrier_never_falls_back_to_finish_or_releases(
 # tests/integration/test_turn_lifecycle.py
 import pytest
 
+from tuntun_core.domain.conversation import TurnEvent, TurnState, transition
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal", ("success", "denied", "error", "ingress_failure"))
@@ -7842,6 +7922,20 @@ async def test_durable_terminal_settlement_completes_exact_pair_then_finish_runs
     assert case.completed_attempt_pairs==[(case.reservation_id,case.attempt_id)]
     assert case.reachy.stop_calls==[case.turn.turn_id]
     assert case.coordinator.active_turn_id() is None
+
+
+@pytest.mark.asyncio
+async def test_task01_playback_terminal_dispatches_finish_before_ephemeral_clear(
+    lifecycle_case,
+) -> None:
+    transition_result = transition(TurnState.SPEAKING, TurnEvent.PLAYBACK_END)
+    assert transition_result.effects == ("finish_turn", "clear_ephemeral")
+    case = lifecycle_case("success")
+    output = await case.workflow.run(case.turn)
+    assert output.outcome == "completed"
+    assert case.effect_order[-2:] == ["finish_turn", "clear_ephemeral"]
+    assert case.coordinator.finish_calls == [case.turn.turn_id]
+    assert case.engine.ephemeral.contains(case.turn.turn_id) is False
 ```
 
 - [ ] **Step 2: Run the test and observe the red result**
@@ -7886,6 +7980,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from tuntun_core.domain.conversation import TurnEvent, TurnState, transition
 from tuntun_core.workflows.ephemeral_turn_context import EphemeralTurnContext
 
 
@@ -7918,33 +8013,44 @@ class LinearConversationEngine:
 
     async def run(self, turn: TurnRequest) -> TurnOutcome:
         start_attempted = False
+        state = TurnState.IDLE
         primary_error: BaseException | None = None
         self.ephemeral.put(turn.turn_id, {"wav": turn.wav_bytes})
         try:
+            state = transition(state, TurnEvent.WAKE).state
             start_attempted = True
             await self._ports.start(turn.turn_id)
+            state = transition(state, TurnEvent.AUDIO_OPEN).state
             transcript = await self._ports.transcribe(turn.wav_bytes)
             self.ephemeral.put(turn.turn_id, {"transcript": transcript})
+            state = transition(state, TurnEvent.AUDIO_END).state
+            state = transition(state, TurnEvent.TRANSCRIPT).state
             identity = await self._ports.guest_identity()
+            state = transition(state, TurnEvent.IDENTITY).state
+            state = transition(state, TurnEvent.AUTHORIZED).state
             answer = await self._ports.generate(transcript, identity)
+            state = transition(state, TurnEvent.RESPONSE).state
             self.ephemeral.put(turn.turn_id, {"answer": answer})
             pcm = await self._ports.synthesize(answer)
             await self._ports.play(turn.turn_id, pcm)
+            terminal = transition(state, TurnEvent.PLAYBACK_END)
+            if terminal.effects != ("finish_turn", "clear_ephemeral"):
+                raise RuntimeError("unexpected Task 01 normal terminal effects")
             return TurnOutcome(spoken=True)
         except BaseException as error:
             primary_error = error
             raise
         finally:
             cleanup_error: BaseException | None = None
-            try:
-                self.ephemeral.clear(turn.turn_id)
-            except BaseException as error:
-                cleanup_error = error
             if start_attempted:
                 try:
                     await self._ports.finish(turn.turn_id)
                 except BaseException as error:
                     cleanup_error = cleanup_error or error
+            try:
+                self.ephemeral.clear(turn.turn_id)
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
             if cleanup_error is not None:
                 self.cleanup_reason_codes.append("turn_cleanup_failed")
                 if primary_error is None:
@@ -8213,10 +8319,11 @@ git commit -m "feat(core): add ephemeral simulated guest conversation"
 ### Task 08: Master WP12 — Delivered Reachy Capability and Security Probe
 
 **Master package:** WP12
-**Depends on:** Foundation repository bootstrap and Task 07 simulated slice
+**Depends on:** accepted Foundation Task 9 repository/testing baseline and Task 07 simulated slice
 **Estimated effort:** 2 person-days
 
 **Files:**
+- Modify: `packages/testing/src/tuntun_testing/fake_reachy.py`
 - Create: `apps/edge/src/tuntun_edge/reachy/probe.py`
 - Create: `apps/edge/src/tuntun_edge/config.py`
 - Create: `apps/edge/src/tuntun_edge/transport/commissioning.py`
@@ -8241,8 +8348,8 @@ git commit -m "feat(core): add ephemeral simulated guest conversation"
 - Create: `docs/operations/reachy-commissioning.md`
 
 **Interfaces:**
-- Consumes: delivered `ReachyMini(media_backend="local")` and local daemon API.
-- Produces: `CapabilityReport` with sanitized media/AEC/DoA/app-lock/controller/port/key-storage, cold-boot RTC, local SSH principal and target-interpreter qualification facts; `probe(reachy) -> CapabilityReport`; a closed boot-time `SecureTimeGate`; local-physical `ReachyCommissioningService`; the sole registered `tuntun-edge = tuntun_edge.cli.main:main` console dispatcher with initial closed `reachy commission|recommission` commands; atomic owner-only `CommissioningRepository`; owner-only persisted `ReachyCoreEndpointV1` commissioning for the one declared 2020 MacBook's reserved numeric IPv4/L2 endpoint; and separately persisted `ReachyNetworkConfigV1.reachy_ingress_interface` for the local Reachy NIC. Later tasks extend this one dispatcher rather than registering another executable. The shared `ReachyOperatorStateV1` is a distinct Mac-side projection containing the Reachy device's numeric RFC1918 SSH address—not `ReachyCoreEndpointV1.core_ipv4`, which identifies the Mac—plus the exact locally probed non-root POSIX SSH username, pinned host-key and DHCP-receipt digests, exact current commissioning generation/digest, accepted capability-report digest, SDK/daemon versions, exact `/venvs/apps_venv/bin/python3` version/ABI/qualified wheel-platform tuple, and acceptance-receipt digest. The hardware gate accepts only a username proved locally to exist, to match the key-only pinned-host session, and to have the exact bounded installer/managed-app privileges; it installs a fresh owner key, disables/rejects password and default-password login, and never relies on a documentation-default account. The explicit delivered-hardware test publishes the projection atomically owner-only only after every Task-08 acceptance assertion passes; a failed/recommissioned/revoked generation never replaces or remains current. This task also owns the concrete `ReachyOperatorReader.from_fixed_owner_file()` and the existing `tuntunctl reachy` core group with initial exact commands `compatibility --field sdk|daemon|python-version|python-abi|wheel-platform|python-executable` and `commissioned-ssh-target --numeric --plain`. The former reads the accepted operator projection and prints one validated closed value plus a newline; the latter prints `<accepted-ssh-username>@<Reachy-device-numeric-RFC1918-IPv4>` plus a newline. The reader imports only the shared contract and opens canonical `/private/var/lib/tuntun/reachy/operator-state.json`; its descriptor-based root walker opens every component without following symlinks, requires root-owned non-group/world-writable system ancestors, then effective-owner mode `0700` on the app directory and `0600` on the state. It freezes descriptor/named inode identity, caps the state at 32 KiB and JSON depth/containers/tokens before parsing, requires canonical bytes and the exact current non-revoked commissioning/acceptance generation, and performs no socket/DNS/subprocess/write operation. Both commands reject symlinks, stale/revoked generations, the Mac's `core_ipv4`, DNS names, extra fields/arguments, unsafe or acceptance-mismatched SSH usernames, unsupported/mismatched interpreter tuples, missing qualification, malformed or oversized state, and any network access with exit `70`; Typer syntax/usage errors remain exit `2`. Release Task 3 extends this same group with lifecycle qualification commands; no second core command module or alternate resolver is allowed. Reachy client-TLS and Ed25519 frame-signing private keys are generated on Reachy. The per-generation HMAC root is independently derived on Reachy and the Mac with X25519/HKDF; no private or symmetric key bytes cross the ceremony boundary, only CSRs and public agreement/signing material. Peer commissioning data never contains the local interface name.
+- Consumes: Foundation Task 9's accepted `packages/testing/src/tuntun_testing/fake_reachy.py`, delivered `ReachyMini(media_backend="local")`, a local daemon API, and an opaque owner-approved core-host inventory record. Physical model/product strings, architecture names, purchase names, or year labels are evidence only and never authorization.
+- Produces: the Task-08 `FakeReachyProbe` test producer appended to `fake_reachy.py`; `CapabilityReport` with sanitized media/AEC/DoA/app-lock/controller/port/key-storage, cold-boot RTC, local SSH principal and target-interpreter qualification facts; `probe(reachy) -> CapabilityReport`; a closed boot-time `SecureTimeGate`; local-physical `ReachyCommissioningService`; the sole registered `tuntun-edge = tuntun_edge.cli.main:main` console dispatcher with initial closed `reachy commission|recommission` commands; atomic owner-only `CommissioningRepository`; owner-only persisted `ReachyCoreEndpointV1` commissioning for the single opaque approved core-host inventory record's reserved numeric IPv4/L2 endpoint; and separately persisted `ReachyNetworkConfigV1.reachy_ingress_interface` for the local Reachy NIC. The approved host-inventory reference is the only deployment authority; it must bind the active household target as Darwin arm64 and also bind an Intel macOS/x86_64 distribution-support receipt, but those platform facts cannot themselves authorize commissioning. Later tasks extend this one dispatcher rather than registering another executable. The shared `ReachyOperatorStateV1` is a distinct Mac-side projection containing the Reachy device's numeric RFC1918 SSH address—not `ReachyCoreEndpointV1.core_ipv4`, which identifies the Mac—plus the exact locally probed non-root POSIX SSH username, pinned host-key and DHCP-receipt digests, exact current commissioning generation/digest, accepted capability-report digest, SDK/daemon versions, exact `/venvs/apps_venv/bin/python3` version/ABI/qualified wheel-platform tuple, and acceptance-receipt digest. The hardware gate accepts only a username proved locally to exist, to match the key-only pinned-host session, and to have the exact bounded installer/managed-app privileges; it installs a fresh owner key, disables/rejects password and default-password login, and never relies on a documentation-default account. The explicit delivered-hardware test publishes the projection atomically owner-only only after every Task-08 acceptance assertion passes; a failed/recommissioned/revoked generation never replaces or remains current. This task also owns the concrete `ReachyOperatorReader.from_fixed_owner_file()` and the existing `tuntunctl reachy` core group with initial exact commands `compatibility --field sdk|daemon|python-version|python-abi|wheel-platform|python-executable` and `commissioned-ssh-target --numeric --plain`. The former reads the accepted operator projection and prints one validated closed value plus a newline; the latter prints `<accepted-ssh-username>@<Reachy-device-numeric-RFC1918-IPv4>` plus a newline. The reader imports only the shared contract and opens canonical `/private/var/lib/tuntun/reachy/operator-state.json`; its descriptor-based root walker opens every component without following symlinks, requires root-owned non-group/world-writable system ancestors, then effective-owner mode `0700` on the app directory and `0600` on the state. It freezes descriptor/named inode identity, caps the state at 32 KiB and JSON depth/containers/tokens before parsing, requires canonical bytes and the exact current non-revoked commissioning/acceptance generation, and performs no socket/DNS/subprocess/write operation. Both commands reject symlinks, stale/revoked generations, the Mac's `core_ipv4`, DNS names, extra fields/arguments, unsafe or acceptance-mismatched SSH usernames, unsupported/mismatched interpreter tuples, missing qualification, malformed or oversized state, and any network access with exit `70`; Typer syntax/usage errors remain exit `2`. Release Task 3 extends this same group with lifecycle qualification commands; no second core command module or alternate resolver is allowed. Reachy client-TLS and Ed25519 frame-signing private keys are generated on Reachy. The per-generation HMAC root is independently derived on Reachy and the Mac with X25519/HKDF; no private or symmetric key bytes cross the ceremony boundary, only CSRs and public agreement/signing material. Peer commissioning data never contains the local interface name.
 
 - [ ] **Step 1: Write a fake-hardware probe test that rejects identifiers**
 
@@ -8321,12 +8428,28 @@ def test_recommission_keeps_only_immediate_tombstones_and_old_generations_stay_r
     with pytest.raises(PermissionError): commissioner.repository.require_usable(first.endpoint)
 
 
-def test_deployment_inventory_uses_the_office_macbook_and_assumes_no_second_host(
+def test_deployment_inventory_uses_opaque_approved_host_record_not_model_authority(
     deployment_inventory,
 ) -> None:
-    assert deployment_inventory.declared_core_hosts==("2020-intel-macbook-pro",)
-    assert deployment_inventory.office_laptop_is_core_host is True
+    assert deployment_inventory.approved_host_inventory_ref.startswith(
+        "host-inventory:"
+    )
+    assert deployment_inventory.active_household_target == "darwin-arm64"
+    assert "macos-x86_64" in deployment_inventory.distribution_support_targets
+    assert deployment_inventory.authorized_core_host_ref == (
+        deployment_inventory.approved_host_inventory_ref
+    )
     assert deployment_inventory.assumed_additional_inner_hosts==()
+    authority = deployment_inventory.authorization_record_json.lower()
+    for forbidden in (
+        "2020-intel-macbook-pro",
+        "macbook",
+        "office laptop",
+        "darwin-arm64",
+        "macos-x86_64",
+        "intel",
+    ):
+        assert forbidden not in authority
 
 
 @pytest.mark.parametrize(
@@ -8566,6 +8689,47 @@ Run: `uv run pytest tests/hardware/test_reachy_capabilities.py -q`
 Expected: FAIL with `ModuleNotFoundError: No module named 'tuntun_edge.reachy.probe'`.
 
 - [ ] **Step 3: Implement the sanitized capability contract**
+
+```python
+# append to packages/testing/src/tuntun_testing/fake_reachy.py
+class FakeReachyProbe:
+    def __init__(
+        self,
+        *,
+        daemon_version: str = "4.5.6",
+        sdk_version: str = "1.2.3",
+        input_rate_hz: int = 16_000,
+        input_channels: int = 1,
+        output_rate_hz: int = 24_000,
+        output_channels: int = 1,
+        aec: bool = True,
+        doa_available: bool = True,
+        daemon_ports: tuple[int, ...] = (8000,),
+        secure_key_storage_available: bool = False,
+        managed_app_lock_available: bool = True,
+        competing_controller_detectable: bool = True,
+        stop_during_playback_tested: bool = True,
+        rtc_available: bool = True,
+        rtc_cold_boot_retains_utc: bool = True,
+        rtc_max_drift_seconds_30d: float | None = 4.0,
+    ) -> None:
+        self.daemon_version = daemon_version
+        self.sdk_version = sdk_version
+        self.input_rate_hz = input_rate_hz
+        self.input_channels = input_channels
+        self.output_rate_hz = output_rate_hz
+        self.output_channels = output_channels
+        self.aec_available = aec
+        self.doa_available = doa_available
+        self.daemon_ports = daemon_ports
+        self.secure_key_storage_available = secure_key_storage_available
+        self.managed_app_lock_available = managed_app_lock_available
+        self.competing_controller_detectable = competing_controller_detectable
+        self.stop_during_playback_tested = stop_during_playback_tested
+        self.rtc_available = rtc_available
+        self.rtc_cold_boot_retains_utc = rtc_cold_boot_retains_utc
+        self.rtc_max_drift_seconds_30d = rtc_max_drift_seconds_30d
+```
 
 ```python
 # apps/edge/src/tuntun_edge/reachy/probe.py
@@ -9744,9 +9908,9 @@ def build_local_commissioning_dependencies():
     )
 ```
 
-`ReachyLocalCeremony` is the concrete pinned local transport implemented in `transport/reachy_local_ceremony.py` in this task (and therefore added to this task's file list and staging command). It opens every fixed input owner-only without following symlinks, verifies the delivered Reachy host key before its first request, consumes the physically displayed one-time code once, and carries only CSR/public agreement/signing material. Before publishing operator state, its local-console probe reads the actual non-root POSIX account and `/venvs/apps_venv/bin/python3` facts without environment override, installs a fresh owner SSH key, disables password authentication, proves the default password is rejected, and reopens a pinned-host key-only session whose remote `id -un`, interpreter tuple, and exact bounded installer/managed-app privilege checks match the local observation. It also canonicalizes and hashes the complete `packaging.tags.sys_tags()` result and a closed required-runtime inventory (Reachy SDK, its declared dependency constraints, exact `websockets==15.0.1`, and every native/media import used by edge), proves the SDK metadata accepts that WebSocket version, and proves a scratch venv created by the accepted interpreter with `--system-site-packages` can install only the two pure Tuntun wheels offline with `--no-deps` and import the whole closure. `py3-none-any` must occur in the probed target tag set and be the tag on both Tuntun wheels. PyGObject and other vendor/native dependencies must resolve from the accepted onboard environment; the gate never assumes they have binary wheels. The scratch venv is removed before acceptance. A username is data only after strict POSIX validation and exact acceptance binding; neither `pollen` nor `reachy` is a code default. Its Reachy-side agent invokes `ReachyPrivateMaterialGenerator`; the Mac-side issuer generates/stages the household-CA server leaf/key and X25519 key locally. `from_owner_files` rejects environment overrides, DNS authority, non-RFC1918 endpoints, non-local invocation, missing DHCP receipts, or a config/key/receipt file not owned by the effective user with mode `0600`. The declared office laptop and core host must resolve to the same single 2020 Intel MacBook inventory record; no second “inner Mac” is assumed. Phase 1's recommended topology moves that Mac's active LAN connection to the same trusted ASUS/mesh L2/VLAN as Reachy (for example an ASUS LAN port/switch) and leaves the direct BE800 LAN path disconnected while Tuntun is active. Commissioning verifies one route-bearing user-LAN interface, IP forwarding off, Internet Sharing off, no bridge, WSS bound only to the commissioned address, and negative reachability on every other local address. A dual-homed Mac is rejected in Phase 1 rather than silently treated as two hosts; supporting it later requires a separately reviewed Mac host-firewall/route gate proving the same no-forwarding/no-bridge and outer-interface negative reachability properties. Before accepting exact peer-MAC mode the ceremony also executes the same fixed-binary route qualification as Task 11 and requires the Mac address to resolve without a gateway through a `scope link` prefix on the commissioned Reachy interface; a routed BE800→ASUS/mesh next hop is not the Mac's L2 identity and is rejected. The TLS key is stored as owner-only PKCS#8 PEM for the strict OpenSSL client context; the distinct frame signer and HMAC root remain raw owner-only artifacts. Production TLS and `EdgePairingKeyResolver` load only the exact current state IDs through `OwnerOnlyArtifactStore.require_path/read`, recompute public/root digests, and reject revoked state before use—there is no second generated-key directory or test-only key loader. The builder test must instantiate these concrete types from a temporary fixed-path root and perform commission → process restart/resume → recommission/revocation; a Protocol, mock, service locator, `NotImplementedError`, or import that is only supplied by tests does not satisfy Task 08.
+`ReachyLocalCeremony` is the concrete pinned local transport implemented in `transport/reachy_local_ceremony.py` in this task (and therefore added to this task's file list and staging command). It opens every fixed input owner-only without following symlinks, verifies the delivered Reachy host key before its first request, consumes the physically displayed one-time code once, and carries only CSR/public agreement/signing material. Before publishing operator state, its local-console probe reads the actual non-root POSIX account and `/venvs/apps_venv/bin/python3` facts without environment override, installs a fresh owner SSH key, disables password authentication, proves the default password is rejected, and reopens a pinned-host key-only session whose remote `id -un`, interpreter tuple, and exact bounded installer/managed-app privilege checks match the local observation. It also canonicalizes and hashes the complete `packaging.tags.sys_tags()` result and a closed required-runtime inventory (Reachy SDK, its declared dependency constraints, exact `websockets==15.0.1`, and every native/media import used by edge), proves the SDK metadata accepts that WebSocket version, and proves a scratch venv created by the accepted interpreter with `--system-site-packages` can install only the two pure Tuntun wheels offline with `--no-deps` and import the whole closure. `py3-none-any` must occur in the probed target tag set and be the tag on both Tuntun wheels. PyGObject and other vendor/native dependencies must resolve from the accepted onboard environment; the gate never assumes they have binary wheels. The scratch venv is removed before acceptance. A username is data only after strict POSIX validation and exact acceptance binding; neither `pollen` nor `reachy` is a code default. Its Reachy-side agent invokes `ReachyPrivateMaterialGenerator`; the Mac-side issuer generates/stages the household-CA server leaf/key and X25519 key locally. `from_owner_files` rejects environment overrides, DNS authority, non-RFC1918 endpoints, non-local invocation, missing DHCP receipts, or a config/key/receipt file not owned by the effective user with mode `0600`. The local approved host-inventory reference must resolve to exactly one current core host record; that record's evidence binds the active household target to Darwin arm64 and binds the mandatory Intel macOS/x86_64 distribution-support receipt, but neither platform fact nor any hardware/product description is authorization. No second "inner Mac" is assumed. Phase 1's recommended topology moves the approved core host's active LAN connection to the same trusted ASUS/mesh L2/VLAN as Reachy (for example an ASUS LAN port/switch) and leaves the direct BE800 LAN path disconnected while Tuntun is active. Commissioning verifies one route-bearing user-LAN interface, IP forwarding off, Internet Sharing off, no bridge, WSS bound only to the commissioned address, and negative reachability on every other local address. A dual-homed core host is rejected in Phase 1 rather than silently treated as two hosts; supporting it later requires a separately reviewed host-firewall/route gate proving the same no-forwarding/no-bridge and outer-interface negative reachability properties. Before accepting exact peer-MAC mode the ceremony also executes the same fixed-binary route qualification as Task 11 and requires the Mac address to resolve without a gateway through a `scope link` prefix on the commissioned Reachy interface; a routed BE800→ASUS/mesh next hop is not the core host's L2 identity and is rejected. The TLS key is stored as owner-only PKCS#8 PEM for the strict OpenSSL client context; the distinct frame signer and HMAC root remain raw owner-only artifacts. Production TLS and `EdgePairingKeyResolver` load only the exact current state IDs through `OwnerOnlyArtifactStore.require_path/read`, recompute public/root digests, and reject revoked state before use—there is no second generated-key directory or test-only key loader. The builder test must instantiate these concrete types from a temporary fixed-path root and perform commission → process restart/resume → recommission/revocation; a Protocol, mock, service locator, `NotImplementedError`, or import that is only supplied by tests does not satisfy Task 08.
 
-Commissioning is a local physical ceremony: use mDNS only to find an uncommissioned Reachy, verify the pinned SSH host key and a physically displayed one-time code, reserve the same MacBook and Reachy DHCP leases, prove that the commissioned Mac IPv4 is on Reachy's same trusted L2/VLAN, and reject an SSH/remote/non-TTY invocation. In the user's BE800→ASUS/mesh topology, the Phase 1 deployment deliberately connects both the one MacBook and Reachy to the ASUS/mesh trusted LAN and does not keep the Mac simultaneously attached to the direct BE800 LAN. Phase 1 must not record the Mac MAC when `ip route get` actually selects a router/mesh gateway MAC. A future routed mode requires a separately commissioned, generation-bound route/next-hop MAC while mTLS continues to identify the Mac; it is not silently inferred. Generate the household-CA Ed25519 server leaf/key and a generation-bound X25519 agreement key on the Mac with the exact numeric RFC1918 IPv4 SAN. Generate the distinct Reachy client-TLS private key/CSR, Ed25519 device-signing private key, and ephemeral X25519 agreement private key on Reachy. Each side derives the same 32-byte frame-HMAC root through X25519 plus HKDF with generation-bound context, compares its SHA-256 digest, and persists only its local root; only the CSR and public signing/agreement material cross the ceremony. Every Reachy private/root file is owner-only `0600`. The Mac signs the CSR and returns the leaf. The Mac server leaf key is also the pinned core application-frame signer; Reachy's device-signing key signs edge frames and the possession challenge. Fresh random suffixes make failed key-generation retries non-colliding; partial unpublished files and core stages are removed. Core certificate/HMAC material is staged durably first, one atomic owner-only versioned Reachy state replacement publishes a complete generation, and idempotent generation activation follows. If rename succeeded but activation or directory fsync failed, startup rereads the complete state and resumes only that exact staged generation before readiness; it never deletes keys referenced by a visible state. Recommissioning records the old server/client certificates and server/TLS/device-signing/HMAC key IDs as revoked in that same state, then may garbage-collect old private files. Startup accepts only the complete current state and rejects every revoked or generation-mixed artifact. Production never resolves, authorizes, or falls back to the mDNS name.
+Commissioning is a local physical ceremony: use mDNS only to find an uncommissioned Reachy, verify the pinned SSH host key and a physically displayed one-time code, reserve the approved core host and Reachy DHCP leases by opaque inventory record reference, prove that the commissioned core IPv4 is on Reachy's same trusted L2/VLAN, and reject an SSH/remote/non-TTY invocation. In the user's BE800→ASUS/mesh topology, the Phase 1 deployment deliberately connects both the approved core host and Reachy to the ASUS/mesh trusted LAN and does not keep the core host simultaneously attached to the direct BE800 LAN. Phase 1 must not record the core-host MAC when `ip route get` actually selects a router/mesh gateway MAC. A future routed mode requires a separately commissioned, generation-bound route/next-hop MAC while mTLS continues to identify the core host; it is not silently inferred. Generate the household-CA Ed25519 server leaf/key and a generation-bound X25519 agreement key on the approved core host with the exact numeric RFC1918 IPv4 SAN. Generate the distinct Reachy client-TLS private key/CSR, Ed25519 device-signing private key, and ephemeral X25519 agreement private key on Reachy. Each side derives the same 32-byte frame-HMAC root through X25519 plus HKDF with generation-bound context, compares its SHA-256 digest, and persists only its local root; only the CSR and public signing/agreement material cross the ceremony. Every Reachy private/root file is owner-only `0600`. The approved core host signs the CSR and returns the leaf. The core host server leaf key is also the pinned core application-frame signer; Reachy's device-signing key signs edge frames and the possession challenge. Fresh random suffixes make failed key-generation retries non-colliding; partial unpublished files and core stages are removed. Core certificate/HMAC material is staged durably first, one atomic owner-only versioned Reachy state replacement publishes a complete generation, and idempotent generation activation follows. If rename succeeded but activation or directory fsync failed, startup rereads the complete state and resumes only that exact staged generation before readiness; it never deletes keys referenced by a visible state. Recommissioning records the old server/client certificates and server/TLS/device-signing/HMAC key IDs as revoked in that same state, then may garbage-collect old private files. Startup accepts only the complete current state and rejects every revoked or generation-mixed artifact. Production never resolves, authorizes, or falls back to the mDNS name.
 
 `ReachyNetworkConfigV1` is restored from a separate root-owned `0600` deployment file and contains only the Reachy-side ingress interface plus its independent generation. `ReachyCoreEndpointV1` contains only the peer Mac IPv4/L2, port and complete trust/key identifiers, generations, and digests. A local interface change requires physical local network reconfiguration, network-generation advancement, firewall regeneration and a new boot receipt; it does not silently rewrite peer identity. Changing the Mac address/L2 identity, port, CA, leaf, server key, client certificate/TLS key, device signing key, HMAC root, or DHCP reservation requires physical local recommissioning. Recommissioning increments endpoint, certificate, TLS-key, signing-key, HMAC-key and trust generations, issues a leaf whose sole IP SAN is the new RFC1918 address, revokes the old leaf/client/key material, rewrites the complete state atomically, regenerates firewall receipts, and invalidates live sessions. Runtime overrides, Python `IPv4Address.is_private` as policy, and silent address following are forbidden.
 
@@ -9774,7 +9938,7 @@ Expected: PASS; every safety operation is attempted independently, a one-shot ta
 
 Run on the robot: `TUNTUN_ALLOW_REACHY_HARDWARE=1 uv run pytest -m reachy_hardware tests/hardware/test_reachy_capabilities.py -q`
 
-Expected: PASS with one sanitized JSON report, including measured RTC facts from an unplugged cold boot, exact locally observed/key-only-reopened SSH principal, and the accepted `/venvs/apps_venv/bin/python3` version/ABI plus target-tag-set and runtime-inventory digests, plus one atomically published owner-only `ReachyOperatorStateV1` for that exact accepted commissioning/report generation. The exact SDK metadata accepts `websockets==15.0.1`, `py3-none-any` occurs in the probed tag set, both project wheels carry only that tag, and a no-network scratch venv imports the full edge closure using accepted onboard native/vendor packages. Default/password login is disabled and rejected; the accepted non-root account has exactly the qualified installer/managed-app privileges. Deployment inventory proves the office laptop and core are the same sole 2020 Intel MacBook, the operator SSH target is the distinct Reachy device address, the commissioned Mac/Reachy path is direct same-L2 and single-homed, and forwarding/Internet Sharing/bridging/secondary WSS reachability are absent. A routed BE800→ASUS next hop, assumed username/interpreter, unsupported or drifted runtime, unavailable/incompatible dependency, guessed wheel platform, or assumed second core host fails commissioning. If `stop_during_playback_tested=false` or `competing_controller_detectable=false`, stop WP13–14 implementation and publish no accepted operator projection. If `rtc_qualified=false`, signed-core bootstrap remains mandatory and direct strict-TLS boot is a failing test.
+Expected: PASS with one sanitized JSON report, including measured RTC facts from an unplugged cold boot, exact locally observed/key-only-reopened SSH principal, and the accepted `/venvs/apps_venv/bin/python3` version/ABI plus target-tag-set and runtime-inventory digests, plus one atomically published owner-only `ReachyOperatorStateV1` for that exact accepted commissioning/report generation. The exact SDK metadata accepts `websockets==15.0.1`, `py3-none-any` occurs in the probed tag set, both project wheels carry only that tag, and a no-network scratch venv imports the full edge closure using accepted onboard native/vendor packages. Default/password login is disabled and rejected; the accepted non-root account has exactly the qualified installer/managed-app privileges. Deployment inventory proves one opaque owner-approved core-host inventory reference, the active Darwin arm64 household target facts, required Intel macOS/x86_64 distribution-support receipt, the distinct Reachy device address, the direct same-L2 and single-homed commissioned core/Reachy path, and absence of forwarding/Internet Sharing/bridging/secondary WSS reachability. The authorization record contains only opaque inventory references and digests, never hardware model/product strings or platform labels. A routed BE800→ASUS next hop, assumed username/interpreter, unsupported or drifted runtime, unavailable/incompatible dependency, guessed wheel platform, assumed model-name authority, or assumed second core host fails commissioning. If `stop_during_playback_tested=false` or `competing_controller_detectable=false`, stop WP13–14 implementation and publish no accepted operator projection. If `rtc_qualified=false`, signed-core bootstrap remains mandatory and direct strict-TLS boot is a failing test.
 
 - [ ] **Step 5: Pin the observed SDK and commit the sanitized record**
 
@@ -9783,7 +9947,7 @@ Run: `REACHY_SDK_VERSION="$(uv run --frozen --offline --no-sync tuntunctl reachy
 Expected: PASS; the edge project and lock contain the exact SDK version emitted by the successful delivered-hardware report.
 
 ```bash
-git add packages/contracts/src/tuntun_contracts/reachy_time.py packages/contracts/src/tuntun_contracts/reachy_operator.py apps/edge/src/tuntun_edge/reachy/probe.py apps/edge/src/tuntun_edge/config.py apps/edge/src/tuntun_edge/transport/commissioning.py apps/edge/src/tuntun_edge/transport/commissioning_repository.py apps/edge/src/tuntun_edge/transport/reachy_local_ceremony.py apps/edge/src/tuntun_edge/transport/secure_time.py apps/edge/src/tuntun_edge/bootstrap/commissioning.py apps/edge/src/tuntun_edge/cli/main.py apps/edge/src/tuntun_edge/cli/reachy_commission.py apps/core/src/tuntun_core/services/reachy/operator.py apps/core/src/tuntun_core/cli/commands/reachy.py apps/core/src/tuntun_core/cli/main.py apps/edge/pyproject.toml uv.lock tests/hardware/test_reachy_capabilities.py tests/security/test_reachy_endpoint_commissioning.py tests/security/test_reachy_secure_time.py tests/integration/cli/test_reachy_commands.py docs/operations/reachy-compatibility.md docs/operations/reachy-commissioning.md
+git add packages/testing/src/tuntun_testing/fake_reachy.py packages/contracts/src/tuntun_contracts/reachy_time.py packages/contracts/src/tuntun_contracts/reachy_operator.py apps/edge/src/tuntun_edge/reachy/probe.py apps/edge/src/tuntun_edge/config.py apps/edge/src/tuntun_edge/transport/commissioning.py apps/edge/src/tuntun_edge/transport/commissioning_repository.py apps/edge/src/tuntun_edge/transport/reachy_local_ceremony.py apps/edge/src/tuntun_edge/transport/secure_time.py apps/edge/src/tuntun_edge/bootstrap/commissioning.py apps/edge/src/tuntun_edge/cli/main.py apps/edge/src/tuntun_edge/cli/reachy_commission.py apps/core/src/tuntun_core/services/reachy/operator.py apps/core/src/tuntun_core/cli/commands/reachy.py apps/core/src/tuntun_core/cli/main.py apps/edge/pyproject.toml uv.lock tests/hardware/test_reachy_capabilities.py tests/security/test_reachy_endpoint_commissioning.py tests/security/test_reachy_secure_time.py tests/integration/cli/test_reachy_commands.py docs/operations/reachy-compatibility.md docs/operations/reachy-commissioning.md
 git diff --cached --check
 git commit -m "docs(reachy): pin delivered capability and security gate"
 ```
@@ -10327,7 +10491,7 @@ git commit -m "security(reachy): authenticate control payloads and reject replay
 ### Task 10: Master WP13 — Bounded Binary Media and Camera Windows
 
 **Master package:** WP13
-**Depends on:** Task 09 authenticated control and replay protection
+**Depends on:** Task 09 authenticated control and replay protection plus the accepted Foundation Task 9 lockfile/project-file baseline inherited through Task 08
 **Estimated effort:** 2 person-days
 
 **Files:**
@@ -12106,7 +12270,7 @@ class ReachyWssServer:
                 await self._sessions.clear(device.device_id,session)
 ```
 
-The server on that same one MacBook binds only its commissioned numeric ASUS/mesh-LAN IPv4 address and port through `websockets.asyncio.server.serve`; the edge dials that numeric URL through `websockets.asyncio.client.connect` with proxy discovery disabled. The single-homed commissioning gate proves there is no second route-bearing LAN attachment or reachable WSS bind. On a qualified RTC, standard TLS hostname verification immediately validates the numeric address against the exact one-element IP-SAN tuple. On an unqualified/lost RTC, the isolated time subprotocol first uses TLS 1.3 with wall-time checking disabled but exact current leaf-DER fingerprint, Ed25519 key, endpoint generation, current client certificate at the Mac, signed nonce and durable time sequence required before any non-secret request; after clock correction it closes and must reconnect through the ordinary strict context. Both application contexts set minimum and maximum TLS to 1.3, the household CA and leaf fingerprint are pinned, client certificates are mandatory, compression/session tickets are disabled, and the post-TLS Ed25519 challenge proves possession of the distinct device signing key. The Mac signs application frames with its pinned Ed25519 TLS leaf key; Reachy signs them with its device-signing key. A cloned certificate without the device key is insufficient. Only one current commissioned Reachy connection or one bounded time-proof exchange is accepted. `CommissioningStateV1` retains only the four key IDs and two certificate digests from the immediately replaced generation. This cannot revive older material: every use first requires equality with the one current endpoint and all current generations, so any earlier endpoint is rejected independently of the bounded diagnostic tombstones; replacing rather than accumulating the prior tombstone set prevents cap exhaustion.
+The server on the same approved core host binds only its commissioned numeric ASUS/mesh-LAN IPv4 address and port through `websockets.asyncio.server.serve`; the edge dials that numeric URL through `websockets.asyncio.client.connect` with proxy discovery disabled. The single-homed commissioning gate proves there is no second route-bearing LAN attachment or reachable WSS bind. On a qualified RTC, standard TLS hostname verification immediately validates the numeric address against the exact one-element IP-SAN tuple. On an unqualified/lost RTC, the isolated time subprotocol first uses TLS 1.3 with wall-time checking disabled but exact current leaf-DER fingerprint, Ed25519 key, endpoint generation, current client certificate at the approved core host, signed nonce and durable time sequence required before any non-secret request; after clock correction it closes and must reconnect through the ordinary strict context. Both application contexts set minimum and maximum TLS to 1.3, the household CA and leaf fingerprint are pinned, client certificates are mandatory, compression/session tickets are disabled, and the post-TLS Ed25519 challenge proves possession of the distinct device signing key. The approved core host signs application frames with its pinned Ed25519 TLS leaf key; Reachy signs them with its device-signing key. A cloned certificate without the device key is insufficient. Only one current commissioned Reachy connection or one bounded time-proof exchange is accepted. `CommissioningStateV1` retains only the four key IDs and two certificate digests from the immediately replaced generation. This cannot revive older material: every use first requires equality with the one current endpoint and all current generations, so any earlier endpoint is rejected independently of the bounded diagnostic tombstones; replacing rather than accumulating the prior tombstone set prevents cap exhaustion.
 
 Each concrete connection/session runs a receive loop and an explicit heartbeat loop in one `asyncio.TaskGroup`. The heartbeat sends a unique WebSocket ping on each one-second boundary, allows at most 900 ms for its pong, resets on a valid pong, and closes after two consecutive misses; the built-in automatic ping loop is disabled. Reconnect backoff is `250 ms, 500 ms, 1 s, 2 s, 5 s` capped at 5 s. Every connection derives a fresh random connection nonce from both peers' challenge nonces, while durable sequence counters never reset. Disconnect immediately fails and clears process-local pending exchanges, then independently attempts bounded physical/media safety and durable correlation tombstoning. A raise, hang, or repeated caller cancellation in one leg cannot suppress the other; cancellation is re-raised only after the owned cleanup finishes, and every degraded leg is content-minimally recorded. Reconnect never resumes or replays a turn, command, media frame, response, correlation or camera grant; a new wake starts new authority. No runtime code invokes DNS/mDNS, a proxy, or follows an address change.
 
@@ -12720,6 +12884,7 @@ git commit -m "security(reachy): bound media and camera authorization windows"
 **Estimated effort:** 2.5 person-days
 
 **Files:**
+- Modify: `packages/testing/src/tuntun_testing/fake_reachy.py`
 - Create: `apps/edge/src/tuntun_edge/security/key_store.py`
 - Create: `apps/edge/src/tuntun_edge/safety/controller_guard.py`
 - Create: `apps/edge/src/tuntun_edge/reachy/client.py`
@@ -12736,8 +12901,8 @@ git commit -m "security(reachy): bound media and camera authorization windows"
 - Test: `tests/hardware/test_reachy_transport.py`
 
 **Interfaces:**
-- Consumes: raw persisted capability-report JSON, raw persisted commissioned Mac endpoint JSON, raw persisted local `ReachyNetworkConfigV1` JSON, the current kernel interface inventory, paired device-key bytes, Reachy running-controller inventory, `stop_all` and media-gate ports. All three restored documents are size-bounded and fully Pydantic-validated before any nft rule object is built.
-- Produces: `EdgeKeyStore.write/read/delete`, bounded concurrent `ControllerGuard.poll`, `restore_firewall_inputs`, `build_nftables_ruleset`, `build_emergency_ruleset`, `install_neighbor_binding`, `require_neighbor_binding`, `apply_ruleset`, endpoint/network-generation-bound input/forward/output default-deny nftables JSON, generation-bound permanent-neighbor enforcement, signed normal/degraded boot receipts, and edge-side bounded concurrent `ReachyClient.execute/health/stop_all`; the authenticated transport exposes the exact frozen `SafetyReceipt` through the production core `ReachyGateway` without redefining the foundation contracts. Every safety sub-operation is independently attempted and truthfully reflected; any raise/hang latches local `ERROR_SAFE`. An owned safety barrier completes before repeated caller cancellation, including cancellation during controller inventory, is propagated. Emergency default-drop is the first boot transaction, before every restored input. No restored string is interpolated into nft source text or a shell command.
+- Consumes: Task 08's accepted `fake_reachy.py`, raw persisted capability-report JSON, raw persisted commissioned Mac endpoint JSON, raw persisted local `ReachyNetworkConfigV1` JSON, the current kernel interface inventory, paired device-key bytes, Reachy running-controller inventory, `stop_all` and media-gate ports. All three restored documents are size-bounded and fully Pydantic-validated before any nft rule object is built.
+- Produces: the Task-11 `FakeControllerSource` and `FakeEdgeSafety` test producers appended to `fake_reachy.py`; `EdgeKeyStore.write/read/delete`, bounded concurrent `ControllerGuard.poll`, `restore_firewall_inputs`, `build_nftables_ruleset`, `build_emergency_ruleset`, `install_neighbor_binding`, `require_neighbor_binding`, `apply_ruleset`, endpoint/network-generation-bound input/forward/output default-deny nftables JSON, generation-bound permanent-neighbor enforcement, signed normal/degraded boot receipts, and edge-side bounded concurrent `ReachyClient.execute/health/stop_all`; the authenticated transport exposes the exact frozen `SafetyReceipt` through the production core `ReachyGateway` without redefining the foundation contracts. Every safety sub-operation is independently attempted and truthfully reflected; any raise/hang latches local `ERROR_SAFE`. An owned safety barrier completes before repeated caller cancellation, including cancellation during controller inventory, is propagated. Emergency default-drop is the first boot transaction, before every restored input. No restored string is interpolated into nft source text or a shell command.
 
 - [ ] **Step 1: Write failing permission and fail-safe tests**
 
@@ -13381,6 +13546,45 @@ Run: `uv run pytest tests/security/test_edge_key_handling.py tests/security/test
 Expected: FAIL during collection because the key, controller and validated firewall modules do not exist.
 
 - [ ] **Step 3: Implement owner-only key files, fail-safe response, and firewall rendering**
+
+```python
+# append to packages/testing/src/tuntun_testing/fake_reachy.py
+from tuntun_contracts.reachy import SafetyReceipt
+
+
+class FakeControllerSource:
+    def __init__(self, active: set[str]) -> None:
+        self._active = active
+
+    async def active_controllers(self) -> set[str]:
+        return set(self._active)
+
+
+class FakeEdgeSafety:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def close_media(self) -> None:
+        self.calls.append("close_media")
+
+    async def stop_playback(self) -> None:
+        self.calls.append("stop_playback")
+
+    async def stop_motion(self) -> None:
+        self.calls.append("stop_motion")
+
+    async def enter_error_safe(self, _reason: str) -> None:
+        self.calls.append("error_safe")
+
+    @property
+    def receipt(self) -> SafetyReceipt:
+        return SafetyReceipt(
+            turn_id=None,
+            playback_stopped="stop_playback" in self.calls,
+            motion_stopped="stop_motion" in self.calls,
+            buffers_cleared="close_media" in self.calls,
+        )
+```
 
 ```python
 # apps/edge/src/tuntun_edge/security/key_store.py
@@ -14816,7 +15020,7 @@ Expected: PASS after an absent-table first boot, missing/corrupt preflight input
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add apps/edge/src/tuntun_edge/security/key_store.py apps/edge/src/tuntun_edge/safety/controller_guard.py apps/edge/src/tuntun_edge/reachy/client.py apps/edge/src/tuntun_edge/reachy/gestures.py deploy/reachy/render_firewall.py deploy/reachy/apply_firewall.py deploy/reachy/boot_gate.py deploy/reachy/systemd/tuntun-reachy-firewall-baseline.service deploy/reachy/systemd/tuntun-reachy-firewall.service tests/security/test_edge_key_handling.py tests/security/test_competing_controller.py tests/security/test_reachy_firewall.py tests/integration/reachy/test_safety_receipt_gateway.py tests/hardware/test_reachy_transport.py
+git add packages/testing/src/tuntun_testing/fake_reachy.py apps/edge/src/tuntun_edge/security/key_store.py apps/edge/src/tuntun_edge/safety/controller_guard.py apps/edge/src/tuntun_edge/reachy/client.py apps/edge/src/tuntun_edge/reachy/gestures.py deploy/reachy/render_firewall.py deploy/reachy/apply_firewall.py deploy/reachy/boot_gate.py deploy/reachy/systemd/tuntun-reachy-firewall-baseline.service deploy/reachy/systemd/tuntun-reachy-firewall.service tests/security/test_edge_key_handling.py tests/security/test_competing_controller.py tests/security/test_reachy_firewall.py tests/integration/reachy/test_safety_receipt_gateway.py tests/hardware/test_reachy_transport.py
 git diff --cached --check
 git commit -m "security(edge): protect keys and fail safe on competing control"
 ```
@@ -15213,6 +15417,7 @@ git commit -m "feat(edge): add governed wake audio pipeline"
 **Estimated effort:** 3 person-days
 
 **Files:**
+- Modify: `packages/testing/src/tuntun_testing/fake_reachy.py`
 - Create: `apps/edge/src/tuntun_edge/safety/state_machine.py`
 - Create: `apps/edge/src/tuntun_edge/safety/stop.py`
 - Create: `apps/edge/src/tuntun_edge/safety/privacy.py`
@@ -15233,8 +15438,8 @@ git commit -m "feat(edge): add governed wake audio pipeline"
 - Test: `tests/integration/reachy/test_managed_edge_runtime.py`
 
 **Interfaces:**
-- Consumes: VAD, AEC-gated stop-keyword inference, playback stop, motion stop, media gate, controller guard, a mandatory verified physical stop input whenever measured AEC is unavailable, signed/replay-protected Reachy events, foundation `StopInputPort`, and `TurnCoordinator.active_turn_id/cancel`.
-- Produces: `StopSupervisor.process_frame`, `PrivacySupervisor.activate`, `CoreWatchdog.tick`, public `SignedStopInputAdapter.receive() -> StopSignal`, `StopLoop.run_once` wiring that cancels the current turn or issues a household-wide idle stop, one concrete long-lived `build_managed_edge_application(app_root)` composition, and the `tuntun-edge managed --app-root <exact-active-release>` extension to Task 08's sole dispatcher. The managed command revalidates the active release inode/owner/mode, runs the boot/firewall/commissioning/time/controller/privacy/safety/transport gates in their frozen order, starts the bounded audio/transport/watchdog supervisors, and never marks health ready before every required supervisor is owned and observed.
+- Consumes: Task 11's accepted `fake_reachy.py`, VAD, AEC-gated stop-keyword inference, playback stop, motion stop, media gate, controller guard, a mandatory verified physical stop input whenever measured AEC is unavailable, signed/replay-protected Reachy events, foundation `StopInputPort`, and `TurnCoordinator.active_turn_id/cancel`.
+- Produces: the Task-13 `FakePlayback` and `FakeStopModel` test producers appended to `fake_reachy.py`; `StopSupervisor.process_frame`, `PrivacySupervisor.activate`, `CoreWatchdog.tick`, public `SignedStopInputAdapter.receive() -> StopSignal`, `StopLoop.run_once` wiring that cancels the current turn or issues a household-wide idle stop, one concrete long-lived `build_managed_edge_application(app_root)` composition, and the `tuntun-edge managed --app-root <exact-active-release>` extension to Task 08's sole dispatcher. The managed command revalidates the active release inode/owner/mode, runs the boot/firewall/commissioning/time/controller/privacy/safety/transport gates in their frozen order, starts the bounded audio/transport/watchdog supervisors, and never marks health ready before every required supervisor is owned and observed.
 
 - [ ] **Step 1: Write the AEC gate and mandatory physical-fallback tests**
 
@@ -15308,6 +15513,30 @@ Run: `uv run pytest tests/unit/edge/test_safety_state.py -q`
 Expected: FAIL with `ModuleNotFoundError: No module named 'tuntun_edge.safety.stop'`.
 
 - [ ] **Step 3: Implement the measured-AEC gate, physical fallback, and authoritative privacy**
+
+```python
+# append to packages/testing/src/tuntun_testing/fake_reachy.py
+class FakePlayback:
+    def __init__(self, *, playing: bool) -> None:
+        self.is_playing = playing
+        self.calls: list[str] = []
+
+    async def stop(self) -> None:
+        self.calls.append("stop")
+        self.is_playing = False
+
+
+class FakeStopModel:
+    def __init__(self, *, scores: list[int]) -> None:
+        self._scores = list(scores)
+        self.calls: list[bytes] = []
+
+    async def infer(self, frame: bytes) -> int:
+        self.calls.append(frame)
+        if not self._scores:
+            return 0
+        return self._scores.pop(0)
+```
 
 ```python
 # apps/edge/src/tuntun_edge/safety/stop.py
@@ -15615,7 +15844,7 @@ Expected: PASS in both modes; recognition-to-playback-and-motion-stop P95 is at 
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add apps/edge/src/tuntun_edge/safety/state_machine.py apps/edge/src/tuntun_edge/safety/stop.py apps/edge/src/tuntun_edge/safety/privacy.py apps/edge/src/tuntun_edge/safety/watchdog.py apps/edge/src/tuntun_edge/runtime.py apps/edge/src/tuntun_edge/bootstrap/managed.py apps/edge/src/tuntun_edge/cli/managed.py apps/edge/src/tuntun_edge/cli/main.py apps/core/src/tuntun_core/adapters/reachy/stop_input.py apps/core/src/tuntun_core/services/sessions/stop_loop.py apps/core/src/tuntun_core/services/sessions/turn_coordinator.py tests/unit/edge/test_safety_state.py tests/security/test_privacy_gate.py tests/contract/reachy/test_stop_input_port.py tests/integration/reachy/test_stop_loop.py tests/integration/reachy/test_managed_edge_runtime.py tests/hardware/test_stop_latency.py tests/hardware/test_physical_guest_turn.py
+git add packages/testing/src/tuntun_testing/fake_reachy.py apps/edge/src/tuntun_edge/safety/state_machine.py apps/edge/src/tuntun_edge/safety/stop.py apps/edge/src/tuntun_edge/safety/privacy.py apps/edge/src/tuntun_edge/safety/watchdog.py apps/edge/src/tuntun_edge/runtime.py apps/edge/src/tuntun_edge/bootstrap/managed.py apps/edge/src/tuntun_edge/cli/managed.py apps/edge/src/tuntun_edge/cli/main.py apps/core/src/tuntun_core/adapters/reachy/stop_input.py apps/core/src/tuntun_core/services/sessions/stop_loop.py apps/core/src/tuntun_core/services/sessions/turn_coordinator.py tests/unit/edge/test_safety_state.py tests/security/test_privacy_gate.py tests/contract/reachy/test_stop_input_port.py tests/integration/reachy/test_stop_loop.py tests/integration/reachy/test_managed_edge_runtime.py tests/hardware/test_stop_latency.py tests/hardware/test_physical_guest_turn.py
 git diff --cached --check
 git commit -m "feat(edge): gate acoustic stop and add physical fallback"
 ```
@@ -16933,7 +17162,7 @@ git commit -m "test(persona): add corpus-bound bilingual and child-safety gate"
 ### Task 16: Master WP16 — Replaceable LangGraph with Ephemeral Content
 
 **Master package:** WP16
-**Depends on:** Tasks 01–15
+**Depends on:** Tasks 01–15 plus accepted Foundation Task 9's `guest_hinglish_scenario()` and the serial lockfile/project-file baseline inherited through Tasks 08 and 10
 **Estimated effort:** 1 person-day
 
 **Files:**
@@ -16952,7 +17181,7 @@ git commit -m "test(persona): add corpus-bound bilingual and child-safety gate"
 - Create: `docs/adr/0001-langgraph-is-orchestration-not-memory.md`
 
 **Interfaces:**
-- Consumes: public `ConversationWorkflow` through the Task 07 contract adapter, the exact Task 14 `PersonalizedTurnContextProvider`, `EphemeralTurnContext`, injected node callables, and private turn cancellation.
+- Consumes: public `ConversationWorkflow` through the Task 07 contract adapter, Foundation Task 9's `guest_hinglish_scenario()` via the Task 07/14 scenario surface, the exact Task 14 `PersonalizedTurnContextProvider`, `EphemeralTurnContext`, injected node callables, and private turn cancellation.
 - Produces: `GraphState`, `build_graph`, and private `LangGraphConversationEngine.run(TurnRequest) -> TurnOutcome`/`cancel`; the composition root wraps either engine in the same `ContractConversationWorkflow.run(TurnInput) -> TurnOutput`.
 
 - [ ] **Step 1: Write failing topology and checkpoint-content tests**
@@ -17358,6 +17587,10 @@ git commit -m "feat(workflow): add ephemeral replaceable LangGraph orchestration
 - Scope is limited to master work packages 07–16; profiles, biometric enrollment, memory persistence, owner authentication, Qwen, owner console, backups, packaging, and release publication remain in later execution plans.
 - The 16 task estimates sum to exactly 35 person-days: `1.5 + 2 + 2.5 + 2 + 3.5 + 3.5 + 2 + 2 + 2 + 2 + 2.5 + 2.5 + 3 + 1.5 + 1.5 + 1 = 35`.
 - Every created or modified file has one named responsibility in the file map and appears in an exact staging command.
+- Foundation Task 9 is named on every direct consumer: Task 02 (`FakeClock`), Task 06 (`FakeClock`, `fake_providers.py`, project/lock files), Task 07 (`guest_hinglish_scenario()`), Task 08 (`fake_reachy.py`, CLI/project/lock files), Task 10 (project/lock files), and Task 16 (`guest_hinglish_scenario()`, project/lock files).
+- Task 01 is self-contained and stdlib-only; Task 07 is the executable owner that dispatches Task 01's normal-terminal `finish_turn` and `clear_ephemeral` effects through Task 02's finish barrier and the workflow's ephemeral context.
+- Reachy fake producers are owned inside this Conversation plan after Foundation Task 9: Task 08 appends `FakeReachyProbe`, Task 11 appends `FakeControllerSource` and `FakeEdgeSafety`, and Task 13 appends `FakePlayback` and `FakeStopModel`.
+- Deployment authorization is only an opaque approved host-inventory reference. Darwin arm64 household-target facts, Intel macOS/x86_64 distribution support, physical model descriptions, and product strings are evidence, not authorization.
 - Every code-producing task contains an executable failing test, exact red command/error, concrete minimal implementation, exact green command/result, and exact commit.
 - Route authorization binds household, subject, session, turn, request, content commitment, maximum units, purpose, attempt, consent, privacy receipt, reservation, and expiry.
 - Provider SDK retries are zero; application attempt limits are numeric; every attempt or TTS segment receives a distinct authorization and reservation.
