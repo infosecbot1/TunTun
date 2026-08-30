@@ -1,4 +1,5 @@
 import typer
+from tuntun_core.cli.commands.models import models_app
 from tuntun_core.cli.commands.simulate import simulate
 
 app = typer.Typer(no_args_is_help=True)
@@ -16,3 +17,4 @@ def version() -> None:
 
 
 app.command("simulate")(simulate)
+app.add_typer(models_app, name="models")

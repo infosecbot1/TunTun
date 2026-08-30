@@ -27831,8 +27831,10 @@ Task 10.
 **Estimated effort:** 2 person-days.
 
 **Files:**
+- Modify: `Makefile`
 - Modify: `apps/core/pyproject.toml`
 - Modify: `uv.lock`
+- Create: `apps/core/src/tuntun_core/resources/model-manifest.yaml`
 - Create: `apps/core/src/tuntun_core/services/models/fs.py`
 - Create: `apps/core/src/tuntun_core/services/models/network.py`
 - Create: `apps/core/src/tuntun_core/services/models/registry.py`
@@ -28803,7 +28805,7 @@ Expected: PASS with the full manifest/filesystem/network/race/fault matrix, `mod
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/services/models/fs.py apps/core/src/tuntun_core/services/models/network.py apps/core/src/tuntun_core/services/models/registry.py apps/core/src/tuntun_core/services/models/installer.py apps/core/src/tuntun_core/cli/commands/models.py apps/core/src/tuntun_core/cli/main.py models/manifest.schema.json models/manifest.yaml scripts/check_model_manifest.py tests/security/test_model_governance.py tests/security/conftest.py tests/security/model_governance_cases.py
+git add Makefile apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/resources/model-manifest.yaml apps/core/src/tuntun_core/services/models/fs.py apps/core/src/tuntun_core/services/models/network.py apps/core/src/tuntun_core/services/models/registry.py apps/core/src/tuntun_core/services/models/installer.py apps/core/src/tuntun_core/cli/commands/models.py apps/core/src/tuntun_core/cli/main.py models/manifest.schema.json models/manifest.yaml scripts/check_model_manifest.py tests/security/test_model_governance.py tests/security/conftest.py tests/security/model_governance_cases.py docs/superpowers/plans/2026-08-27-tuntun-phase1-foundation-execution.md
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(models): add governed registry and explicit installer"
