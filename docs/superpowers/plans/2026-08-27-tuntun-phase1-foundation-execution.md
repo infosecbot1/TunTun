@@ -27852,7 +27852,7 @@ Task 10.
 **Interfaces:**
 - Consumes: owner-invoked immutable HTTPS URL on an exact host allowlist, declared bounded byte size/SHA-256, a bounded duplicate-free manifest, and owner-only no-follow model directory descriptors.
 - Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only a verified exact nonempty tuple of stable read-only file descriptors; immutable private `_ManifestBoundFile(path, size, sha256, device, inode)` expectations; frozen `VerifiedModelFile`/`ActivatedModel`; derived read-only property `ActivatedModel.all_files_verified: bool`; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. Public `fd`, `size`, `sha256`, and `files` are getter-only views. `all_files_verified` and runtime receipt comparison use the sealed private manifest tuple and recheck descriptor access/type/mode/device/inode/size/hash; they never derive trust from a caller-replaceable public field. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
-- Darwin filesystems may reject renaming a write-disabled directory even when source and destination share one parent. The installer therefore keeps the already-complete owner-only stage at `0700` through the exclusive no-replace rename, establishes an owner-only descriptor-relative parent recovery marker, then seals the retained directory descriptor to exact `0500`, fsyncs it, and only then fsyncs the parent in the accepted publication order. A newly created or previously existing marker is accepted only as the exact stable owner-owned `0600`, zero-length, single-link regular inode named by the retained model dirfd; every accepted marker descriptor is fsynced, its parent is fsynced, and descriptor/name identity is revalidated after those durability operations before sealing. Initial exact `0500` plus a marker establishes rollback ownership before marker reopen, fsync, parent fsync, or identity revalidation, so every such fault rolls back to exact `0700` and remains unusable. Public `ModelRegistry.activate` holds a shared flock on the root `.model-install-{MODEL_ID}.lock` across model open and exact verification, while installation/recovery for that model holds the same lock exclusively. Different model IDs therefore do not serialize their downloads or activation; the installer's already-under-lock fast path calls a private retained-model-dirfd verifier instead of recursively acquiring the public lock or reopening a path. Consequently, no cooperating interpreter can observe a same-model marker-unlink to parent-fsync window or decide activation before the exclusive transaction has an outcome. The marker is cleared only after repeated exact inventory/hash proof, revision and parent fsync, and final marker revalidation. Before even that final revalidation, the installer records `(model-directory device, inode, revision)` in a process-global lock-protected uncertain-publication set; it removes the key only after unlink plus parent fsync succeeds or after an exact replacement marker has itself been opened/created, fsynced, parent-fsynced, and identity-revalidated. If marker clear reports failure, the installer first restores that exact durable marker while still holding the exclusive lock and re-raises the original failure. If restoration cannot be completed, fresh publication and recovery attempt exact `0700` plus revision fsync; if rollback also fails, they make a second exact marker-restoration attempt. These absence-based controls are containment only: activation additionally requires a positive `.publication-verified-{REVISION}` proof opened through the retained model dirfd as an exact owner-owned `0400`, zero-length, single-link regular `O_RDONLY` descriptor/name identity. The proof inode is created at `0600` only after exact post-seal verification and successful pending-marker removal, fsynced with its parent while still non-authorizing, then changed to `0400` and fsynced before success. Activation retains and revalidates that proof descriptor before and after exact artifact inventory/hash verification. Therefore total marker-restoration and rollback exhaustion still leaves no positive proof and remains non-activatable in the originating process, another interpreter after lock release, and a restarted process; a later exclusive installer can reverify exact on-disk facts and create the proof. Missing, symlinked, special, writable, nonempty, multiply linked, or identity-swapped proof entries deny activation. The process-local uncertainty latch remains additional race containment, never the cross-process or restart authorization boundary. Lock-body, unlock, close, transfer, restoration, and rollback faults preserve the original public exception; secondary failures add only the established content-minimal note and each owned descriptor receives at most one close attempt. A missing, extra, symlinked, special, writable, wrong-sized, or hash-mismatched artifact stays unusable and fails closed; there is no ordinary rename fallback, path reopen, or unverified byte that can become active.
+- Darwin filesystems may reject renaming a write-disabled directory even when source and destination share one parent. The installer therefore keeps the already-complete owner-only stage at `0700` through the exclusive no-replace rename, establishes an owner-only descriptor-relative parent recovery marker, then seals the retained directory descriptor to exact `0500`, fsyncs it, and only then fsyncs the parent in the accepted publication order. A newly created or previously existing marker is accepted only as the exact stable owner-owned `0600`, zero-length, single-link regular inode named by the retained model dirfd; every accepted marker descriptor is fsynced, its parent is fsynced, and descriptor/name identity is revalidated after those durability operations before sealing. Initial exact `0500` plus a marker establishes rollback ownership before marker reopen, fsync, parent fsync, or identity revalidation, so every such fault rolls back to exact `0700` and remains unusable. Public `ModelRegistry.activate` holds a shared flock on the root `.model-install-{MODEL_ID}.lock` across model open and exact verification, while installation/recovery for that model holds the same lock exclusively. Different model IDs therefore do not serialize their downloads or activation; the installer's already-under-lock fast path calls a private retained-model-dirfd verifier instead of recursively acquiring the public lock or reopening a path. Consequently, no cooperating interpreter can observe a same-model state-transfer window or decide activation before the exclusive transaction has an outcome. After repeated exact inventory/hash proof plus revision and parent fsync, the installer creates `.publication-verified-{REVISION}` at `0600`, validates and fsyncs the inode, fsyncs its parent, revalidates it, changes it to exact `0400`, fsyncs and revalidates it again, and closes that proof descriptor while the durable recovery marker still exists. Only after every proof operation and close succeeds does it revalidate, unlink, and parent-fsync the recovery marker. Thus a proof chmod, either proof fsync, proof-parent fsync, final proof validation, or proof-close fault leaves the durable marker authoritative across process restart. The failed transaction descriptor-relatively removes any incomplete/complete proof before unlock; a later exclusive retry reopens or creates the exact marker, removes stale proof state, re-verifies the artifacts, and converges. Before final marker revalidation, the installer records `(model-directory device, inode, revision)` in a process-global lock-protected uncertain-publication set; it removes the key only after unlink plus parent fsync succeeds or after an exact replacement marker has itself been opened/created, fsynced, parent-fsynced, and identity-revalidated. If marker clear reports failure, the installer first restores that exact durable marker while still holding the exclusive lock and re-raises the original failure. If restoration cannot be completed, fresh publication and recovery attempt proof removal plus exact `0700`/revision-fsync rollback; if rollback also fails, they make a second exact marker-restoration attempt. Activation additionally retains and revalidates the exact owner-owned `0400`, zero-length, single-link regular `O_RDONLY` proof descriptor before and after exact artifact inventory/hash verification; marker-present, missing, symlinked, special, writable, nonempty, multiply linked, or identity-swapped proof states deny. The process-local uncertainty latch remains additional race containment, never the cross-process or restart authorization boundary. `install` retains ownership of a fresh or reused `ActivatedModel` until stage/model/root directory close, exclusive unlock, and lock-FD close all succeed; any transfer or cleanup failure closes that activation exactly once and preserves the original cleanup exception, with secondary close failures represented only by the established content-minimal note. A missing, extra, symlinked, special, writable, wrong-sized, or hash-mismatched artifact stays unusable and fails closed; there is no ordinary rename fallback, path reopen, or unverified byte that can become active.
 
 - [ ] **Step 1: Write red model-governance tests**
 
@@ -28167,7 +28167,7 @@ def concurrent_model_case(governed_model_case):
     return governed_model_case.concurrent_view()
 ```
 
-`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`: `manifest`, `model_id`, `expected_bytes`, `expected_sha256`, `network.inject()/followed_redirects`, `mutate_manifest`, `apply_filesystem_mutation`, `registry_or_activate`, `inject_os_write_result`, `inject_repeated_os_write_result`, `install`, `install_peer_model`, `as_installed_model`, `concurrent_view`, `race_activation`, `crash_install_at`, `restart_and_reconcile`, `restart_with_post_seal_recovery_fault`, `require_write_enabled_publish_source`, `mutate_unsealed_revision`, `create_interrupted_recovery_marker`, `create_sealed_pending_revision`, `clear_process_publication_uncertainty`, `recovery_marker_path`, `publication_commit_path`, `recovery_marker_exists`, `final_revision_mode`, `rehash_exact_descriptor`, and every asserted state/identity/count query. Each mutation/race/fault string in the test has one explicit dispatch-table entry; unknown names raise `AssertionError`. Filesystem mutations use real missing entries, symlinks, FIFOs, modes, sizes, hashes, and inode replacements; the post-seal recovery seam either mutates the artifact or raises before repeated inventory/hash checks. The exact cleanup matrix separately injects raw-descriptor and constructed-wrapper close failures in fresh and recovery transfer windows, asserts the original exception object plus the content-minimal cleanup note, and proves one close attempt/no leak. The lock-cleanup matrix independently injects raw unlock and close faults around both a successful protected body and a primary body failure, proves exactly one unlock and close attempt, preserves the primary with a content-minimal note, and immediately reacquires the lock. The rollback matrix independently fails recovery chmod, fsync, and revision close, then constructs a fresh registry to prove the parent-directory recovery marker remains an on-disk activation deny before later exact recovery clears it. The durability-order fixture records marker-file fsync, parent fsync, seal, revision fsync, post-seal hash, marker unlink, final parent fsync, non-authorizing proof fsync and parent fsync, then read-only proof fsync in that order. Existing-marker durability and identity matrices start from both realistic `0700` interrupted publication and legitimate durable `0500` plus marker, independently fail marker fsync and parent fsync, or swap/remove the name after parent fsync, and prove rollback to exact `0700`, primary preservation, close-once/no-leak ownership, and later convergence. Fresh and recovery final-parent-fsync probes pause a separate interpreter after marker unlink and prove its same-model shared activation lock cannot pass the installer's exclusive lock; after the failure, the child observes a restored marker or absent positive proof and denies activation. Marker restoration independently fails creation, marker fsync, parent fsync, and close; compound probes then combine both finite restoration failures with rollback chmod failure and require denial by absent positive proof after unlock and simulated restart. Exact proof mutations cover missing, symlinked, FIFO, writable, nonempty, multiply linked, and verification-window identity-swap states. Every case retries under the per-model lock, converges to exact verified `0500`/marker-absent/proof-present, and proves activation succeeds afterward. A verification-window race marks publication uncertain after the registry's first check and proves the second check fails closed. Cross-model concurrency pauses one model's download and proves a different installed model activates through its distinct per-model lock; the corresponding same-model case observes the shared-lock attempt and proves it remains excluded until publication commits. Write faults monkeypatch only `os.write`, and network faults drive the injected transport/child-resolver seam. State queries inspect the real staged/final filesystem and live descriptors rather than booleans set by the case.
+`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`: `manifest`, `model_id`, `expected_bytes`, `expected_sha256`, `network.inject()/followed_redirects`, `mutate_manifest`, `apply_filesystem_mutation`, `registry_or_activate`, `inject_os_write_result`, `inject_repeated_os_write_result`, `install`, `install_peer_model`, `as_installed_model`, `concurrent_view`, `race_activation`, `crash_install_at`, `restart_and_reconcile`, `restart_with_post_seal_recovery_fault`, `require_write_enabled_publish_source`, `mutate_unsealed_revision`, `create_interrupted_recovery_marker`, `create_sealed_pending_revision`, `clear_process_publication_uncertainty`, `recovery_marker_path`, `publication_commit_path`, `recovery_marker_exists`, `final_revision_mode`, `rehash_exact_descriptor`, and every asserted state/identity/count query. Each mutation/race/fault string in the test has one explicit dispatch-table entry; unknown names raise `AssertionError`. Filesystem mutations use real missing entries, symlinks, FIFOs, modes, sizes, hashes, and inode replacements; the post-seal recovery seam either mutates the artifact or raises before repeated inventory/hash checks. The exact cleanup matrix separately injects raw-descriptor and constructed-wrapper close failures in fresh and recovery transfer windows, asserts the original exception object plus the content-minimal cleanup note, and proves one close attempt/no leak. The install-result ownership matrix captures the real fresh/reused `ActivatedModel` artifact descriptor, independently fails stage/model/root close or exclusive unlock/lock-FD close after result construction, injects a secondary activation-close failure, and proves the primary cleanup exception survives, the activation receives exactly one close attempt, `fstat` rejects the captured descriptor, and the FD delta is zero. The lock-cleanup matrix independently injects raw unlock and close faults around both a successful protected body and a primary body failure, proves exactly one unlock and close attempt, preserves the primary with a content-minimal note, and immediately reacquires the lock. The rollback matrix independently fails recovery chmod, fsync, and revision close, then constructs a fresh registry to prove the parent-directory recovery marker remains an on-disk activation deny before later exact recovery clears it. The durability-order fixture records marker-file fsync, parent fsync, seal, revision fsync, post-seal hash, non-authorizing proof fsync and parent fsync, read-only proof fsync, marker unlink, and final parent fsync in that order. A fresh/recovery proof-fault matrix independently fails initial proof fsync, proof-parent fsync, the `0400` transition, final proof fsync, final validation, and proof close; every case proves the marker remains durable, a fresh interpreter denies activation, the first attempt leaks no descriptor, and a fault-free retry converges to exact verified `0500`/marker-absent/proof-present state. Existing-marker durability and identity matrices start from both realistic `0700` interrupted publication and legitimate durable `0500` plus marker, independently fail marker fsync and parent fsync, or swap/remove the name after parent fsync, and prove rollback to exact `0700`, primary preservation, close-once/no-leak ownership, and later convergence. Fresh and recovery final-parent-fsync probes pause a separate interpreter after marker unlink and prove its same-model shared activation lock cannot pass the installer's exclusive lock; after the failure, the child observes a restored marker or absent positive proof and denies activation. Marker restoration independently fails creation, marker fsync, parent fsync, and close; compound probes then combine both finite restoration failures with rollback chmod failure and require denial by absent positive proof after unlock and simulated restart. Exact proof mutations cover missing, symlinked, FIFO, writable, nonempty, multiply linked, and verification-window identity-swap states. Every case retries under the per-model lock, converges to exact verified `0500`/marker-absent/proof-present, and proves activation succeeds afterward. A verification-window race marks publication uncertain after the registry's first check and proves the second check fails closed. Cross-model concurrency pauses one model's download and proves a different installed model activates through its distinct per-model lock; the corresponding same-model case observes the shared-lock attempt and proves it remains excluded until publication commits. Write faults monkeypatch only `os.write`, and network faults drive the injected transport/child-resolver seam. State queries inspect the real staged/final filesystem and live descriptors rather than booleans set by the case.
 
 `InstalledModel` exposes only `registry`, `model_id`, `expected_bytes`, `expected_sha256`, and `replace_every_named_path_with_attacker_bytes()`. `ScriptedRuntimeAdapter.load_verified_reader` consumes the bounded reader to EOF, records bytes and open duplicate count, returns an exact per-file receipt, and never accepts a path; `finish_model` returns an unpublished signed candidate; the verifier publishes only after checking the exact domain/generation/expiry/model/revision/ordered file tuple. `mutate_receipt`, `fail_at`, and `abort_model` are closed dispatch methods for the test strings and maintain the asserted `path_opens`, `open_duplicate_fd_count`, `abort_calls`, `published_runtime_count`, and `last_loaded_bytes`. The concurrent view uses two real `ModelInstaller` instances plus a barrier only before lock acquisition, measures lock ownership around the production lock, and derives publication/stage results from disk. This helper contains no pass-through fake of `ModelRegistry`, `ModelInstaller`, descriptor hashing, publication, or receipt comparison.
 
@@ -28913,6 +28913,13 @@ from .fs import (
 from .network import PinnedHttpsTransport
 from .registry import ActivatedModel,ModelEntry,VerifiedModelFile
 
+@contextlib.contextmanager
+def _close_owned_directory(directory):
+    try: yield
+    except BaseException as error:
+        close_preserving_primary(directory,OwnedDirectory.close,error); raise
+    else: directory.close()
+
 class ModelInstaller:
     def __init__(self,registry,allowed_hosts,transport=None):
         self.registry=registry; self.allowed_hosts=frozenset(allowed_hosts)
@@ -28920,6 +28927,7 @@ class ModelInstaller:
     MAX_TOTAL_DOWNLOAD_SECONDS=900.0
     _RECOVERY_ROLLBACK_NOTE="additional recovery rollback failure"
     _RECOVERY_RESTORE_NOTE="additional recovery marker restoration failure"
+    _PUBLICATION_PROOF_ROLLBACK_NOTE="additional publication proof rollback failure"
     def _download(self,stage,item,deadline):
         parsed=urlsplit(item.url)
         if parsed.hostname not in self.allowed_hosts:
@@ -29117,6 +29125,12 @@ class ModelInstaller:
             close_preserving_primary(descriptor,os.close,error); raise
         os.close(descriptor)
 
+    @staticmethod
+    def _remove_publication_commit_preserving_primary(model,revision,primary_error):
+        try: ModelInstaller._remove_publication_commit(model,revision)
+        except BaseException:
+            primary_error.add_note(ModelInstaller._PUBLICATION_PROOF_ROLLBACK_NOTE)
+
     def _reuse_or_recover_revision(
         self,model:OwnedDirectory,entry:ModelEntry,
     ) -> ActivatedModel|None:
@@ -29130,6 +29144,7 @@ class ModelInstaller:
             return None
         handles=[]; activated=None; marker_fd=None; commit_fd=None
         sealed_for_recovery=False; post_seal_phase=False; transaction_complete=False
+        commit_attempted=False
         try:
             mode=stat.S_IMODE(os.fstat(revision.fd).st_mode)
             # Exact initial 0500 means this invocation owns rollback immediately,
@@ -29181,16 +29196,21 @@ class ModelInstaller:
                 for item,handle in zip(entry.files,handles,strict=True):
                     hash_exact_fd(handle.fd,item.size,item.sha256)
                 revision.fsync(); model.fsync()
+                commit_attempted=True
+                commit_fd=self._create_publication_commit(model,entry.revision)
+                descriptor_to_close=commit_fd; commit_fd=None
+                os.close(descriptor_to_close)
                 self._clear_recovery_marker(model,entry.revision,marker_fd)
                 descriptor_to_close=marker_fd; marker_fd=None
                 os.close(descriptor_to_close)
-                commit_fd=self._create_publication_commit(model,entry.revision)
                 transaction_complete=True
-                descriptor_to_close=commit_fd; commit_fd=None
-                os.close(descriptor_to_close)
                 activated=ActivatedModel.from_manifest(entry,tuple(handles))
                 handles.clear()
         except BaseException as error:
+            if commit_attempted and not transaction_complete:
+                self._remove_publication_commit_preserving_primary(
+                    model,entry.revision,error,
+                )
             if sealed_for_recovery and not transaction_complete:
                 try: revision.chmod(0o700); revision.fsync()
                 except BaseException:
@@ -29219,107 +29239,156 @@ class ModelInstaller:
 
     def install(self,model_id):
         entry=self.registry.entry(model_id)
-        root=OwnedDirectory.open_or_create(self.registry._root)
+        activated=None
         try:
-            with root.lock(
-                model_install_lock_name(entry.model_id),timeout_seconds=30,
+            root=OwnedDirectory.open_or_create(self.registry._root)
+            with (
+                _close_owned_directory(root),
+                root.lock(model_install_lock_name(entry.model_id),timeout_seconds=30),
             ):
                 model=root.child(entry.model_id,create=True,exist_ok=True)
-                try:
-                    model.remove_private_stages(f".stage-{entry.revision}-")
-                    model.fsync()
-                    existing=self._reuse_or_recover_revision(model,entry)
-                    if existing is not None:
-                        return existing
-                    stage_name=f".stage-{entry.revision}-{secrets.token_hex(8)}"
-                    stage=model.child(stage_name,create=True)
-                    stage_identity=stage.identity
-                    published=False; sealed_for_publication=False
-                    handles=[]; marker_fd=None; commit_fd=None
-                    try:
-                        download_deadline=time.monotonic()+self.MAX_TOTAL_DOWNLOAD_SECONDS
-                        for item in entry.files:
-                            descriptor=self._download(stage,item,download_deadline)
+                with _close_owned_directory(model):
+                    prefix=f".stage-{entry.revision}-"
+                    model.remove_private_stages(prefix); model.fsync()
+                    activated=self._reuse_or_recover_revision(model,entry)
+                    if activated is None:
+                        stage_name=f"{prefix}{secrets.token_hex(8)}"
+                        stage=model.child(stage_name,create=True)
+                        with _close_owned_directory(stage):
+                            stage_identity=stage.identity
+                            published=False; sealed_for_publication=False
+                            transaction_complete=False; commit_attempted=False
+                            handles=[]; marker_fd=None; commit_fd=None
                             try:
-                                handle=VerifiedModelFile.from_manifest(item,descriptor)
+                                deadline=time.monotonic()+self.MAX_TOTAL_DOWNLOAD_SECONDS
+                                for item in entry.files:
+                                    descriptor=self._download(stage,item,deadline)
+                                    try:
+                                        handle=VerifiedModelFile.from_manifest(item,descriptor)
+                                    except BaseException as error:
+                                        close_preserving_primary(descriptor,os.close,error); raise
+                                    try:
+                                        self._fault_hook("before_retain_downloaded_file")
+                                        handles.append(handle)
+                                    except BaseException as error:
+                                        close_preserving_primary(
+                                            handle,VerifiedModelFile.close,error,
+                                        ); raise
+                                for item,handle in zip(entry.files,handles,strict=True):
+                                    hash_exact_fd(handle.fd,item.size,item.sha256)
+                                stage.fsync()
+                                atomic_publish_dir_noreplace(
+                                    model,stage_name,entry.revision,
+                                )
+                                published=True
+                                self._fault_hook("after_publish_before_seal")
+                                marker_fd=self._open_recovery_marker(
+                                    model,entry.revision,create=True,
+                                )
+                                stage.chmod(0o500); sealed_for_publication=True
+                                stage.fsync(); model.fsync()
+                                expected_names=tuple(
+                                    sorted(item.path for item in entry.files)
+                                )
+                                if tuple(sorted(os.listdir(stage.fd)))!=expected_names:
+                                    raise PermissionError(
+                                        "unsafe model filesystem revision"
+                                    )
+                                for item,handle in zip(
+                                    entry.files,handles,strict=True,
+                                ):
+                                    hash_exact_fd(handle.fd,item.size,item.sha256)
+                                # The durable marker remains present through every
+                                # proof fsync/validation and proof-descriptor close.
+                                commit_attempted=True
+                                commit_fd=self._create_publication_commit(
+                                    model,entry.revision,
+                                )
+                                descriptor_to_close=commit_fd; commit_fd=None
+                                os.close(descriptor_to_close)
+                                self._clear_recovery_marker(
+                                    model,entry.revision,marker_fd,
+                                )
+                                descriptor_to_close=marker_fd; marker_fd=None
+                                os.close(descriptor_to_close)
+                                transaction_complete=True
+                                activated=ActivatedModel.from_manifest(
+                                    entry,tuple(handles),
+                                )
+                                handles.clear()
+                            except FileExistsError as error:
+                                if published:
+                                    if commit_attempted and not transaction_complete:
+                                        self._remove_publication_commit_preserving_primary(
+                                            model,entry.revision,error,
+                                        )
+                                    for handle in handles:
+                                        close_preserving_primary(
+                                            handle,VerifiedModelFile.close,error,
+                                        )
+                                    raise
+                                for handle in handles:
+                                    with contextlib.suppress(OSError): handle.close()
+                                model.remove_private_stage(stage_name,stage_identity)
+                                model.fsync()
+                                activated=self._reuse_or_recover_revision(model,entry)
+                                if activated is None:
+                                    raise RuntimeError(
+                                        "model install publication disappeared"
+                                    ) from None
                             except BaseException as error:
-                                close_preserving_primary(descriptor,os.close,error); raise
-                            try:
-                                self._fault_hook("before_retain_downloaded_file")
-                                handles.append(handle)
-                            except BaseException as error:
-                                close_preserving_primary(handle,VerifiedModelFile.close,error); raise
-                        # Rehash the retained same-inode O_RDONLY descriptions
-                        # that are handed to the runtime; publication never
-                        # qualifies one pathname and later reopens it.
-                        for item,handle in zip(entry.files,handles,strict=True):
-                            hash_exact_fd(handle.fd,item.size,item.sha256)
-                        stage.fsync()
-                        atomic_publish_dir_noreplace(model,stage_name,entry.revision)
-                        published=True
-                        self._fault_hook("after_publish_before_seal")
-                        marker_fd=self._open_recovery_marker(
-                            model,entry.revision,create=True,
-                        )
-                        stage.chmod(0o500)
-                        sealed_for_publication=True
-                        stage.fsync()
-                        self._fault_hook("after_publish_before_parent_fsync")
-                        model.fsync()        # accepted rename/seal publication order
-                        expected_names=tuple(sorted(item.path for item in entry.files))
-                        if tuple(sorted(os.listdir(stage.fd)))!=expected_names:
-                            raise PermissionError("unsafe model filesystem revision")
-                        for item,handle in zip(entry.files,handles,strict=True):
-                            hash_exact_fd(handle.fd,item.size,item.sha256)
-                        self._clear_recovery_marker(model,entry.revision,marker_fd)
-                        descriptor_to_close=marker_fd; marker_fd=None
-                        os.close(descriptor_to_close)
-                        commit_fd=self._create_publication_commit(
-                            model,entry.revision,
-                        )
-                        descriptor_to_close=commit_fd; commit_fd=None
-                        os.close(descriptor_to_close)
-                        return ActivatedModel.from_manifest(entry,tuple(handles))
-                    except BaseException as error:
-                        if (
-                            sealed_for_publication
-                            and publication_is_uncertain(model,entry.revision)
-                        ):
-                            try: stage.chmod(0o700); stage.fsync()
-                            except BaseException:
-                                error.add_note(self._RECOVERY_ROLLBACK_NOTE)
-                                if publication_is_uncertain(model,entry.revision):
-                                    self._restore_recovery_marker(
+                                if commit_attempted and not transaction_complete:
+                                    self._remove_publication_commit_preserving_primary(
                                         model,entry.revision,error,
                                     )
-                        for handle in handles:
-                            close_preserving_primary(handle,VerifiedModelFile.close,error)
-                        if marker_fd is not None:
-                            descriptor_to_close=marker_fd; marker_fd=None
-                            close_preserving_primary(descriptor_to_close,os.close,error)
-                        if commit_fd is not None:
-                            descriptor_to_close=commit_fd; commit_fd=None
-                            close_preserving_primary(descriptor_to_close,os.close,error)
-                        if not published:
-                            model.remove_private_stage(stage_name,stage_identity)
-                            model.fsync()
-                        # If marker restoration cannot be made durable, exact
-                        # 0700 rollback is attempted; if that also faults, a
-                        # second exact marker restoration is attempted.
-                        raise
-                    finally: stage.close()
-                finally: model.close()
-        finally: root.close()
-        raise RuntimeError("model install did not publish")
+                                if (
+                                    sealed_for_publication
+                                    and publication_is_uncertain(model,entry.revision)
+                                ):
+                                    try: stage.chmod(0o700); stage.fsync()
+                                    except BaseException:
+                                        error.add_note(self._RECOVERY_ROLLBACK_NOTE)
+                                        if publication_is_uncertain(
+                                            model,entry.revision,
+                                        ):
+                                            self._restore_recovery_marker(
+                                                model,entry.revision,error,
+                                            )
+                                for handle in handles:
+                                    close_preserving_primary(
+                                        handle,VerifiedModelFile.close,error,
+                                    )
+                                if marker_fd is not None:
+                                    descriptor_to_close=marker_fd; marker_fd=None
+                                    close_preserving_primary(
+                                        descriptor_to_close,os.close,error,
+                                    )
+                                if commit_fd is not None:
+                                    descriptor_to_close=commit_fd; commit_fd=None
+                                    close_preserving_primary(
+                                        descriptor_to_close,os.close,error,
+                                    )
+                                if not published:
+                                    model.remove_private_stage(stage_name,stage_identity)
+                                    model.fsync()
+                                raise
+        except BaseException as error:
+            if activated is not None:
+                close_preserving_primary(activated,ActivatedModel.close,error)
+                activated=None
+            raise
+        if activated is None:
+            raise RuntimeError("model install did not activate")
+        return activated
 ```
 
-`models/manifest.schema.json` is JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry`/file fields, the same closed ID/revision/file/hash/size/URL bounds, and an array-size cap of 256 models and 64 files. Schema validation is defense in depth: `ModelRegistry.load` independently enforces every invariant, rejects booleans and every other wrong scalar type as `ValueError`, caps models before iteration and files before construction, detects duplicate IDs/files, checks total revision bytes, and uses strict YAML parsing. Only the checked-in bootstrap manifest may have `models: []`; release candidates with enabled local-model capabilities must contain their exact governed entries. `scripts/check_model_manifest.py` uses the same bounded strict read, then the schema and runtime loader; it never performs a second pathname read. Add a Typer `models` sub-app with `list`, `verify`, and explicit owner-presence `install MODEL_ID` commands; registering it must not instantiate the installer/client or perform network I/O. Startup accepts only an `ActivatedModel` whose retained handles are `O_RDONLY`; hashing and adapter reads use explicit-offset `pread`, so prior or concurrent descriptor offsets cannot truncate or redirect a load. The adapter receives only the bounded pread reader, and the runtime’s exact signed loader receipt is authoritative. `receipt_verifier` verifies the canonical signature, non-overlapping domain, exact current key generation, expiry, model/revision, and ordered `(path,size,sha256)` inventory; per-file receipts repeat that exact tuple. The adapter keeps any partly loaded runtime private until verification returns; every load, finish, or verification exception invokes mandatory `abort_model`, and abort failure disables/restarts the model capability rather than exposing the candidate. The installer has one 900-second monotonic deadline shared across bounded DNS resolution, connect, headers, and every artifact body. That long operation holds only the target model's exclusive lock, so activation of another installed model remains available. Before either a fresh or recovered revision changes from `0700` to `0500`, the installer requires an exact owner-only zero-length `.recovery-pending-REVISION` entry through the retained model dirfd, fsyncs every newly created or reopened marker descriptor, fsyncs the model directory, and revalidates descriptor/name identity. Public activation holds the target model's lock shared for the complete proof/marker/mode/inventory/hash decision, while installation and recovery for that model hold it exclusively; the private retained-dirfd verifier prevents installer self-deadlock. Only the exclusive transaction may clear a marker, and it establishes local uncertainty before final marker identity validation and descriptor-relative unlink. A failed clear restores and re-durabilizes the exact marker before unlock; if that cannot succeed, the installer attempts exact durable `0700`, and if rollback also fails, attempts marker restoration again. Initial `0500` plus marker is treated as rollback-owned before marker reopen, so marker fsync, parent fsync, swap, and disappearance cannot leave an authorized revision. Authorization is positive rather than absence-based: only an exact stable `0400` publication-proof descriptor created after post-seal manifest verification and successful marker removal can activate. Proof creation fsyncs the non-authorizing `0600` inode and parent before the read-only `0400` transition and fsync; activation opens it `O_RDONLY` and revalidates descriptor/name identity after artifact verification. Total quarantine-fallback exhaustion leaves the proof absent, so even `0500` plus no marker is denied across processes and restart until a later exclusive retry re-verifies and creates proof. Lock cleanup and descriptor-transfer/restoration/rollback failures add only content-minimal notes and never replace the primary exception; every descriptor and unlock operation is attempted at most once. Missing/rejected/unverified/pending/uncertain/proofless models produce a disabled capability.
+`models/manifest.schema.json` is JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry`/file fields, the same closed ID/revision/file/hash/size/URL bounds, and an array-size cap of 256 models and 64 files. Schema validation is defense in depth: `ModelRegistry.load` independently enforces every invariant, rejects booleans and every other wrong scalar type as `ValueError`, caps models before iteration and files before construction, detects duplicate IDs/files, checks total revision bytes, and uses strict YAML parsing. Only the checked-in bootstrap manifest may have `models: []`; release candidates with enabled local-model capabilities must contain their exact governed entries. `scripts/check_model_manifest.py` uses the same bounded strict read, then the schema and runtime loader; it never performs a second pathname read. Add a Typer `models` sub-app with `list`, `verify`, and explicit owner-presence `install MODEL_ID` commands; registering it must not instantiate the installer/client or perform network I/O. Startup accepts only an `ActivatedModel` whose retained handles are `O_RDONLY`; hashing and adapter reads use explicit-offset `pread`, so prior or concurrent descriptor offsets cannot truncate or redirect a load. The adapter receives only the bounded pread reader, and the runtime’s exact signed loader receipt is authoritative. `receipt_verifier` verifies the canonical signature, non-overlapping domain, exact current key generation, expiry, model/revision, and ordered `(path,size,sha256)` inventory; per-file receipts repeat that exact tuple. The adapter keeps any partly loaded runtime private until verification returns; every load, finish, or verification exception invokes mandatory `abort_model`, and abort failure disables/restarts the model capability rather than exposing the candidate. The installer has one 900-second monotonic deadline shared across bounded DNS resolution, connect, headers, and every artifact body. That long operation holds only the target model's exclusive lock, so activation of another installed model remains available. Before either a fresh or recovered revision changes from `0700` to `0500`, the installer requires an exact owner-only zero-length `.recovery-pending-REVISION` entry through the retained model dirfd, fsyncs every newly created or reopened marker descriptor, fsyncs the model directory, and revalidates descriptor/name identity. Public activation holds the target model's lock shared for the complete proof/marker/mode/inventory/hash decision, while installation and recovery for that model hold it exclusively; the private retained-dirfd verifier prevents installer self-deadlock. Only the exclusive transaction may clear a marker, and it establishes local uncertainty before final marker identity validation and descriptor-relative unlink. Authorization is positive rather than absence-based, but the positive proof is prepared while the durable negative marker is still authoritative: proof creation validates and fsyncs the `0600` inode, fsyncs its parent, revalidates, transitions to `0400`, fsyncs and revalidates again, and closes the descriptor before marker clear begins. Any proof preparation/close failure removes the proof, retains the marker, preserves the primary exception, and denies activation across restart; retry re-verifies and converges. A failed marker clear restores and re-durabilizes the exact marker and removes the proof before unlock; if those cleanup steps cannot all be confirmed, the installer additionally attempts exact durable `0700`, and if rollback also fails, attempts marker restoration again. Initial `0500` plus marker is treated as rollback-owned before marker reopen, so marker fsync, parent fsync, swap, and disappearance cannot leave an authorized revision. Activation opens the exact stable `0400` proof `O_RDONLY` and revalidates descriptor/name identity after artifact verification. Fresh and reused results remain installer-owned until every directory and lock cleanup succeeds; a cleanup failure closes the unreturned activation exactly once without replacing the primary. Cleanup and descriptor-transfer/restoration/rollback failures add only content-minimal notes and every descriptor/unlock operation is attempted at most once. Missing/rejected/unverified/pending/uncertain/proofless models produce a disabled capability.
 
 - [ ] **Step 4: Lock and run the green model gate**
 
 Run: `uv lock && uv run pytest tests/security/test_model_governance.py -q && uv run python scripts/check_model_manifest.py models/manifest.yaml && uv run tuntunctl models list`
 
-Expected: PASS with the full manifest/filesystem/network/race/fault/ownership-transfer/lock-cleanup/rollback/marker-durability/positive-proof/cross-process-commit matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, cleanup failure, and conflicting publication never expose an *activatable* revision or runtime bytes. An exclusively renamed but not yet `0500`-sealed final name is rejected by mode; every accepted existing marker, including legitimate `0500` plus marker state, is re-durably fsynced and identity-revalidated before recovery proceeds. A same-model child activation blocks behind the shared/exclusive per-model lock throughout marker unlink and commit fsync. If marker restoration and rollback are all exhausted, the child and a restarted interpreter still deny because the exact positive proof is absent; retry re-verifies before creating that proof and only then activation succeeds. Missing, special, writable, nonempty, multiply linked, or identity-swapped proofs deny. Independent unlock/close, marker-restoration create/fsync/parent-fsync/close, and compound rollback faults preserve the primary error and close each descriptor at most once. Two installers for one model serialize and converge on one complete immutable revision, while a paused 900-second download for one model does not block activation of another installed model. Runtime loads repeatedly see the full exact bytes hashed through stable read-only descriptors regardless of prior offsets; list/verify/startup make zero network requests.
+Expected: PASS with the full manifest/filesystem/network/race/fault/ownership-transfer/lock-cleanup/rollback/marker-durability/positive-proof/cross-process-commit matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, cleanup failure, and conflicting publication never expose an *activatable* revision or runtime bytes. An exclusively renamed but not yet `0500`-sealed final name is rejected by mode; every accepted existing marker, including legitimate `0500` plus marker state, is re-durably fsynced and identity-revalidated before recovery proceeds. A same-model child activation blocks behind the shared/exclusive per-model lock throughout proof preparation and marker clear. Fresh/recovery proof mode, fsync, parent-fsync, validation, and close faults leave the marker authoritative, deny a fresh interpreter, leak no descriptor, and converge on retry. Missing, special, writable, nonempty, multiply linked, or identity-swapped proofs deny. Independent fresh/reused stage/model/root-close, unlock, and lock-close faults close the constructed but unreturned activation exactly once, preserve the primary cleanup exception, and produce a zero real-FD delta. Marker-restoration create/fsync/parent-fsync/close and compound rollback faults preserve the primary error and close each descriptor at most once. Two installers for one model serialize and converge on one complete immutable revision, while a paused 900-second download for one model does not block activation of another installed model. Runtime loads repeatedly see the full exact bytes hashed through stable read-only descriptors regardless of prior offsets; list/verify/startup make zero network requests.
 
 - [ ] **Step 5: Commit exact Task 10 paths**
 

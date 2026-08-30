@@ -23,6 +23,7 @@ from tuntun_core.services.models import registry as registry_module
 from tuntun_core.services.models.fs import OwnedDirectory, hash_exact_fd
 from tuntun_core.services.models.installer import ModelInstaller
 from tuntun_core.services.models.registry import (
+    ActivatedModel,
     ModelRegistry,
     ModelVerificationError,
     VerifiedModelFile,
@@ -906,6 +907,180 @@ def test_owned_directory_lock_cleanup_preserves_primary_and_releases_once(
     root.close()
 
 
+@pytest.mark.parametrize(
+    ("phase", "cleanup_fault"),
+    (
+        ("fresh", "stage_close"),
+        ("fresh", "model_close"),
+        ("fresh", "unlock"),
+        ("fresh", "lock_close"),
+        ("fresh", "root_close"),
+        ("reuse", "model_close"),
+        ("reuse", "unlock"),
+        ("reuse", "lock_close"),
+        ("reuse", "root_close"),
+    ),
+)
+def test_install_cleanup_failure_closes_unreturned_activation_once(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    cleanup_fault: str,
+) -> None:
+    if phase == "reuse":
+        installed = governed_model_case.install()  # type: ignore[attr-defined]
+        installed.close()
+
+    model_root = governed_model_case.model_root  # type: ignore[attr-defined]
+    model_path = model_root / governed_model_case.model_id  # type: ignore[attr-defined]
+    revision_path = model_path / ("a" * 40)
+    root_metadata = model_root.stat(follow_symlinks=False)
+    model_metadata = model_path.stat(follow_symlinks=False)
+    root_identity = (root_metadata.st_dev, root_metadata.st_ino)
+    model_identity = (model_metadata.st_dev, model_metadata.st_ino)
+    primary = OSError(f"scripted install {cleanup_fault} failure")
+    secondary = OSError("scripted activation cleanup failure")
+    candidates: list[ActivatedModel] = []
+    candidate_descriptors: list[int] = []
+    activation_close_attempts: list[int] = []
+    lock_descriptor: int | None = None
+    fault_injected = False
+    faults_active = True
+    real_from_manifest = ActivatedModel.from_manifest
+    real_activated_close = ActivatedModel.close
+    real_open_regular = fs_module.open_regular_at
+    real_flock = fcntl.flock
+    real_os_close = os.close
+    real_directory_close = OwnedDirectory.close
+    lock_name = fs_module.model_install_lock_name(  # type: ignore[attr-defined]
+        governed_model_case.model_id
+    )
+
+    def capture_activation(
+        _cls: type[ActivatedModel],
+        entry: object,
+        files: tuple[VerifiedModelFile, ...],
+    ) -> ActivatedModel:
+        candidate = real_from_manifest(entry, files)  # type: ignore[arg-type]
+        candidates.append(candidate)
+        candidate_descriptors.extend(item.fd for item in candidate.files)
+        return candidate
+
+    def capture_lock_descriptor(
+        directory: OwnedDirectory,
+        name: str,
+        flags: int,
+        *,
+        mode: int = 0o600,
+        expected_mode: int | None = None,
+    ) -> int:
+        nonlocal lock_descriptor
+        descriptor = real_open_regular(
+            directory,
+            name,
+            flags,
+            mode=mode,
+            expected_mode=expected_mode,
+        )
+        if name == lock_name:
+            lock_descriptor = descriptor
+        return descriptor
+
+    def fail_unlock(descriptor: int, operation: int) -> None:
+        nonlocal fault_injected
+        real_flock(descriptor, operation)
+        if (
+            faults_active
+            and candidates
+            and cleanup_fault == "unlock"
+            and descriptor == lock_descriptor
+            and operation == fcntl.LOCK_UN
+            and not fault_injected
+        ):
+            fault_injected = True
+            raise primary
+
+    def fail_lock_close(descriptor: int) -> None:
+        nonlocal fault_injected
+        target = (
+            faults_active
+            and candidates
+            and cleanup_fault == "lock_close"
+            and descriptor == lock_descriptor
+            and not fault_injected
+        )
+        real_os_close(descriptor)
+        if target:
+            fault_injected = True
+            raise primary
+
+    def fail_directory_close(directory: OwnedDirectory) -> None:
+        nonlocal fault_injected
+        identity = (directory.identity.device, directory.identity.inode)
+        target_identity: tuple[int, int] | None = None
+        if cleanup_fault == "root_close":
+            target_identity = root_identity
+        elif cleanup_fault == "model_close":
+            target_identity = model_identity
+        elif cleanup_fault == "stage_close" and revision_path.exists():
+            revision_metadata = revision_path.stat(follow_symlinks=False)
+            target_identity = (revision_metadata.st_dev, revision_metadata.st_ino)
+        target = (
+            faults_active
+            and candidates
+            and target_identity is not None
+            and identity == target_identity
+            and not fault_injected
+        )
+        real_directory_close(directory)
+        if target:
+            fault_injected = True
+            raise primary
+
+    def fail_activation_close(candidate: ActivatedModel) -> None:
+        if any(candidate is captured for captured in candidates):
+            activation_close_attempts.append(id(candidate))
+            real_activated_close(candidate)
+            raise secondary
+        real_activated_close(candidate)
+
+    monkeypatch.setattr(
+        ActivatedModel,
+        "from_manifest",
+        classmethod(capture_activation),
+    )
+    monkeypatch.setattr(ActivatedModel, "close", fail_activation_close)
+    monkeypatch.setattr(fs_module, "open_regular_at", capture_lock_descriptor)
+    monkeypatch.setattr(fcntl, "flock", fail_unlock)
+    monkeypatch.setattr(os, "close", fail_lock_close)
+    monkeypatch.setattr(OwnedDirectory, "close", fail_directory_close)
+
+    caught: BaseException | None = None
+    try:
+        try:
+            unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+                governed_model_case.model_id  # type: ignore[attr-defined]
+            )
+        except BaseException as error:
+            caught = error
+        else:
+            unexpected.close()
+
+        assert caught is primary
+        assert fault_injected
+        assert len(candidates) == 1
+        assert activation_close_attempts == [id(candidates[0])]
+        assert len(candidate_descriptors) == 1
+        with pytest.raises(OSError):
+            os.fstat(candidate_descriptors[0])
+        assert getattr(primary, "__notes__", []) == ["additional descriptor cleanup failure"]
+        assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+    finally:
+        faults_active = False
+        for candidate in candidates:
+            real_activated_close(candidate)
+
+
 def test_unrelated_installed_model_activates_while_download_is_paused(
     governed_model_case: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -1198,7 +1373,200 @@ def test_publication_commit_inode_is_durable_before_read_only_authority(
     activated.close()
 
     assert commit_fsync_modes == [0o600, 0o400]
-    assert parent_fsync_modes == [0o600]
+    assert parent_fsync_modes == [0o600, 0o400]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+@pytest.mark.parametrize(
+    "proof_fault",
+    (
+        "initial_fsync",
+        "parent_fsync",
+        "readonly_mode",
+        "final_fsync",
+        "final_validation",
+        "close",
+    ),
+)
+def test_publication_proof_fault_keeps_durable_marker_until_retry(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    proof_fault: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    model_path = (
+        governed_model_case.model_root  # type: ignore[attr-defined]
+        / governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    proof_path = governed_model_case.publication_commit_path  # type: ignore[attr-defined]
+    model_metadata = model_path.stat(follow_symlinks=False)
+    model_identity = (model_metadata.st_dev, model_metadata.st_ino)
+    primary = OSError(f"scripted proof {proof_fault} failure")
+    fault_injected = False
+    faults_active = True
+    real_fsync = os.fsync
+    real_fchmod = os.fchmod
+    real_close = os.close
+    real_require = installer_module.require_publication_commit
+
+    def is_proof_descriptor(descriptor: int) -> bool:
+        if not proof_path.exists():
+            return False
+        identity = os.fstat(descriptor)
+        proof = proof_path.stat(follow_symlinks=False)
+        return (identity.st_dev, identity.st_ino) == (proof.st_dev, proof.st_ino)
+
+    def fail_proof_fsync(descriptor: int) -> None:
+        nonlocal fault_injected
+        if faults_active and is_proof_descriptor(descriptor):
+            mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+            requested = (proof_fault == "initial_fsync" and mode == 0o600) or (
+                proof_fault == "final_fsync" and mode == 0o400
+            )
+            if requested and not fault_injected:
+                real_fsync(descriptor)
+                fault_injected = True
+                raise primary
+        real_fsync(descriptor)
+
+    def fail_proof_parent_fsync(directory: OwnedDirectory) -> None:
+        nonlocal fault_injected
+        identity = (directory.identity.device, directory.identity.inode)
+        if (
+            faults_active
+            and proof_fault == "parent_fsync"
+            and proof_path.exists()
+            and identity == model_identity
+            and not fault_injected
+        ):
+            real_fsync(directory.fd)
+            fault_injected = True
+            raise primary
+        real_fsync(directory.fd)
+
+    def fail_proof_mode(descriptor: int, mode: int) -> None:
+        nonlocal fault_injected
+        real_fchmod(descriptor, mode)
+        if (
+            faults_active
+            and proof_fault == "readonly_mode"
+            and mode == 0o400
+            and is_proof_descriptor(descriptor)
+            and not fault_injected
+        ):
+            fault_injected = True
+            raise primary
+
+    def fail_final_validation(
+        model: OwnedDirectory,
+        revision: str,
+        descriptor: int,
+        *,
+        expected_mode: int,
+        require_read_only: bool,
+    ) -> None:
+        nonlocal fault_injected
+        real_require(
+            model,
+            revision,
+            descriptor,
+            expected_mode=expected_mode,
+            require_read_only=require_read_only,
+        )
+        if (
+            faults_active
+            and proof_fault == "final_validation"
+            and expected_mode == 0o400
+            and not fault_injected
+        ):
+            fault_injected = True
+            raise primary
+
+    def fail_proof_close(descriptor: int) -> None:
+        nonlocal fault_injected
+        target = (
+            faults_active
+            and proof_fault == "close"
+            and is_proof_descriptor(descriptor)
+            and stat.S_IMODE(os.fstat(descriptor).st_mode) == 0o400
+            and not fault_injected
+        )
+        real_close(descriptor)
+        if target:
+            fault_injected = True
+            raise primary
+
+    monkeypatch.setattr(os, "fsync", fail_proof_fsync)
+    monkeypatch.setattr(OwnedDirectory, "fsync", fail_proof_parent_fsync)
+    monkeypatch.setattr(os, "fchmod", fail_proof_mode)
+    monkeypatch.setattr(installer_module, "require_publication_commit", fail_final_validation)
+    monkeypatch.setattr(os, "close", fail_proof_close)
+
+    caught: BaseException | None = None
+    try:
+        unexpected = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
+        )
+    except BaseException as error:
+        caught = error
+    else:
+        unexpected.close()
+
+    assert caught is primary
+    assert fault_injected
+    expected_mode = 0o500 if phase == "fresh" else 0o700
+    assert governed_model_case.final_revision_mode == expected_mode  # type: ignore[attr-defined]
+    assert governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+    activation_probe = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from tuntun_core.services.models.registry import ModelRegistry\n"
+        "registry=ModelRegistry.load(Path(sys.argv[1]),model_root=Path(sys.argv[2]))\n"
+        "try:\n"
+        "    activated=registry.activate(sys.argv[3])\n"
+        "except RuntimeError:\n"
+        "    raise SystemExit(0)\n"
+        "activated.close()\n"
+        "raise SystemExit(1)\n"
+    )
+
+    def probe_activation() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                activation_probe,
+                str(governed_model_case.manifest),  # type: ignore[attr-defined]
+                str(governed_model_case.model_root),  # type: ignore[attr-defined]
+                governed_model_case.model_id,  # type: ignore[attr-defined]
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    denied = probe_activation()
+    assert denied.returncode == 0, denied.stderr
+
+    faults_active = False
+    governed_model_case.clear_process_publication_uncertainty()  # type: ignore[attr-defined]
+    recovered = governed_model_case._installer().install(  # type: ignore[attr-defined]
+        governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    recovered.close()
+
+    assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert stat.S_IMODE(proof_path.stat(follow_symlinks=False).st_mode) == 0o400
+    available = probe_activation()
+    assert available.returncode == 1, available.stderr
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
 
 
 def test_publication_supports_filesystems_that_cannot_rename_read_only_directories(
@@ -1633,11 +2001,11 @@ def test_successful_recovery_persists_marker_before_seal_and_removal_after_verif
         "post_seal_hash",
         "revision_fsync",
         "model_fsync",
-        "marker_unlink",
-        "model_fsync",
         "commit_fsync_600",
         "model_fsync",
         "commit_fsync_400",
+        "marker_unlink",
+        "model_fsync",
     ]
     assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
 
@@ -2026,17 +2394,23 @@ def test_marker_clear_restoration_fault_falls_back_to_cross_process_quarantine(
     faults_active = False
 
     assert caught is primary
-    expected_note = (
-        "additional descriptor cleanup failure"
-        if restoration_fault == "close"
-        else "additional recovery marker restoration failure"
-    )
-    assert getattr(primary, "__notes__", []) == [expected_note]
+    expected_notes = [
+        (
+            "additional descriptor cleanup failure"
+            if restoration_fault == "close"
+            else "additional recovery marker restoration failure"
+        )
+    ]
+    if restoration_fault == "parent_fsync":
+        expected_notes.append("additional publication proof rollback failure")
+    assert getattr(primary, "__notes__", []) == expected_notes
     assert restoration_attempts == (
         1
         if restoration_fault == "create"
+        else 3
+        if restoration_fault == "parent_fsync"
         else 2
-        if restoration_fault in {"marker_fsync", "parent_fsync"}
+        if restoration_fault == "marker_fsync"
         else 0
     )
     assert restoration_close_attempts == (1 if restoration_fault == "close" else 0)

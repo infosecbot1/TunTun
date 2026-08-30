@@ -7,7 +7,7 @@ import os
 import secrets
 import stat
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -33,6 +33,7 @@ WriteOnce = Callable[[int, bytes | memoryview], int]
 FaultHook = Callable[[str], None]
 _RECOVERY_ROLLBACK_NOTE = "additional recovery rollback failure"
 _RECOVERY_RESTORE_NOTE = "additional recovery marker restoration failure"
+_PUBLICATION_PROOF_ROLLBACK_NOTE = "additional publication proof rollback failure"
 
 
 def _write_once(descriptor: int, data: bytes | memoryview) -> int:
@@ -41,6 +42,18 @@ def _write_once(descriptor: int, data: bytes | memoryview) -> int:
 
 def _no_fault(_point: str) -> None:
     return None
+
+
+@contextlib.contextmanager
+def _close_owned_directory(directory: OwnedDirectory) -> Iterator[None]:
+    """Close one directory without replacing an active body failure."""
+    try:
+        yield
+    except BaseException as error:
+        close_preserving_primary(directory, OwnedDirectory.close, error)
+        raise
+    else:
+        directory.close()
 
 
 class ModelInstaller:
@@ -333,6 +346,17 @@ class ModelInstaller:
             raise
         os.close(descriptor)
 
+    @staticmethod
+    def _remove_publication_commit_preserving_primary(
+        model: OwnedDirectory,
+        revision: str,
+        primary_error: BaseException,
+    ) -> None:
+        try:
+            ModelInstaller._remove_publication_commit(model, revision)
+        except BaseException:
+            primary_error.add_note(_PUBLICATION_PROOF_ROLLBACK_NOTE)
+
     def _reuse_or_recover_revision(
         self,
         model: OwnedDirectory,
@@ -353,6 +377,7 @@ class ModelInstaller:
         sealed_for_recovery = False
         post_seal_phase = False
         transaction_complete = False
+        commit_attempted = False
         try:
             mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
             sealed_for_recovery = mode == 0o500
@@ -417,18 +442,25 @@ class ModelInstaller:
                     hash_exact_fd(handle.fd, item.size, item.sha256)
                 revision.fsync()
                 model.fsync()
+                commit_attempted = True
+                commit_fd = self._create_publication_commit(model, entry.revision)
+                descriptor_to_close = commit_fd
+                commit_fd = None
+                os.close(descriptor_to_close)
                 self._clear_recovery_marker(model, entry.revision, marker_fd)
                 descriptor_to_close = marker_fd
                 marker_fd = None
                 os.close(descriptor_to_close)
-                commit_fd = self._create_publication_commit(model, entry.revision)
                 transaction_complete = True
-                descriptor_to_close = commit_fd
-                commit_fd = None
-                os.close(descriptor_to_close)
                 activated = ActivatedModel.from_manifest(entry, tuple(handles))
                 handles.clear()
         except BaseException as error:
+            if commit_attempted and not transaction_complete:
+                self._remove_publication_commit_preserving_primary(
+                    model,
+                    entry.revision,
+                    error,
+                )
             if sealed_for_recovery and not transaction_complete:
                 try:
                     revision.chmod(0o700)
@@ -463,139 +495,243 @@ class ModelInstaller:
 
     def install(self, model_id: str) -> ActivatedModel:
         entry = self.registry.entry(model_id)
-        root = OwnedDirectory.open_or_create(self.registry._root)
+        activated: ActivatedModel | None = None
         try:
-            with root.lock(
-                model_install_lock_name(entry.model_id),
-                timeout_seconds=30.0,
+            root = OwnedDirectory.open_or_create(self.registry._root)
+            with (
+                _close_owned_directory(root),
+                root.lock(
+                    model_install_lock_name(entry.model_id),
+                    timeout_seconds=30.0,
+                ),
             ):
                 model = root.child(entry.model_id, create=True, exist_ok=True)
-                try:
+                with _close_owned_directory(model):
                     prefix = f".stage-{entry.revision}-"
                     model.remove_private_stages(prefix)
                     model.fsync()
                     existing = self._reuse_or_recover_revision(model, entry)
                     if existing is not None:
-                        return existing
-                    stage_name = f"{prefix}{secrets.token_hex(8)}"
-                    stage = model.child(stage_name, create=True)
-                    stage_identity = stage.identity
-                    published = False
-                    sealed_for_publication = False
-                    handles: list[VerifiedModelFile] = []
-                    marker_fd: int | None = None
-                    commit_fd: int | None = None
-                    try:
-                        deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
-                        for item in entry.files:
-                            descriptor = self._download(stage, item, deadline)
+                        activated = existing
+                    else:
+                        stage_name = f"{prefix}{secrets.token_hex(8)}"
+                        stage = model.child(stage_name, create=True)
+                        with _close_owned_directory(stage):
+                            stage_identity = stage.identity
+                            published = False
+                            sealed_for_publication = False
+                            transaction_complete = False
+                            commit_attempted = False
+                            handles: list[VerifiedModelFile] = []
+                            marker_fd: int | None = None
+                            commit_fd: int | None = None
                             try:
-                                handle = VerifiedModelFile.from_manifest(item, descriptor)
-                            except BaseException as error:
-                                close_preserving_primary(descriptor, os.close, error)
-                                raise
-                            try:
-                                self._fault_hook("before_retain_downloaded_file")
-                                handles.append(handle)
-                            except BaseException as error:
-                                close_preserving_primary(handle, VerifiedModelFile.close, error)
-                                raise
-                            self._fault_hook("after_each_file")
-                        for item, handle in zip(entry.files, handles, strict=True):
-                            hash_exact_fd(handle.fd, item.size, item.sha256)
-                        self._fault_hook("before_stage_fsync")
-                        stage.fsync()
-                        self._fault_hook("after_stage_fsync")
-                        self._fault_hook("before_publish")
-                        atomic_publish_dir_noreplace(model, stage_name, entry.revision)
-                        published = True
-                        self._fault_hook("after_publish_before_seal")
-                        marker_fd = self._open_recovery_marker(
-                            model,
-                            entry.revision,
-                            create=True,
-                        )
-                        stage.chmod(0o500)
-                        sealed_for_publication = True
-                        stage.fsync()
-                        self._fault_hook("after_publish_before_parent_fsync")
-                        model.fsync()
-                        expected_names = tuple(sorted(item.path for item in entry.files))
-                        if tuple(sorted(os.listdir(stage.fd))) != expected_names:
-                            raise PermissionError("unsafe model filesystem revision")
-                        for item, handle in zip(entry.files, handles, strict=True):
-                            hash_exact_fd(handle.fd, item.size, item.sha256)
-                        self._clear_recovery_marker(model, entry.revision, marker_fd)
-                        descriptor_to_close = marker_fd
-                        marker_fd = None
-                        os.close(descriptor_to_close)
-                        commit_fd = self._create_publication_commit(model, entry.revision)
-                        descriptor_to_close = commit_fd
-                        commit_fd = None
-                        os.close(descriptor_to_close)
-                        return ActivatedModel.from_manifest(entry, tuple(handles))
-                    except FileExistsError as error:
-                        if published:
-                            for handle in handles:
-                                close_preserving_primary(handle, VerifiedModelFile.close, error)
-                            if marker_fd is not None:
-                                descriptor_to_close = marker_fd
-                                marker_fd = None
-                                close_preserving_primary(descriptor_to_close, os.close, error)
-                            if commit_fd is not None:
+                                deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
+                                for item in entry.files:
+                                    descriptor = self._download(stage, item, deadline)
+                                    try:
+                                        handle = VerifiedModelFile.from_manifest(
+                                            item,
+                                            descriptor,
+                                        )
+                                    except BaseException as error:
+                                        close_preserving_primary(
+                                            descriptor,
+                                            os.close,
+                                            error,
+                                        )
+                                        raise
+                                    try:
+                                        self._fault_hook("before_retain_downloaded_file")
+                                        handles.append(handle)
+                                    except BaseException as error:
+                                        close_preserving_primary(
+                                            handle,
+                                            VerifiedModelFile.close,
+                                            error,
+                                        )
+                                        raise
+                                    self._fault_hook("after_each_file")
+                                for item, handle in zip(
+                                    entry.files,
+                                    handles,
+                                    strict=True,
+                                ):
+                                    hash_exact_fd(
+                                        handle.fd,
+                                        item.size,
+                                        item.sha256,
+                                    )
+                                self._fault_hook("before_stage_fsync")
+                                stage.fsync()
+                                self._fault_hook("after_stage_fsync")
+                                self._fault_hook("before_publish")
+                                atomic_publish_dir_noreplace(
+                                    model,
+                                    stage_name,
+                                    entry.revision,
+                                )
+                                published = True
+                                self._fault_hook("after_publish_before_seal")
+                                marker_fd = self._open_recovery_marker(
+                                    model,
+                                    entry.revision,
+                                    create=True,
+                                )
+                                stage.chmod(0o500)
+                                sealed_for_publication = True
+                                stage.fsync()
+                                self._fault_hook("after_publish_before_parent_fsync")
+                                model.fsync()
+                                expected_names = tuple(sorted(item.path for item in entry.files))
+                                if tuple(sorted(os.listdir(stage.fd))) != expected_names:
+                                    raise PermissionError("unsafe model filesystem revision")
+                                for item, handle in zip(
+                                    entry.files,
+                                    handles,
+                                    strict=True,
+                                ):
+                                    hash_exact_fd(
+                                        handle.fd,
+                                        item.size,
+                                        item.sha256,
+                                    )
+                                commit_attempted = True
+                                commit_fd = self._create_publication_commit(
+                                    model,
+                                    entry.revision,
+                                )
                                 descriptor_to_close = commit_fd
                                 commit_fd = None
-                                close_preserving_primary(
-                                    descriptor_to_close,
-                                    os.close,
-                                    error,
+                                os.close(descriptor_to_close)
+                                self._clear_recovery_marker(
+                                    model,
+                                    entry.revision,
+                                    marker_fd,
                                 )
-                            raise
-                        for handle in handles:
-                            with contextlib.suppress(OSError):
-                                handle.close()
-                        if not published:
-                            model.remove_private_stage(stage_name, stage_identity)
-                            model.fsync()
-                        existing = self._reuse_or_recover_revision(model, entry)
-                        if existing is None:
-                            raise RuntimeError("model install publication disappeared") from None
-                        return existing
-                    except BaseException as error:
-                        if sealed_for_publication and publication_is_uncertain(
-                            model, entry.revision
-                        ):
-                            try:
-                                stage.chmod(0o700)
-                                stage.fsync()
-                            except BaseException:
-                                error.add_note(_RECOVERY_ROLLBACK_NOTE)
-                                if publication_is_uncertain(model, entry.revision):
-                                    self._restore_recovery_marker(
+                                descriptor_to_close = marker_fd
+                                marker_fd = None
+                                os.close(descriptor_to_close)
+                                transaction_complete = True
+                                activated = ActivatedModel.from_manifest(
+                                    entry,
+                                    tuple(handles),
+                                )
+                                handles.clear()
+                            except FileExistsError as error:
+                                if published:
+                                    if commit_attempted and not transaction_complete:
+                                        self._remove_publication_commit_preserving_primary(
+                                            model,
+                                            entry.revision,
+                                            error,
+                                        )
+                                    for handle in handles:
+                                        close_preserving_primary(
+                                            handle,
+                                            VerifiedModelFile.close,
+                                            error,
+                                        )
+                                    if marker_fd is not None:
+                                        descriptor_to_close = marker_fd
+                                        marker_fd = None
+                                        close_preserving_primary(
+                                            descriptor_to_close,
+                                            os.close,
+                                            error,
+                                        )
+                                    if commit_fd is not None:
+                                        descriptor_to_close = commit_fd
+                                        commit_fd = None
+                                        close_preserving_primary(
+                                            descriptor_to_close,
+                                            os.close,
+                                            error,
+                                        )
+                                    raise
+                                for handle in handles:
+                                    with contextlib.suppress(OSError):
+                                        handle.close()
+                                model.remove_private_stage(
+                                    stage_name,
+                                    stage_identity,
+                                )
+                                model.fsync()
+                                existing = self._reuse_or_recover_revision(
+                                    model,
+                                    entry,
+                                )
+                                if existing is None:
+                                    raise RuntimeError(
+                                        "model install publication disappeared"
+                                    ) from None
+                                activated = existing
+                            except BaseException as error:
+                                if commit_attempted and not transaction_complete:
+                                    self._remove_publication_commit_preserving_primary(
                                         model,
                                         entry.revision,
                                         error,
                                     )
-                        for handle in handles:
-                            close_preserving_primary(handle, VerifiedModelFile.close, error)
-                        if marker_fd is not None:
-                            descriptor_to_close = marker_fd
-                            marker_fd = None
-                            close_preserving_primary(descriptor_to_close, os.close, error)
-                        if commit_fd is not None:
-                            descriptor_to_close = commit_fd
-                            commit_fd = None
-                            close_preserving_primary(descriptor_to_close, os.close, error)
-                        if not published:
-                            try:
-                                model.remove_private_stage(stage_name, stage_identity)
-                                model.fsync()
-                            except FileNotFoundError:
-                                pass
-                        raise
-                    finally:
-                        stage.close()
-                finally:
-                    model.close()
-        finally:
-            root.close()
+                                if sealed_for_publication and publication_is_uncertain(
+                                    model,
+                                    entry.revision,
+                                ):
+                                    try:
+                                        stage.chmod(0o700)
+                                        stage.fsync()
+                                    except BaseException:
+                                        error.add_note(_RECOVERY_ROLLBACK_NOTE)
+                                        if publication_is_uncertain(
+                                            model,
+                                            entry.revision,
+                                        ):
+                                            self._restore_recovery_marker(
+                                                model,
+                                                entry.revision,
+                                                error,
+                                            )
+                                for handle in handles:
+                                    close_preserving_primary(
+                                        handle,
+                                        VerifiedModelFile.close,
+                                        error,
+                                    )
+                                if marker_fd is not None:
+                                    descriptor_to_close = marker_fd
+                                    marker_fd = None
+                                    close_preserving_primary(
+                                        descriptor_to_close,
+                                        os.close,
+                                        error,
+                                    )
+                                if commit_fd is not None:
+                                    descriptor_to_close = commit_fd
+                                    commit_fd = None
+                                    close_preserving_primary(
+                                        descriptor_to_close,
+                                        os.close,
+                                        error,
+                                    )
+                                if not published:
+                                    try:
+                                        model.remove_private_stage(
+                                            stage_name,
+                                            stage_identity,
+                                        )
+                                        model.fsync()
+                                    except FileNotFoundError:
+                                        pass
+                                raise
+        except BaseException as error:
+            if activated is not None:
+                close_preserving_primary(
+                    activated,
+                    ActivatedModel.close,
+                    error,
+                )
+                activated = None
+            raise
+        if activated is None:
+            raise RuntimeError("model install did not activate")
+        return activated
