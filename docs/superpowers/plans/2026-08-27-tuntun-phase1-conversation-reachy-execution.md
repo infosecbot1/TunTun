@@ -427,7 +427,7 @@ git commit -m "feat(conversation): add fail-closed turn state machine"
 - Create: `apps/core/src/tuntun_core/services/sessions/idempotency.py`
 - Create: `apps/core/src/tuntun_core/bootstrap/lifecycle.py`
 - Create: `tests/fixtures/sessions.py`
-- Modify: `tests/conftest.py`
+- Create: `tests/conftest.py`
 - Test: `tests/integration/test_session_exclusivity.py`
 - Test: `tests/integration/test_turn_cancellation.py`
 
@@ -1104,6 +1104,8 @@ async def test_single_household_turn_admits_successor_only_after_clear_and_relea
 # tests/conftest.py
 from importlib.util import find_spec
 
+import pytest
+
 _FIXTURE_PLUGINS = (
     "tests.fixtures.sessions",
     "tests.fixtures.provider_routes",
@@ -1120,9 +1122,44 @@ _FIXTURE_PLUGINS = (
     "tests.fixtures.evals",
     "tests.fixtures.workflows",
 )
+
+
+def _plugin_exists(plugin):
+    try:
+        return find_spec(plugin) is not None
+    except ModuleNotFoundError:
+        return False
+
+
 pytest_plugins = tuple(
-    plugin for plugin in _FIXTURE_PLUGINS if find_spec(plugin) is not None
+    plugin for plugin in _FIXTURE_PLUGINS if _plugin_exists(plugin)
 )
+
+_APPROVED_SKIP_MARKERS = (("reachy_hardware",), ("live_cloud",))
+_NON_AUTHORIZATION_MARKERS = {
+    "asyncio", "filterwarnings", "parametrize", "skip", "skipif", "usefixtures",
+}
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if not report.skipped:
+        return
+    marker_names = tuple(
+        sorted(
+            marker.name
+            for marker in item.iter_markers()
+            if marker.name not in _NON_AUTHORIZATION_MARKERS
+        )
+    )
+    if marker_names in _APPROVED_SKIP_MARKERS:
+        return
+    report.outcome = "failed"
+    report.longrepr = f"unapproved pytest skip blocked by policy: {item.nodeid}"
+    if hasattr(report, "wasxfail"):
+        del report.wasxfail
 ```
 
 ```python
@@ -2180,7 +2217,7 @@ git commit -m "feat(conversation): enforce one session and safe cancellation"
 ### Task 03: Master WP08 — Persist and Consume the Frozen Provider Authorization
 
 **Master package:** WP08
-**Depends on:** Task 02 and foundation contracts, receipts, SQLCipher schema, and provider-review records; live family routing additionally waits for the subject/Guest consent ledgers in master Task 17
+**Depends on:** Task 02 and the accepted Foundation Task 13 integration ref, including its contracts, receipts, SQLCipher migration engine, `tests/integration/storage/test_migrations.py`, and provider-review records; live family routing additionally waits for the subject/Guest consent ledgers in master Task 17
 **Estimated effort:** 2.5 person-days
 
 **Files:**
@@ -2898,7 +2935,7 @@ git commit -m "security(provider): persist and consume frozen route authorizatio
 ### Task 04: Master WP08 — Purpose-Derived Commitments and Two-Pass Redaction
 
 **Master package:** WP08
-**Depends on:** Task 03 and foundation key/contract services
+**Depends on:** Task 03 and the accepted Foundation Task 13 integration ref, including its SQLCipher migration engine and `tests/integration/storage/test_migrations.py`, plus foundation key/contract services
 **Estimated effort:** 2 person-days
 
 **Files:**
@@ -3484,7 +3521,7 @@ git commit -m "feat(privacy): add purpose-bound provider sanitization"
 ### Task 05: Master WP09 — Atomic Per-Attempt Budget Guard
 
 **Master package:** WP09
-**Depends on:** Foundation budget contracts, SQLCipher schema, provider-review records, and Task 04 commitments
+**Depends on:** The accepted Foundation Task 13 integration ref, including its budget contracts, SQLCipher migration engine, `tests/integration/storage/test_migrations.py`, and provider-review records, plus Task 04 commitments
 **Estimated effort:** 3.5 person-days
 
 **Files:**
@@ -7207,7 +7244,7 @@ git commit -m "feat(budget): reserve and settle every provider attempt"
 ### Task 06: Master WP10 — Retry Owner and OpenAI Adapters
 
 **Master package:** WP10
-**Depends on:** Tasks 03–05 plus accepted Foundation Task 9 for `FakeClock`, `packages/testing/src/tuntun_testing/fake_providers.py`, `apps/core/pyproject.toml`, and `uv.lock`
+**Depends on:** Tasks 03–05 plus the accepted Foundation Task 13 integration ref, which includes Task 9's `FakeClock`, `packages/testing/src/tuntun_testing/fake_providers.py`, `apps/core/pyproject.toml`, and `uv.lock` and owns the SQLCipher migration engine and `tests/integration/storage/test_migrations.py`
 **Estimated effort:** 3.5 person-days
 
 **Files:**
@@ -10324,7 +10361,7 @@ git commit -m "feat(providers): add explicitly budgeted OpenAI attempts"
 ### Task 07: Master WP11 — Simulated Guest Conversation Slice
 
 **Master package:** WP11
-**Depends on:** Tasks 01–06 plus accepted Foundation Task 9 for `guest_hinglish_scenario()`
+**Depends on:** Tasks 01–06 plus the accepted Foundation Task 13 integration ref, which includes Task 9's `guest_hinglish_scenario()` and owns the SQLCipher migration engine and `tests/integration/storage/test_migrations.py`
 **Estimated effort:** 2 person-days
 
 **Files:**
@@ -11667,7 +11704,7 @@ git commit -m "feat(core): add ephemeral simulated guest conversation"
 ### Task 08: Master WP12 — Delivered Reachy Capability and Security Probe
 
 **Master package:** WP12
-**Depends on:** accepted Foundation Task 9 repository/testing baseline and Task 07 simulated slice
+**Depends on:** The accepted Foundation Task 13 integration ref, including the repository/testing baseline, SQLCipher migration engine, and `tests/integration/storage/test_migrations.py`, plus the Task 07 simulated slice
 **Estimated effort:** 2 person-days
 
 **Files:**
@@ -16160,7 +16197,7 @@ git commit -m "docs(reachy): pin delivered capability and security gate"
 ### Task 09: Master WP13 — Authenticated Control Protocol and HMAC Verification
 
 **Master package:** WP13
-**Depends on:** Task 08 capability gate and foundation event/device schema
+**Depends on:** Task 08 capability gate and the accepted Foundation Task 13 integration ref, including its SQLCipher migration engine, `tests/integration/storage/test_migrations.py`, and event/device schema
 **Estimated effort:** 2 person-days
 
 **Files:**
@@ -16935,7 +16972,7 @@ git commit -m "security(reachy): authenticate control payloads and reject replay
 ### Task 10: Master WP13 — Bounded Binary Media and Camera Windows
 
 **Master package:** WP13
-**Depends on:** Task 09 authenticated control and replay protection plus the accepted Foundation Task 9 lockfile/project-file baseline inherited through Task 08
+**Depends on:** Task 09 authenticated control and replay protection plus the accepted Foundation Task 13 integration ref, including its SQLCipher migration engine and `tests/integration/storage/test_migrations.py` and the lockfile/project-file baseline inherited through Task 08
 **Estimated effort:** 2 person-days
 
 **Files:**
@@ -19486,7 +19523,7 @@ git commit -m "security(reachy): bound media and camera authorization windows"
 ### Task 11: Master WP13 — Edge Key Custody and Competing-Controller Fail-Safe
 
 **Master package:** WP13
-**Depends on:** Tasks 08–10
+**Depends on:** Tasks 08–10 plus the accepted Foundation Task 13 integration ref, including its SQLCipher migration engine and `tests/integration/storage/test_migrations.py`
 **Estimated effort:** 2.5 person-days
 
 **Files:**
@@ -21815,7 +21852,7 @@ git commit -m "security(edge): protect keys and fail safe on competing control"
 ### Task 12: Master WP14 — Exact Audio Conversion, RAM Bounds, Wake, and VAD
 
 **Master package:** WP14
-**Depends on:** Tasks 08 and 11 plus governed-model foundation
+**Depends on:** Tasks 08 and 11 plus the accepted Foundation Task 13 integration ref, including its SQLCipher migration engine, `tests/integration/storage/test_migrations.py`, and governed-model foundation
 **Estimated effort:** 2.5 person-days
 
 **Files:**
@@ -21828,10 +21865,12 @@ git commit -m "security(edge): protect keys and fail safe on competing control"
 - Modify: `apps/edge/src/tuntun_edge/reachy/probe.py`
 - Create: `packages/contracts/src/tuntun_contracts/reachy_assistant_qualification.py`
 - Modify: `models/manifest.yaml`
+- Modify: `apps/core/src/tuntun_core/resources/model-manifest.yaml`
 - Create: `models/wake/hello-tuntun/model-card.yaml`
 - Create: `models/wake/stop/model-card.yaml`
 - Test: `tests/unit/edge/test_audio_buffer.py`
 - Test: `tests/unit/edge/test_audio_converter.py`
+- Test: `tests/unit/edge/test_wake_model_offline.py`
 - Test: `tests/hardware/bench_wakeword.py`
 - Test: `tests/unit/edge/test_runtime_compatibility_probe.py`
 - Test: `tests/hardware/test_reachy_assistant_qualification.py`
@@ -21953,6 +21992,31 @@ def test_ring_keeps_five_seconds_and_post_wake_cap() -> None:
     ring.begin_turn()
     ring.append_post_wake(b"b" * 8_388_608)
     assert ring.post_wake_size == 8_388_608
+```
+
+```python
+# tests/unit/edge/test_wake_model_offline.py
+import socket
+
+from tuntun_edge.audio.wakeword import WakeDetector
+
+
+def test_manifest_bound_wake_activation_and_inference_are_offline(
+    monkeypatch, offline_wake_model_case,
+) -> None:
+    def deny_network(*_args, **_kwargs):
+        raise AssertionError("wake model activation/inference attempted network access")
+
+    monkeypatch.setattr(socket, "socket", deny_network)
+    monkeypatch.setattr(socket, "getaddrinfo", deny_network)
+    case = offline_wake_model_case()
+    activated = case.registry.activate(case.model_id)
+    receipt = activated.load_with(case.strict_edge_adapter, case.receipt_verifier)
+    assert receipt.model_id == case.model_id
+    detector = WakeDetector(case.strict_edge_adapter.infer, case.threshold_micros)
+    assert detector.process(b"\0" * 2_560) is False
+    assert case.strict_edge_adapter.inference_count == 1
+    activated.close()
 ```
 
 - [ ] **Step 2: Run the tests and observe the red result**
@@ -22262,7 +22326,7 @@ class VoiceActivityDetector:
         return self._infer(pcm) >= self._threshold
 ```
 
-Add two entries to `models/manifest.yaml`, named `hello-tuntun-v1` and `stop-tuntun-v1`, each with immutable source URL, source revision, SHA-256 file hash, license, training provenance, runtime, exact 1,280-sample input contract, output score units, approved purpose, calibration report hash, and `runtime_download: false`. Model cards must state that only synthetic or explicitly consented non-family samples were used and that weights are omitted when redistribution is not approved.
+Add two entries to both `models/manifest.yaml` and the byte-identical packaged `apps/core/src/tuntun_core/resources/model-manifest.yaml`, named `hello-tuntun-v1` and `stop-tuntun-v1`. Each entry uses only Foundation's closed model keys—`id`, `revision`, `license`, `provenance`, `redistribution`, `approved_purpose`, `runtime`, `architecture`, `input_contract`, `output_contract`, `benchmark_gate`, `review_date`, and `files`—and each file uses only `path`, `size`, `sha256`, and `url`. The immutable revision, hashes, license/provenance review, exact 1,280-sample input, output score units, and calibration gate must be real approved evidence. Models are provisioned only by Foundation's explicit governed installer before activation; edge activation and inference perform no network access. Model cards must state that only synthetic or explicitly consented non-family samples were used and that weights are omitted when redistribution is not approved.
 
 ```python
 # tests/unit/edge/test_runtime_compatibility_probe.py (Task 12 append)
@@ -22327,7 +22391,7 @@ Expected: exit 0 with no dropped frames and CPU at or below 25% of one CM4 core.
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add apps/edge/pyproject.toml uv.lock apps/edge/src/tuntun_edge/audio/converter.py apps/edge/src/tuntun_edge/audio/buffer.py apps/edge/src/tuntun_edge/audio/wakeword.py apps/edge/src/tuntun_edge/audio/vad.py apps/edge/src/tuntun_edge/reachy/probe.py packages/contracts/src/tuntun_contracts/reachy_assistant_qualification.py models/manifest.yaml models/wake/hello-tuntun/model-card.yaml models/wake/stop/model-card.yaml tests/fixtures/reachy_commissioning.py tests/unit/edge/test_audio_converter.py tests/unit/edge/test_audio_buffer.py tests/unit/edge/test_runtime_compatibility_probe.py tests/hardware/test_reachy_assistant_qualification.py tests/hardware/bench_wakeword.py
+git add apps/edge/pyproject.toml uv.lock apps/edge/src/tuntun_edge/audio/converter.py apps/edge/src/tuntun_edge/audio/buffer.py apps/edge/src/tuntun_edge/audio/wakeword.py apps/edge/src/tuntun_edge/audio/vad.py apps/edge/src/tuntun_edge/reachy/probe.py packages/contracts/src/tuntun_contracts/reachy_assistant_qualification.py models/manifest.yaml apps/core/src/tuntun_core/resources/model-manifest.yaml models/wake/hello-tuntun/model-card.yaml models/wake/stop/model-card.yaml tests/fixtures/reachy_commissioning.py tests/unit/edge/test_audio_converter.py tests/unit/edge/test_audio_buffer.py tests/unit/edge/test_wake_model_offline.py tests/unit/edge/test_runtime_compatibility_probe.py tests/hardware/test_reachy_assistant_qualification.py tests/hardware/bench_wakeword.py
 git diff --cached --check
 git commit -m "feat(edge): add governed wake audio pipeline"
 ```
@@ -22335,7 +22399,7 @@ git commit -m "feat(edge): add governed wake audio pipeline"
 ### Task 13: Master WP14 — Stop and Privacy During Playback With a No-AEC Physical Fallback
 
 **Master package:** WP14
-**Depends on:** Tasks 10–12
+**Depends on:** Tasks 10–12 plus the accepted Foundation Task 13 integration ref, including its SQLCipher migration engine and `tests/integration/storage/test_migrations.py`
 **Estimated effort:** 3 person-days
 
 **Files:**
@@ -23261,7 +23325,7 @@ git commit -m "feat(edge): gate acoustic stop and add physical fallback"
 ### Task 14: Master WP15 — Turn-Local Language and Pseudonymous Personas
 
 **Master package:** WP15
-**Depends on:** Task 07 conversation slice only; production identity/profile projection is deferred to the Identity plan
+**Depends on:** Task 07 conversation slice plus the accepted Foundation Task 13 integration ref, including its SQLCipher migration engine and `tests/integration/storage/test_migrations.py`; production identity/profile projection is deferred to the Identity plan
 **Estimated effort:** 1.5 person-days
 
 **Files:**
@@ -24280,13 +24344,14 @@ git commit -m "feat(persona): add pseudonymous bilingual turn behavior"
 ### Task 15: Master WP15 — Corpus-Bound Bilingual and Child-Safety Evaluation Gate
 
 **Master package:** WP15
-**Depends on:** Task 14
+**Depends on:** Task 14 plus the accepted Foundation Task 13 integration ref, including its SQLCipher migration engine and `tests/integration/storage/test_migrations.py`
 **Estimated effort:** 2.5 person-days
 
 **Files:**
 - Create: `evals/pyproject.toml`
 - Create: `evals/uv.lock`
 - Create: `evals/control_json.py`
+- Create: `evals/generate_bilingual_report_schema.py`
 - Create: `evals/cases/build_bilingual_family.py`
 - Create: `evals/cases/bilingual_schema.py`
 - Create: `evals/cases/child_safety_schema.py`
@@ -24311,6 +24376,77 @@ git commit -m "feat(persona): add pseudonymous bilingual turn behavior"
 **Blocking external-artifact prerequisite (complete before Task 15 starts):** an owner-reviewed artifact commit must already track exact nonempty bytes at `evals/cases/bilingual-family.jsonl`, `evals/cases/child-safety-v1.jsonl`, `evals/cases/evaluator-calibration-v1.jsonl`, `evals/cases/corpora.lock.json`, and `evals/models/evaluator-models.lock.json`, plus every content-addressed local evaluator artifact named by the model lock. `corpora.lock.json` is strict canonical JSON mapping each of the three corpus paths to its SHA-256 and row count. The prerequisite commit is independently reviewed and named in Task-15 evidence. If any artifact is absent, untracked, empty, hash-mismatched, or lacks license/source review, Task 15 does not begin and no RED/GREEN claim is made. These large reviewed bytes are prerequisites, not task-generated fixtures and not staged by Task 15.
 
 Task 15 owns an isolated evaluator project. `evals/pyproject.toml` requires Python `==3.12.*`, local path/editable=false `tuntun-core` and `tuntun-contracts` project wheels, and exact `pydantic==2.13.5`, `pytest==8.4.2`, `fasttext-wheel==0.9.2`, `transformers==4.56.2`, and `torch==2.8.0`; generate `evals/uv.lock` with `uv lock --project evals`, then use `uv run --project evals --locked`. It never mutates the workspace-root `uv.lock`. All Task-15 Python commands below use this isolated project.
+
+The score schema is generated, never hand-maintained. The generator below imports the strict report model, assigns one stable `$id`, serializes sorted keys with fixed compact separators and one LF, and either writes atomically or byte-compares the committed schema. Unknown fields, missing fields, a wrong schema-version literal, and changed candidate/model/corpus binding fields are negative gates. Any missing corpus, evaluator model, or license approval remains the blocking external-artifact prerequisite above and is never converted to a skip.
+
+```python
+# evals/generate_bilingual_report_schema.py
+import argparse
+import json
+import os
+from pathlib import Path
+
+from evals.verify_bilingual_report import BilingualScoreReportV1
+
+
+SCHEMA_PATH = Path("evals/reports/bilingual-persona-score-v1.schema.json")
+SCHEMA_ID = "https://tuntun.local/schemas/bilingual-persona-score-v1.schema.json"
+
+
+def canonical_schema_bytes() -> bytes:
+    schema = BilingualScoreReportV1.model_json_schema()
+    schema["$id"] = SCHEMA_ID
+    return (
+        json.dumps(
+            schema,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def write_schema(path: Path = SCHEMA_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        payload = canonical_schema_bytes()
+        written = os.write(descriptor, payload)
+        if written != len(payload):
+            raise OSError("short schema write")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+
+
+def verify_schema(path: Path = SCHEMA_PATH) -> None:
+    if path.read_bytes() != canonical_schema_bytes():
+        raise SystemExit("bilingual report schema byte drift")
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--write", action="store_true")
+    action.add_argument("--check", action="store_true")
+    arguments = parser.parse_args(argv)
+    if arguments.write:
+        write_schema()
+    else:
+        verify_schema()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
 
 ```python
 # tests/fixtures/evals.py
@@ -24530,6 +24666,45 @@ def test_tamper_or_stale_binding_blocks(valid_report, verifier, mutate_report, m
 def test_label_counts_cannot_substitute_for_executed_results(report_builder):
     with pytest.raises(ValueError, match="complete_case_results"):
         report_builder.sign({"labels":{"hi":70,"en":70,"mixed":70,"hi_romanized":70}})
+```
+
+```python
+# tests/acceptance/test_bilingual_score_report.py (schema generation append)
+# materializer: append
+from copy import deepcopy
+from pathlib import Path
+
+from pydantic import ValidationError
+
+from evals.generate_bilingual_report_schema import canonical_schema_bytes
+from evals.verify_bilingual_report import BilingualScoreReportV1
+
+
+def test_committed_score_schema_is_canonical_and_current() -> None:
+    assert (
+        Path("evals/reports/bilingual-persona-score-v1.schema.json").read_bytes()
+        == canonical_schema_bytes()
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("unknown", "missing", "wrong_literal", "wrong_binding"),
+)
+def test_score_schema_rejects_unknown_missing_literal_and_binding_drift(
+    valid_report, mutation,
+) -> None:
+    payload = deepcopy(valid_report.report.model_dump(mode="json"))
+    if mutation == "unknown":
+        payload["caller_passed"] = True
+    elif mutation == "missing":
+        payload.pop("candidate_commit")
+    elif mutation == "wrong_literal":
+        payload["schema_version"] = "tuntun.bilingual-persona-score.v2"
+    else:
+        payload["candidate_commit"] = "not-a-bound-commit"
+    with pytest.raises(ValidationError):
+        BilingualScoreReportV1.model_validate(payload)
 ```
 
 - [ ] **Step 2: Run the test and observe the red result**
@@ -25619,7 +25794,7 @@ Expected: PASS and no reviewed-corpus diff. The independently verified signed ca
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add evals/pyproject.toml evals/uv.lock evals/control_json.py evals/cases/build_bilingual_family.py evals/cases/bilingual_schema.py evals/cases/child_safety_schema.py evals/run_bilingual_personas.py evals/run_child_safety.py evals/scorers/corpus_bound.py evals/scorers/relevance.py evals/judges/pinned_language.py evals/judges/multilingual_leakage.py evals/reports/bilingual-persona-score-v1.schema.json evals/verify_bilingual_report.py tests/fixtures/evals.py tests/acceptance/test_bilingual_personas.py tests/acceptance/test_child_safety_corpus.py tests/acceptance/test_evaluator_calibration.py tests/acceptance/test_bilingual_score_report.py
+git add evals/pyproject.toml evals/uv.lock evals/control_json.py evals/generate_bilingual_report_schema.py evals/cases/build_bilingual_family.py evals/cases/bilingual_schema.py evals/cases/child_safety_schema.py evals/run_bilingual_personas.py evals/run_child_safety.py evals/scorers/corpus_bound.py evals/scorers/relevance.py evals/judges/pinned_language.py evals/judges/multilingual_leakage.py evals/reports/bilingual-persona-score-v1.schema.json evals/verify_bilingual_report.py tests/fixtures/evals.py tests/acceptance/test_bilingual_personas.py tests/acceptance/test_child_safety_corpus.py tests/acceptance/test_evaluator_calibration.py tests/acceptance/test_bilingual_score_report.py
 git diff --cached --check
 git commit -m "test(persona): add corpus-bound bilingual and child-safety gate"
 ```
@@ -25627,7 +25802,7 @@ git commit -m "test(persona): add corpus-bound bilingual and child-safety gate"
 ### Task 16: Master WP16 — Replaceable LangGraph with Ephemeral Content
 
 **Master package:** WP16
-**Depends on:** Tasks 01–15 plus accepted Foundation Task 9's `guest_hinglish_scenario()` and the serial lockfile/project-file baseline inherited through Tasks 08 and 10
+**Depends on:** Tasks 01–15 plus the accepted Foundation Task 13 integration ref, which includes Task 9's `guest_hinglish_scenario()`, owns the SQLCipher migration engine and `tests/integration/storage/test_migrations.py`, and supplies the serial lockfile/project-file baseline inherited through Tasks 08 and 10
 **Estimated effort:** 1 person-day
 
 **Files:**
