@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,9 +29,7 @@ from scripts.validate_conversation_plan import (
     validate_plan_document,
 )
 
-PLAN_PATH = Path(
-    "docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md"
-)
+PLAN_PATH = Path("docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md")
 
 
 @pytest.mark.parametrize(
@@ -57,9 +59,7 @@ def test_foundation_archive_is_read_from_the_explicit_ref_not_the_worktree(
         ["git", "-C", repository, "config", "user.email", "plan-test@tuntun.invalid"],
         check=True,
     )
-    subprocess.run(
-        ["git", "-C", repository, "config", "user.name", "Plan Test"], check=True
-    )
+    subprocess.run(["git", "-C", repository, "config", "user.name", "Plan Test"], check=True)
     tracked = repository / "foundation.txt"
     tracked.write_text("accepted\n")
     subprocess.run(["git", "-C", repository, "add", "foundation.txt"], check=True)
@@ -88,9 +88,7 @@ def test_foundation_ref_is_resolved_once_before_archive(
         ["git", "-C", repository, "config", "user.email", "plan-test@tuntun.invalid"],
         check=True,
     )
-    subprocess.run(
-        ["git", "-C", repository, "config", "user.name", "Plan Test"], check=True
-    )
+    subprocess.run(["git", "-C", repository, "config", "user.name", "Plan Test"], check=True)
     tracked = repository / "foundation.txt"
     tracked.write_text("accepted\n")
     subprocess.run(["git", "-C", repository, "add", "foundation.txt"], check=True)
@@ -143,9 +141,7 @@ def test_plan_is_read_from_explicit_git_object_not_dirty_worktree(tmp_path: Path
         ["git", "-C", repository, "config", "user.email", "plan-test@tuntun.invalid"],
         check=True,
     )
-    subprocess.run(
-        ["git", "-C", repository, "config", "user.name", "Plan Test"], check=True
-    )
+    subprocess.run(["git", "-C", repository, "config", "user.name", "Plan Test"], check=True)
     plan_path = repository / "plan.md"
     plan_path.write_text(
         _task(
@@ -183,8 +179,7 @@ def _task(
 ) -> str:
     declarations = "\n".join(f"- {kind}: `{path}`" for kind, path in files)
     fences = "\n\n".join(
-        f"```{language}\n{header}\n{body.rstrip()}\n```"
-        for language, header, body in snippets
+        f"```{language}\n{header}\n{body.rstrip()}\n```" for language, header, body in snippets
     )
     staged_paths = staged if staged is not None else tuple(path for _, path in files)
     command = "git add " + " ".join(staged_paths)
@@ -241,8 +236,97 @@ def _foundation_files() -> dict[str, bytes]:
     }
 
 
+def _real_foundation_files() -> dict[str, bytes]:
+    return {
+        "apps/core/src/tuntun_core/__init__.py": b"",
+        "apps/core/src/tuntun_core/adapters/__init__.py": b"",
+        "apps/core/src/tuntun_core/adapters/sqlcipher/__init__.py": b"",
+        "apps/core/src/tuntun_core/adapters/sqlcipher/engine.py": (
+            b"import sqlite3\n"
+            b"create_engine = sqlite3.connect\n\n"
+            b"def create_sqlcipher_engine(path, key):\n"
+            b"    if type(key) is not bytes or len(key) != 32:\n"
+            b"        raise ValueError('key')\n"
+            b"    return create_engine(path)\n"
+        ),
+        "apps/core/src/tuntun_core/adapters/sqlcipher/migrations.py": (
+            b"import importlib.util\n"
+            b"from pathlib import Path\n"
+            b"from .engine import create_sqlcipher_engine\n\n"
+            b"def _revision():\n"
+            b"    path=Path('apps/core/migrations/versions/0001_foundation.py')\n"
+            b"    spec=importlib.util.spec_from_file_location('foundation_0001',path)\n"
+            b"    module=importlib.util.module_from_spec(spec)\n"
+            b"    assert spec is not None and spec.loader is not None\n"
+            b"    spec.loader.exec_module(module)\n"
+            b"    return module\n\n"
+            b"def encrypted_backup(source, destination, key):\n"
+            b"    source_db=create_sqlcipher_engine(source,key)\n"
+            b"    destination_db=create_sqlcipher_engine(destination,key)\n"
+            b"    try:\n        source_db.backup(destination_db)\n        destination_db.commit()\n"
+            b"    finally:\n        source_db.close()\n        destination_db.close()\n\n"
+            b"def upgrade_encrypted(path, key, backup):\n"
+            b"    if Path(path).exists() and backup is not None:\n"
+            b"        encrypted_backup(path,backup,key)\n"
+            b"    connection=create_sqlcipher_engine(path,key)\n"
+            b"    try:\n        _revision().upgrade(connection)\n        connection.commit()\n"
+            b"    finally:\n        connection.close()\n"
+        ),
+        "apps/core/migrations/versions/0001_foundation.py": (
+            b"def upgrade(connection):\n"
+            b"    connection.execute('CREATE TABLE foundation_state (id INTEGER PRIMARY KEY)')\n\n"
+            b"def downgrade(connection):\n"
+            b"    connection.execute('DROP TABLE foundation_state')\n"
+        ),
+        "tests/integration/storage/test_migrations.py": (
+            b"import importlib.util\n"
+            b"from pathlib import Path\n"
+            b"from tuntun_core.adapters.sqlcipher.engine import create_sqlcipher_engine\n"
+            b"from tuntun_core.adapters.sqlcipher.migrations import (\n"
+            b"    encrypted_backup, upgrade_encrypted,\n)\n\n"
+            b"KEY=bytes(range(32))\n\n"
+            b"def _revision():\n"
+            b"    path=Path('apps/core/migrations/versions/0001_foundation.py')\n"
+            b"    spec=importlib.util.spec_from_file_location('foundation_0001_test',path)\n"
+            b"    module=importlib.util.module_from_spec(spec)\n"
+            b"    assert spec is not None and spec.loader is not None\n"
+            b"    spec.loader.exec_module(module)\n"
+            b"    return module\n\n"
+            b"def test_migrations_upgrade_backup_and_downgrade(tmp_path):\n"
+            b"    revision_probe=create_sqlcipher_engine(tmp_path/'revision.db',KEY)\n"
+            b"    _revision().upgrade(revision_probe)\n"
+            b"    _revision().downgrade(revision_probe)\n"
+            b"    revision_probe.close()\n"
+            b"    source=tmp_path/'source.db'\n    backup=tmp_path/'backup.db'\n"
+            b"    db=create_sqlcipher_engine(source,KEY)\n"
+            b"    db.execute('CREATE TABLE seed (id INTEGER PRIMARY KEY)')\n"
+            b"    db.execute('INSERT INTO seed VALUES (1)')\n    db.commit()\n    db.close()\n"
+            b"    encrypted_backup(source,backup,KEY)\n"
+            b"    copied=create_sqlcipher_engine(backup,KEY)\n"
+            b"    assert copied.execute('SELECT id FROM seed').fetchone()==(1,)\n"
+            b"    copied.close()\n"
+            b"    upgrade_encrypted(source,KEY,tmp_path/'pre-upgrade.db')\n"
+            b"    upgraded=create_sqlcipher_engine(source,KEY)\n"
+            b"    state=upgraded.execute(\n"
+            b"        \"SELECT name FROM sqlite_master WHERE name='foundation_state'\"\n"
+            b"    ).fetchone()\n"
+            b"    assert state==('foundation_state',)\n"
+            b"    _revision().downgrade(upgraded)\n    upgraded.commit()\n"
+            b"    state=upgraded.execute(\n"
+            b"        \"SELECT name FROM sqlite_master WHERE name='foundation_state'\"\n"
+            b"    ).fetchone()\n"
+            b"    assert state is None\n"
+            b"    upgraded.close()\n"
+        ),
+    }
+
+
 def _disconnected_foundation_files() -> dict[str, bytes]:
     files = _foundation_files()
+    files[validator.FOUNDATION_REVISION_PATH] = (
+        b"def upgrade(state):\n    state.append('revision-up')\n\n"
+        b"def downgrade(state):\n    state.append('revision-down')\n"
+    )
     files[FOUNDATION_MIGRATION_PATHS[2]] = (
         b"class command:\n"
         b"    @staticmethod\n    def upgrade(state):\n        state.append('up')\n"
@@ -363,10 +447,10 @@ def test_model_manifest_validator_accepts_only_foundation_closed_keys() -> None:
     assert any("file keys" in error for error in validate_model_manifest_bytes(file_level_drift))
 
 
-def test_model_manifest_rejects_an_empty_model_set() -> None:
+def test_model_manifest_accepts_an_empty_bootstrap_model_set() -> None:
     errors = validate_model_manifest_bytes(b'schema_version: "1.0"\nmodels: []\n')
 
-    assert any("models shape" in error for error in errors), errors
+    assert errors == []
 
 
 @pytest.mark.parametrize(
@@ -417,9 +501,7 @@ def test_materializer_enforces_create_modify_truth(
             "declared/staged path mismatch",
         ),
         (
-            lambda text: text.replace(
-                "```yaml\n# config/first.yaml\nenabled: true\n```\n\n", ""
-            ),
+            lambda text: text.replace("```yaml\n# config/first.yaml\nenabled: true\n```\n\n", ""),
             "declared/snippet path mismatch",
         ),
         (
@@ -428,9 +510,7 @@ def test_materializer_enforces_create_modify_truth(
         ),
     ),
 )
-def test_validator_rejects_path_parity_breaks(
-    mutate: Callable[[str], str], message: str
-) -> None:
+def test_validator_rejects_path_parity_breaks(mutate: Callable[[str], str], message: str) -> None:
     errors = validate_plan_document(
         parse_plan_text(mutate(_valid_two_task_plan())), foundation_files={}
     )
@@ -499,8 +579,7 @@ def test_green_command_cannot_mask_or_deselect_owned_tests(green: str) -> None:
         snippets=(("python", "# tests/test_owned.py", "def test_owned():\n    assert True"),),
     ).replace(
         "git diff --cached --check",
-        "git diff --cached --check\n\n- [ ] **Step 4: Run the green gate**\n\n"
-        f"Run: `{green}`",
+        f"git diff --cached --check\n\n- [ ] **Step 4: Run the green gate**\n\nRun: `{green}`",
     )
 
     errors = validate_plan_document(parse_plan_text(plan), foundation_files={})
@@ -534,8 +613,7 @@ def test_pytest_node_id_does_not_certify_the_whole_owned_test_file() -> None:
             (
                 "python",
                 "# tests/test_owned.py",
-                "def test_selected():\n    assert True\n\n"
-                "def test_unselected():\n    assert False",
+                "def test_selected():\n    assert True\n\ndef test_unselected():\n    assert False",
             ),
         ),
     ).replace(
@@ -598,15 +676,13 @@ def test_green_command_executes_each_owned_critical_validator() -> None:
         ),
     ).replace(
         "git diff --cached --check",
-        "git diff --cached --check\n\n- [ ] **Step 4: Run the green gate**\n\n"
-        "Run: `echo verified`",
+        "git diff --cached --check\n\n- [ ] **Step 4: Run the green gate**\n\nRun: `echo verified`",
     )
 
     errors = validate_plan_document(parse_plan_text(plan), foundation_files={})
 
     assert any(
-        "green command does not execute owned critical validator" in error
-        for error in errors
+        "green command does not execute owned critical validator" in error for error in errors
     )
 
 
@@ -755,8 +831,7 @@ def test_validator_rejects_dynamic_empty_or_name_only_fixture_factories(
     errors = validate_plan_document(parse_plan_text(plan), foundation_files={})
 
     assert any(
-        "fixture" in error and ("dynamic" in error or "placeholder" in error)
-        for error in errors
+        "fixture" in error and ("dynamic" in error or "placeholder" in error) for error in errors
     )
 
 
@@ -952,6 +1027,7 @@ def test_discovered_yield_fixture_with_typed_concrete_surface_is_accepted() -> N
         1,
         depends="Foundation contracts",
         files=(
+            ("Create", "pkg/case.py"),
             ("Create", "tests/fixtures/cases.py"),
             ("Create", "tests/conftest.py"),
             ("Test", "tests/test_case.py"),
@@ -959,11 +1035,16 @@ def test_discovered_yield_fixture_with_typed_concrete_surface_is_accepted() -> N
         snippets=(
             (
                 "python",
-                "# tests/fixtures/cases.py",
-                "from collections.abc import Iterator\nimport pytest\n\n"
+                "# pkg/case.py",
                 "class Case:\n"
                 "    value: str = 'real'\n"
-                "    def required_method(self) -> str:\n        return 'real'\n\n"
+                "    def required_method(self) -> str:\n        return 'real'",
+            ),
+            (
+                "python",
+                "# tests/fixtures/cases.py",
+                "from collections.abc import Iterator\nimport pytest\n"
+                "from pkg.case import Case\n\n"
                 "@pytest.fixture\n"
                 "def case() -> Iterator[Case]:\n    yield Case()",
             ),
@@ -975,8 +1056,7 @@ def test_discovered_yield_fixture_with_typed_concrete_surface_is_accepted() -> N
             (
                 "python",
                 "# tests/test_case.py",
-                "def test_case(case):\n"
-                "    assert case.required_method() == case.value == 'real'",
+                "def test_case(case):\n    assert case.required_method() == case.value == 'real'",
             ),
         ),
     )
@@ -1019,8 +1099,7 @@ def test_fixture_can_wrap_typed_concrete_foundation_class() -> None:
     foundation = {
         "pkg/__init__.py": b"",
         "pkg/foundation_case.py": (
-            b"class FoundationCase:\n"
-            b"    def required_method(self) -> str:\n        return 'real'\n"
+            b"class FoundationCase:\n    def required_method(self) -> str:\n        return 'real'\n"
         ),
     }
 
@@ -1122,8 +1201,7 @@ def test_authoritative_plan_now_owns_offline_wake_model_gate() -> None:
         for error in errors
     ), errors
     assert not any(
-        "green command does not execute owned test tests/hardware/bench_wakeword.py"
-        in error
+        "green command does not execute owned test tests/hardware/bench_wakeword.py" in error
         for error in errors
     ), errors
 
@@ -1212,6 +1290,10 @@ def test_foundation_pass_classes_and_comment_tokens_do_not_satisfy_capabilities(
 
 def test_foundation_migration_integration_test_must_execute_successfully() -> None:
     broken = _foundation_files() | {
+        validator.FOUNDATION_REVISION_PATH: (
+            b"def upgrade(state):\n    state.append('revision-up')\n\n"
+            b"def downgrade(state):\n    state.append('revision-down')\n"
+        ),
         FOUNDATION_MIGRATION_PATHS[2]: (
             b"class command:\n"
             b"    @staticmethod\n    def upgrade(state):\n        state.append('up')\n"
@@ -1219,7 +1301,7 @@ def test_foundation_migration_integration_test_must_execute_successfully() -> No
             b"def test_migrations_upgrade_and_rollback():\n"
             b"    state = []\n    command.upgrade(state)\n    command.downgrade(state)\n"
             b"    assert state == ['never', 'passes']\n"
-        )
+        ),
     }
 
     errors = validate_plan_document(
@@ -1233,6 +1315,10 @@ def test_foundation_migration_integration_test_must_execute_successfully() -> No
 
 def test_foundation_migration_integration_test_cannot_skip() -> None:
     skipped = _foundation_files() | {
+        validator.FOUNDATION_REVISION_PATH: (
+            b"def upgrade(state):\n    state.append('revision-up')\n\n"
+            b"def downgrade(state):\n    state.append('revision-down')\n"
+        ),
         FOUNDATION_MIGRATION_PATHS[2]: (
             b"import pytest\n\n"
             b"class command:\n"
@@ -1241,7 +1327,7 @@ def test_foundation_migration_integration_test_cannot_skip() -> None:
             b"def test_migrations_upgrade_and_rollback():\n"
             b"    command.upgrade([])\n    command.downgrade([])\n"
             b"    assert True\n    pytest.skip('not evidence')\n"
-        )
+        ),
     }
 
     errors = validate_plan_document(
@@ -1250,13 +1336,15 @@ def test_foundation_migration_integration_test_cannot_skip() -> None:
         require_foundation_task_13=True,
     )
 
-    assert any(
-        "Foundation Task 13" in error and "skip/xfail" in error for error in errors
-    ), errors
+    assert any("Foundation Task 13" in error and "skip/xfail" in error for error in errors), errors
 
 
 def test_foundation_behavioral_probe_rejects_runtime_aliased_skip() -> None:
     skipped = _foundation_files() | {
+        validator.FOUNDATION_REVISION_PATH: (
+            b"def upgrade(state):\n    state.append('revision-up')\n\n"
+            b"def downgrade(state):\n    state.append('revision-down')\n"
+        ),
         FOUNDATION_MIGRATION_PATHS[2]: (
             b"import pytest\n_skip = pytest.skip\n\n"
             b"class command:\n"
@@ -1265,7 +1353,7 @@ def test_foundation_behavioral_probe_rejects_runtime_aliased_skip() -> None:
             b"def test_migrations_upgrade_and_rollback():\n"
             b"    state = []\n    command.upgrade(state)\n    command.downgrade(state)\n"
             b"    assert state == ['up', 'down']\n    _skip('not evidence')\n"
-        )
+        ),
     }
 
     errors = validate_plan_document(
@@ -1297,7 +1385,7 @@ def test_foundation_integration_test_must_exercise_supplied_production_modules()
 def test_synthetic_accepted_foundation_capabilities_pass_the_boundary_gate() -> None:
     errors = validate_plan_document(
         parse_plan_text(_valid_two_task_plan()),
-        foundation_files=_foundation_files(),
+        foundation_files=_real_foundation_files(),
         require_foundation_task_13=True,
     )
 
@@ -1306,14 +1394,16 @@ def test_synthetic_accepted_foundation_capabilities_pass_the_boundary_gate() -> 
 
 def test_foundation_conftest_fixture_is_in_static_and_runtime_closure() -> None:
     foundation = _foundation_files() | {
+        "pkg/foundation_case.py": (
+            b"class FoundationCase:\n    def required_method(self):\n        return 'ready'\n"
+        ),
         "tests/conftest.py": (
-            b"import pytest\n\n"
-            b"class FoundationCase:\n"
-            b"    def required_method(self):\n        return 'ready'\n\n"
+            b"import pytest\n"
+            b"from pkg.foundation_case import FoundationCase\n\n"
             b"@pytest.fixture\n"
             b"def foundation_case() -> FoundationCase:\n"
             b"    return FoundationCase()\n"
-        )
+        ),
     }
     plan = _task(
         1,
@@ -1337,16 +1427,19 @@ def test_foundation_conftest_fixture_is_in_static_and_runtime_closure() -> None:
 
 def test_foundation_typed_factory_fixture_uses_runtime_discovery_evidence() -> None:
     foundation = _foundation_files() | {
-        "tests/conftest.py": (
-            b"import pytest\n\n"
+        "pkg/foundation_case.py": (
             b"class FoundationCase:\n"
             b"    @classmethod\n"
             b"    def build(cls):\n        return cls()\n"
-            b"    def required_method(self):\n        return 'ready'\n\n"
+            b"    def required_method(self):\n        return 'ready'\n"
+        ),
+        "tests/conftest.py": (
+            b"import pytest\n"
+            b"from pkg.foundation_case import FoundationCase\n\n"
             b"@pytest.fixture\n"
             b"def foundation_case() -> FoundationCase:\n"
             b"    return FoundationCase.build()\n"
-        )
+        ),
     }
     plan = _task(
         1,
@@ -1389,8 +1482,7 @@ def test_foundation_callable_fixture_annotation_is_concrete() -> None:
             (
                 "python",
                 "# tests/test_builder.py",
-                "def test_builder(text_builder):\n"
-                "    assert text_builder('ready') == 'READY'",
+                "def test_builder(text_builder):\n    assert text_builder('ready') == 'READY'",
             ),
         ),
     )
@@ -1398,8 +1490,7 @@ def test_foundation_callable_fixture_annotation_is_concrete() -> None:
     errors = validate_plan_document(parse_plan_text(plan), foundation_files=foundation)
 
     assert not any(
-        "fixture text_builder does not return a typed concrete harness" in error
-        for error in errors
+        "fixture text_builder does not return a typed concrete harness" in error for error in errors
     ), errors
     assert not any("pytest task-boundary probe failed" in error for error in errors), errors
 
@@ -1468,9 +1559,9 @@ def test_authoritative_plan_and_current_foundation_are_truthfully_blocked() -> N
     assert any("dynamic fixture name table is forbidden" in error for error in errors), errors
     assert any("wake benchmark behavioral probe" in error for error in errors), errors
     assert not any("must generate the bilingual report schema" in error for error in errors), errors
-    assert any(
-        error.startswith("Task 15: declared/snippet path mismatch") for error in errors
-    ), errors
+    assert any(error.startswith("Task 15: declared/snippet path mismatch") for error in errors), (
+        errors
+    )
 
 
 @pytest.mark.parametrize(
@@ -1483,10 +1574,13 @@ def test_authoritative_plan_and_current_foundation_are_truthfully_blocked() -> N
         lambda data: data.replace(b"size: 1", b"size: true"),
         lambda data: data.replace(b"b" * 64, b"B" * 64),
         lambda data: data.replace(b"hello.onnx", b"../hello.onnx"),
-        lambda data: data.replace(b"https://models.example.com/hello.onnx", b"http://models.example.com/hello.onnx"),
-        lambda data: data.replace(b"https://models.example.com/hello.onnx", b"https://127.0.0.1/hello.onnx"),
-        lambda data: data.replace(b"models:\n", b"models: &models\n", 1)
-        + b"shadow: *models\n",
+        lambda data: data.replace(
+            b"https://models.example.com/hello.onnx", b"http://models.example.com/hello.onnx"
+        ),
+        lambda data: data.replace(
+            b"https://models.example.com/hello.onnx", b"https://127.0.0.1/hello.onnx"
+        ),
+        lambda data: data.replace(b"models:\n", b"models: &models\n", 1) + b"shadow: *models\n",
         lambda data: data.replace(
             b"https://models.example.com/hello.onnx",
             b"https://bad host/hello.onnx",
@@ -1516,9 +1610,7 @@ def test_model_manifest_parser_rejects_oversized_or_deep_documents() -> None:
             b"  license: Apache-2.0\n  provenance: approved synthetic corpus",
             b"  license: &approved Apache-2.0\n  provenance: *approved",
         ),
-        _valid_model_manifest().replace(
-            b"  license: Apache-2.0", b"  license: !!str Apache-2.0"
-        ),
+        _valid_model_manifest().replace(b"  license: Apache-2.0", b"  license: !!str Apache-2.0"),
     ),
 )
 def test_model_manifest_parser_rejects_aliases_and_explicit_tags(content: bytes) -> None:
@@ -1585,10 +1677,9 @@ def test_task12_manifest_requires_exactly_both_wake_model_ids() -> None:
 
     errors = validate_plan_document(parse_plan_text(plan), foundation_files=foundation)
 
-    assert any(
-        "exact model IDs hello-tuntun-v1 and stop-tuntun-v1" in error
-        for error in errors
-    ), errors
+    assert any("exact model IDs hello-tuntun-v1 and stop-tuntun-v1" in error for error in errors), (
+        errors
+    )
 
 
 def _controlled_bilingual_schema() -> bytes:
@@ -1645,9 +1736,7 @@ def _controlled_bilingual_schema() -> bytes:
     properties["candidate_commit"] = titled(
         "candidate_commit", pattern="^[0-9a-f]{40}$", type="string"
     )
-    properties["model_id"] = titled(
-        "model_id", minLength=1, maxLength=128, type="string"
-    )
+    properties["model_id"] = titled("model_id", minLength=1, maxLength=128, type="string")
     for name in (
         "prompt_bundle_sha256",
         "policy_sha256",
@@ -1688,9 +1777,7 @@ def _controlled_bilingual_schema() -> bytes:
         type="array",
     )
     properties["aggregates"] = {"$ref": "#/$defs/RecomputedAggregates"}
-    properties["signer_key_id"] = titled(
-        "signer_key_id", minLength=1, maxLength=128, type="string"
-    )
+    properties["signer_key_id"] = titled("signer_key_id", minLength=1, maxLength=128, type="string")
     properties["signature_domain"] = {
         "const": "tuntun.bilingual-persona-score.v1",
         "title": "Signature Domain",
@@ -1703,16 +1790,12 @@ def _controlled_bilingual_schema() -> bytes:
     }
     properties["issued_at"] = titled("issued_at", format="date-time", type="string")
     properties["expires_at"] = titled("expires_at", format="date-time", type="string")
-    properties["signature_b64"] = titled(
-        "signature_b64", minLength=88, maxLength=88, type="string"
-    )
+    properties["signature_b64"] = titled("signature_b64", minLength=88, maxLength=88, type="string")
     schema = {
         "$defs": {
             "RecomputedAggregates": {
                 "additionalProperties": False,
-                "properties": {
-                    name: titled(name, type="integer") for name in aggregate_fields
-                },
+                "properties": {name: titled(name, type="integer") for name in aggregate_fields},
                 "required": list(aggregate_fields),
                 "title": "RecomputedAggregates",
                 "type": "object",
@@ -1736,16 +1819,12 @@ def test_bilingual_schema_validator_executes_controlled_good_and_bad_artifacts()
     mutations: tuple[Callable[[dict[str, Any]], dict[str, Any]], ...] = (
         lambda value: value | {"additionalProperties": True},
         lambda value: value | {"required": value["required"][:-1]},
-        lambda value: value
-        | {
-            "properties": value["properties"]
-            | {"schema_version": {"type": "string"}}
-        },
-        lambda value: value
-        | {
-            "properties": value["properties"]
-            | {"candidate_commit": {"type": "string"}}
-        },
+        lambda value: (
+            value | {"properties": value["properties"] | {"schema_version": {"type": "string"}}}
+        ),
+        lambda value: (
+            value | {"properties": value["properties"] | {"candidate_commit": {"type": "string"}}}
+        ),
     )
     for mutate in mutations:
         hostile = mutate(json.loads(good))
@@ -1756,21 +1835,13 @@ def test_bilingual_schema_validator_executes_controlled_good_and_bad_artifacts()
 @pytest.mark.parametrize(
     "mutation",
     (
-        lambda value: value["$defs"]["RecomputedAggregates"].update(
-            additionalProperties=True
-        ),
+        lambda value: value["$defs"]["RecomputedAggregates"].update(additionalProperties=True),
         lambda value: value["$defs"]["RecomputedAggregates"]["properties"][
             "bilingual_total"
         ].update(type="number"),
-        lambda value: value["properties"]["aggregates"].update(
-            {"$ref": "#/$defs/Other"}
-        ),
-        lambda value: value["properties"]["evaluator_artifacts_sha256"].update(
-            maxItems=9
-        ),
-        lambda value: value["properties"]["result_manifest_paths"]["items"].update(
-            type="integer"
-        ),
+        lambda value: value["properties"]["aggregates"].update({"$ref": "#/$defs/Other"}),
+        lambda value: value["properties"]["evaluator_artifacts_sha256"].update(maxItems=9),
+        lambda value: value["properties"]["result_manifest_paths"]["items"].update(type="integer"),
         lambda value: value["properties"]["evaluator_license"].update(enum=["MIT"]),
         lambda value: value["properties"]["issued_at"].update(format="date"),
         lambda value: value["properties"]["signature_b64"].update(minLength=1),
@@ -1782,15 +1853,13 @@ def test_bilingual_schema_rejects_nested_contract_drift(
 ) -> None:
     hostile = json.loads(_controlled_bilingual_schema())
     mutation(hostile)
-    content = (
-        json.dumps(hostile, sort_keys=True, separators=(",", ":")) + "\n"
-    ).encode()
+    content = (json.dumps(hostile, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
     assert validator.validate_bilingual_schema_bytes(content), hostile
 
 
 def _bilingual_report_model_source() -> bytes:
-    return b'''from datetime import datetime
+    return b"""from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -1851,7 +1920,7 @@ class BilingualScoreReportV1(BaseModel):
         ):
             raise ValueError("report lifecycle invalid")
         return self
-'''
+"""
 
 
 def test_bilingual_report_runtime_enforces_lifecycle_and_signature_contract() -> None:
@@ -1924,26 +1993,29 @@ def test_wake_benchmark_behavioral_probe_executes_good_and_fault_artifacts() -> 
 
 
 def _production_wake_files() -> dict[str, bytes]:
-    benchmark = b'''import argparse
+    benchmark = b"""import argparse
+import asyncio
 import time
 
 from tuntun_core.services.models.registry import ModelRegistry
 from tuntun_edge.audio.converter import StreamingAudioConverter
 from tuntun_edge.audio.wakeword import WakeDetector
+from tuntun_contracts.speech import AudioFormat
 
 MODEL_SHA = "a" * 64
 RUNTIME_SHA = "b" * 64
 
-def run_benchmark(*, frames, converter, adapter, detector, process_time,
-                  max_one_core_percent):
+async def run_benchmark(*, frames, converter, adapter, detector, process_time,
+                        max_one_core_percent):
     started = process_time()
     input_count = inference_count = output_count = drop_count = 0
-    for frame in frames:
+    async def source_frames():
+        for frame in frames:
+            yield frame
+    source = AudioFormat(16000, 1, "s16le", True, "mono")
+    target = AudioFormat(16000, 1, "s16le", True, "mono")
+    async for converted in converter.convert(source_frames(), source, target):
         input_count += 1
-        converted = converter.convert(frame)
-        if converted is None:
-            drop_count += 1
-            continue
         before = adapter.inference_count
         detected = detector.process(converted)
         inference_count += adapter.inference_count - before
@@ -1972,17 +2044,24 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.frames <= 64:
         raise ValueError("frame_count_invalid")
-    activated = ModelRegistry().activate("hello-tuntun-v1")
+    registry = ModelRegistry.from_document({
+        "schema_version": "1.0",
+        "models": [{"id": "hello-tuntun-v1", "model_sha256": MODEL_SHA,
+                    "runtime_sha256": RUNTIME_SHA}],
+    })
+    activated = registry.activate("hello-tuntun-v1")
     adapter = activated.load_with()
     converter = StreamingAudioConverter()
     detector = WakeDetector(adapter.infer, 750000)
-    receipt = run_benchmark(
-        frames=[b"\\x00" * 2560 for _ in range(args.frames)],
-        converter=converter,
-        adapter=adapter,
-        detector=detector,
-        process_time=time.process_time,
-        max_one_core_percent=args.max_one_core_percent,
+    receipt = asyncio.run(
+        run_benchmark(
+            frames=[b"\\x00" * 2560 for _ in range(args.frames)],
+            converter=converter,
+            adapter=adapter,
+            detector=detector,
+            process_time=time.process_time,
+            max_one_core_percent=args.max_one_core_percent,
+        )
     )
     if set(receipt) != {
         "input_count", "inference_count", "output_count", "drop_count",
@@ -1993,15 +2072,28 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-'''
+"""
     return {
+        "packages/contracts/src/tuntun_contracts/__init__.py": b"",
+        "packages/contracts/src/tuntun_contracts/speech.py": (
+            b"from dataclasses import dataclass\n\n"
+            b"@dataclass(frozen=True)\n"
+            b"class AudioFormat:\n"
+            b"    sample_rate_hz: int\n    channels: int\n    sample_format: str\n"
+            b"    interleaved: bool\n    channel_layout: str\n"
+        ),
         "apps/edge/src/tuntun_edge/__init__.py": b"",
         "apps/edge/src/tuntun_edge/audio/__init__.py": b"",
         "apps/edge/src/tuntun_edge/audio/converter.py": (
             b"class StreamingAudioConverter:\n"
-            b"    def convert(self, frame):\n"
-            b"        if len(frame) != 2560:\n            raise ValueError('frame')\n"
-            b"        return frame\n"
+            b"    def convert(self, audio, source, target):\n"
+            b"        if source != target:\n            raise ValueError('format')\n"
+            b"        async def converted():\n"
+            b"            async for frame in audio:\n"
+            b"                if len(frame) != 2560:\n"
+            b"                    raise ValueError('frame')\n"
+            b"                yield frame\n"
+            b"        return converted()\n"
         ),
         "apps/edge/src/tuntun_edge/audio/wakeword.py": (
             b"class WakeDetector:\n"
@@ -2023,6 +2115,11 @@ if __name__ == "__main__":
             b"class ActivatedModel:\n"
             b"    def load_with(self):\n        return Adapter()\n\n"
             b"class ModelRegistry:\n"
+            b"    @classmethod\n"
+            b"    def from_document(cls, raw):\n"
+            b"        if raw.get('schema_version') != '1.0':\n"
+            b"            raise ValueError('manifest')\n"
+            b"        return cls()\n"
             b"    def activate(self, model_id):\n"
             b"        if model_id != 'hello-tuntun-v1':\n            raise ValueError('model')\n"
             b"        return ActivatedModel()\n"
@@ -2034,9 +2131,12 @@ if __name__ == "__main__":
 def test_wake_benchmark_uses_delivered_production_pipeline_and_main() -> None:
     files = _production_wake_files()
 
-    assert validator.validate_wake_benchmark_bytes(
-        files["tests/hardware/bench_wakeword.py"], materialized_files=files
-    ) == []
+    assert (
+        validator.validate_wake_benchmark_bytes(
+            files["tests/hardware/bench_wakeword.py"], materialized_files=files
+        )
+        == []
+    )
 
     disconnected = _disconnected_wake_benchmark()
     errors = validator.validate_wake_benchmark_bytes(
@@ -2044,6 +2144,19 @@ def test_wake_benchmark_uses_delivered_production_pipeline_and_main() -> None:
         materialized_files=files | {"tests/hardware/bench_wakeword.py": disconnected},
     )
     assert any("production pipeline" in error or "main" in error for error in errors), errors
+
+
+def test_wake_probe_rejects_sync_converter_and_zero_arg_registry_fake() -> None:
+    files = _production_wake_files()
+    files["apps/edge/src/tuntun_edge/audio/converter.py"] = (
+        b"class StreamingAudioConverter:\n    def convert(self, frame):\n        return frame\n"
+    )
+
+    errors = validator.validate_wake_benchmark_bytes(
+        files["tests/hardware/bench_wakeword.py"], materialized_files=files
+    )
+
+    assert any("production-faithful async" in error for error in errors), errors
 
 
 def test_wake_benchmark_noop_main_cannot_certify_physical_command() -> None:
@@ -2054,9 +2167,7 @@ def test_wake_benchmark_noop_main_cannot_certify_physical_command() -> None:
     benchmark += b"\ndef main(argv=None):\n    return 0\n"
     files["tests/hardware/bench_wakeword.py"] = benchmark
 
-    errors = validator.validate_wake_benchmark_bytes(
-        benchmark, materialized_files=files
-    )
+    errors = validator.validate_wake_benchmark_bytes(benchmark, materialized_files=files)
 
     assert any("main" in error or "controlled mutation" in error for error in errors), errors
 
@@ -2130,8 +2241,7 @@ def test_named_generator_diagnostic_output_is_bounded() -> None:
         ),
     ).replace(
         "**Files:**",
-        "**Files:**\n- Generate `schema-v1`: `python tools/generate.py` "
-        "-> `generated/schema.json`",
+        "**Files:**\n- Generate `schema-v1`: `python tools/generate.py` -> `generated/schema.json`",
     )
 
     with pytest.raises(MaterializationError, match="diagnostic output exceeded"):
@@ -2158,8 +2268,7 @@ def test_named_generator_cannot_observe_ambient_environment(
         ),
     ).replace(
         "**Files:**",
-        "**Files:**\n- Generate `schema-v1`: `python tools/generate.py` "
-        "-> `generated/schema.json`",
+        "**Files:**\n- Generate `schema-v1`: `python tools/generate.py` -> `generated/schema.json`",
     )
 
     files = materialize_document(parse_plan_text(plan), foundation_files={})
@@ -2186,8 +2295,7 @@ def test_named_generator_output_limit_interrupts_before_process_exit() -> None:
         ),
     ).replace(
         "**Files:**",
-        "**Files:**\n- Generate `schema-v1`: `python tools/generate.py` "
-        "-> `generated/schema.json`",
+        "**Files:**\n- Generate `schema-v1`: `python tools/generate.py` -> `generated/schema.json`",
     )
 
     with pytest.raises(MaterializationError, match="diagnostic output exceeded"):
@@ -2264,15 +2372,580 @@ def test_offline_wake_test_executes_against_good_and_networking_artifacts() -> N
             ),
         )
 
-    good = validate_plan_document(
-        parse_plan_text(plan_for("return 'ready'")), foundation_files={}
-    )
+    good = validate_plan_document(parse_plan_text(plan_for("return 'ready'")), foundation_files={})
     bad = validate_plan_document(
-        parse_plan_text(
-            plan_for("socket.getaddrinfo('models.example.com', 443); return 'ready'")
-        ),
+        parse_plan_text(plan_for("socket.getaddrinfo('models.example.com', 443); return 'ready'")),
         foundation_files={},
     )
 
     assert not any("probe failed" in error for error in good), good
     assert any("pytest task-boundary probe failed" in error for error in bad), bad
+
+
+def test_green_command_must_execute_owned_python_gate() -> None:
+    plan = _task(
+        1,
+        depends="Foundation contracts",
+        files=(("Create", "tools/probe_gate.py"),),
+        snippets=(
+            (
+                "python",
+                "# tools/probe_gate.py",
+                "raise SystemExit('owned gate really executed')",
+            ),
+        ),
+    ).replace(
+        "git diff --cached --check",
+        "git diff --cached --check\n\n- [ ] **Step 4: Run the green gate**\n\n"
+        "Run: `python tools/probe_gate.py`",
+    )
+
+    errors = validate_plan_document(parse_plan_text(plan), foundation_files={})
+
+    assert any("owned green command failed" in error for error in errors), errors
+
+
+@pytest.mark.parametrize("help_option", ("--help", "-h"))
+def test_green_command_help_mode_never_counts_as_execution(help_option: str) -> None:
+    plan = _task(
+        1,
+        depends="Foundation contracts",
+        files=(("Create", "tools/probe_gate.py"),),
+        snippets=(
+            (
+                "python",
+                "# tools/probe_gate.py",
+                "import argparse\nargparse.ArgumentParser().parse_args()",
+            ),
+        ),
+    ).replace(
+        "git diff --cached --check",
+        "git diff --cached --check\n\n- [ ] **Step 4: Run the green gate**\n\n"
+        f"Run: `python tools/probe_gate.py {help_option}`",
+    )
+
+    errors = validate_plan_document(
+        parse_plan_text(plan), foundation_files={}, execute_behavioral_probes=False
+    )
+
+    assert any("green command is not fail-closed" in error for error in errors), errors
+
+
+def test_final_materialized_tree_reruns_prior_task_tests() -> None:
+    task_1 = _task(
+        1,
+        depends="Foundation contracts",
+        files=(
+            ("Create", "pkg/service.py"),
+            ("Test", "tests/test_service.py"),
+        ),
+        snippets=(
+            ("python", "# pkg/service.py", "def value():\n    return 'ready'"),
+            (
+                "python",
+                "# tests/test_service.py",
+                "from pkg.service import value\n\ndef test_value():\n    assert value() == 'ready'",
+            ),
+        ),
+    ).replace(
+        "git diff --cached --check",
+        "git diff --cached --check\n\n- [ ] **Step 4: Run the green gate**\n\n"
+        "Run: `python -m pytest tests/test_service.py -q`",
+    )
+    task_2 = _task(
+        2,
+        depends="Task 01 and Foundation contracts",
+        files=(("Modify", "pkg/service.py"),),
+        snippets=(
+            (
+                "python",
+                "# replace pkg/service.py",
+                "# materializer: replace-file\ndef value():\n    return 'regressed'",
+            ),
+        ),
+    )
+
+    errors = validate_plan_document(parse_plan_text(task_1 + "\n" + task_2), foundation_files={})
+
+    assert any("final cumulative pytest probe failed" in error for error in errors), errors
+
+
+def test_external_only_status_is_computed_for_each_collected_class_method() -> None:
+    plan = _task(
+        1,
+        depends="Foundation contracts",
+        files=(("Test", "tests/test_mixed.py"),),
+        snippets=(
+            (
+                "python",
+                "# tests/test_mixed.py",
+                "import pytest\n\n"
+                "@pytest.mark.reachy_hardware\n"
+                "def test_physical():\n    assert True\n\n"
+                "class TestHiddenSoftwareRegression:\n"
+                "    def test_ordinary(self):\n        assert False",
+            ),
+        ),
+    ).replace(
+        "git diff --cached --check",
+        "git diff --cached --check\n\n- [ ] **Step 4: Run the green gate**\n\n"
+        "Run: `python -m pytest tests/test_mixed.py -q`",
+    )
+
+    errors = validate_plan_document(parse_plan_text(plan), foundation_files={})
+
+    assert any("pytest task-boundary probe failed" in error for error in errors), errors
+
+
+def test_wake_probe_rejects_synthetic_inference_accounting() -> None:
+    files = _production_wake_files()
+    benchmark = files["tests/hardware/bench_wakeword.py"].replace(
+        b"inference_count += adapter.inference_count - before",
+        b"inference_count += 1",
+        1,
+    )
+    files["tests/hardware/bench_wakeword.py"] = benchmark
+
+    errors = validator.validate_wake_benchmark_bytes(benchmark, materialized_files=files)
+
+    assert any("Adapter.infer" in error for error in errors), errors
+
+
+def test_wake_probe_rejects_unbound_model_and_runtime_hashes() -> None:
+    files = _production_wake_files()
+    benchmark = files["tests/hardware/bench_wakeword.py"].replace(
+        b"if adapter.model_sha256 != MODEL_SHA or adapter.runtime_sha256 != RUNTIME_SHA:\n"
+        b'        raise RuntimeError("artifact/runtime mismatch")',
+        b'if False:\n        raise RuntimeError("artifact/runtime mismatch")',
+        1,
+    )
+    files["tests/hardware/bench_wakeword.py"] = benchmark
+
+    errors = validator.validate_wake_benchmark_bytes(benchmark, materialized_files=files)
+
+    assert any("hash binding" in error for error in errors), errors
+
+
+def _locked_generator_plan(
+    source: str,
+    *,
+    dependencies: str = "[]",
+    lock_packages: str = (
+        '[[package]]\nname="generator-fixture"\nversion="0.0.0"\nsource={ virtual="." }\n'
+    ),
+) -> str:
+    return _task(
+        1,
+        depends="Foundation contracts",
+        files=(
+            ("Create", "evals/pyproject.toml"),
+            ("Create", "evals/uv.lock"),
+            ("Create", "tools/generate.py"),
+            ("Create", "generated/schema.json"),
+        ),
+        snippets=(
+            (
+                "toml",
+                "# evals/pyproject.toml",
+                "[project]\nname='generator-fixture'\nversion='0.0.0'\n"
+                f"requires-python='==3.12.*'\ndependencies={dependencies}",
+            ),
+            (
+                "toml",
+                "# evals/uv.lock",
+                "version=1\nrevision=3\nrequires-python='==3.12.*'\n" + lock_packages,
+            ),
+            ("python", "# tools/generate.py", source),
+        ),
+    ).replace(
+        "**Files:**",
+        "**Files:**\n- Generate `schema-v1`: `uv run --project evals --locked python "
+        "tools/generate.py` -> `generated/schema.json`",
+    )
+
+
+def test_locked_generator_uses_available_interpreter_without_uv_cache() -> None:
+    plan = _locked_generator_plan(
+        "from pathlib import Path\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text('{}\\n')"
+    )
+
+    files = materialize_document(parse_plan_text(plan), foundation_files={})
+
+    assert files["generated/schema.json"] == b"{}\n"
+
+
+def test_locked_generator_rejects_import_outside_declared_project() -> None:
+    plan = _locked_generator_plan(
+        "import json,pydantic\n"
+        "from pathlib import Path\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text(json.dumps(pydantic.__version__))"
+    )
+
+    with pytest.raises(MaterializationError, match="locked|declared|pydantic"):
+        materialize_document(parse_plan_text(plan), foundation_files={})
+
+
+def test_locked_generator_rejects_distribution_version_drift() -> None:
+    lock_packages = """
+[[package]]
+name = "generator-fixture"
+version = "0.0.0"
+source = { virtual = "." }
+dependencies = [{ name = "pyyaml" }]
+
+[package.metadata]
+requires-dist = [{ name = "pyyaml", specifier = "==0.0.1" }]
+
+[[package]]
+name = "pyyaml"
+version = "0.0.1"
+source = { registry = "https://pypi.org/simple" }
+[[package.wheels]]
+url = "https://example.invalid/pyyaml-0.0.1-py3-none-any.whl"
+hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+size = 1
+"""
+    plan = _locked_generator_plan(
+        "import json,yaml\n"
+        "from pathlib import Path\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text(json.dumps(yaml.__version__))",
+        dependencies="['PyYAML==0.0.1']",
+        lock_packages=lock_packages,
+    )
+
+    with pytest.raises(MaterializationError, match="locked|version|pyyaml"):
+        materialize_document(parse_plan_text(plan), foundation_files={})
+
+
+def test_locked_generator_rejects_untrusted_locked_artifact_hash() -> None:
+    arm_url = (
+        "https://files.pythonhosted.org/packages/89/a0/"
+        "6cf41a19a1f2f3feab0e9c0b74134aa2ce6849093d5517a0c550fe37a648/"
+        "pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl"
+    )
+    lock_packages = f"""
+[[package]]
+name = "generator-fixture"
+version = "0.0.0"
+source = {{ virtual = "." }}
+dependencies = [{{ name = "pyyaml" }}]
+
+[package.metadata]
+requires-dist = [{{ name = "pyyaml", specifier = "==6.0.3" }}]
+
+[[package]]
+name = "pyyaml"
+version = "6.0.3"
+source = {{ registry = "https://pypi.org/simple" }}
+[[package.wheels]]
+url = "{arm_url}"
+hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+size = 173973
+"""
+    plan = _locked_generator_plan(
+        "import json,yaml\n"
+        "from pathlib import Path\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text(json.dumps(yaml.__version__))",
+        dependencies="['PyYAML==6.0.3']",
+        lock_packages=lock_packages,
+    )
+
+    with pytest.raises(MaterializationError, match="locked|hash|pyyaml"):
+        materialize_document(parse_plan_text(plan), foundation_files={})
+
+
+def test_locked_generator_allows_exact_declared_distribution() -> None:
+    intel_url = (
+        "https://files.pythonhosted.org/packages/d1/33/"
+        "422b98d2195232ca1826284a76852ad5a86fe23e31b009c9886b2d0fb8b2/"
+        "pyyaml-6.0.3-cp312-cp312-macosx_10_13_x86_64.whl"
+    )
+    arm_url = (
+        "https://files.pythonhosted.org/packages/89/a0/"
+        "6cf41a19a1f2f3feab0e9c0b74134aa2ce6849093d5517a0c550fe37a648/"
+        "pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl"
+    )
+    lock_packages = f"""
+[[package]]
+name = "generator-fixture"
+version = "0.0.0"
+source = {{ virtual = "." }}
+dependencies = [{{ name = "pyyaml" }}]
+
+[package.metadata]
+requires-dist = [{{ name = "pyyaml", specifier = "==6.0.3" }}]
+
+[[package]]
+name = "pyyaml"
+version = "6.0.3"
+source = {{ registry = "https://pypi.org/simple" }}
+[[package.wheels]]
+url = "{intel_url}"
+hash = "sha256:7f047e29dcae44602496db43be01ad42fc6f1cc0d8cd6c83d342306c32270196"
+size = 182063
+[[package.wheels]]
+url = "{arm_url}"
+hash = "sha256:fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0"
+size = 173973
+"""
+    plan = _locked_generator_plan(
+        "import json,yaml\n"
+        "from pathlib import Path\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text(json.dumps(yaml.__version__))",
+        dependencies="['PyYAML==6.0.3']",
+        lock_packages=lock_packages,
+    )
+
+    files = materialize_document(parse_plan_text(plan), foundation_files={})
+
+    assert files["generated/schema.json"] == b'"6.0.3"'
+
+
+def test_locked_generator_rejects_unreachable_extra_lock_package() -> None:
+    lock_packages = """
+[[package]]
+name = "generator-fixture"
+version = "0.0.0"
+source = { virtual = "." }
+
+[[package]]
+name = "pyyaml"
+version = "6.0.3"
+source = { registry = "https://pypi.org/simple" }
+[[package.wheels]]
+url = "https://files.pythonhosted.org/pyyaml-6.0.3-py3-none-any.whl"
+hash = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+size = 1
+"""
+    plan = _locked_generator_plan(
+        "import json,yaml\n"
+        "from pathlib import Path\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text(json.dumps(yaml.__version__))",
+        lock_packages=lock_packages,
+    )
+
+    with pytest.raises(MaterializationError, match="declared|closure|pyyaml"):
+        materialize_document(parse_plan_text(plan), foundation_files={})
+
+
+def test_locked_generator_rejects_project_and_lock_version_disagreement() -> None:
+    lock_packages = """
+[[package]]
+name = "generator-fixture"
+version = "0.0.0"
+source = { virtual = "." }
+dependencies = [{ name = "offline-only" }]
+
+[package.metadata]
+requires-dist = [{ name = "offline-only", specifier = "==1.0.0" }]
+
+[[package]]
+name = "offline-only"
+version = "2.0.0"
+source = { directory = "../packages/offline_only" }
+"""
+    plan = _locked_generator_plan(
+        "from pathlib import Path\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text('{}')",
+        dependencies="['offline-only==1.0.0']",
+        lock_packages=lock_packages,
+    )
+
+    with pytest.raises(MaterializationError, match="version differs"):
+        materialize_document(parse_plan_text(plan), foundation_files={})
+
+
+def test_locked_import_policy_remains_active_when_host_policy_is_disabled(
+    tmp_path: Path,
+) -> None:
+    materializer.write_materialized_tree(
+        tmp_path,
+        {
+            "evals/pyproject.toml": (
+                b"[project]\nname='generator-fixture'\nversion='0.0.0'\n"
+                b"requires-python='==3.12.*'\ndependencies=[]\n"
+            ),
+            "evals/uv.lock": (
+                b"version=1\nrevision=3\nrequires-python='==3.12.*'\n"
+                b"[[package]]\nname='generator-fixture'\nversion='0.0.0'\n"
+                b"source={ virtual='.' }\n"
+            ),
+            "probe.py": b"import yaml\n",
+        },
+    )
+
+    result = materializer.run_materialized_python(
+        ("probe.py",), root=tmp_path, restrict_host_apis=False
+    )
+
+    assert result.returncode != 0
+    assert b"undeclared distribution import" in result.diagnostic
+
+
+def test_locked_generator_rejects_python_requirement_drift() -> None:
+    plan = _locked_generator_plan(
+        "from pathlib import Path\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text('{}')"
+    ).replace("requires-python='==3.12.*'", "requires-python='==3.11.*'", 1)
+
+    with pytest.raises(MaterializationError, match="Python requirement|interpreter"):
+        materialize_document(parse_plan_text(plan), foundation_files={})
+
+
+def test_generator_cannot_embed_host_identity_even_deterministically() -> None:
+    plan = _locked_generator_plan(
+        "import json,platform\n"
+        "from pathlib import Path\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text(json.dumps({'node': platform.node()}))"
+    )
+
+    with pytest.raises(MaterializationError, match="host API|nondeterministic"):
+        materialize_document(parse_plan_text(plan), foundation_files={})
+
+
+@pytest.mark.parametrize(
+    "host_source",
+    (
+        "import subprocess\nvalue=subprocess.check_output(['/bin/hostname']).decode()",
+        "value=Path('/Library/Preferences/SystemConfiguration/preferences.plist').read_bytes().hex()",
+    ),
+)
+def test_generator_cannot_read_host_identity_from_command_or_file(
+    host_source: str,
+) -> None:
+    plan = _locked_generator_plan(
+        "import json\nfrom pathlib import Path\n"
+        f"{host_source}\n"
+        "Path('generated').mkdir(exist_ok=True)\n"
+        "Path('generated/schema.json').write_text(json.dumps({'host': value}))"
+    )
+
+    with pytest.raises(MaterializationError, match="host API|host identity|nondeterministic"):
+        materialize_document(parse_plan_text(plan), foundation_files={})
+
+
+def test_bilingual_runtime_probe_uses_the_generator_sandbox_policy() -> None:
+    files = {
+        "evals/verify_bilingual_report.py": _bilingual_report_model_source().replace(
+            b"from datetime import datetime\n",
+            b"from datetime import datetime\nimport platform\nplatform.node()\n",
+            1,
+        )
+    }
+
+    errors = validator.validate_bilingual_report_model_files(files)
+
+    assert any("host API" in error or "nondeterministic" in error for error in errors), errors
+
+
+def test_bilingual_runtime_rejects_naive_expiry() -> None:
+    disconnected = {
+        "evals/verify_bilingual_report.py": _bilingual_report_model_source().replace(
+            b"            or self.expires_at.tzinfo is None\n", b"", 1
+        )
+    }
+
+    assert validator.validate_bilingual_report_model_files(disconnected)
+
+
+def test_generator_timeout_kills_grandchild_after_parent_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "parent.py"
+    child_pid_path = tmp_path / "child.pid"
+    script.write_text(
+        "import subprocess,sys\n"
+        "from pathlib import Path\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])\n"
+        "Path(sys.argv[1]).write_text(str(child.pid))\n"
+    )
+    monkeypatch.setattr(materializer, "GENERATOR_TIMEOUT_SECONDS", 0.25)
+    child_pid = -1
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            materializer._run_generator_process(
+                (sys.executable, str(script), str(child_pid_path)),
+                root=tmp_path,
+                environment=materializer._generator_environment(tmp_path),
+            )
+        child_pid = int(child_pid_path.read_text())
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"grandchild {child_pid} survived generator timeout")
+    finally:
+        if child_pid > 0:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+
+
+def test_test_local_harness_cannot_hide_broken_production_class() -> None:
+    plan = _task(
+        1,
+        depends="Foundation contracts",
+        files=(
+            ("Create", "pkg/service.py"),
+            ("Create", "tests/fixtures/service.py"),
+            ("Create", "tests/conftest.py"),
+            ("Test", "tests/test_service.py"),
+        ),
+        snippets=(
+            (
+                "python",
+                "# pkg/service.py",
+                "class Service:\n    def run(self):\n        return 'broken'",
+            ),
+            (
+                "python",
+                "# tests/fixtures/service.py",
+                "import pytest\n\n"
+                "class ServiceCase:\n"
+                "    def run(self):\n        return 'ready'\n\n"
+                "@pytest.fixture\n"
+                "def service() -> ServiceCase:\n    return ServiceCase()",
+            ),
+            (
+                "python",
+                "# tests/conftest.py",
+                "pytest_plugins = ('tests.fixtures.service',)",
+            ),
+            (
+                "python",
+                "# tests/test_service.py",
+                "def test_service(service):\n    assert service.run() == 'ready'",
+            ),
+        ),
+    )
+
+    errors = validate_plan_document(parse_plan_text(plan), foundation_files={})
+
+    assert any("test-local harness" in error for error in errors), errors
+
+
+def test_generic_manifest_accepts_foundation_bootstrap_empty_models() -> None:
+    assert validate_model_manifest_bytes(b'schema_version: "1.0"\nmodels: []\n') == []
+
+
+def test_foundation_tuple_fakes_and_local_downgrade_are_not_acceptance_evidence() -> None:
+    errors = validate_plan_document(
+        parse_plan_text(_valid_two_task_plan()),
+        foundation_files=_foundation_files(),
+        require_foundation_task_13=True,
+    )
+
+    assert any("real migration" in error or "downgrade" in error for error in errors), errors

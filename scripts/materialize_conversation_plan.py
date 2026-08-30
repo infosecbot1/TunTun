@@ -12,13 +12,13 @@ import argparse
 import ast
 import configparser
 import contextlib
+import importlib.metadata
 import io
 import json
 import os
 import re
 import selectors
 import shlex
-import shutil
 import signal
 import subprocess
 import sys
@@ -46,9 +46,7 @@ STEP_HEADING = re.compile(
     r"^- \[ \] \*\*(?P<label>Step [^*]+)\*\*.*$", re.MULTILINE | re.IGNORECASE
 )
 RUN_COMMAND = re.compile(r"^Run(?: on [^:]+)?: `(?P<command>[^`]+)`", re.MULTILINE)
-FENCE = re.compile(
-    r"^```(?P<language>[^\n]*)\n(?P<body>.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL
-)
+FENCE = re.compile(r"^```(?P<language>[^\n]*)\n(?P<body>.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 DIRECTIVE = re.compile(
     r"^# materializer: (?P<operation>append|replace-file|replace-symbol [A-Za-z_]\w*)$"
 )
@@ -59,6 +57,9 @@ APPEND_WORDS = ("append", "addition", "continued", "extension")
 STRUCTURED_SUFFIXES = {".json", ".toml", ".yaml", ".yml"}
 GENERATOR_DIAGNOSTIC_LIMIT = 1_048_576
 GENERATOR_TIMEOUT_SECONDS = 15
+_DISTRIBUTION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
+_EXACT_VERSION = re.compile(r"==\s*([A-Za-z0-9][A-Za-z0-9.!+_-]*)")
+_SHA256 = re.compile(r"^sha256:([0-9a-f]{64})$")
 
 
 class PlanParseError(ValueError):
@@ -273,9 +274,7 @@ def parse_plan_text(source: str) -> PlanDocument:
                     lines = lines[1:]
             ordinal += 1
             body = ("\n".join(lines).rstrip() + "\n").encode()
-            snippets.append(
-                Snippet(number, language, path, qualifier, operation, body, ordinal)
-            )
+            snippets.append(Snippet(number, language, path, qualifier, operation, body, ordinal))
         tasks.append(
             Task(
                 number=number,
@@ -364,13 +363,290 @@ def _tree_files(root: Path) -> dict[str, bytes]:
     return files
 
 
+def _normalise_distribution_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", value).casefold()
+
+
+def _locked_eval_import_policy(root: Path) -> tuple[str, ...]:
+    """Validate the eval lock and return installed imports outside its closure."""
+
+    project_path = root / "evals/pyproject.toml"
+    lock_path = root / "evals/uv.lock"
+    if not project_path.is_file() and not lock_path.is_file():
+        return ()
+    if not project_path.is_file() or not lock_path.is_file():
+        raise MaterializationError(
+            "locked eval runtime requires both evals/pyproject.toml and evals/uv.lock"
+        )
+    try:
+        project_document = tomllib.loads(project_path.read_text(encoding="utf-8"))
+        lock_document = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise MaterializationError(f"locked eval runtime metadata is invalid: {error}") from error
+
+    project = project_document.get("project")
+    packages = lock_document.get("package")
+    if not isinstance(project, dict) or not isinstance(packages, list):
+        raise MaterializationError("locked eval runtime metadata lacks project or package records")
+    interpreter_requirement = f"=={sys.version_info.major}.{sys.version_info.minor}.*"
+    if (
+        project.get("requires-python") != interpreter_requirement
+        or lock_document.get("requires-python") != interpreter_requirement
+    ):
+        raise MaterializationError(
+            "locked eval Python requirement does not match the validation interpreter"
+        )
+    if lock_document.get("version") != 1 or lock_document.get("revision") != 3:
+        raise MaterializationError("locked eval uv.lock format or revision is unsupported")
+    dependencies = project.get("dependencies", [])
+    if not isinstance(dependencies, list) or not all(
+        isinstance(value, str) for value in dependencies
+    ):
+        raise MaterializationError("locked eval project dependencies must be strings")
+    project_name_value = project.get("name")
+    if not isinstance(project_name_value, str):
+        raise MaterializationError("locked eval project name is invalid")
+    project_name = _normalise_distribution_name(project_name_value)
+    declared_dependencies: dict[str, str | None] = {}
+    for dependency in dependencies:
+        match = _DISTRIBUTION_NAME.match(dependency.strip())
+        if match is None:
+            raise MaterializationError(f"locked eval project dependency is invalid: {dependency!r}")
+        name = _normalise_distribution_name(match.group())
+        exact_match = _EXACT_VERSION.search(dependency)
+        declared_dependencies[name] = exact_match.group(1) if exact_match is not None else None
+
+    locked_versions: dict[str, set[str]] = {}
+    dependency_graph: dict[str, set[str]] = {}
+    root_metadata_dependencies: set[str] = set()
+    for package in packages:
+        if not isinstance(package, dict) or not isinstance(package.get("name"), str):
+            raise MaterializationError("locked eval package record is invalid")
+        name = _normalise_distribution_name(package["name"])
+        dependency_graph.setdefault(name, set())
+        version = package.get("version")
+        if isinstance(version, str):
+            locked_versions.setdefault(name, set()).add(version)
+        package_dependencies = package.get("dependencies", [])
+        if not isinstance(package_dependencies, list):
+            raise MaterializationError(f"locked eval package {name} dependencies are invalid")
+        for dependency in package_dependencies:
+            if not isinstance(dependency, dict) or not isinstance(dependency.get("name"), str):
+                raise MaterializationError(
+                    f"locked eval package {name} dependency record is invalid"
+                )
+            dependency_graph[name].add(_normalise_distribution_name(dependency["name"]))
+        if name == project_name:
+            metadata = package.get("metadata")
+            if isinstance(metadata, dict):
+                requires_dist = metadata.get("requires-dist", [])
+                if not isinstance(requires_dist, list):
+                    raise MaterializationError("locked eval project dependency metadata is invalid")
+                for dependency in requires_dist:
+                    if not isinstance(dependency, dict) or not isinstance(
+                        dependency.get("name"), str
+                    ):
+                        raise MaterializationError(
+                            "locked eval project dependency metadata record is invalid"
+                        )
+                    root_metadata_dependencies.add(_normalise_distribution_name(dependency["name"]))
+        source = package.get("source")
+        if isinstance(source, dict) and source.get("registry") is not None:
+            artifacts = []
+            if isinstance(package.get("sdist"), dict):
+                artifacts.append(package["sdist"])
+            wheels = package.get("wheels", [])
+            if isinstance(wheels, list):
+                artifacts.extend(item for item in wheels if isinstance(item, dict))
+            hashes = [item.get("hash") for item in artifacts]
+            if not hashes or any(
+                not isinstance(value, str)
+                or (match := _SHA256.fullmatch(value)) is None
+                or set(match.group(1)) == {"0"}
+                for value in hashes
+            ):
+                raise MaterializationError(
+                    f"locked eval package {name} lacks trustworthy sha256 artifacts"
+                )
+
+    if project_name not in dependency_graph:
+        raise MaterializationError("locked eval project package is absent from evals/uv.lock")
+    declared_names = set(declared_dependencies)
+    if dependency_graph[project_name] != declared_names or (
+        root_metadata_dependencies and root_metadata_dependencies != declared_names
+    ):
+        raise MaterializationError(
+            "locked eval project dependency closure differs from evals/pyproject.toml"
+        )
+    reachable = {project_name}
+    pending = [project_name]
+    while pending:
+        current = pending.pop()
+        for dependency_name in dependency_graph[current]:
+            if dependency_name not in dependency_graph:
+                raise MaterializationError(
+                    f"locked eval dependency {dependency_name} has no package record"
+                )
+            if dependency_name not in reachable:
+                reachable.add(dependency_name)
+                pending.append(dependency_name)
+    unreachable = set(dependency_graph) - reachable
+    if unreachable:
+        raise MaterializationError(
+            f"locked eval package closure contains undeclared packages: {sorted(unreachable)}"
+        )
+
+    for name, exact_version in declared_dependencies.items():
+        versions = locked_versions.get(name)
+        if not versions:
+            raise MaterializationError(
+                f"locked eval dependency {name} is absent from evals/uv.lock"
+            )
+        if exact_version is not None and exact_version not in versions:
+            raise MaterializationError(
+                f"locked eval dependency {name} version differs between project and lock"
+            )
+
+    installed_to_imports = importlib.metadata.packages_distributions()
+    for distribution_name in sorted(reachable):
+        versions = locked_versions.get(distribution_name, set())
+        if not versions:
+            continue
+        try:
+            installed_version = importlib.metadata.version(distribution_name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        if installed_version not in versions:
+            raise MaterializationError(
+                f"locked eval dependency {distribution_name} version {versions} does not "
+                f"match runtime {installed_version}"
+            )
+
+    allowed = reachable
+    forbidden: set[str] = set()
+    for import_name, distribution_names in installed_to_imports.items():
+        if not distribution_names:
+            continue
+        normalised = {_normalise_distribution_name(name) for name in distribution_names}
+        if not normalised <= allowed:
+            forbidden.add(import_name.partition(".")[0])
+    return tuple(sorted(forbidden))
+
+
 def _run_generator_process(
-    argv: tuple[str, ...], *, root: Path, environment: dict[str, str]
+    argv: tuple[str, ...],
+    *,
+    root: Path,
+    environment: dict[str, str],
+    timeout_seconds: float | None = None,
+    diagnostic_limit: int = GENERATOR_DIAGNOSTIC_LIMIT,
+    restrict_host_apis: bool = True,
 ) -> _GeneratorRun:
-    with tempfile.TemporaryDirectory(
-        prefix="tuntun-plan-generator-runtime-"
-    ) as isolated_runtime:
+    effective_timeout = GENERATOR_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    forbidden_imports = _locked_eval_import_policy(root)
+    with tempfile.TemporaryDirectory(prefix="tuntun-plan-generator-runtime-") as isolated_runtime:
         runtime = Path(isolated_runtime)
+        policy = runtime / "policy"
+        if restrict_host_apis or forbidden_imports:
+            policy.mkdir(mode=0o700)
+            host_policy = ""
+            if restrict_host_apis:
+                host_policy = """
+_tuntun_host_files = frozenset({
+    "/etc/hostname",
+    "/etc/machine-id",
+    "/var/lib/dbus/machine-id",
+    "/proc/sys/kernel/hostname",
+    "/Library/Preferences/SystemConfiguration/preferences.plist",
+    "/Library/Preferences/SystemConfiguration/NetworkInterfaces.plist",
+    "/var/db/SystemKey",
+})
+_tuntun_host_commands = frozenset({
+    "hostname", "ioreg", "scutil", "system_profiler", "sysctl", "uname"
+})
+_tuntun_open = builtins.open
+_tuntun_io_open = io.open
+_tuntun_popen = subprocess.Popen
+
+def _tuntun_guard_path(value):
+    try:
+        candidate = os.path.realpath(os.fspath(value))
+    except TypeError:
+        return
+    if candidate in _tuntun_host_files:
+        raise RuntimeError("nondeterministic host identity file forbidden")
+
+def _tuntun_guard_command(command):
+    if isinstance(command, (list, tuple)) and command:
+        executable = os.path.basename(os.fspath(command[0])).casefold()
+    elif isinstance(command, (str, bytes)):
+        decoded = os.fsdecode(command).casefold()
+        executable = next(
+            (name for name in _tuntun_host_commands if name in decoded), ""
+        )
+    else:
+        executable = ""
+    if executable in _tuntun_host_commands:
+        raise RuntimeError("nondeterministic host identity command forbidden")
+
+def _tuntun_guarded_open(file, *args, **kwargs):
+    _tuntun_guard_path(file)
+    return _tuntun_open(file, *args, **kwargs)
+
+def _tuntun_guarded_io_open(file, *args, **kwargs):
+    _tuntun_guard_path(file)
+    return _tuntun_io_open(file, *args, **kwargs)
+
+def _tuntun_guarded_popen(args, *other_args, **kwargs):
+    _tuntun_guard_command(args)
+    return _tuntun_popen(args, *other_args, **kwargs)
+
+def _tuntun_guarded_system(command):
+    _tuntun_guard_command(command)
+    return _tuntun_deny_host_api()
+
+builtins.open = _tuntun_guarded_open
+io.open = _tuntun_guarded_io_open
+subprocess.Popen = _tuntun_guarded_popen
+os.system = _tuntun_guarded_system
+platform.node = _tuntun_deny_host_api
+socket.gethostname = _tuntun_deny_host_api
+socket.getaddrinfo = _tuntun_deny_host_api
+socket.create_connection = _tuntun_deny_host_api
+uuid.getnode = _tuntun_deny_host_api
+if hasattr(os, "uname"):
+    os.uname = _tuntun_deny_host_api
+"""
+            (policy / "sitecustomize.py").write_text(
+                f"""import builtins
+import io
+import os
+import platform
+import socket
+import subprocess
+import uuid
+
+def _tuntun_deny_host_api(*_args, **_kwargs):
+    raise RuntimeError("nondeterministic host API forbidden")
+
+{host_policy}
+_tuntun_forbidden_imports = frozenset({json.dumps(forbidden_imports)})
+_tuntun_import = builtins.__import__
+
+def _tuntun_locked_import(name, *args, **kwargs):
+    top_level = name.partition(".")[0]
+    if top_level in _tuntun_forbidden_imports:
+        raise RuntimeError(
+            f"locked eval environment forbids undeclared distribution import: {{top_level}}"
+        )
+    return _tuntun_import(name, *args, **kwargs)
+
+builtins.__import__ = _tuntun_locked_import
+for _key in ("UV_CACHE_DIR", "UV_PROJECT_ENVIRONMENT", "UV_PYTHON"):
+    os.environ.pop(_key, None)
+""",
+                encoding="utf-8",
+            )
         isolated_environment = dict(environment)
         isolated_environment.update(
             {
@@ -380,6 +656,15 @@ def _run_generator_process(
                 "XDG_CACHE_HOME": str(runtime / "xdg-cache"),
             }
         )
+        existing_python_path = isolated_environment.get("PYTHONPATH", "")
+        isolated_environment["PYTHONPATH"] = os.pathsep.join(
+            value
+            for value in (
+                str(policy) if restrict_host_apis or forbidden_imports else "",
+                existing_python_path,
+            )
+            if value
+        )
         for directory in (
             isolated_environment["HOME"],
             isolated_environment["TMPDIR"],
@@ -387,9 +672,6 @@ def _run_generator_process(
             isolated_environment["XDG_CACHE_HOME"],
         ):
             Path(directory).mkdir(parents=True, exist_ok=True)
-        if Path(argv[0]).name == "uv":
-            isolated_environment["UV_PROJECT_ENVIRONMENT"] = str(runtime / "uv-venv")
-            isolated_environment["UV_OFFLINE"] = "1"
         process = subprocess.Popen(
             argv,
             cwd=root,
@@ -405,24 +687,27 @@ def _run_generator_process(
         stream_selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         totals = {"stdout": 0, "stderr": 0}
         tails = {"stdout": bytearray(), "stderr": bytearray()}
-        deadline = time.monotonic() + GENERATOR_TIMEOUT_SECONDS
+        deadline = time.monotonic() + effective_timeout
         output_exceeded = False
 
         def terminate() -> None:
+            # The direct child may have already exited while a descendant keeps
+            # a diagnostic pipe open.  Its process-group ID remains the direct
+            # child's PID, so always kill the group before reaping the parent.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
             if process.poll() is None:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
 
         try:
             while stream_selector.get_map():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise subprocess.TimeoutExpired(argv, GENERATOR_TIMEOUT_SECONDS)
+                    raise subprocess.TimeoutExpired(argv, effective_timeout)
                 for key, _ in stream_selector.select(min(remaining, 0.25)):
                     file_object = key.fileobj
                     descriptor = (
@@ -437,7 +722,7 @@ def _run_generator_process(
                     tails[name].extend(chunk)
                     if len(tails[name]) > 2048:
                         del tails[name][:-2048]
-                    if totals[name] > GENERATOR_DIAGNOSTIC_LIMIT:
+                    if totals[name] > diagnostic_limit:
                         output_exceeded = True
                         break
                 if output_exceeded:
@@ -448,7 +733,7 @@ def _run_generator_process(
             else:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise subprocess.TimeoutExpired(argv, GENERATOR_TIMEOUT_SECONDS)
+                    raise subprocess.TimeoutExpired(argv, effective_timeout)
                 returncode = process.wait(timeout=remaining)
         except BaseException:
             terminate()
@@ -487,12 +772,33 @@ def _generator_environment(root: Path) -> dict[str, str]:
 
 
 def _resolved_generator_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
-    if argv[0] != "uv":
-        return (sys.executable, *argv[1:])
-    executable = shutil.which("uv")
-    if executable is None:
-        raise MaterializationError("deterministic generator requires the uv executable")
-    return (executable, *argv[1:])
+    if argv[0] == "uv":
+        # The runtime policy verifies the selected interpreter's imported
+        # distribution closure and versions against the materialized eval lock.
+        # Running uv here would require a mutable cache or network bootstrap;
+        # both are forbidden during deterministic plan validation.
+        return (sys.executable, *argv[6:])
+    return (sys.executable, *argv[1:])
+
+
+def run_materialized_python(
+    arguments: Sequence[str],
+    *,
+    root: Path,
+    timeout_seconds: float = 15,
+    diagnostic_limit: int = GENERATOR_DIAGNOSTIC_LIMIT,
+    restrict_host_apis: bool = True,
+) -> _GeneratorRun:
+    """Run materialized Python under the deterministic offline policy."""
+
+    return _run_generator_process(
+        (sys.executable, *arguments),
+        root=root,
+        environment=_generator_environment(root),
+        timeout_seconds=timeout_seconds,
+        diagnostic_limit=diagnostic_limit,
+        restrict_host_apis=restrict_host_apis,
+    )
 
 
 def _execute_generator_once(
@@ -564,8 +870,7 @@ def _run_generator_check(
                 )
             except subprocess.TimeoutExpired as error:
                 raise MaterializationError(
-                    f"Task {task_number:02d} generator {generator.name}: "
-                    "check exceeded 15 seconds"
+                    f"Task {task_number:02d} generator {generator.name}: check exceeded 15 seconds"
                 ) from error
             after = _tree_files(root)
         if after != before:
@@ -715,9 +1020,7 @@ def materialize_document(
     return files
 
 
-def foundation_snapshot_from_ref(
-    repository_root: Path, foundation_ref: str
-) -> FoundationSnapshot:
+def foundation_snapshot_from_ref(repository_root: Path, foundation_ref: str) -> FoundationSnapshot:
     """Resolve and archive one immutable Foundation commit object."""
 
     resolved = subprocess.run(
@@ -757,9 +1060,7 @@ def foundation_files_from_ref(repository_root: Path, foundation_ref: str) -> dic
     return foundation_snapshot_from_ref(repository_root, foundation_ref).files
 
 
-def plan_document_from_ref(
-    repository_root: Path, plan_ref: str, plan_path: str
-) -> PlanDocument:
+def plan_document_from_ref(repository_root: Path, plan_ref: str, plan_path: str) -> PlanDocument:
     """Parse plan bytes from an explicit committed git object, never the worktree."""
 
     canonical_path = _normalise_path(plan_path)
@@ -778,9 +1079,7 @@ def plan_document_from_ref(
         source = content.decode("utf-8")
     except UnicodeDecodeError as error:
         raise PlanParseError(f"committed plan is not UTF-8: {canonical_path}") from error
-    return replace(
-        parse_plan_text(source), source_commit=resolved, source_path=canonical_path
-    )
+    return replace(parse_plan_text(source), source_commit=resolved, source_path=canonical_path)
 
 
 def write_materialized_tree(destination: Path, files: dict[str, bytes]) -> None:

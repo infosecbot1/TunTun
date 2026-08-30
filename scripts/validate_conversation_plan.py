@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import ipaddress
 import json
 import os
@@ -30,6 +31,7 @@ try:
         foundation_snapshot_from_ref,
         materialize_document,
         plan_document_from_ref,
+        run_materialized_python,
         write_materialized_tree,
     )
 except ModuleNotFoundError as error:
@@ -42,6 +44,7 @@ except ModuleNotFoundError as error:
         foundation_snapshot_from_ref,
         materialize_document,
         plan_document_from_ref,
+        run_materialized_python,
         write_materialized_tree,
     )
 
@@ -51,6 +54,7 @@ FOUNDATION_MIGRATION_PATHS = (
     "apps/core/src/tuntun_core/adapters/sqlcipher/migrations.py",
     "tests/integration/storage/test_migrations.py",
 )
+FOUNDATION_REVISION_PATH = "apps/core/migrations/versions/0001_foundation.py"
 PYTEST_FIXTURES = {
     "cache",
     "capfd",
@@ -87,9 +91,7 @@ MODEL_KEYS = {
     "files",
 }
 MODEL_FILE_KEYS = {"path", "size", "sha256", "url"}
-BILINGUAL_SCHEMA_ID = (
-    "https://tuntun.local/schemas/bilingual-persona-score-v1.schema.json"
-)
+BILINGUAL_SCHEMA_ID = "https://tuntun.local/schemas/bilingual-persona-score-v1.schema.json"
 BILINGUAL_REPORT_FIELDS = frozenset(
     {
         "schema_version",
@@ -215,10 +217,7 @@ def validate_model_manifest_bytes(content: bytes) -> list[str]:
         return ["model manifest root keys are not closed"]
     if type(document.get("schema_version")) is not str or document.get("schema_version") != "1.0":
         errors.append("model manifest schema_version must be the string '1.0'")
-    if (
-        type(document.get("models")) is not list
-        or not 1 <= len(document.get("models", ())) <= 256
-    ):
+    if type(document.get("models")) is not list or not 0 <= len(document.get("models", ())) <= 256:
         return ["model manifest version/models shape is invalid"]
     model_ids: list[str] = []
     for model_index, model in enumerate(document["models"]):
@@ -326,9 +325,13 @@ def _unsafe_model_url(value: str) -> bool:
         address = ipaddress.ip_address(host)
     except ValueError:
         labels = host.split(".")
-        return len(labels) < 2 or len(host) > 253 or any(
-            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
-            for label in labels
+        return (
+            len(labels) < 2
+            or len(host) > 253
+            or any(
+                re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
+                for label in labels
+            )
         )
     return not address.is_global
 
@@ -387,9 +390,7 @@ def _expected_bilingual_schema() -> dict[str, object]:
     properties["candidate_commit"] = titled(
         "candidate_commit", pattern="^[0-9a-f]{40}$", type="string"
     )
-    properties["model_id"] = titled(
-        "model_id", minLength=1, maxLength=128, type="string"
-    )
+    properties["model_id"] = titled("model_id", minLength=1, maxLength=128, type="string")
     for name in BILINGUAL_DIRECT_HASH_FIELDS:
         properties[name] = titled(name, pattern="^[0-9a-f]{64}$", type="string")
     properties["evaluator_license"] = titled(
@@ -419,9 +420,7 @@ def _expected_bilingual_schema() -> dict[str, object]:
         type="array",
     )
     properties["aggregates"] = {"$ref": "#/$defs/RecomputedAggregates"}
-    properties["signer_key_id"] = titled(
-        "signer_key_id", minLength=1, maxLength=128, type="string"
-    )
+    properties["signer_key_id"] = titled("signer_key_id", minLength=1, maxLength=128, type="string")
     properties["signature_domain"] = {
         "const": "tuntun.bilingual-persona-score.v1",
         "title": "Signature Domain",
@@ -434,16 +433,12 @@ def _expected_bilingual_schema() -> dict[str, object]:
     }
     properties["issued_at"] = titled("issued_at", format="date-time", type="string")
     properties["expires_at"] = titled("expires_at", format="date-time", type="string")
-    properties["signature_b64"] = titled(
-        "signature_b64", minLength=88, maxLength=88, type="string"
-    )
+    properties["signature_b64"] = titled("signature_b64", minLength=88, maxLength=88, type="string")
     return {
         "$defs": {
             "RecomputedAggregates": {
                 "additionalProperties": False,
-                "properties": {
-                    name: titled(name, type="integer") for name in aggregate_fields
-                },
+                "properties": {name: titled(name, type="integer") for name in aggregate_fields},
                 "required": list(aggregate_fields),
                 "title": "RecomputedAggregates",
                 "type": "object",
@@ -477,8 +472,9 @@ def validate_bilingual_schema_bytes(content: bytes) -> list[str]:
             "$defs, lifecycle arrays, aggregates, and signature semantics"
         )
     canonical = (
-        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        .encode("utf-8")
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         + b"\n"
     )
     if content != canonical:
@@ -486,7 +482,7 @@ def validate_bilingual_schema_bytes(content: bytes) -> list[str]:
     return errors
 
 
-_BILINGUAL_REPORT_MODEL_PROBE = r'''import copy
+_BILINGUAL_REPORT_MODEL_PROBE = r"""import copy
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -542,6 +538,9 @@ value = copy.deepcopy(good)
 value["issued_at"] = value["issued_at"].replace(tzinfo=None)
 faults.append(value)
 value = copy.deepcopy(good)
+value["expires_at"] = value["expires_at"].replace(tzinfo=None)
+faults.append(value)
+value = copy.deepcopy(good)
 value["expires_at"] = issued
 faults.append(value)
 value = copy.deepcopy(good)
@@ -572,7 +571,7 @@ for index, candidate in enumerate(faults):
     except (TypeError, ValueError):
         continue
     raise AssertionError(f"report model accepted controlled lifecycle/signature fault {index}")
-'''
+"""
 
 
 def validate_bilingual_report_model_files(files: dict[str, bytes]) -> list[str]:
@@ -581,32 +580,50 @@ def validate_bilingual_report_model_files(files: dict[str, bytes]) -> list[str]:
     path = "evals/verify_bilingual_report.py"
     if path not in files:
         return [f"bilingual report runtime model is absent: {path}"]
+    try:
+        tree = ast.parse(files[path].decode("utf-8"), filename=path)
+    except (SyntaxError, UnicodeDecodeError) as error:
+        return [f"bilingual report runtime model is invalid: {error}"]
+    report_class = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "BilingualScoreReportV1"
+        ),
+        None,
+    )
+    lifecycle = next(
+        (
+            node
+            for node in (report_class.body if report_class is not None else ())
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "lifecycle"
+        ),
+        None,
+    )
+    checks_expiry_timezone = lifecycle is not None and any(
+        isinstance(node, ast.Attribute)
+        and node.attr == "tzinfo"
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "expires_at"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "self"
+        for node in ast.walk(lifecycle)
+    )
+    if not checks_expiry_timezone:
+        return ["bilingual report runtime model does not explicitly reject naive expires_at"]
     with tempfile.TemporaryDirectory(prefix="tuntun-bilingual-report-model-") as temporary:
         root = Path(temporary)
         write_materialized_tree(root, files)
         probe = root / ".bilingual-report-model-probe.py"
         probe.write_text(_BILINGUAL_REPORT_MODEL_PROBE, encoding="utf-8")
         try:
-            result = subprocess.run(
-                (sys.executable, "-I", str(probe), str(root)),
-                cwd=root,
-                env={
-                    "LANG": "C",
-                    "LC_ALL": "C",
-                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                    "PYTHONHASHSEED": "0",
-                    "TZ": "UTC",
-                },
-                check=False,
-                capture_output=True,
-                timeout=15,
-            )
+            result = run_materialized_python((probe.name, str(root)), root=root, timeout_seconds=15)
         except subprocess.TimeoutExpired:
             return ["bilingual report runtime behavioral probe exceeded 15 seconds"]
     if result.returncode == 0:
         return []
-    diagnostic = (result.stdout + result.stderr)[-4096:].decode(errors="replace")
+    diagnostic = result.diagnostic[-4096:].decode(errors="replace")
     return [f"bilingual report runtime behavioral probe failed: {diagnostic}"]
 
 
@@ -673,6 +690,55 @@ def validate_wake_benchmark_bytes(
     if absent:
         return [f"behavioral probe delivered production pipeline files are absent: {absent}"]
 
+    try:
+        converter_tree = ast.parse(
+            materialized_files["apps/edge/src/tuntun_edge/audio/converter.py"].decode("utf-8")
+        )
+    except (SyntaxError, UnicodeDecodeError) as error:
+        return [f"production-faithful async converter is invalid: {error}"]
+    converter_class = next(
+        (
+            node
+            for node in converter_tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "StreamingAudioConverter"
+        ),
+        None,
+    )
+    converter_method = next(
+        (
+            node
+            for node in (converter_class.body if converter_class is not None else ())
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "convert"
+        ),
+        None,
+    )
+    converter_args = (
+        [argument.arg for argument in converter_method.args.args]
+        if converter_method is not None
+        else []
+    )
+    run_benchmark = functions.get("run_benchmark")
+    uses_registry_loader = any(
+        isinstance(node, ast.Call)
+        and _decorator_name(node.func) in {"ModelRegistry.from_document", "ModelRegistry.load"}
+        for node in ast.walk(tree)
+    )
+    main = functions.get("main")
+    uses_asyncio_run = main is not None and any(
+        isinstance(node, ast.Call) and _decorator_name(node.func) == "asyncio.run"
+        for node in ast.walk(main)
+    )
+    if (
+        converter_args != ["self", "audio", "source", "target"]
+        or not isinstance(run_benchmark, ast.AsyncFunctionDef)
+        or not uses_registry_loader
+        or not uses_asyncio_run
+    ):
+        return [
+            "behavioral probe requires a production-faithful async converter, "
+            "locked ModelRegistry loader, runtime inference path, and asyncio main"
+        ]
+
     baseline_files = dict(materialized_files)
     baseline_files[benchmark_path] = content
 
@@ -681,24 +747,20 @@ def validate_wake_benchmark_bytes(
             root = Path(temporary)
             write_materialized_tree(root, candidate)
             try:
-                result = subprocess.run(
+                result = run_materialized_python(
                     (
-                        sys.executable,
                         benchmark_path,
                         "--frames",
                         "4",
                         "--max-one-core-percent",
                         "25",
                     ),
-                    cwd=root,
-                    env=_pytest_environment(root),
-                    check=False,
-                    capture_output=True,
-                    timeout=15,
+                    root=root,
+                    timeout_seconds=15,
                 )
             except subprocess.TimeoutExpired:
                 return False, "exceeded 15 seconds"
-        diagnostic = (result.stdout + result.stderr)[-4096:].decode(errors="replace")
+        diagnostic = result.diagnostic[-4096:].decode(errors="replace")
         return result.returncode == 0, f"exit {result.returncode}: {diagnostic}"
 
     passed, diagnostic = execute(baseline_files, "baseline")
@@ -731,6 +793,12 @@ def validate_wake_benchmark_bytes(
             "load_with",
             "return None",
         ),
+        (
+            "apps/core/src/tuntun_core/services/models/registry.py",
+            "Adapter",
+            "infer",
+            "return 900000",
+        ),
     )
     for path, class_name, function_name, body in mutations:
         mutated_content = _mutate_function_body(
@@ -751,6 +819,31 @@ def validate_wake_benchmark_bytes(
                 f"benchmark main accepted controlled mutation of production pipeline "
                 f"{path}:{identity}"
             )
+    registry_path = "apps/core/src/tuntun_core/services/models/registry.py"
+    for attribute_name, replacement in (
+        ("model_sha256", repr("f" * 64)),
+        ("runtime_sha256", repr("e" * 64)),
+    ):
+        mutated_content = _mutate_class_attribute(
+            baseline_files[registry_path],
+            class_name="Adapter",
+            attribute_name=attribute_name,
+            value_source=replacement,
+        )
+        if mutated_content is None:
+            errors.append(
+                "production pipeline hash binding cannot be probed: "
+                f"{registry_path}:Adapter.{attribute_name}"
+            )
+            continue
+        candidate = dict(baseline_files)
+        candidate[registry_path] = mutated_content
+        mutation_passed, _ = execute(candidate, f"mutation-{attribute_name}")
+        if mutation_passed:
+            errors.append(
+                "benchmark main accepted controlled mutation of production pipeline "
+                f"hash binding {registry_path}:Adapter.{attribute_name}"
+            )
     return errors
 
 
@@ -760,9 +853,7 @@ def _python_tree(snippet: Snippet, errors: list[str]) -> ast.Module | None:
     try:
         return ast.parse(snippet.body.decode(), filename=snippet.path)
     except (SyntaxError, UnicodeDecodeError) as error:
-        errors.append(
-            f"Task {snippet.task:02d} {snippet.path}: Python snippet is invalid: {error}"
-        )
+        errors.append(f"Task {snippet.task:02d} {snippet.path}: Python snippet is invalid: {error}")
         return None
 
 
@@ -806,11 +897,7 @@ def _imported_modules(
             if not module:
                 continue
             result.add(module)
-            result.update(
-                f"{module}.{alias.name}"
-                for alias in node.names
-                if alias.name != "*"
-            )
+            result.update(f"{module}.{alias.name}" for alias in node.names if alias.name != "*")
     return result
 
 
@@ -943,9 +1030,7 @@ def _validate_path_parity(document: PlanDocument, errors: list[str]) -> None:
 def _validate_dependencies(document: PlanDocument, errors: list[str]) -> None:
     for task in document.tasks:
         if 3 <= task.number <= 16 and "Foundation Task 13" not in task.depends_on:
-            errors.append(
-                f"Task {task.number:02d} must depend on accepted Foundation Task 13"
-            )
+            errors.append(f"Task {task.number:02d} must depend on accepted Foundation Task 13")
 
 
 def _function_has_call(function: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
@@ -1017,6 +1102,50 @@ def _mutate_function_body(
     return (ast.unparse(mutated) + "\n").encode("utf-8")
 
 
+def _mutate_class_attribute(
+    content: bytes,
+    *,
+    class_name: str,
+    attribute_name: str,
+    value_source: str,
+) -> bytes | None:
+    """Replace one concrete class attribute with a controlled value."""
+
+    try:
+        tree = ast.parse(content.decode("utf-8"))
+        replacement = ast.parse(value_source, mode="eval").body
+    except (SyntaxError, UnicodeDecodeError):
+        return None
+    count = 0
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for statement in node.body:
+            assignment_matches = isinstance(statement, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == attribute_name
+                for target in statement.targets
+            )
+            annotated_assignment_matches = (
+                isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+                and statement.target.id == attribute_name
+                and statement.value is not None
+            )
+            if not assignment_matches and not annotated_assignment_matches:
+                continue
+            if isinstance(statement, ast.Assign):
+                statement.value = ast.copy_location(replacement, statement.value)
+            else:
+                assert isinstance(statement, ast.AnnAssign)
+                assert statement.value is not None
+                statement.value = ast.copy_location(replacement, statement.value)
+            count += 1
+    if count != 1:
+        return None
+    ast.fix_missing_locations(tree)
+    return (ast.unparse(tree) + "\n").encode("utf-8")
+
+
 def _validate_foundation(
     foundation_files: dict[str, bytes], errors: list[str], *, required: bool
 ) -> None:
@@ -1030,6 +1159,12 @@ def _validate_foundation(
             continue
         if not content.strip():
             errors.append(f"Foundation Task 13 capability is empty: {path}")
+    revision_content = foundation_files.get(FOUNDATION_REVISION_PATH)
+    if revision_content is None or not revision_content.strip():
+        errors.append(
+            "Foundation Task 13 real migration downgrade capability missing: "
+            f"{FOUNDATION_REVISION_PATH}"
+        )
     parsed: dict[str, ast.Module] = {}
     for path in FOUNDATION_MIGRATION_PATHS:
         content = foundation_files.get(path)
@@ -1039,6 +1174,16 @@ def _validate_foundation(
             parsed[path] = ast.parse(content.decode(), filename=path)
         except (SyntaxError, UnicodeDecodeError) as error:
             errors.append(f"Foundation Task 13 behavioral interface invalid at {path}: {error}")
+    if revision_content:
+        try:
+            parsed[FOUNDATION_REVISION_PATH] = ast.parse(
+                revision_content.decode(), filename=FOUNDATION_REVISION_PATH
+            )
+        except (SyntaxError, UnicodeDecodeError) as error:
+            errors.append(
+                "Foundation Task 13 real migration downgrade interface invalid at "
+                f"{FOUNDATION_REVISION_PATH}: {error}"
+            )
     engine_tree = parsed.get(FOUNDATION_MIGRATION_PATHS[0])
     engine_functions = {
         node.name: node
@@ -1046,14 +1191,11 @@ def _validate_foundation(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     engine = engine_functions.get("create_sqlcipher_engine")
-    if (
-        engine_tree is not None
-        and (
-            engine is None
-            or not _meaningful_function(engine)
-            or [arg.arg for arg in engine.args.args] != ["path", "key"]
-            or not _function_has_call(engine, "create_engine")
-        )
+    if engine_tree is not None and (
+        engine is None
+        or not _meaningful_function(engine)
+        or [arg.arg for arg in engine.args.args] != ["path", "key"]
+        or not _function_has_call(engine, "create_engine")
     ):
         errors.append(
             f"Foundation Task 13 behavioral interface invalid: {FOUNDATION_MIGRATION_PATHS[0]}"
@@ -1069,14 +1211,11 @@ def _validate_foundation(
         ("upgrade_encrypted", ["path", "key", "backup"], "upgrade"),
     ):
         function = migration_functions.get(name)
-        if (
-            migration_tree is not None
-            and (
-                function is None
-                or not _meaningful_function(function)
-                or [arg.arg for arg in function.args.args] != args
-                or not _function_has_call(function, required_call)
-            )
+        if migration_tree is not None and (
+            function is None
+            or not _meaningful_function(function)
+            or [arg.arg for arg in function.args.args] != args
+            or not _function_has_call(function, required_call)
         ):
             errors.append(
                 f"Foundation Task 13 behavioral interface invalid: "
@@ -1095,8 +1234,7 @@ def _validate_foundation(
         or not any(_function_has_call(function, "upgrade") for function in tests)
         or not any(_function_has_call(function, "downgrade") for function in tests)
         or not any(
-            any(isinstance(node, ast.Assert) for node in ast.walk(function))
-            for function in tests
+            any(isinstance(node, ast.Assert) for node in ast.walk(function)) for function in tests
         )
     ):
         errors.append(
@@ -1107,6 +1245,20 @@ def _validate_foundation(
         or any(_has_pytest_skip(function) or _has_skip_decorator(function) for function in tests)
     ):
         errors.append("Foundation Task 13 migration integration test contains skip/xfail")
+    revision_tree = parsed.get(FOUNDATION_REVISION_PATH)
+    revision_functions = {
+        node.name: node
+        for node in (revision_tree.body if revision_tree is not None else [])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if revision_tree is not None and any(
+        name not in revision_functions or not _meaningful_function(revision_functions[name])
+        for name in ("upgrade", "downgrade")
+    ):
+        errors.append(
+            "Foundation Task 13 real migration upgrade/downgrade interface invalid: "
+            f"{FOUNDATION_REVISION_PATH}"
+        )
     if len(errors) == foundation_error_start:
         _run_foundation_behavioral_probe(foundation_files, errors)
 
@@ -1119,8 +1271,7 @@ def _junit_is_complete_pass(path: Path) -> tuple[bool, str]:
     cases = list(root.iter("testcase"))
     skipped = sum(case.find("skipped") is not None for case in cases)
     failed = sum(
-        case.find("failure") is not None or case.find("error") is not None
-        for case in cases
+        case.find("failure") is not None or case.find("error") is not None for case in cases
     )
     if not cases or skipped or failed:
         return (
@@ -1130,13 +1281,9 @@ def _junit_is_complete_pass(path: Path) -> tuple[bool, str]:
     return True, f"JUnit evidence tests={len(cases)} skipped=0 failed=0"
 
 
-def _run_foundation_behavioral_probe(
-    foundation_files: dict[str, bytes], errors: list[str]
-) -> None:
+def _run_foundation_behavioral_probe(foundation_files: dict[str, bytes], errors: list[str]) -> None:
     def execute(candidate: dict[str, bytes], label: str) -> tuple[bool, str]:
-        with tempfile.TemporaryDirectory(
-            prefix=f"tuntun-foundation-task13-{label}-"
-        ) as temporary:
+        with tempfile.TemporaryDirectory(prefix=f"tuntun-foundation-task13-{label}-") as temporary:
             root = Path(temporary)
             junit = root / ".foundation-task13.junit.xml"
             write_materialized_tree(root, candidate)
@@ -1168,21 +1315,19 @@ def _run_foundation_behavioral_probe(
 
     passed, diagnostic = execute(foundation_files, "baseline")
     if not passed:
-        errors.append(
-            f"Foundation Task 13 behavioral probe failed with {diagnostic}"
-        )
+        errors.append(f"Foundation Task 13 behavioral probe failed with {diagnostic}")
         return
     for path, function_name in (
         (FOUNDATION_MIGRATION_PATHS[0], "create_sqlcipher_engine"),
         (FOUNDATION_MIGRATION_PATHS[1], "encrypted_backup"),
         (FOUNDATION_MIGRATION_PATHS[1], "upgrade_encrypted"),
+        (FOUNDATION_REVISION_PATH, "upgrade"),
+        (FOUNDATION_REVISION_PATH, "downgrade"),
     ):
         mutated_content = _mutate_function_body(
             foundation_files[path],
             function_name=function_name,
-            body_source=(
-                f"raise RuntimeError('controlled Foundation mutation: {function_name}')"
-            ),
+            body_source=(f"raise RuntimeError('controlled Foundation mutation: {function_name}')"),
         )
         if mutated_content is None:
             errors.append(
@@ -1271,10 +1416,7 @@ def _fixture_values(
 ) -> list[ast.expr]:
     values: list[ast.expr] = []
     for node in _walk_function_body(function):
-        if (
-            isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))
-            and node.value is not None
-        ):
+        if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)) and node.value is not None:
             values.append(node.value)
     return values
 
@@ -1327,9 +1469,7 @@ def _class_surface(node: ast.ClassDef) -> set[str]:
         if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
             surface.add(child.target.id)
         elif isinstance(child, ast.Assign):
-            surface.update(
-                target.id for target in child.targets if isinstance(target, ast.Name)
-            )
+            surface.update(target.id for target in child.targets if isinstance(target, ast.Name))
     for descendant in ast.walk(node):
         if (
             isinstance(descendant, ast.AnnAssign)
@@ -1400,8 +1540,7 @@ def _pytest_plugin_modules(tree: ast.Module) -> tuple[str, ...]:
             value = statement.value
             targets = (statement.target,)
         if any(
-            isinstance(target, ast.Name) and target.id == "pytest_plugins"
-            for target in targets
+            isinstance(target, ast.Name) and target.id == "pytest_plugins" for target in targets
         ):
             modules.extend(_literal_string_values(value))
     return tuple(modules)
@@ -1409,9 +1548,7 @@ def _pytest_plugin_modules(tree: ast.Module) -> tuple[str, ...]:
 
 def _foundation_fixture_paths(foundation_files: dict[str, bytes]) -> set[str]:
     module_paths = {
-        module: path
-        for path in foundation_files
-        if (module := _module_for_path(path)) is not None
+        module: path for path in foundation_files if (module := _module_for_path(path)) is not None
     }
     selected = {
         path
@@ -1436,11 +1573,10 @@ def _foundation_fixture_paths(foundation_files: dict[str, bytes]) -> set[str]:
 def _validate_fixtures_and_skips(
     document: PlanDocument, foundation_files: dict[str, bytes], errors: list[str]
 ) -> None:
-    producers: dict[
-        str, list[tuple[int, str, ast.FunctionDef | ast.AsyncFunctionDef]]
-    ] = {}
+    producers: dict[str, list[tuple[int, str, ast.FunctionDef | ast.AsyncFunctionDef]]] = {}
     consumers: list[tuple[str, str, str, set[str]]] = []
     class_surfaces: dict[str, set[str]] = {}
+    class_paths: dict[str, set[str]] = {}
     for path, content in foundation_files.items():
         if not path.endswith(".py"):
             continue
@@ -1451,6 +1587,7 @@ def _validate_fixtures_and_skips(
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 class_surfaces[node.name] = _class_surface(node)
+                class_paths.setdefault(node.name, set()).add(path)
     for path in sorted(_foundation_fixture_paths(foundation_files)):
         try:
             tree = ast.parse(foundation_files[path].decode("utf-8"), filename=path)
@@ -1459,8 +1596,7 @@ def _validate_fixtures_and_skips(
         for function in (
             node
             for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and _is_fixture(node)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_fixture(node)
         ):
             producers.setdefault(function.name, []).append((0, path, function))
             reason = _fixture_placeholder_reason(function)
@@ -1476,6 +1612,7 @@ def _validate_fixtures_and_skips(
             for node in snippet_tree.body:
                 if isinstance(node, ast.ClassDef):
                     class_surfaces[node.name] = _class_surface(node)
+                    class_paths.setdefault(node.name, set()).add(snippet.path)
             if _has_module_level_skip_or_xfail(snippet_tree):
                 errors.append(
                     f"Task {task.number:02d} {snippet.path}: unapproved module-level "
@@ -1503,9 +1640,7 @@ def _validate_fixtures_and_skips(
                             f"Task {task.number:02d} {snippet.path}: fixture {function.name} "
                             f"is a placeholder ({reason})"
                         )
-                is_test = function.name.startswith("test_") and snippet.path.startswith(
-                    "tests/"
-                )
+                is_test = function.name.startswith("test_") and snippet.path.startswith("tests/")
                 if _is_fixture(function) or is_test:
                     parametrized = _parametrized_names(function)
                     arguments = (
@@ -1539,9 +1674,7 @@ def _validate_fixtures_and_skips(
     ambiguous = {name for name in consumer_counts if len(producers.get(name, ())) != 1} - missing
     for name in sorted(missing):
         sites = [
-            f"{path}:{function}"
-            for candidate, path, function, _ in consumers
-            if candidate == name
+            f"{path}:{function}" for candidate, path, function, _ in consumers if candidate == name
         ]
         errors.append(
             f"fixture {name} has 0 explicit producers; fixture consumer missing; "
@@ -1582,6 +1715,16 @@ def _validate_fixtures_and_skips(
                 errors.append(
                     f"Task {task_number:02d} {path}: fixture {name} does not return "
                     "a typed concrete harness"
+                )
+                continue
+            annotation_owners = class_paths.get(annotation, set())
+            if annotation not in BUILTIN_CONCRETE_TYPES | {"Callable"} and (
+                path in annotation_owners
+                or not any(not owner.startswith("tests/") for owner in annotation_owners)
+            ):
+                errors.append(
+                    f"Task {task_number:02d} {path}: fixture {name} uses a "
+                    "test-local harness instead of wrapping an imported production class"
                 )
                 continue
             required_members = used_members.get(name, set())
@@ -1685,11 +1828,7 @@ def _pytest_targets(arguments: tuple[str, ...]) -> tuple[str, ...]:
 
 def _arguments_cover_path(arguments: tuple[str, ...], path: str) -> bool:
     return any(
-        "::" not in target
-        and (
-            target == path
-            or path.startswith(target.rstrip("/") + "/")
-        )
+        "::" not in target and (target == path or path.startswith(target.rstrip("/") + "/"))
         for target in _pytest_targets(arguments)
     )
 
@@ -1700,10 +1839,9 @@ def _green_command_is_fail_closed(command: str) -> bool:
     words = tuple(lexer)
     if any(word in {"||", "|", ";", "&"} for word in words):
         return False
-    if any(
-        re.fullmatch(r"(?:PYTEST_ADDOPTS|PYTEST_PLUGINS)=.*", word)
-        for word in words
-    ):
+    if any(re.fullmatch(r"(?:PYTEST_ADDOPTS|PYTEST_PLUGINS)=.*", word) for word in words):
+        return False
+    if any(word in {"--help", "-h"} for word in words):
         return False
     unsafe_pytest_options = {
         "--co",
@@ -1733,9 +1871,7 @@ def _green_command_is_fail_closed(command: str) -> bool:
     return True
 
 
-def _python_entry_point_invoked(
-    path: str, invocations: tuple[tuple[str, ...], ...]
-) -> bool:
+def _python_entry_point_invoked(path: str, invocations: tuple[tuple[str, ...], ...]) -> bool:
     module = path.removesuffix(".py").replace("/", ".")
     for invocation in invocations:
         executable, arguments = _unwrap_invocation(invocation)
@@ -1769,13 +1905,11 @@ def _validate_green_commands(document: PlanDocument, errors: list[str]) -> None:
             if declaration.kind != "Test":
                 continue
             executed_by_pytest = any(
-                _arguments_cover_path(arguments, declaration.path)
-                for arguments in pytest_commands
+                _arguments_cover_path(arguments, declaration.path) for arguments in pytest_commands
             )
-            executed_benchmark = (
-                Path(declaration.path).name.startswith("bench_")
-                and _python_entry_point_invoked(declaration.path, invocations)
-            )
+            executed_benchmark = Path(declaration.path).name.startswith(
+                "bench_"
+            ) and _python_entry_point_invoked(declaration.path, invocations)
             if not executed_by_pytest and not executed_benchmark:
                 errors.append(
                     f"Task {task.number:02d}: green command does not execute owned test "
@@ -1844,6 +1978,64 @@ def _validate_green_commands(document: PlanDocument, errors: list[str]) -> None:
                 )
 
 
+def _module_path(module: str) -> str:
+    return module.replace(".", "/") + ".py"
+
+
+def _execute_owned_green_commands(
+    document: PlanDocument,
+    files: dict[str, bytes],
+    errors: list[str],
+) -> None:
+    """Execute materialized Python gates; pytest/external lanes have dedicated probes."""
+
+    with tempfile.TemporaryDirectory(prefix="tuntun-plan-green-commands-") as temporary:
+        root = Path(temporary)
+        write_materialized_tree(root, files)
+        for task in document.tasks:
+            for command in task.green_commands:
+                if not _green_command_is_fail_closed(command):
+                    continue
+                for invocation in _command_invocations(command):
+                    if any(
+                        word.startswith("TUNTUN_ALLOW_REACHY_HARDWARE=")
+                        or word.startswith("TUNTUN_ALLOW_LIVE_CLOUD=")
+                        for word in invocation
+                    ):
+                        continue
+                    executable, arguments = _unwrap_invocation(invocation)
+                    if not Path(executable).name.startswith("python"):
+                        continue
+                    if arguments[:2] == ("-m", "pytest"):
+                        continue
+                    if not arguments:
+                        continue
+                    if arguments[0] == "-m" and len(arguments) >= 2:
+                        entry_path = _module_path(arguments[1])
+                    else:
+                        entry_path = arguments[0]
+                    if entry_path not in files:
+                        continue
+                    try:
+                        result = run_materialized_python(
+                            arguments,
+                            root=root,
+                            timeout_seconds=45,
+                        )
+                    except subprocess.TimeoutExpired:
+                        errors.append(
+                            f"Task {task.number:02d}: owned green command failed: "
+                            f"exceeded 45 seconds: {command}"
+                        )
+                        continue
+                    if result.returncode != 0:
+                        diagnostic = result.diagnostic[-4096:].decode(errors="replace")
+                        errors.append(
+                            f"Task {task.number:02d}: owned green command failed with "
+                            f"exit {result.returncode}: {command}: {diagnostic}"
+                        )
+
+
 def _validate_model_and_eval_contracts(
     document: PlanDocument,
     errors: list[str],
@@ -1874,17 +2066,12 @@ def _validate_model_and_eval_contracts(
                 )
             else:
                 manifest_errors = validate_model_manifest_bytes(values[0] or b"")
-                errors.extend(
-                    f"Task 12 {error}"
-                    for error in manifest_errors
-                )
+                errors.extend(f"Task 12 {error}" for error in manifest_errors)
                 if not manifest_errors:
                     manifest_content = values[0]
                     assert manifest_content is not None
                     parsed_manifest = yaml.load(manifest_content, Loader=_UniqueKeyLoader)
-                    model_ids = tuple(
-                        model["id"] for model in parsed_manifest["models"]
-                    )
+                    model_ids = tuple(model["id"] for model in parsed_manifest["models"])
                     expected_ids = {"hello-tuntun-v1", "stop-tuntun-v1"}
                     if len(model_ids) != 2 or set(model_ids) != expected_ids:
                         errors.append(
@@ -1928,8 +2115,7 @@ def _validate_model_and_eval_contracts(
                 errors.append("Task 15 generated schema output is absent")
             else:
                 errors.extend(
-                    f"Task 15 {error}"
-                    for error in validate_bilingual_schema_bytes(schema)
+                    f"Task 15 {error}" for error in validate_bilingual_schema_bytes(schema)
                 )
                 errors.extend(
                     f"Task 15 {error}"
@@ -1954,18 +2140,90 @@ def _pytest_environment(root: Path) -> dict[str, str]:
     return environment
 
 
-def _test_file_is_external_only(content: bytes) -> bool:
+_COLLECTION_PLUGIN = """import json
+from pathlib import Path
+
+def pytest_collection_finish(session):
+    records = []
+    for item in session.items:
+        records.append({
+            "nodeid": item.nodeid,
+            "markers": sorted({marker.name for marker in item.iter_markers()}),
+        })
+    Path(".tuntun-collected-nodes.json").write_text(
+        json.dumps(records, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+"""
+
+
+def _collect_software_pytest_nodes(
+    root: Path,
+    paths: Sequence[str],
+    *,
+    task_number: int,
+    label: str,
+    errors: list[str],
+) -> tuple[str, ...] | None:
+    """Return every non-external node after pytest applies real inheritance/fixtures."""
+
+    plugin = root / "__tuntun_plan_collection_plugin.py"
+    evidence = root / ".tuntun-collected-nodes.json"
+    plugin.write_text(_COLLECTION_PLUGIN, encoding="utf-8")
+    with contextlib.suppress(FileNotFoundError):
+        evidence.unlink()
     try:
-        tree = ast.parse(content.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError):
-        return False
-    tests = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name.startswith("test_")
-    ]
-    return bool(tests) and all(approved_skip_marker_names(_marker_names(test)) for test in tests)
+        result = run_materialized_python(
+            (
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                "-p",
+                "__tuntun_plan_collection_plugin",
+                *paths,
+            ),
+            root=root,
+            timeout_seconds=45,
+            restrict_host_apis=False,
+        )
+    except subprocess.TimeoutExpired:
+        errors.append(f"Task {task_number:02d}: {label} collection failed: exceeded 45 seconds")
+        return None
+    if result.returncode != 0 or not evidence.is_file():
+        diagnostic = result.diagnostic[-4096:].decode(errors="replace")
+        errors.append(
+            f"Task {task_number:02d}: {label} collection failed with exit "
+            f"{result.returncode}: {diagnostic}"
+        )
+        return None
+    try:
+        records = json.loads(evidence.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        errors.append(f"Task {task_number:02d}: {label} collection evidence invalid: {error}")
+        return None
+    if type(records) is not list or not records:
+        errors.append(f"Task {task_number:02d}: {label} collected no pytest nodes")
+        return None
+    software: list[str] = []
+    for record in records:
+        if (
+            type(record) is not dict
+            or set(record) != {"nodeid", "markers"}
+            or type(record["nodeid"]) is not str
+            or type(record["markers"]) is not list
+            or any(type(marker) is not str for marker in record["markers"])
+        ):
+            errors.append(f"Task {task_number:02d}: {label} collection evidence is not closed")
+            return None
+        authorization_markers = tuple(
+            sorted(
+                marker for marker in record["markers"] if marker not in NON_AUTHORIZATION_MARKERS
+            )
+        )
+        if not approved_skip_marker_names(authorization_markers):
+            software.append(record["nodeid"])
+    return tuple(software)
 
 
 def _execute_pytest_boundary_probe(
@@ -1997,9 +2255,7 @@ def _execute_pytest_boundary_probe(
             timeout=45,
         )
     except subprocess.TimeoutExpired:
-        errors.append(
-            f"Task {task_number:02d}: {label} failed: exceeded 45 seconds"
-        )
+        errors.append(f"Task {task_number:02d}: {label} failed: exceeded 45 seconds")
         return
     complete, junit_diagnostic = _junit_is_complete_pass(junit)
     if result.returncode != 0 or not complete:
@@ -2014,11 +2270,10 @@ def _validate_pytest_task_boundaries(
     document: PlanDocument, foundation_files: dict[str, bytes], errors: list[str]
 ) -> None:
     files = dict(foundation_files)
+    cumulative_test_paths: list[str] = []
     for task in document.tasks:
         try:
-            files = materialize_document(
-                PlanDocument((task,)), foundation_files=files
-            )
+            files = materialize_document(PlanDocument((task,)), foundation_files=files)
         except MaterializationError:
             return
         producer_names: set[str] = set()
@@ -2033,12 +2288,16 @@ def _validate_pytest_task_boundaries(
                 and _is_fixture(function)
             )
         test_paths = [
-            declaration.path
-            for declaration in task.declarations
-            if declaration.kind == "Test"
-            and not declaration.path.startswith("tests/hardware/")
-            and not _test_file_is_external_only(files.get(declaration.path, b""))
+            declaration.path for declaration in task.declarations if declaration.kind == "Test"
         ]
+        for declaration in task.declarations:
+            if (
+                declaration.path.startswith("tests/")
+                and declaration.path.endswith(".py")
+                and declaration.path not in cumulative_test_paths
+                and declaration.kind in {"Test", "Modify"}
+            ):
+                cumulative_test_paths.append(declaration.path)
         if not test_paths and not producer_names:
             continue
         prefix = f"tuntun-plan-task-{task.number:02d}-"
@@ -2071,11 +2330,38 @@ def _validate_pytest_task_boundaries(
                         errors=errors,
                     )
             if test_paths:
-                _execute_pytest_boundary_probe(
+                nodes = _collect_software_pytest_nodes(
                     root,
                     test_paths,
                     task_number=task.number,
                     label="pytest task-boundary probe",
+                    errors=errors,
+                )
+                if nodes:
+                    _execute_pytest_boundary_probe(
+                        root,
+                        nodes,
+                        task_number=task.number,
+                        label="pytest task-boundary probe",
+                        errors=errors,
+                    )
+    if cumulative_test_paths:
+        with tempfile.TemporaryDirectory(prefix="tuntun-plan-final-pytest-") as temporary:
+            root = Path(temporary)
+            write_materialized_tree(root, files)
+            nodes = _collect_software_pytest_nodes(
+                root,
+                cumulative_test_paths,
+                task_number=document.tasks[-1].number,
+                label="final cumulative pytest probe",
+                errors=errors,
+            )
+            if nodes:
+                _execute_pytest_boundary_probe(
+                    root,
+                    nodes,
+                    task_number=document.tasks[-1].number,
+                    label="final cumulative pytest probe",
                     errors=errors,
                 )
 
@@ -2101,10 +2387,9 @@ def validate_plan_document(
         materialized = materialize_document(document, foundation_files=foundation_files)
     except MaterializationError as error:
         errors.append(f"materialization failed: {error}")
-    _validate_model_and_eval_contracts(
-        document, errors, materialized_files=materialized
-    )
+    _validate_model_and_eval_contracts(document, errors, materialized_files=materialized)
     if execute_behavioral_probes and materialized is not None:
+        _execute_owned_green_commands(document, materialized, errors)
         _validate_pytest_task_boundaries(document, foundation_files, errors)
     return errors
 
