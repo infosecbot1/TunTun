@@ -2170,7 +2170,7 @@ git commit -m "test(ui): prove cross-surface privacy and negative reachability"
 - Create: `docs/operations/ui/reachy-presenter.md`
 - Create: `docs/operations/ui/display-client.md`
 
-**Interfaces:** Runs every installed owner and subject-zone route plus every display projection/default-loading-empty-error-stale-degraded-privacy-on-authorization state across supported widths/themes/locales/contrast/motion; keyboard and VoiceOver cover login/navigation/filter/detail/approval/Shield/destructive confirmation/playback/logout; Reachy fixed prompts/cues retain their separate human/hardware review; performance binds the 2020 Intel Mac household-load baseline.
+**Interfaces:** Runs every installed owner and subject-zone route plus every display projection/default-loading-empty-error-stale-degraded-privacy-on-authorization state across supported widths/themes/locales/contrast/motion; keyboard and VoiceOver cover login/navigation/filter/detail/approval/Shield/destructive confirmation/playback/logout; Reachy fixed prompts/cues retain their separate human/hardware review; performance binds the owner-approved Darwin `arm64` Core Mac household-load baseline, while Intel macOS remains mandatory distribution support.
 
 - [ ] **Step 1: Write failing matrix completeness and budget tests**
 
@@ -2194,9 +2194,9 @@ Expected: FAIL with the exact missing route/state/matrix/budget evidence; do not
 
 Ensure landmarks, headings, live announcements, focus restoration/trap, table/card alternatives, countdown meaning, non-color states, 44px targets, reduced motion, 200%/320px layout, Devanagari glyphs/punctuation, and equivalent safety copy. Bound and paginate lists; visibility-aware polling uses validity windows/jitter/backoff and cannot compete with voice. Absent chunks stay excluded. Review screenshots for hierarchy/spacing/type/focus/truncation/contrast/motion/safe-summary legibility rather than snapshot equality alone.
 
-- [ ] **Step 4: Run green on the Intel baseline**
+- [ ] **Step 4: Run green on the active Core Mac baseline**
 
-Run: `uv run python scripts/ui/capture_visuals.py --all-matrix && uv run python scripts/ui/verify_budgets.py --target intel-2020 --household-load && uv run pytest tests/performance/ui/test_shell_budgets.py -q && pnpm --filter @tuntun/admin e2e -- tests/ui tests/performance/ui/navigation.spec.ts && pnpm --filter @tuntun/subject-privacy e2e -- tests/ui/subject-accessibility.spec.ts && pnpm --filter @tuntun/display-agent e2e -- tests/ui/display-accessibility.spec.ts`
+Run: `uv run python scripts/ui/capture_visuals.py --all-matrix && uv run python scripts/ui/verify_budgets.py --target active-core-mac --household-load && uv run pytest tests/performance/ui/test_shell_budgets.py -q && pnpm --filter @tuntun/admin e2e -- tests/ui tests/performance/ui/navigation.spec.ts && pnpm --filter @tuntun/subject-privacy e2e -- tests/ui/subject-accessibility.spec.ts && pnpm --filter @tuntun/display-agent e2e -- tests/ui/display-accessibility.spec.ts`
 Expected: PASS with reviewed visual evidence, zero serious/critical axe findings, completed keyboard/VoiceOver checklist, no clipped mixed-script fixture, and all three performance budgets met. Paired-LAN results are reported separately.
 
 - [ ] **Step 5: Commit checkpoint**
@@ -2387,7 +2387,7 @@ Calendar reporting must show hands-on engineering, physical bakeoff time, unatte
 - [ ] Private routes and downloads are `no-store`; browser artifacts, storage, cache, URLs, history, logs, traces, screenshots, display cache and evidence contain no forbidden content.
 - [ ] Every absent feature is absent from navigation, direct URL, API/OpenAPI, preparation, config, registration, bundle, IPC/listener and runtime.
 - [ ] WCAG 2.2 AA, keyboard, VoiceOver, non-color, 44px targets, reduced motion, 200%/320px, light/dark/high-contrast and English/Hindi/mixed-script gates pass for every route/state.
-- [ ] Localhost shell <=2s interactive, cached navigation p95 <=250ms and fresh local API p95 <=1s on the 2020 Intel Mac under household load.
+- [ ] Localhost shell <=2s interactive, cached navigation p95 <=250ms and fresh local API p95 <=1s on the owner-approved Darwin `arm64` Core Mac under household load; Intel macOS remains a separate distribution support target unless requalified as the household host.
 - [ ] Fault campaigns never invent success or replay authority; rollback preserves the prior accepted candidate.
 - [ ] After at least 90 steady-state days and three complete monthly buckets, full-system rolling three-month median maintenance is <=8 hours/month, or optional expansion freezes after three consecutive breaches.
 - [ ] Final signed UI evidence binds one unchanged candidate and is eligible for the owning phase gates and whole-program C0; it never aliases P1R0/P1R1 with C0/C1.

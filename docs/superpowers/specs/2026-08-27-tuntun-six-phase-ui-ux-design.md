@@ -44,7 +44,7 @@ The Phase 1 four-area concept—Home, Family + Memory, Privacy, and System—is 
 
 ### 2.1 Audited cross-phase UI closure
 
-- The inventoried 2020 Intel Mac is both the office-use machine and the sole Core/UI host; the UI never depicts or requires a second office laptop/helper. Family-ready topology is the Mac single-homed on the inner ASUS/AiMesh network with its direct BE800 link disconnected; optional dual-home state is a separately qualified fact, never ambient authority.
+- The active Core/UI host is the owner-approved Darwin arm64 Mac recorded in `docs/architecture/decisions/0001-phase1-host-baseline.md`; the UI never depicts or requires a second office laptop/helper. Family-ready topology is the active Mac single-homed on the inner ASUS/AiMesh network with any direct BE800 link disconnected; optional dual-home state is a separately qualified fact, never ambient authority. Intel macOS remains distribution evidence only unless a fresh real-host transition qualification passes.
 - Memory/knowledge audience vocabulary is exactly `subject_private`, `guardian_child`, `household_adults`, and `household_all`. Every row binds exact subject, audience, guardian, consent, and applicable child-safe-approval generations. Legacy aliases fail schema decoding; owner status never widens `subject_private`.
 - Every `ui.plane_fact.v1` owns its source generation, observation time, validity deadline, and evidence commitment. A newly generated wrapper may shorten but cannot refresh an expired source fact; stale/unknown/error-safe facts never render green or enable controls.
 - D3 and D4 execution network is exactly `none` in contract and presentation. The separately prepared desktop model-egress exception displays the exact bounded selections, provider/model/attempt, serialized-byte/token counts, commitments, disclosure/policy, and expiry and never authorizes helper network access.
@@ -880,7 +880,7 @@ The console may be packaged in the monorepo but depends only on versioned UI con
 
 ## 26. Performance budgets
 
-- The authenticated shell becomes interactive within two seconds on the 2020 Intel Mac over localhost under household load; paired-LAN performance is measured separately.
+- The authenticated shell becomes interactive within two seconds on the approved Darwin arm64 Core Mac over localhost under household load; paired-LAN performance is measured separately. Hosted Intel CI is functional portability evidence, not household performance evidence.
 - Navigation to a cached non-sensitive read model completes within 250 ms at p95; a fresh local API view completes within one second at p95 under household load.
 - Privacy Shield provides immediate input feedback and retains `activating` only until the canonical authority-revocation transaction settles. Downstream effect cards then show acknowledged, physically verified, or unverified under their own deadlines; animation can never mask a missed core or feature deadline.
 - Lists render bounded pages and virtualize only when needed; no route requests an unbounded memory, event, clip, audit, or device history.

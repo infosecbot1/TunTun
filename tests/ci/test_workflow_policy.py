@@ -6,9 +6,15 @@ import pytest
 import yaml
 
 FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
-FIXED_RUNNERS = {"ubuntu-24.04", "macos-15-intel"}
+FIXED_RUNNERS = {"ubuntu-24.04", "macos-26", "macos-15-intel"}
 MATRIX_RUNNER = "${{ matrix.os }}"
-APPROVED_MATRIX = {"os": ["ubuntu-24.04", "macos-15-intel"]}
+APPROVED_MATRIX = {"os": ["ubuntu-24.04", "macos-26", "macos-15-intel"]}
+EXPECTED_ARCHITECTURES = {
+    "ubuntu-24.04": "x86_64",
+    "macos-26": "arm64",
+    "macos-15-intel": "x86_64",
+}
+ARCHITECTURE_CHECK_STEP_NAME = "Assert runner architecture"
 WORKFLOW_ROOT = Path(".github/workflows")
 
 
@@ -58,6 +64,40 @@ def _assert_strategy_matches_runner(job: Mapping[str, object]) -> None:
     assert strategy["matrix"] == APPROVED_MATRIX
 
 
+def _assert_matrix_job_checks_expected_architecture(job: Mapping[str, object]) -> None:
+    if job.get("runs-on") != MATRIX_RUNNER:
+        return
+    steps = job.get("steps")
+    assert isinstance(steps, Sequence)
+    architecture_steps = [
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, Mapping) and step.get("name") == ARCHITECTURE_CHECK_STEP_NAME
+    ]
+    assert architecture_steps == [4]
+    architecture_step = steps[architecture_steps[0]]
+    assert isinstance(architecture_step, Mapping)
+    assert architecture_step.get("shell") == "bash"
+    run = architecture_step.get("run")
+    assert isinstance(run, str)
+    assert "uname -m" in run
+    assert "*-latest" not in run
+    for runner, machine in EXPECTED_ARCHITECTURES.items():
+        assert runner in run
+        assert machine in run
+    for command in (
+        "uv sync --all-packages --locked",
+        "pnpm install --frozen-lockfile",
+        "make check",
+    ):
+        command_index = next(
+            index
+            for index, step in enumerate(steps)
+            if isinstance(step, Mapping) and step.get("run") == command
+        )
+        assert command_index > architecture_steps[0]
+
+
 def _assert_workflow_policy(path: Path) -> None:
     assert path.is_file() and not path.is_symlink()
     raw = path.read_text()
@@ -98,6 +138,7 @@ def _assert_workflow_policy(path: Path) -> None:
             assert runner == MATRIX_RUNNER
         else:
             assert runner in FIXED_RUNNERS
+        _assert_matrix_job_checks_expected_architecture(job)
         for step in job.get("steps", []):
             if "uses" in step:
                 _assert_uses_is_immutable(step["uses"])
@@ -111,8 +152,13 @@ def test_every_yml_and_yaml_workflow_has_only_fixed_runners_and_full_sha_actions
 def test_ci_matrix_remains_exact() -> None:
     workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
     assert workflow["jobs"]["check"]["strategy"]["matrix"] == {
-        "os": ["ubuntu-24.04", "macos-15-intel"],
+        "os": ["ubuntu-24.04", "macos-26", "macos-15-intel"],
     }
+
+
+def test_ci_check_asserts_expected_architectures_before_dependency_installation() -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
+    _assert_matrix_job_checks_expected_architecture(workflow["jobs"]["check"])
 
 
 def test_ci_is_unprivileged_and_has_no_hardware_or_provider_secrets() -> None:

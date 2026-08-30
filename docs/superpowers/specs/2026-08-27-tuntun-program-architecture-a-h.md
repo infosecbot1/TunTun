@@ -40,7 +40,7 @@ Tuntun responds naturally in English, Hindi, or Hinglish and follows language sw
 
 | Category | Current baseline |
 |---|---|
-| Core host | One 2020 Intel MacBook Pro, 16 GB RAM, kept at home; it is also the machine previously described as the office laptop, not a separate second host |
+| Core host | One owner-approved Darwin arm64 Mac, defined by `docs/architecture/decisions/0001-phase1-host-baseline.md`; Intel macOS remains a supported-distribution CI target and standby/future-transition class |
 | Embodied endpoint | Reachy Mini Wireless with official daemon retained |
 | Home controller | Home Assistant Green, introduced in Phase 2 |
 | Lights | 12 MOES Zigbee ceiling lights through an existing MOES MZHUB; exact capabilities are commissioned, not assumed |
@@ -109,7 +109,7 @@ A high/critical unresolved security finding, false privacy state, missing physic
 
 ### A.7 Program non-goals
 
-The six-phase program does not create a public SaaS, public household API, ambient surveillance identity system, unrestricted web agent, general-purpose Home Assistant proxy, unrestricted desktop agent, autonomous mobile robot, child-monitoring system, or cloud video service. It does not promise strong VLAN isolation on unproved router firmware, frontier-quality local conversation on the 16 GB Intel Mac, redundant storage from one attached SSD, or secure erasure of physical flash bytes.
+The six-phase program does not create a public SaaS, public household API, ambient surveillance identity system, unrestricted web agent, general-purpose Home Assistant proxy, unrestricted desktop agent, autonomous mobile robot, child-monitoring system, or cloud video service. It does not promise strong VLAN isolation on unproved router firmware, frontier-quality local conversation on the active Phase 1 control host, redundant storage from one attached SSD, or secure erasure of physical flash bytes.
 
 ---
 
@@ -236,7 +236,7 @@ The existing Mac is the trusted control plane; Reachy and later endpoints are th
 
 ### D.1 Written architecture
 
-Tuntun is a **local modular monolith plus bounded edge/adapter processes**. `tuntun-core` on the Intel Mac serializes canonical writes and owns the single active household conversation, identity fusion, family/child policy, exact authorization, seven memory kinds, provider/inference routing, cost reservation, audit, owner-API semantics, feature registry, and recovery coordination. It communicates in-process through typed ports and a bounded event router; Kafka, MQTT, NATS, Redis, a service mesh, Kubernetes, and a distributed database are not required. Phase 3 transfers all HTTP listener ownership to the separate least-privilege `tuntun-owner-ingress` process; core retains authentication, session, authorization, and response authority behind authenticated bounded Unix-domain-socket protocols and owns no TCP listener after the serialized takeover.
+Tuntun is a **local modular monolith plus bounded edge/adapter processes**. `tuntun-core` on the owner-approved Darwin arm64 Mac serializes canonical writes and owns the single active household conversation, identity fusion, family/child policy, exact authorization, seven memory kinds, provider/inference routing, cost reservation, audit, owner-API semantics, feature registry, and recovery coordination. It communicates in-process through typed ports and a bounded event router; Kafka, MQTT, NATS, Redis, a service mesh, Kubernetes, and a distributed database are not required. Phase 3 transfers all HTTP listener ownership to the separate least-privilege `tuntun-owner-ingress` process; core retains authentication, session, authorization, and response authority behind authenticated bounded Unix-domain-socket protocols and owns no TCP listener after the serialized takeover.
 
 Reachy and later room nodes detect wake/VAD locally, retain only bounded RAM audio, expose physical/local stop and mute behavior, and send post-wake media only under a current lease. Home Assistant Green owns device integration and deterministic routines but knows no family identity, transcript, biometric, memory, or policy rationale. The Mac sends only signed closed desired-state envelopes to a custom HA Core integration that independently enforces compiled bindings, idempotency, timing, and receipt state.
 
@@ -258,7 +258,7 @@ flowchart TB
     SUBJECT[Adult/guardian browser\none-use local decision only]
   end
 
-  subgraph CORE[Tuntun trusted control plane · Intel Mac]
+  subgraph CORE[Tuntun trusted control plane · approved Darwin arm64 Mac]
     EDGE[Edge gateway + wake arbiter]
     TURN[Conversation/session coordinator]
     ID[Identity fusion]
@@ -289,7 +289,7 @@ flowchart TB
     ROUTER --> AUDIT
   end
 
-  INGRESS[Owner ingress · Intel Mac\nsole HTTP listener from Phase 3\nauthenticated bounded UDS to core/media]
+  INGRESS[Owner ingress · approved Darwin arm64 Mac\nsole HTTP listener from Phase 3\nauthenticated bounded UDS to core/media]
 
   subgraph DEVICE[Deterministic device/media plane]
     GREEN[Home Assistant Green\ncustom signed bridge + receipts]
@@ -361,7 +361,7 @@ flowchart TB
 | Node | Deployed processes/data | Availability role | Secrets/authority | Failure behavior |
 |---|---|---|---|---|
 | Reachy CM4 | Official daemon plus `tuntun-edge`; wake/VAD, bounded RAM audio, speaker, safe gesture, interaction-gated frames | Family voice endpoint and local safety | Device TLS/signing keys only; no provider, memory, HA, or database key | Enters offline-essential/error-safe; no stale speech/motion resume |
-| Intel Mac | `tuntun-core`; `tuntun-owner-ingress` as the sole HTTP listener from Phase 3; camera-source/recorder/media-proxy processes; owner UI assets; optional desktop helper; SQLCipher stores; Keychain roots | Canonical household control plane and bounded network edge | Core: identity, policy, memory, auth, audit, provider/action keys. Ingress: listener/peer keys and fresh core-derived session tuples only | Device/manual controls and HA automations survive; new identity-governed actions stop. Ingress cannot continue authorization without core |
+| Approved Core Mac | `tuntun-core`; `tuntun-owner-ingress` as the sole HTTP listener from Phase 3; camera-source/recorder/media-proxy processes; owner UI assets; optional desktop helper; SQLCipher stores; Keychain roots | Canonical household control plane and bounded network edge | Core: identity, policy, memory, auth, audit, provider/action keys. Ingress: listener/peer keys and fresh core-derived session tuples only | Device/manual controls and HA automations survive; new identity-governed actions stop. Ingress cannot continue authorization without core |
 | External encrypted SSD | Separate `TUNTUN_VIDEO` and `HA_BACKUPS` volumes/quotas | Initial video retention and recoverable HA backup copy | Volume key in Keychain; no shared cross-volume service account | Recorder stops by threshold without deleting unexpired media; voice remains available |
 | Home Assistant Green | HA Core, Matter Server, Tuntun custom integration, receipt store, bounded routines | Local device authority independent of Mac restarts | Pinned Mac public key/controller epoch; no family/provider secret | Physical/native controls remain; Tuntun reports unavailable/unknown |
 | MOES MZHUB | Existing Zigbee coordinator and conditional Matter bridge | Light network | Vendor commissioning material only | Physical/native recovery; no blind Tuntun retry |
@@ -422,7 +422,7 @@ flowchart LR
 
 Network invariants:
 
-- There is one inventoried 2020 Intel MacBook, serving both office use and Tuntun Core. No design, test, or bill of materials may silently assume a second always-home Mac.
+- There is one active approved Core Mac at a time. The current Phase 1 household-validation host is the Darwin arm64 Mac in ADR 0001; the 2020 Intel Mac is a supported-distribution and future-transition target until fresh real-host qualification promotes it. No design, test, or bill of materials may silently assume a second always-home Mac.
 - BE800 and GT-AX6000 use distinct non-overlapping subnets. Double NAT is accepted as topology, not claimed as complete mutual isolation.
 - The Phase 1 family-ready baseline single-homes the Mac and Reachy on the trusted ASUS/AiMesh L2. Commissioning must prove the Reachy route uses the expected inner interface and direct peer identity rather than a routed next hop; otherwise Reachy remains disabled. The Mac's direct BE800 Ethernet connection is disconnected for this baseline.
 - Re-enabling the direct BE800 link creates a separately qualified dual-homed mode. It is ineligible unless Internet Sharing, IP forwarding, bridging, proxying, and outer-network Tuntun ingress/transit are disabled; service binds, interface-scoped firewall rules, DNS, routes, and the default route match the signed qualification. Restart, DHCP renewal, interface-order/default-route change, sleep/wake, and cable reconnect must re-prove those facts. Any drift removes Reachy and LAN-console eligibility before traffic is admitted.

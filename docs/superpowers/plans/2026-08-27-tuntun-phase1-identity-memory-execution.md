@@ -5888,7 +5888,7 @@ def test_procedure_is_inert(procedural_memory):
 
 ```python
 # tests/benchmark/test_memory_repository_10k.py
-def test_intel_mac_scoped_query_over_10k(benchmark, seeded_repository_10k, owner_query):
+def test_active_core_mac_scoped_query_over_10k(benchmark, seeded_repository_10k, owner_query):
     result = benchmark(lambda: seeded_repository_10k.query_sync(owner_query))
     assert len(result) <= 6
     assert benchmark.stats.stats.mean < 0.100

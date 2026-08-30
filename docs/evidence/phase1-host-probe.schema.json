@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tuntun.local/schemas/evidence/phase1-host-probe.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "receipt_id",
+    "recorded_at_utc",
+    "status",
+    "cleanup_verified",
+    "host",
+    "runtime",
+    "source",
+    "artifact_digests",
+    "owner_review_ref"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "https://tuntun.local/schemas/evidence/phase1-host-probe.schema.json"
+    },
+    "receipt_id": {
+      "const": "phase1.macos-keychain.host-probe.v1"
+    },
+    "recorded_at_utc": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "status": {
+      "enum": ["pass", "fail"]
+    },
+    "cleanup_verified": {
+      "type": "boolean"
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system",
+        "machine",
+        "model_class",
+        "os_product_version",
+        "os_build"
+      ],
+      "properties": {
+        "system": {
+          "const": "Darwin"
+        },
+        "machine": {
+          "const": "arm64"
+        },
+        "model_class": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9,._-]{0,63}$"
+        },
+        "os_product_version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "os_build": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "python_version",
+        "keyring_version",
+        "keyring_backend_class"
+      ],
+      "properties": {
+        "python_version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "keyring_version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "keyring_backend_class": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.]{0,255}$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "probe_script_sha256"],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "probe_script_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "artifact_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "candidate_artifact_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "native_lock_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "model_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "owner_review_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+    }
+  }
+}

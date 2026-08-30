@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15-intel]
+        os: [ubuntu-24.04, macos-26, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,6 +33,29 @@ jobs:
         with: {version: "10.15.0", run_install: false}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: {node-version: "22", cache: pnpm}
+      - name: Assert runner architecture
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-24.04)
+              expected="x86_64"
+              ;;
+            macos-26)
+              expected="arm64"
+              ;;
+            macos-15-intel)
+              expected="x86_64"
+              ;;
+            *)
+              echo "unsupported runner label: ${{ matrix.os }}" >&2
+              exit 1
+              ;;
+          esac
+          actual="$(uname -m)"
+          if [ "$actual" != "$expected" ]; then
+            echo "runner architecture mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
       - run: uv sync --all-packages --locked
       - run: pnpm install --frozen-lockfile
       - run: make check

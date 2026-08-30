@@ -4,7 +4,7 @@
 
 **Goal:** Deliver a private, bilingual Reachy Mini Wireless family assistant whose canonical identity, policy, seven memory types, audit, and budget state remain encrypted on the household Mac, then package the same implementation as an open-source Phase 1 beta.
 
-**Architecture:** Run a narrow `tuntun-edge` service on Reachy for local wake/VAD, media, privacy/stop, and gestures. Run one ports-and-adapters modular monolith, `tuntun-core`, on the Intel Mac for orchestration, local identity, policy/auth, canonical memory, provider routing, audit, owner API, and the React console. Connect them over a paired mTLS WebSocket protocol; use only explicit outbound cloud calls and no public inbound access.
+**Architecture:** Run a narrow `tuntun-edge` service on Reachy for local wake/VAD, media, privacy/stop, and gestures. Run one ports-and-adapters modular monolith, `tuntun-core`, on the owner-approved Darwin `arm64` Core Mac from ADR 0001 for orchestration, local identity, policy/auth, canonical memory, provider routing, audit, owner API, and the React console. Intel macOS remains a mandatory supported-distribution target, not the active household host unless fresh real-host probes requalify it. Connect Core and Reachy over a paired mTLS WebSocket protocol; use only explicit outbound cloud calls and no public inbound access.
 
 **Tech Stack:** Python 3.12, `uv`, Pydantic v2, FastAPI/Uvicorn, asyncio, LangGraph behind an adapter, SQLAlchemy 2/Alembic, `sqlcipher3==0.6.2` compatibility candidate, `cryptography`, macOS Keychain, OpenAI Python SDK, OpenCV headless, ONNX Runtime, governed SpeechBrain-to-ONNX conversion candidate, openWakeWord/Silero behind replaceable ports; React, TypeScript, Vite, TanStack Query, React Router, pnpm; pytest, pytest-asyncio, Hypothesis, Ruff, mypy, Vitest, Testing Library, Playwright, and GitHub Actions.
 
@@ -760,7 +760,7 @@ budget:
 - [ ] Implement AES-256-GCM record encryption with a random DEK and random 96-bit nonce per record, associated data containing household/table/row UUID/purpose/schema version, and a separately wrapped DEK under a purpose-specific Keychain root. Never deterministically derive a record key from its row ID.
 - [ ] Ensure temporary test DB, WAL, and shared-memory files use owner-only permissions and are deleted by the test fixture.
 - [ ] Add `tuntunctl storage probe --json`, reporting architecture, Python/driver/cipher versions, integrity result, and file permissions without paths containing usernames or any key material.
-- [ ] Run the probe on the 2020 Intel Mac. Record the exact tested versions and result in `docs/operations/sqlcipher-compatibility.md`.
+- [ ] Run the active-host probe on the owner-approved Darwin `arm64` Core Mac, and keep hosted/physical Intel macOS as a separate supported-distribution compatibility row. Record the exact tested versions and result in `docs/operations/sqlcipher-compatibility.md`; moving household deployment back to Intel requires repeating the real-host probe.
 - [ ] If any encryption gate fails, stop this implementation wave. Do not create a plaintext fallback. Resolve or replace the driver behind the same connection factory, rerun all gates, and record the accepted driver/version.
 - [ ] Run `make test-security && make typecheck`.
 - [ ] Commit with `git add apps/core pyproject.toml uv.lock tests/security docs/operations && git commit -m "feat(storage): verify encrypted SQLCipher foundation"`.
@@ -1326,7 +1326,7 @@ Development in Tasks 18–19 uses synthetic profiles and a fake `AuthenticationP
 - [ ] Write a voice-sentinel test scanning disk, DB, logs, graph state, and provider capture after enrollment and matching.
 - [ ] Run tests and confirm adapter/fusion are missing.
 - [ ] Pin SpeechBrain ECAPA source revision `0f99f2d0ebe89ac095bcc5903c4dd8f72b367286` in the manifest with license/provenance and use an isolated, non-production conversion environment to turn the reviewed `.ckpt` source into verified ONNX/safe artifacts. Production never imports pickle checkpoints or enables remote code.
-- [ ] Run an Intel Mac stop/go probe for Python/ONNX Runtime performance and correctness. Do not place the old unsupported Intel PyTorch/Torchaudio stack in the long-lived core; if conversion/runtime/vulnerability gates fail, disable voice production and evaluate another governed encoder behind the same port.
+- [ ] Run an active Core Mac stop/go probe for Python/ONNX Runtime performance and correctness, and keep Intel macOS as distribution compatibility evidence rather than the household performance baseline. Do not place any unsupported PyTorch/Torchaudio stack in the long-lived core; if conversion/runtime/vulnerability gates fail, disable voice production and evaluate another governed encoder behind the same port.
 - [ ] Load the ONNX model once in a bounded worker. Accept approximately 1.5–3 seconds of quality speech and normalize embeddings before per-record-DEK AEAD storage/comparison.
 - [ ] Enrollment uses several in-memory utterances across distances/noise, stores only encrypted centroids/templates, and releases recordings immediately.
 - [ ] Implement per-profile calibrated thresholds and quality-aware normalized scores. Do not copy the model card’s EER into household claims.
@@ -1420,7 +1420,7 @@ Development in Tasks 18–19 uses synthetic profiles and a fake `AuthenticationP
 - [ ] Enforce default lifecycles from the specification and query-time exclusion of pending/expired/deleted/superseded/revoked records.
 - [ ] Make working memory an approved state summary, not turns/messages; it expires at session end plus 30 minutes.
 - [ ] Ensure procedural tool labels are inert and never call the executor; policy memory keys must exist in the compiled registry.
-- [ ] Add indexes for household/subject/kind/status/expiry and benchmark 10,000 synthetic memories on the Intel Mac.
+- [ ] Add indexes for household/subject/kind/status/expiry and benchmark 10,000 synthetic memories on the owner-approved Darwin `arm64` Core Mac.
 - [ ] Run `uv run pytest tests/integration/memory tests/security/test_memory_isolation.py tests/security/test_procedural_memory.py -q`.
 - [ ] Commit with `git add apps/core/src/tuntun_core/services/memory apps/core/migrations tests && git commit -m "feat(memory): add seven-type canonical repository"`.
 
@@ -1909,7 +1909,7 @@ For a mutation without sufficient action assurance, the server validates and can
 - [ ] Write layout/permission tests and an upgrade test from the previous fixture schema/release to the candidate, followed by rollback and data hash comparison.
 - [ ] Write an uninstall test proving runtime/service removal preserves data, models, backups, and Keychain items unless the separately authenticated destructive purge command is used.
 - [ ] Run deploy tests and confirm scripts/layout are absent.
-- [ ] Implement `preflight.sh` to verify Intel macOS support, Python/runtime architecture, free disk, FileVault state, Keychain availability, private LAN, ports 7443/8787/8443, wake/power state, and Reachy reachability. Production install fails closed when FileVault is off, the data/runtime paths are not owner-only, or a required listener is already occupied; development probe mode may report but cannot enable family data.
+- [ ] Implement `preflight.sh` to verify the active Darwin `arm64` household target, mandatory Intel macOS distribution support, Python/runtime architecture, free disk, FileVault state, Keychain availability, private LAN, ports 7443/8787/8443, wake/power state, and Reachy reachability. Production install fails closed when FileVault is off, the data/runtime paths are not owner-only, or a required listener is already occupied; development probe mode may report but cannot enable family data.
 - [ ] Build locked wheels and static admin assets in a staged release directory; verify hashes/SBOM before switching the `current` symlink.
 - [ ] Install an owner-only LaunchAgent with `KeepAlive`/restart throttling, explicit working/data/log paths, no secret environment variables, loopback admin bind (or explicit LAN 8443), private edge bind, `SoftResourceLimits/Core=0`, bounded files/processes, and no app crash-body capture. Add a test reading the installed plist and a deliberate crash proving no core file/app transcript diagnostic is produced.
 - [ ] Require the Mac to be logged into the runtime account for the private beta. Document a future signed system service as a separate post-beta option.
@@ -2033,7 +2033,7 @@ For a mutation without sufficient action assurance, the server validates and can
 - [ ] Write README outcomes, architecture diagram, hardware/software matrix, privacy guarantees/limits, cloud costs, simulator quickstart, physical Reachy commissioning, management UI, and future seams.
 - [ ] Document that software privacy is not a physical mic disconnect, `store=false` is not contractual ZDR, biometrics are personalization evidence, Qwen is disabled, and no NAS/smart-home integration is required.
 - [ ] Make `make bootstrap && make check` and the simulator work without Reachy, cloud credentials, model weights, or household data.
-- [ ] On the clean frozen commit, reproducibly build locked source archives/wheels/admin assets/Reachy package twice and sign the exact nonpublic qualification manifest. During an owner-approved maintenance window after verified encrypted backup, independently verify the same one physical 2020 Intel Mac has no managed Tuntun runtime/key/listener/journal residue, locally commission it against that manifest, install the same bytes in evidence-pending state, and collect target/LAN/outer evidence before acceptance. Preserve unrelated office data; a VM/hosted runner cannot substitute for this real-host lifecycle receipt. Later candidate assembly consumes those byte-identical role paths plus evidence and never rebuilds.
+- [ ] On the clean frozen commit, reproducibly build locked source archives/wheels/admin assets/Reachy package twice and sign the exact nonpublic qualification manifest. During an owner-approved maintenance window after verified encrypted backup, independently verify the owner-approved Darwin `arm64` Core Mac has no managed Tuntun runtime/key/listener/journal residue, locally commission it against that manifest, install the same bytes in evidence-pending state, and collect target/LAN/outer evidence before acceptance. Preserve unrelated office data; a VM/hosted runner cannot substitute for this real-host lifecycle receipt. Intel macOS distribution evidence remains mandatory, and promoting Intel back to household target requires repeating the real-host lifecycle probes. Later candidate assembly consumes those byte-identical role paths plus evidence and never rebuilds.
 - [ ] Run `scripts/verify_release.sh` in a clean temporary checkout with network blocked except the explicit bootstrap dependency phase.
 - [ ] Search release bytes and git history for API keys, local paths/usernames, IP/MAC/serial/hostnames, family data sentinels, audio/image/model weights, `.env`, certificates, private keys, DB/backups, and acceptance raw data.
 - [ ] Install the staged artifact on a clean macOS test account, run simulator, install physical services, complete one synthetic turn, upgrade/rollback, and uninstall-preserve.
@@ -2174,7 +2174,7 @@ The controlled-web column below is a linked overlay allocated across the same th
 | SFace provenance remains unacceptable | Face production feature unavailable | Keep face adapter disabled; use voice/Guest; evaluate a governed replacement without schema change |
 | SpeechBrain is too slow or weak for children/far field | Identity latency/false personalization | Bounded worker, stricter quality threshold, Guest fallback, lighter governed adapter evaluation |
 | Hindi/Hinglish STT/persona quality misses gate | Poor family experience | Expand synthetic/de-identified eval, hints/turn handling, compare Realtime adapter; do not weaken safety/privacy |
-| Intel Mac memory/CPU pressure causes audio gaps | Conversation instability | Load heavy models lazily/one at a time, bounded workers/queues; trigger private-appliance review if sustained |
+| Active Core Mac memory/CPU pressure causes audio gaps | Conversation instability | Load heavy models lazily/one at a time, bounded workers/queues; trigger private-appliance review if sustained |
 | Provider latency exceeds four-second target | Slow answers | Report measured P95, stream TTS/model output where safe, optimize turn/VAD; retain quality-first Sol unless owner changes decision |
 | Provider pricing/FX expires | Budget calculation uncertain | Fail closed for cloud, update dated price/FX through authenticated owner workflow |
 | Cloud cost repeatedly reaches hard cap | Assistant loses open-ended cloud Q&A | Review usage for three months; consider private AI appliance only after measured total-cost/quality analysis |
@@ -2189,7 +2189,7 @@ The controlled-web column below is a linked overlay allocated across the same th
 No NAS, VPS, AWS instance, GPU, or mini-PC is needed to begin this plan.
 
 - Consider a NAS only when Reolink recording/retention becomes a separate approved phase, or when encrypted Tuntun backups need a second always-on target. Tuntun’s Phase 1 DB alone does not justify it.
-- Consider a private AI appliance after at least eight weeks of measurements show sustained Intel Mac CPU/memory pressure, unacceptable local identity/offline latency, or cloud spend/availability that materially harms the experience.
+- Consider a private AI appliance after at least eight weeks of measurements show sustained active Core Mac CPU/memory pressure, unacceptable local identity/offline latency, or cloud spend/availability that materially harms the experience.
 - For a quality local LLM/vision path, use the later architecture seam and evaluate at least 48 GB unified Apple Silicon memory; 64 GB is the safer multi-model target. Do not buy this for hosted Qwen3.7.
 - A UPS may be more valuable than compute during the home-server phase if power interruptions affect timers/availability.
 
@@ -2197,7 +2197,7 @@ No NAS, VPS, AWS instance, GPU, or mini-PC is needed to begin this plan.
 
 - [ ] All five implementation checkpoints A0, A0.5, A1, B1, and B2 are accepted, with A0.5 explicitly recorded as disposable/non-hardened.
 - [ ] P1R0 private-beta acceptance has no severity 0/1 blocker.
-- [ ] SQLCipher/Keychain, backup/restore, upgrade/rollback, reboot, and uninstall-preserve pass on the actual Intel Mac.
+- [ ] SQLCipher/Keychain, backup/restore, upgrade/rollback, reboot, and uninstall-preserve pass on the owner-approved Darwin `arm64` Core Mac; Intel macOS distribution support has its separate current compatibility evidence.
 - [ ] Reachy daemon/SDK/protocol/model compatibility is pinned and documented.
 - [ ] No raw media/transcript/secret/private-memory sentinel exists outside its authorized ephemeral boundary.
 - [ ] Identity uncertainty always fails to Guest; biometrics never authorize any action, including low-risk actions.

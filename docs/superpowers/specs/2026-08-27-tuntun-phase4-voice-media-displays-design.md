@@ -124,7 +124,7 @@ flowchart LR
     DA -->|HDMI pixels| TV
   end
 
-  subgraph MAC[Tuntun Core on Intel Mac]
+  subgraph MAC[Tuntun Core on approved Darwin arm64 Mac]
     EG[Endpoint gateway\npairing · mTLS · media backpressure]
     WA[Wake arbiter\none capture lease]
     VS[Voice session broker\none conversation initially]
@@ -848,7 +848,7 @@ Raising the slot count from one to two is a high-risk owner action and a new rel
 - a hard compiled maximum of two and atomic admission/budget reservations;
 - at least 1,000 randomized cross-session cases with zero audio, transcript, identity, memory, action, citation, TTS, display, or cancellation crossover;
 - independent endpoint/turn UUIDs, language state, memory namespaces, provider requests, action approvals, and reply routes;
-- CPU/memory/network/provider-latency evidence on the actual Intel Mac with two simultaneous 90-second worst-case turns;
+- CPU/memory/network/provider-latency evidence on the approved Darwin arm64 Core Mac with two simultaneous 90-second worst-case turns;
 - provider budget behavior that rejects the second turn before egress when its independent worst-case reservation would exceed the cap;
 - child/adult, adult/Guest, two-child, privacy-on-one-room, stop-one-room, handoff, identity conflict, and shared-media-target contention cases;
 - a new owner-accepted privacy disclosure and rollback to one slot.

@@ -14,7 +14,7 @@
 - `P1R0` and `P1R1` are Phase 1-only standalone-preview gates. `P1R0` follows the family-ready FB0 private beta; `P1R1` may publish an explicitly labelled Phase 1 preview. Neither gate satisfies, aliases, or makes claims for the whole-program Phase 6 `C0/C1` gates.
 - Candidate version is exactly `0.1.0-beta.1`; release tag is exactly `v0.1.0-beta.1`.
 - Effort is preserved: WP31 `6` person-days, WP32 `7`, WP33 `8` plus two elapsed eight-hour runs and a four-calendar-day staged trial, WP34 `5`; total `26` engineering days.
-- Production requires native Intel `x86_64` macOS, FileVault on, macOS Keychain available, owner-only `0700` roots, installed launchd core limit zero, and no content-bearing crash diagnostic.
+- Production household validation requires the owner-approved native Darwin `arm64` Core Mac from ADR 0001, FileVault on, macOS Keychain available, owner-only `0700` roots, installed launchd core limit zero, and no content-bearing crash diagnostic. Intel macOS remains a mandatory supported-distribution target; moving household deployment back to Intel requires fresh real-host probes before any live-household claim.
 - Listener policy is exact: `127.0.0.1:8787`, resolved RFC1918 interface address on `7443`, and optional passkey console on that same address at `8443`. Wildcard, public, unresolved-interface, and other Tuntun listeners fail.
 - Every upgrade invokes Privacy Shield, disables new provider attempts, drains in-flight calls to zero, creates/verifies an encrypted backup, verifies DB/audit/model/protocol compatibility, then switches runtime.
 - Failed install/upgrade restores the prior symlink and compatible encrypted DB before restart. Uninstall removes runtime/service only; data, models, backups, and Keychain items remain.
@@ -23,7 +23,7 @@
 - Acceptance includes 240+ bilingual/persona cases, 1,000 cross-profile cases, 500 mixed turns, two distinct eight-hour runs, then owner 48 hours followed by second-adult 48 hours. Simulation never replaces elapsed gates.
 - P1R0 is an explicit owner approve/reject artifact bound to version, commit, acceptance hash, evidence hashes, and a fresh action-bound owner passkey receipt.
 - Tasks 5–10 commit and test evidence tooling only with synthetic fixtures. After Task 10, one clean frozen commit is qualified by two byte-identical builds; a clean target is locally commissioned and evidence-pending-installed from those exact bytes. Official security, acceptance, elapsed soak/trial, P1R0, candidate assembly without rebuild, accepted installation, and tag outputs are then generated once, in that order; no tracked change may occur during the ceremony.
-- `Clean target` does not assume a second Mac. For this household it is the same single 2020 Intel Mac, entered through an owner-approved maintenance window only after a verified encrypted backup and recovery-key check. The clean-target probe means no installed Tuntun runtime, core leaf/private key, launchd registration, listener, or unfinished lifecycle journal remains; it does not require erasing unrelated office data. Qualified bytes are retained on owner-controlled immutable storage while the managed Tuntun namespace is cleaned, and rollback restores the previously verified backup/runtime if commissioning or evidence-pending installation fails. A VM, hosted runner, or synthetic receipt cannot replace this real-host lifecycle evidence.
+- `Clean target` does not assume a second Mac. For this household it is the same owner-approved Darwin `arm64` Core Mac, entered through an owner-approved maintenance window only after a verified encrypted backup and recovery-key check. The clean-target probe means no installed Tuntun runtime, core leaf/private key, launchd registration, listener, or unfinished lifecycle journal remains; it does not require erasing unrelated office data. Qualified bytes are retained on owner-controlled immutable storage while the managed Tuntun namespace is cleaned, and rollback restores the previously verified backup/runtime if commissioning or evidence-pending installation fails. A VM, hosted runner, or synthetic receipt cannot replace this real-host lifecycle evidence. Intel distribution receipts remain separate and do not promote Intel to household target without new real-host qualification.
 - Apache-2.0 is added only after owner license approval. Incompatible/non-commercial weights stay outside artifacts.
 - `.github/workflows/release.yml` has `contents: read`, never tags or publishes, and only builds/attests/uploads a workflow artifact. Final publication is manual.
 - Every task uses red → green → affected/static checks → exact staging → one reviewable commit.
@@ -70,7 +70,7 @@ class Runner:
     def run(self, argv):
         self.calls.append(argv)
         values={
-          ("uname","-m"):"x86_64\n", ("uv","run","python","-c","import platform; print(platform.machine())"):"x86_64\n",
+          ("uname","-m"):"arm64\n", ("uv","run","python","-c","import platform; print(platform.machine())"):"arm64\n",
           ("id","-un"):"test\n", ("fdesetup","status"):"FileVault is On.\n",
           ("security","list-keychains","-d","user"):'    "/Users/test/Library/Keychains/login.keychain-db"\n',
           ("security","find-generic-password","-s","tuntun.database","-a","root-v1"):"ok\n",
@@ -215,7 +215,7 @@ def run_preflight(mode,home,runner,lan_console):
     current=home/"Library/Application Support/Tuntun/runtime/current"
     roots=[home/path for path in ("Library/Application Support/Tuntun/runtime","Library/Application Support/Tuntun/data","Library/Application Support/Tuntun/models","Library/Application Support/Tuntun/backups","Library/Logs/Tuntun")]
     owner=required(runner,("id","-un")).strip()
-    native=required(runner,("uname","-m")).strip()=="x86_64" and required(runner,("uv","run","python","-c","import platform; print(platform.machine())")).strip()=="x86_64"
+    native=required(runner,("uname","-m")).strip()=="arm64" and required(runner,("uv","run","python","-c","import platform; print(platform.machine())")).strip()=="arm64"
     values={
         "architecture":native,
         "filevault":"FileVault is On." in required(runner,("fdesetup","status")),
@@ -7128,7 +7128,7 @@ Tasks 5–10 commit implementation and synthetic fixtures only. After Task 10, f
 
 ### Ceremony A: qualify exact bytes, commission a clean target, then collect evidence
 
-For the initial household release, this ceremony runs on the one physical Intel Mac during the declared maintenance window above. Before the first command, verify the encrypted backup and recovery key, stop ordinary office use, and record the prior managed-runtime state (normally absent on first install). After qualification, preserve the exact signed role bytes outside the Tuntun managed runtime roots before the clean-target check. A later upgrade that cannot prove a clean evidence target on this same Mac remains an upgrade candidate only; it cannot mint fresh clean-install evidence from a VM or CI runner.
+For the initial household release, this ceremony runs on the owner-approved Darwin `arm64` Core Mac during the declared maintenance window above. Before the first command, verify the encrypted backup and recovery key, stop ordinary office use, and record the prior managed-runtime state (normally absent on first install). After qualification, preserve the exact signed role bytes outside the Tuntun managed runtime roots before the clean-target check. A later upgrade that cannot prove a clean evidence target on this same Mac remains an upgrade candidate only; it cannot mint fresh clean-install evidence from a VM or CI runner. Hosted or physical Intel macOS evidence remains a supported-distribution row until the owner repeats the household real-host probes for an Intel target.
 
 ```bash
 test -z "$(git status --porcelain)"

@@ -4,7 +4,7 @@
 **Date:** 2026-08-27
 **Scope:** Reachy Mini Wireless family assistant; smart-home control is intentionally deferred
 **Primary operator:** one owner-managed household
-**Deployment:** one Intel MacBook Pro (2020, 16 GB RAM) plus one Reachy Mini Wireless
+**Deployment:** one owner-approved Darwin arm64 Mac plus one Reachy Mini Wireless; Intel macOS remains mandatory distribution support, not active household evidence
 
 ## 1. Outcome
 
@@ -18,7 +18,7 @@ The first useful release is a disposable physical Reachy conversation loop. The 
 |---|---|
 | Robot | Reachy Mini Wireless; official daemon remains in place |
 | Wake phrase | “Hello Tuntun” |
-| Host | Existing 2020 Intel MacBook Pro, 16 GB RAM, stays at home |
+| Host | Owner-approved Darwin arm64 Mac, as accepted in `docs/architecture/decisions/0001-phase1-host-baseline.md`; Intel macOS remains a supported-distribution CI target |
 | Initial scope | Family voice assistant only; no MOES MZHUB/Zigbee light control, Reolink, Home Assistant, TV, or multi-room control |
 | Languages | English, Hindi, and natural Hinglish; follow within-conversation language switches |
 | Conversation concurrency | Exactly one active household conversation |
@@ -99,7 +99,7 @@ K2 and N1 profiles may ask age-appropriate educational questions, request storie
 - Remote internet administration, port forwarding, a public API, or cloud-hosted canonical memory.
 - Autonomous purchases, messages, account changes, or other external side effects.
 - Unrestricted web agents, authenticated-site automation, downloads, code execution from web content, or live web access for child/Guest profiles.
-- A local large language model on the 16 GB Intel Mac.
+- A local large language model on the active Phase 1 control host; Phase 5 private inference remains a separate appliance decision.
 - Full speech recognition, LLM inference, or face recognition on Reachy’s CM4.
 - Microservices, Redis, Kafka, MQTT, NATS, Kubernetes, or a service mesh.
 
@@ -121,7 +121,7 @@ flowchart LR
       SAFE --> BODY
     end
 
-    subgraph MAC[Intel Mac · Tuntun Core]
+    subgraph MAC[Approved Darwin arm64 Mac · Tuntun Core]
       GATE[Paired mTLS edge gateway]
       TURN[Single-turn coordinator]
       ID[Local identity fusion]
@@ -397,7 +397,7 @@ Audit is a separate append-only control ledger. This keeps operational receipts 
 ### 11.1 Database
 
 - SQLCipher encrypts the complete canonical database.
-- The first compatibility candidate is `sqlcipher3==0.6.2` on Python 3.12/macOS x86_64, locked with hashes after the target-Mac probe.
+- The first compatibility candidate is `sqlcipher3==0.6.2` on Python 3.12 for both macOS arm64 and x86_64 distribution rows, locked with hashes after architecture-specific smoke and active-host receipt review.
 - Startup verifies `PRAGMA cipher_version`, `PRAGMA cipher_integrity_check`, secure file permissions, schema version, and the expected application marker.
 - A wrong/unavailable key fails closed. There is no plaintext database fallback.
 - The 256-bit database key, versioned audit HMAC keys, record-encryption roots, local backup slot key, and provider credentials live in macOS Keychain under separate service identifiers.
@@ -530,7 +530,7 @@ The 6–8 week objective is a controlled, owner-managed **family private beta**,
 | `P1R0` | Owner may approve a **Phase 1-only** standalone preview candidate | Every mandatory quantitative gate in Sections 16.1–16.6; signed feature-manifest evidence for each optional feature; signed security evidence; 500-turn run; two eight-hour soaks; staged household trial; fresh-Mac recovery; and no unmitigated high/critical finding |
 | `P1R1` | Optional Phase 1-only Apache-2.0 preview publication | Candidate is bit-for-bit bound to approved P1R0 evidence; signed package, rollback, SBOM, licences/notices, reproducible CI artifacts, and clean-install verification; it makes no Phase 2–6 or whole-program support claim |
 
-Release security evidence includes separately signed, candidate/time/config/target-bound receipts for the target Mac process tree, DNS, listeners/sockets, payload-free packet facts, and both LAN and isolated-outer scans. Private-data scanning takes one or more explicit roots, never skips an explicit generated artifact, and completely reads bounded files/archive members including beyond 2 MiB. Reachy packaging uses a pinned cross-platform archive writer with normalized order/UID/GID/mode/mtime. On one clean frozen commit, two byte-identical builds produce a signed nonpublic qualification manifest; an independently clean, locally commissioned target installs those exact bytes in evidence-pending state before security collection, and candidate assembly later consumes the same artifact hashes without rebuilding. In the one-Mac household baseline, that target is the same physical 2020 Intel Mac during an owner-approved maintenance window after verified encrypted backup; `clean` means the managed Tuntun runtime/key/listener/journal namespace is absent, not that unrelated office data is erased, and no VM/CI receipt substitutes for real-host lifecycle evidence. Manual publication requires the canonical adjacent archive/checksum/manifest triple to match the candidate `SHA256SUMS` and pass the closed archive verifier after re-download. CI pins every third-party action to a full commit SHA and fixed runner label; hosted Intel-macOS coverage is portability evidence, not physical lifecycle qualification.
+Release security evidence includes separately signed, candidate/time/config/target-bound receipts for the target Mac process tree, DNS, listeners/sockets, payload-free packet facts, and both LAN and isolated-outer scans. Private-data scanning takes one or more explicit roots, never skips an explicit generated artifact, and completely reads bounded files/archive members including beyond 2 MiB. Reachy packaging uses a pinned cross-platform archive writer with normalized order/UID/GID/mode/mtime. On one clean frozen commit, two byte-identical builds produce a signed nonpublic qualification manifest; an independently clean, locally commissioned target installs those exact bytes in evidence-pending state before security collection, and candidate assembly later consumes the same artifact hashes without rebuilding. In the one-Mac household baseline, that target is the owner-approved Darwin arm64 Mac during an owner-approved maintenance window after verified encrypted backup; `clean` means the managed Tuntun runtime/key/listener/journal namespace is absent, not that unrelated office data is erased, and no VM/CI receipt substitutes for real-host lifecycle evidence. Moving the household target back to the 2020 Intel Mac requires a new real-host qualification. Manual publication requires the canonical adjacent archive/checksum/manifest triple to match the candidate `SHA256SUMS` and pass the closed archive verifier after re-download. CI pins every third-party action to a full commit SHA and fixed runner label; hosted Intel-macOS coverage is portability evidence, not physical lifecycle qualification.
 
 `FB0` does not defer encryption, consent, child safety, Guest fallback, action authorization, privacy/stop, or raw-data minimization. It defers scale evidence, extended recovery/soak ceremonies, distribution hardening, and public-release reproducibility. A feature that misses its `FB0` safety evidence remains disabled rather than lowering the gate.
 
@@ -708,7 +708,7 @@ Verified against primary/official sources on 2026-08-29:
 | Local authorization after model output | Model text and tool calls remain untrusted |
 | Proposal-based memory writes | Personalization improves without silently accumulating sensitive claims |
 | No NAS purchase now | Tuntun’s Phase 1 data volume is small; Reolink retention is a separate decision |
-| No local Qwen on Intel Mac | Hosted Qwen3.7 is not an open-weight local model; useful local models would compromise response quality on this hardware |
+| No local Qwen on the Phase 1 control host | Hosted Qwen3.7 is not an open-weight local model; useful local models would compromise response quality on the active control host without separate Phase 5 evidence |
 | Two-stage delivery | A disposable weeks 1–2 loop gets hardware feedback early; FB0 targets family use in weeks 6–8 while P1R0/P1R1 hardening continues on evidence rather than weakening safety gates |
 | Guarded child mode | K2/N1 can learn and converse without adult-private disclosure, autonomous actions, live web, or unapproved durable child memory |
 | Three web modes | Controlled cited lookup supplies current information; no-web suppresses search while other consented cloud functions may continue; `OFFLINE_ONLY` is the full-egress safety state; isolated owner-only experimental multi-pass research contains the highest-risk search behavior |

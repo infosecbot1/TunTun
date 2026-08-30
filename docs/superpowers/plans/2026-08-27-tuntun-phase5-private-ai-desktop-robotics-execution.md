@@ -4,7 +4,7 @@
 
 **Goal:** Deliver evidence-gated task-cell local inference, a separate owner-governed knowledge corpus, owner-only bounded desktop assistance, advisory selected-frame local perception, and physically supervised Raspbot operation without moving household authority, private media, identity, or unrestricted execution into a model or endpoint.
 
-**Architecture:** The one inventoried 2020 Intel Mac is both the office-use machine and the canonical policy, identity, memory, authorization, audit, budget, routing, and recovery host; no second office laptop or ambient cross-network helper exists. The family-ready baseline single-homes that Mac on the inner ASUS/AiMesh network with its direct BE800 link disconnected. Any optional dual-homed mode is a separately signed network qualification and grants no forwarding, bridging, outer-network ingress, or additional desktop authority. Model runtimes, the desktop helper, the Phase 3 frame broker/perception service, and the Raspbot edge are replaceable least-privilege workers behind closed signed contracts; each conditional capability is independently registered only after its positive evidence gate. Knowledge uses one identity-bound canonical SQLCipher/object root plus a separately bound encrypted recovery copy, while desktop code execution is confined to D4 disposable sandboxes and robot motion is confined to short signed leases under local physical safety.
+**Architecture:** The owner-approved Darwin `arm64` Core Mac from ADR 0001 is both the office-use machine and the canonical policy, identity, memory, authorization, audit, budget, routing, and recovery host; no second office laptop or ambient cross-network helper exists. The family-ready baseline single-homes that Mac on the inner ASUS/AiMesh network with its direct BE800 link disconnected. Intel macOS remains a mandatory supported-distribution target and future household-transition candidate only after fresh real-host probes. Any optional dual-homed mode is a separately signed network qualification and grants no forwarding, bridging, outer-network ingress, or additional desktop authority. Model runtimes, the desktop helper, the Phase 3 frame broker/perception service, and the Raspbot edge are replaceable least-privilege workers behind closed signed contracts; each conditional capability is independently registered only after its positive evidence gate. Knowledge uses one identity-bound canonical SQLCipher/object root plus a separately bound encrypted recovery copy, while desktop code execution is confined to D4 disposable sandboxes and robot motion is confined to short signed leases under local physical safety.
 
 **Tech Stack:** Python 3.12, `asyncio`, Pydantic v2, SQLAlchemy 2/Alembic over SQLCipher, SQLite FTS5, application-envelope encryption, macOS Keychain/Secure Enclave ports, FastAPI, Unix-domain sockets with peer credentials, mTLS/JCS signatures, `llama.cpp`/vLLM/MLX-compatible adapters behind ports, isolated non-generative CV, React 19/TypeScript/Vite/TanStack Query, pytest/pytest-asyncio/Hypothesis, Ruff, strict mypy, Vitest, Playwright/axe, marker-gated Mac/appliance/storage/robot campaigns, and content-safe signed evidence.
 
@@ -22,10 +22,10 @@
 ## Global Constraints
 
 1. P5-E0 requires accepted Phase 1 `FB0`, current accepted Phase 2 topology/action contracts, the accepted Phase 3 camera/zone/frame contract and privacy boundary, and stable accepted Phase 4 endpoint/conversation contracts. A failed optional upstream camera, media, television, or room feature remains absent and does not authorize a substitute.
-2. The Intel Mac remains the sole canonical identity, family policy, authorization, seven-kind memory, audit, cloud-budget, routing, signing, feature, and recovery authority. No model/proxy/helper/robot stores or decides those authorities.
+2. The owner-approved Darwin `arm64` Core Mac remains the sole canonical identity, family policy, authorization, seven-kind memory, audit, cloud-budget, routing, signing, feature, and recovery authority. No model/proxy/helper/robot stores or decides those authorities; Intel macOS support remains a distribution obligation, not active household authority.
 3. Staged task-cell local migration is per exact `(task_class, capability, language_mode, profile_class, sensitivity_class)` cell through M0–M5. A global model-family or “local AI enabled” switch is invalid.
 4. M0 is the accepted cloud/offline baseline; M1 permits only individually passed bounded Mac cells; M2 appliance shadow uses synthetic or explicitly de-identified cases only; M3 is a 14-day owner opt-in; M4 requires 30-day adult/local-knowledge evidence; M5 requires the complete Phase 1 child corpus, Phase 5 injection/RAG gates, and distinct current owner/guardian approval bound to exact artefact/evaluation/policy digests.
-5. The actual 2020 Intel Mac must be benchmarked. An M1 process is at most 4 GiB RSS, its artefact at most 3.5 GiB, available memory before launch at least 6 GiB, sustained average at most two logical CPU cores, and one inference job at a time. Background work retains at least 4 GiB headroom and yields to voice, privacy, recording, database, backup, and console work.
+5. The active owner-approved Darwin `arm64` Core Mac must be benchmarked. An M1 process is at most 4 GiB RSS, its artefact at most 3.5 GiB, available memory before launch at least 6 GiB, sustained average at most two logical CPU cores, and one inference job at a time. Background work retains at least 4 GiB headroom and yields to voice, privacy, recording, database, backup, and console work. Moving household inference back to Intel requires repeating the real-host campaign on that Intel machine.
 6. Candidate Mac work passes a two-hour simultaneous-load soak, an eight-hour idle/periodic soak, and a seven-day mixed workload with no OOM, swap storm, thermal runaway, unbounded queue/cache, Phase 3 recording gap, Green-backup failure, or greater than 10% regression in accepted Phase 1 wake/stop/privacy/first-audio P95 without explicit owner review.
 7. A model/runtime/template/tokenizer/quantization/evaluation digest change revokes activation and re-enters evaluation. Model names and API compatibility are never evidence inheritance.
 8. Model weights, tokenizers, runtimes, parsers, containers, prompt templates, and CV artefacts are independently hash/licence/provenance/SBOM bound. Unknown custom code and `trust_remote_code` equivalents are prohibited.
@@ -82,7 +82,7 @@
 |---|---|---|---|
 | P5-E0 | Phase 1 `FB0`; accepted Phase 2 topology/action; accepted Phase 3 area/zone/camera/privacy and selected-frame contracts; stable accepted Phase 4 endpoint/one-slot contracts; migration head `0019_screen_time_real_adapter` | Shared contracts reconciled, migrations/fakes/corpora pass, threat/privacy amendments pass, and every Phase 5 feature is negatively reachable as absent | All Phase 5 routes/packages/client chunks remain unregistered |
 | P5-0 | P5-E0 software baseline | Exact Mac/Raspbot/LILYGO/storage/network/sandbox/runtime inventory, simulator, contract, feature-absence, and threat evidence pass without model download, document import, desktop grant, frame, or motor motion | Only simulator and content-safe inventory remain |
-| P5-1 | P5-0 plus actual Intel Mac availability | Individually named M1 cells pass quality and exact resource/preemption/two-hour/eight-hour/seven-day gates | Cell remains deterministic or on its prior eligible route; no global local route |
+| P5-1 | P5-0 plus active approved Core Mac availability | Individually named M1 cells pass quality and exact resource/preemption/two-hour/eight-hour/seven-day gates | Cell remains deterministic or on its prior eligible route; no global local route |
 | P5-2 | P5-0 plus canonical and independent recovery storage bindings | Owner import, encrypted object/catalog/FTS/ACL/citation/deletion/recovery/restore gates pass | Corpus routes/import are absent; canonical memory unchanged |
 | P5-3 | P5-1/P5-2 benchmark and owner procurement decision | `no_purchase` is valid evidence, or one candidate passes isolation/M2 then exact M3–M5 task-cell promotion gates | No appliance traffic/route/package registration; prior routes remain |
 | P5-4 | P5-0 and eligible local model route | D0, then owner-only D1/D2 grants/read/proposals/DLP/local-only and exact egress ceremony pass; no execution route | Failed level absent; lower passed levels remain |
@@ -290,7 +290,7 @@ scripts/phase5/
 ├── generate_schemas.py
 ├── build_corpora.py
 ├── inventory.py
-├── benchmark_intel_mac.py
+├── benchmark_control_host.py
 ├── evaluate_task_cells.py
 ├── verify_model_artifact.py
 ├── evaluate_appliance.py
@@ -1821,7 +1821,7 @@ pnpm --filter @tuntun/admin e2e -- tests/ui/ai-workspace-*.spec.ts tests/accessi
 Owner-gated commands use synthetic/de-identified inputs and ignored evidence destinations. The elapsed examples below may be invoked only by their task's explicit post-commit workflow: each runner resolves the committed candidate, requires a clean worktree, and rejects a chain signed for any other commit/candidate before starting the clock.
 
 ```bash
-TUNTUN_ALLOW_INTEL_MAC_BENCHMARK=1 uv run python scripts/phase5/benchmark_intel_mac.py --feature-manifest-chain var/evidence/phase5/feature-authority/signed-rollover-chain.json --duration-seconds 604800 --evidence-root var/evidence/phase5/intel-mac
+TUNTUN_ALLOW_CONTROL_HOST_BENCHMARK=1 uv run python scripts/phase5/benchmark_control_host.py --feature-manifest-chain var/evidence/phase5/feature-authority/signed-rollover-chain.json --duration-seconds 604800 --evidence-root var/evidence/phase5/control-host
 TUNTUN_ALLOW_PHASE5_STORAGE=1 uv run python scripts/phase5/qualify_knowledge_root.py --evidence-root var/evidence/phase5/knowledge
 TUNTUN_ALLOW_PHASE5_APPLIANCE=1 uv run python scripts/phase5/evaluate_appliance.py --evidence-root var/evidence/phase5/appliance
 TUNTUN_ALLOW_PHASE5_DESKTOP=1 uv run python scripts/phase5/qualify_d4_sandbox.py --evidence-root var/evidence/phase5/desktop
@@ -2666,9 +2666,9 @@ async def test_route_decision_replay_against_another_signed_request_denies_befor
 - [ ] **Step 4 — Prove GREEN and existing-latency safety.** Run the narrow suites plus `uv run pytest tests/integration -k "privacy or budget or conversation" -q`; expect route properties to pass and existing privacy/voice behavior unchanged.
 - [ ] **Step 5 — Commit routing policy.** Stage exact paths, run `git diff --cached --check`, inspect local-only/cloud and child handling, and commit with `git commit -m "feat(phase5): route inference by exact task cell"`.
 
-### Task 12: Benchmark the actual Intel Mac under canonical household load
+### Task 12: Benchmark the active approved Core Mac under canonical household load
 
-**Depends on:** Tasks 08–11; actual 2020 Intel Mac and a locally verified candidate artifact/runtime are physically available.
+**Depends on:** Tasks 08–11; the active owner-approved Darwin `arm64` Core Mac and a locally verified candidate artifact/runtime are physically available. If the owner later chooses the 2020 Intel Mac as household target, this task must be repeated as a new real-host campaign for that machine before any Intel household-performance claim.
 
 **Gate contribution:** P5-1 measured hardware gate; absence evidence is the only valid result without the actual Mac campaign.
 
@@ -2676,25 +2676,25 @@ async def test_route_decision_replay_against_another_signed_request_denies_befor
 
 **Files:**
 
-- Create: `scripts/phase5/benchmark_intel_mac.py`
-- Create: `docs/operations/phase5-intel-mac-benchmark.md`
-- Create: `docs/evidence/phase5-intel-mac-benchmark.schema.json`
+- Create: `scripts/phase5/benchmark_control_host.py`
+- Create: `docs/operations/phase5-control-host-benchmark.md`
+- Create: `docs/evidence/phase5-control-host-benchmark.schema.json`
 - Create: `ops/launchd/phase5/com.tuntun.inference-proxy.plist`
 - Create: `ops/services/phase5-inference-proxy.v1.json`
-- Test: `tests/unit/private_ai/test_intel_mac_benchmark_harness.py`
-- Test: `tests/performance/private_ai/test_intel_mac_limits.py`
-- Test: `tests/hardware/private_ai/test_intel_mac_campaign.py`
+- Test: `tests/unit/private_ai/test_control_host_benchmark_harness.py`
+- Test: `tests/performance/private_ai/test_control_host_limits.py`
+- Test: `tests/hardware/private_ai/test_control_host_campaign.py`
 - Test: `tests/integration/private_ai/test_inference_proxy_service_lifecycle.py`
 
 **Interfaces:** The marker-gated harness binds pseudonymous exact CPU/GPU/RAM/macOS/free-disk/thermal/power/runtime/artifact/configuration and measures pre-launch available memory, peak RSS, artifact size, sustained logical-core use, concurrency, p50/p95/first/total token latency, fan/noise, power, disk I/O, model-load, cancellation, cold/restart, swap/thermal/queue/cache, background headroom, and Phase 1 wake/stop/privacy/first-audio plus Phase 3 recording/Green-backup effects. It includes one worst-case 90-second voice turn plus candidate workload and runs two-hour simultaneous, eight-hour idle/periodic, and seven-day mixed campaigns using synthetic/de-identified prompts only. The seven-day runner consumes the canonical Phase 2 pre-issued chain through `FeatureManifestLeaseSupervisor`; its receipt binds one frozen candidate, chain ID, ordered signed-envelope and transition-receipt digests, interval, and zero expired-authority interval, and every job/background sample checks the half-open wall and monotonic lease. The rendered launch daemon and `phase5-inference-proxy.v1` row implement the frozen service baseline exactly: absolute app-bundle executable, `start` plus the exact root-owned configuration path, `_tuntun_inference`, mode-`0660` `/private/var/run/tuntun/inference-proxy.sock`, bounded health, crash-only restart, and exact owned cleanup. The service has no TCP listener, ambient home, provider credential, corpus mount, camera access, unregistered model path, acceptance signer, or renewal service.
 
 - [ ] **Step 1 — Write failing harness, threshold, lifecycle, and authority tests.** Feed synthetic metric traces at every boundary and assert: artefact ≤3.5 GiB, process RSS ≤4 GiB, pre-launch available ≥6 GiB, average ≤2 logical cores, concurrency exactly one, background headroom ≥4 GiB, no forbidden failure, and no accepted latency P95 regression over 10%. Assert interruption resumes evidence collection but never fabricates elapsed duration. Reject missing/extra/reordered/late successors, bad signature/hash link, candidate/package/registration drift, future activation, wall or monotonic equality, rollback, restart lease reuse, missing transition receipt, and any metric/job admission after authority closes; prove zero inference I/O for each. Parse the installed plist/inventory and assert the exact command/account/config/socket/restart/cleanup row; drive help/version/start/health/SIGTERM, wrong account/config, deliberate crash/restart, old-generation request replay, stale socket, and both uninstall modes with injected resources.
-- [ ] **Step 2 — Prove RED without touching hardware.** Run `uv run pytest tests/unit/private_ai/test_intel_mac_benchmark_harness.py tests/performance/private_ai/test_intel_mac_limits.py tests/integration/private_ai/test_inference_proxy_service_lifecycle.py -q`; expect the missing harness/schema/plist/service row/lifecycle. Confirm `uv run pytest tests/hardware/private_ai/test_intel_mac_campaign.py -q` skips with the exact missing flag/hardware reason.
+- [ ] **Step 2 — Prove RED without touching hardware.** Run `uv run pytest tests/unit/private_ai/test_control_host_benchmark_harness.py tests/performance/private_ai/test_control_host_limits.py tests/integration/private_ai/test_inference_proxy_service_lifecycle.py -q`; expect the missing harness/schema/plist/service row/lifecycle. Confirm `uv run pytest tests/hardware/private_ai/test_control_host_campaign.py -q` skips with the exact missing flag/hardware reason.
 - [ ] **Step 3 — Implement the read-only metric harness and exact preemptible service.** Use argv-only local runtime launch, one-job semaphore, OS-native process metrics, monotonic timestamps, baseline snapshots, signal-safe cancellation and signed append-only evidence. Render the plist and service row from one typed description, verify executable containment/digests and root-owned configuration before bind, rotate a durable boot generation before accepting work, remove only a proved stale owned socket, and make health read-only. Never install/download a model or change production routes.
-- [ ] **Step 4 — Prove GREEN and lifecycle without starting the physical clock.** Run `uv run pytest tests/unit/private_ai/test_intel_mac_benchmark_harness.py tests/performance/private_ai/test_intel_mac_limits.py tests/integration/private_ai/test_inference_proxy_service_lifecycle.py -q && plutil -lint ops/launchd/phase5/com.tuntun.inference-proxy.plist`; use fake-clock traces and signed fixture chains to prove all duration, threshold, transition, expiry and zero-I/O failure behavior. Confirm the hardware suite still skips without a committed clean candidate and matching owner flag. Do not start the two-hour, eight-hour, or seven-day campaign before Step 5 commits the complete harness/service/schema/test bytes.
-- [ ] **Step 5 — Commit harness and service contract, not local evidence.** Run `git add scripts/phase5/benchmark_intel_mac.py docs/operations/phase5-intel-mac-benchmark.md docs/evidence/phase5-intel-mac-benchmark.schema.json ops/launchd/phase5/com.tuntun.inference-proxy.plist ops/services/phase5-inference-proxy.v1.json tests/unit/private_ai/test_intel_mac_benchmark_harness.py tests/performance/private_ai/test_intel_mac_limits.py tests/hardware/private_ai/test_intel_mac_campaign.py tests/integration/private_ai/test_inference_proxy_service_lifecycle.py && git status --short var/evidence/phase5 && git diff --cached --check`; require evidence status empty/ignored, then commit with `git commit -m "test(phase5): qualify intel mac inference limits"`.
+- [ ] **Step 4 — Prove GREEN and lifecycle without starting the physical clock.** Run `uv run pytest tests/unit/private_ai/test_control_host_benchmark_harness.py tests/performance/private_ai/test_control_host_limits.py tests/integration/private_ai/test_inference_proxy_service_lifecycle.py -q && plutil -lint ops/launchd/phase5/com.tuntun.inference-proxy.plist`; use fake-clock traces and signed fixture chains to prove all duration, threshold, transition, expiry and zero-I/O failure behavior. Confirm the hardware suite still skips without a committed clean candidate and matching owner flag. Do not start the two-hour, eight-hour, or seven-day campaign before Step 5 commits the complete harness/service/schema/test bytes.
+- [ ] **Step 5 — Commit harness and service contract, not local evidence.** Run `git add scripts/phase5/benchmark_control_host.py docs/operations/phase5-control-host-benchmark.md docs/evidence/phase5-control-host-benchmark.schema.json ops/launchd/phase5/com.tuntun.inference-proxy.plist ops/services/phase5-inference-proxy.v1.json tests/unit/private_ai/test_control_host_benchmark_harness.py tests/performance/private_ai/test_control_host_limits.py tests/hardware/private_ai/test_control_host_campaign.py tests/integration/private_ai/test_inference_proxy_service_lifecycle.py && git status --short var/evidence/phase5 && git diff --cached --check`; require evidence status empty/ignored, then commit with `git commit -m "test(phase5): qualify control-host inference limits"`.
 
-After that commit, verify the worktree is clean, rebuild and lifecycle-qualify the resolved bytes without changing them, and prepare a new externally signed canonical chain for that exact commit/candidate. Only then run `TUNTUN_ALLOW_INTEL_MAC_BENCHMARK=1 uv run python scripts/phase5/benchmark_intel_mac.py --feature-manifest-chain var/evidence/phase5/feature-authority/signed-rollover-chain.json --duration-seconds 604800 --evidence-root var/evidence/phase5/intel-mac`; require schema-valid signed evidence for the two-hour, eight-hour, and seven-day intervals, every resource threshold, ordered transitions, and zero expired-authority interval. Verify it with `TUNTUN_ALLOW_INTEL_MAC_BENCHMARK=1 uv run pytest tests/hardware/private_ai/test_intel_mac_campaign.py -q`. Any missing/failed interval or authority fault records `mac_cell_ineligible`, closes inference admission, unloads/removes the production service artifacts for that feature, and keeps the cell M0. Only this clean-commit run may promote a Mac task cell; any later bound-byte change invalidates it.
+After that commit, verify the worktree is clean, rebuild and lifecycle-qualify the resolved bytes without changing them, and prepare a new externally signed canonical chain for that exact commit/candidate. Only then run `TUNTUN_ALLOW_CONTROL_HOST_BENCHMARK=1 uv run python scripts/phase5/benchmark_control_host.py --feature-manifest-chain var/evidence/phase5/feature-authority/signed-rollover-chain.json --duration-seconds 604800 --evidence-root var/evidence/phase5/control-host`; require schema-valid signed evidence for the two-hour, eight-hour, and seven-day intervals, every resource threshold, ordered transitions, and zero expired-authority interval. Verify it with `TUNTUN_ALLOW_CONTROL_HOST_BENCHMARK=1 uv run pytest tests/hardware/private_ai/test_control_host_campaign.py -q`. Any missing/failed interval or authority fault records `mac_cell_ineligible`, closes inference admission, unloads/removes the production service artifacts for that feature, and keeps the cell M0. Only this clean-commit run may promote a Mac task cell; any later bound-byte change invalidates it. Intel may be promoted only by repeating this real-host procedure on the Intel target.
 
 ### Task 13: Evaluate and expose only individually promoted M1 task cells
 
@@ -3927,7 +3927,7 @@ The normative Phase 5 estimate remains **130–210 engineering person-days**, ex
 | Work package | Tasks | Engineering person-days |
 |---|---:|---:|
 | Contracts, registries, simulators, routing/evaluation foundation | 01–11 | 14–22 |
-| Actual Intel Mac benchmark and optional appliance isolation/promotion | 12–16 | 12–22 |
+| Active control-host benchmark and optional appliance isolation/promotion | 12–16 | 12–22 |
 | Knowledge catalog, object store, FTS, citations, deletion, backup and UI | 17–22, 24 | 22–32 |
 | Optional embeddings/vector evaluation | 23 | 6–12 |
 | Desktop D0–D2 grants, read, proposal and exact model egress | 25–28 | 14–20 |
@@ -3939,7 +3939,7 @@ The normative Phase 5 estimate remains **130–210 engineering person-days**, ex
 
 The calendar is longer than person-day arithmetic because these intervals are non-compressible and evidence-bound:
 
-- actual Intel Mac: one worst-case 90-second voice turn, two-hour concurrent soak, eight-hour idle/periodic soak and seven-day mixed workload;
+- active control host: one worst-case 90-second voice turn, two-hour concurrent soak, eight-hour idle/periodic soak and seven-day mixed workload;
 - optional appliance: same-day quote/compatibility evidence and procurement/delivery/return-window lead time, followed by 14-day M3 and 30-day M4 evidence; M5 waits for the full child corpus and distinct current guardian approval;
 - storage/recovery: encrypted-volume acquisition/commissioning when needed, a 24-hour recovery/deletion reconciliation bound and quarterly offline restore;
 - D4/perception: actual installed-backend qualification and current hardware/model/calibration evidence, with no simulated substitute for a positive gate;
@@ -3971,7 +3971,7 @@ Parallel execution is allowed only after the named dependencies: Wave 1, Wave 3 
 
 | Requirement | Owning tasks | Release proof |
 |---|---|---|
-| Per-task-cell M0–M5 migration and actual Intel Mac limits | 03, 09–13, 16 | Exact-cell evaluation plus two-hour/eight-hour/seven-day Mac evidence; no global switch |
+| Per-task-cell M0–M5 migration and active control-host limits | 03, 09–13, 16 | Exact-cell evaluation plus two-hour/eight-hour/seven-day Mac evidence; no global switch |
 | Optional appliance/no-purchase and isolated M2–M5 | 14–16 | Same-day TCO decision, isolation/packet evidence, stage-specific elapsed evidence or signed absence |
 | Closed inference and no cloud authority/media/identity | 01, 09–11, 27, 34–36, 46 | Contract/property/DLP/network/no-store tests and current route evidence |
 | One identity-bound knowledge root plus separate recovery | 04, 17–24 | UUID/handle binding, ACL/deletion, 24-hour RPO, quarterly offline restore and non-queryable recovery proof |
@@ -4000,7 +4000,7 @@ Parallel execution is allowed only after the named dependencies: Wave 1, Wave 3 
 
 - [ ] Closed request/result contracts reject identity, secrets, media, paths and authority/tool/memory output.
 - [ ] Every artifact/runtime/tokenizer/template/evaluation bundle has independent immutable supply-chain evidence.
-- [ ] At least one M1 cell, if enabled, has actual 2020 Intel Mac evidence for all exact resource, preemption and duration limits; its seven-day run has the inherited continuous rollover-chain/lease proof, and neighboring cells do not inherit it.
+- [ ] At least one M1 cell, if enabled, has active owner-approved Darwin `arm64` Core Mac evidence for all exact resource, preemption and duration limits; its seven-day run has the inherited continuous rollover-chain/lease proof, and neighboring cells do not inherit it. Intel macOS can inherit none of this evidence until requalified by a fresh real-host campaign.
 - [ ] Appliance decision is current `no_purchase` or exact eligible candidate; purchase/promotion is never assumed.
 - [ ] M2–M5 transitions, if used, have exact shadow/14-day/30-day/child evidence and rollback; every longer-than-24-hour run has the inherited continuous rollover-chain/lease proof.
 
