@@ -64,25 +64,48 @@ def _scenario_typecheck_invocation(
     lines = tuple(line for line in rendered.stdout.decode("utf-8").splitlines() if line)
     assert len(lines) == 1
     tokens = shlex.split(lines[0])
-    assignment = tokens.pop(0)
-    key, separator, value = assignment.partition("=")
-    assert (key, separator) == ("MYPYPATH", "=")
-    declared_sources = {
-        str(ROOT / relative)
-        for relative in (
-            "packages/testing/src",
-            "scripts/run_scenarios.py",
-            "tests/unit/testing/test_scenario.py",
-            "tests/unit/testing/test_scenario_cli.py",
-            "tests/integration/test_deterministic_turn.py",
-            "tests/security/test_scenario_guard.py",
-        )
-    }
-    assert declared_sources.issubset(tokens)
-    command = [token for token in tokens if token not in declared_sources]
-    command.append(str(source))
+    assert tokens == [
+        "uv",
+        "run",
+        "--offline",
+        "--no-sync",
+        "python",
+        "-I",
+        "-S",
+        "scripts/run_isolated_module.py",
+        "mypy",
+    ]
+    harness = """
+import importlib.util
+import sys
+from pathlib import Path
+
+launcher = Path(sys.argv[1])
+source = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("_isolated_mypy_test_harness", launcher)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+repository_root = launcher.parent.parent
+arguments = module._canonical_mypy_arguments(repository_root, str(launcher))
+arguments[-len(module._MYPY_SOURCE_PATHS):] = [str(source)]
+module.sys.argv[:] = arguments
+with module._owned_mypy_environment(repository_root), module._retained_mypy_config(
+    repository_root, module.sys.argv
+):
+    module._run_from_retained_site("mypy")
+"""
+    command = [
+        str(ROOT / ".venv/bin/python"),
+        "-I",
+        "-S",
+        "-c",
+        harness,
+        str(ROOT / "scripts/run_isolated_module.py"),
+        str(source),
+    ]
     environment = os.environ.copy()
-    environment.update({key: value, "UV_CACHE_DIR": str(uv_cache)})
+    environment["UV_CACHE_DIR"] = str(uv_cache)
     if temp_root is not None:
         environment["TMPDIR"] = str(temp_root)
     result = subprocess.run(
@@ -874,14 +897,144 @@ def test_make_launcher_explicitly_enforces_root_mypy_config(
 
     assert result.returncode == 1, result.stdout.decode("utf-8", errors="replace")
     assert b"no-untyped-def" in result.stdout + result.stderr
-    assert command.count("--config-file") == 1
-    config_index = command.index("--config-file")
-    assert command[config_index + 1] == str(ROOT / "pyproject.toml")
-    assert command.count("--no-incremental") == 1
-    assert command.count("--cache-dir") == 1
-    cache_index = command.index("--cache-dir")
-    assert command[cache_index + 1] == os.devnull
-    assert command.count("--no-fast-exit") == 1
+    assert command[-2:] == [str(ROOT / "scripts/run_isolated_module.py"), str(source)]
+
+    import importlib.util
+
+    launcher = ROOT / "scripts/run_isolated_module.py"
+    spec = importlib.util.spec_from_file_location("_isolated_mypy_owned_policy", launcher)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    policy = module._canonical_mypy_arguments(ROOT, str(launcher))
+    assert policy.count("--config-file") == 1
+    config_index = policy.index("--config-file")
+    assert policy[config_index + 1] == str(ROOT / "pyproject.toml")
+    assert policy.count("--no-incremental") == 1
+    assert policy.count("--cache-dir") == 1
+    cache_index = policy.index("--cache-dir")
+    assert policy[cache_index + 1] == os.devnull
+    assert policy.count("--no-fast-exit") == 1
+
+
+def test_make_delegates_the_complete_mypy_policy_to_the_launcher() -> None:
+    rendered = subprocess.run(
+        ["make", "-n", "scenario-typecheck"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    assert rendered.returncode == 0, rendered.stderr.decode("utf-8", errors="replace")
+    lines = tuple(line for line in rendered.stdout.decode("utf-8").splitlines() if line)
+    assert len(lines) == 1
+    tokens = shlex.split(lines[0])
+    assert tokens == [
+        "uv",
+        "run",
+        "--offline",
+        "--no-sync",
+        "python",
+        "-I",
+        "-S",
+        "scripts/run_isolated_module.py",
+        "mypy",
+    ]
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        ("--allow-untyped-defs",),
+        ("--no-disallow-untyped-defs",),
+        ("--config-file={config}",),
+        ("--config-file", "{config}"),
+        ("--incremental",),
+        ("--cache-dir={cache}",),
+        ("--cache-dir", "{cache}"),
+        ("--fast-exit",),
+        ("--python-version=3.11",),
+        ("--no-strict-optional",),
+        ("--tuntun-unknown-policy",),
+    ),
+)
+def test_isolated_launcher_rejects_every_caller_supplied_mypy_argument(
+    tmp_path: Path,
+    override: tuple[str, ...],
+) -> None:
+    source = tmp_path / "typed.py"
+    source.write_text("VALUE: int = 1\n", encoding="utf-8")
+    config = tmp_path / "override.toml"
+    config.write_text("[tool.mypy]\n", encoding="utf-8")
+    cache = tmp_path / "override-cache"
+    rendered_override = tuple(item.format(config=config, cache=cache) for item in override)
+    temp_root = tmp_path / "tmp"
+    temp_root.mkdir()
+    environment = os.environ.copy()
+    environment["TMPDIR"] = str(temp_root)
+    result = subprocess.run(
+        [
+            str(ROOT / ".venv/bin/python"),
+            "-I",
+            "-S",
+            str(ROOT / "scripts/run_isolated_module.py"),
+            "mypy",
+            "--python-version",
+            "3.12",
+            "--config-file",
+            str(ROOT / "pyproject.toml"),
+            "--no-incremental",
+            "--cache-dir",
+            os.devnull,
+            "--no-fast-exit",
+            *rendered_override,
+            str(source),
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 97
+    assert result.stdout == b""
+    assert result.stderr == b""
+
+
+def test_isolated_launcher_owns_mypy_path_instead_of_trusting_the_caller(
+    tmp_path: Path,
+) -> None:
+    shadow = tmp_path / "shadow"
+    package = shadow / "tuntun_contracts"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("def invalid(:\n", encoding="utf-8")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "MYPYPATH": str(shadow),
+            "UV_CACHE_DIR": str(tmp_path / "uv-cache"),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            str(ROOT / ".venv/bin/python"),
+            "-I",
+            "-S",
+            str(ROOT / "scripts/run_isolated_module.py"),
+            "mypy",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout.decode("utf-8", errors="replace")
+    assert b"Success: no issues found in 12 source files" in result.stdout
+    assert result.stderr == b""
 
 
 def test_make_launcher_does_not_modify_retained_site_mypy_cache(
@@ -964,15 +1117,7 @@ def test_isolated_launcher_snapshots_the_validated_root_config(
     repository.mkdir()
     config = repository / "pyproject.toml"
     config.write_text("[tool.mypy]\nstrict = true\n", encoding="utf-8")
-    arguments = [
-        "launcher",
-        "--config-file",
-        str(config),
-        "--no-incremental",
-        "--cache-dir",
-        os.devnull,
-        "--no-fast-exit",
-    ]
+    arguments = module._canonical_mypy_arguments(repository, "launcher")
     config_index = arguments.index("--config-file") + 1
 
     with module._retained_mypy_config(repository, arguments):
@@ -1039,16 +1184,7 @@ def test_isolated_module_retains_validated_site_root_through_package_execution(
     monkeypatch.setattr(
         module.sys,
         "argv",
-        [
-            str(fake_launcher),
-            "mypy",
-            "--config-file",
-            str(config),
-            "--no-incremental",
-            "--cache-dir",
-            os.devnull,
-            "--no-fast-exit",
-        ],
+        [str(fake_launcher), "mypy"],
     )
     monkeypatch.setattr(module.sys, "path", safe_path)
     real_import_module = module.importlib.import_module

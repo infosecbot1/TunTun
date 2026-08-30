@@ -13,6 +13,51 @@ from unittest import mock
 
 _RETAINED_SITE_MARKER = "__tuntun_retained_site_packages__"
 _MAX_MYPY_CONFIG_BYTES = 1_048_576
+_MYPY_IMPORT_PATHS = (
+    "packages/contracts/src",
+    "packages/testing/src",
+    "apps/core/src",
+)
+_MYPY_SOURCE_PATHS = (
+    "packages/testing/src",
+    "scripts/run_scenarios.py",
+    "tests/unit/testing/test_scenario.py",
+    "tests/unit/testing/test_scenario_cli.py",
+    "tests/integration/test_deterministic_turn.py",
+    "tests/security/test_scenario_guard.py",
+)
+
+
+@contextmanager
+def _owned_mypy_environment(repository_root: Path) -> Iterator[None]:
+    inherited = {key: value for key, value in os.environ.items() if key.startswith("MYPY")}
+    for key in inherited:
+        del os.environ[key]
+    os.environ["MYPYPATH"] = os.pathsep.join(
+        str(repository_root / relative) for relative in _MYPY_IMPORT_PATHS
+    )
+    try:
+        yield
+    finally:
+        for key in tuple(os.environ):
+            if key.startswith("MYPY"):
+                del os.environ[key]
+        os.environ.update(inherited)
+
+
+def _canonical_mypy_arguments(repository_root: Path, program: str) -> list[str]:
+    return [
+        program,
+        "--python-version",
+        "3.12",
+        "--config-file",
+        str(repository_root / "pyproject.toml"),
+        "--no-incremental",
+        "--cache-dir",
+        os.devnull,
+        "--no-fast-exit",
+        *(str(repository_root / relative) for relative in _MYPY_SOURCE_PATHS),
+    ]
 
 
 @contextmanager
@@ -176,12 +221,20 @@ def _run_from_retained_site(module: str) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) < 2 or sys.argv[1] != "mypy":
+    if sys.argv[1:] != ["mypy"]:
         return 97
-    module = sys.argv.pop(1)
+    module = sys.argv[1]
     repository_root = Path(__file__).absolute().parent.parent
-    with _retained_mypy_config(repository_root, sys.argv):
-        _run_from_retained_site(module)
+    original_arguments = sys.argv[:]
+    sys.argv[:] = _canonical_mypy_arguments(repository_root, original_arguments[0])
+    try:
+        with (
+            _owned_mypy_environment(repository_root),
+            _retained_mypy_config(repository_root, sys.argv),
+        ):
+            _run_from_retained_site(module)
+    finally:
+        sys.argv[:] = original_arguments
     return 0
 
 

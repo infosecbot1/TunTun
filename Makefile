@@ -26,7 +26,7 @@ web-e2e:
 verify-private-data:
 	uv run python scripts/verify_private_data.py .
 scenario-typecheck:
-	MYPYPATH="$(CURDIR)/packages/contracts/src:$(CURDIR)/packages/testing/src:$(CURDIR)/apps/core/src" uv run --offline --no-sync python -I -S scripts/run_isolated_module.py mypy --python-version 3.12 --config-file "$(CURDIR)/pyproject.toml" --no-incremental --cache-dir /dev/null --no-fast-exit "$(CURDIR)/packages/testing/src" "$(CURDIR)/scripts/run_scenarios.py" "$(CURDIR)/tests/unit/testing/test_scenario.py" "$(CURDIR)/tests/unit/testing/test_scenario_cli.py" "$(CURDIR)/tests/integration/test_deterministic_turn.py" "$(CURDIR)/tests/security/test_scenario_guard.py"
+	uv run --offline --no-sync python -I -S scripts/run_isolated_module.py mypy
 scenario-check:
 	uv run --offline --no-sync python -I -S scripts/run_scenarios.py --turns 2 --assert-resource-bounds --json
 # Resolve the highest versions allowed by the wheel's current dependency ranges; do not use uv.lock.
