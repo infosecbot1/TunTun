@@ -6,12 +6,13 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from types import TracebackType
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import Protocol, TypeVar, cast, runtime_checkable
 
 from sqlalchemy import Engine
 from tuntun_core.services.transactions.protocols import UnitOfWorkProtocol
 
 from .repository_facade import (
+    _OwnedResultEnvelope,
     _reject_awaitable,
     _reject_worker_result,
     _RejectedDeferredResult,
@@ -21,6 +22,7 @@ from .unit_of_work import UnitOfWork
 ResultT = TypeVar("ResultT")
 _ASYNC_CLEANUP_NOTE = "additional async unit-of-work cleanup failure"
 _FACTORY_QUARANTINE_LIMIT = 64
+_RESULT_SOURCE_RETENTION_LIMIT = 64
 _PROCESS_LIFETIME_REJECTED_VALUES: list[object] = []
 _PROCESS_LIFETIME_QUARANTINE_LOCK = Lock()
 
@@ -92,6 +94,8 @@ class AsyncUnitOfWork:
         self._owner_claimed = False
         self._task_owner: asyncio.Task[object] | None = None
         self._poisoned = False
+        self._result_sources_until_unlock: list[object] = []
+        self._result_source_ids: set[int] = set()
 
     async def _call(self, operation: Callable[[], ResultT]) -> ResultT:
         loop = asyncio.get_running_loop()
@@ -144,7 +148,24 @@ class AsyncUnitOfWork:
                 _record_cleanup_failure(cancellation, "worker operation", operation_error)
                 raise cancellation from None
             raise
+        if type(result) is _OwnedResultEnvelope:
+            try:
+                envelope = cast(_OwnedResultEnvelope[object], result)
+                result = cast(ResultT, self._adopt_result_envelope(envelope))
+                del envelope
+            except _RejectedDeferredResult as adoption_error:
+                if cancellation is not None:
+                    _record_cleanup_failure(
+                        adoption_error,
+                        "cancellation deferred behind result-source retention",
+                        cancellation,
+                    )
+                raise
         if cancellation is not None:
+            # A completed worker task owns its exact result envelope. Drop it
+            # after its record sources have moved into UOW retention so the
+            # cancellation traceback cannot extend source lifetime.
+            del worker_call
             raise cancellation
         return result
 
@@ -164,6 +185,31 @@ class AsyncUnitOfWork:
         if self._task_owner is None or current is not self._task_owner:
             raise RuntimeError("async unit of work belongs to another owning task")
 
+    def _adopt_result_envelope[EnvelopeResultT](
+        self,
+        envelope: _OwnedResultEnvelope[EnvelopeResultT],
+    ) -> EnvelopeResultT:
+        additions: list[object] = []
+        addition_ids: set[int] = set()
+        for value in envelope.record_sources:
+            identity = id(value)
+            if identity not in self._result_source_ids and identity not in addition_ids:
+                addition_ids.add(identity)
+                additions.append(value)
+        if len(self._result_sources_until_unlock) + len(additions) > _RESULT_SOURCE_RETENTION_LIMIT:
+            raise _RejectedDeferredResult(
+                tuple(additions),
+                "unit-of-work operations must return a synchronous data value; "
+                "record retention bound exceeded",
+            )
+        self._result_source_ids.update(addition_ids)
+        self._result_sources_until_unlock.extend(additions)
+        return envelope.snapshot
+
+    def _release_result_sources_after_unlock(self) -> None:
+        self._result_source_ids.clear()
+        self._result_sources_until_unlock.clear()
+
     def _release_terminal_ownership(self) -> None:
         sync = self._sync
         if sync is not None and not sync.closed:
@@ -178,6 +224,10 @@ class AsyncUnitOfWork:
             self._transaction_lock.release()
             self._owns_lock = False
             self._task_owner = None
+            # Caller record sources can acquire Python-level finalizers after
+            # validation. Drop their last component-owned references only
+            # after both SQL close and writer-lock release.
+            self._release_result_sources_after_unlock()
 
     async def _finish_exit(
         self,
@@ -253,14 +303,14 @@ class AsyncUnitOfWork:
     ) -> ResultT:
         sync = self._active_sync()
 
-        def invoke() -> ResultT:
+        def invoke() -> _OwnedResultEnvelope[ResultT]:
             return _reject_worker_result(
                 operation(sync),
                 "unit-of-work operations must return a synchronous data value",
             )
 
         try:
-            return await self._terminal_call(invoke)
+            return cast(ResultT, await self._terminal_call(invoke))
         except _RejectedDeferredResult as error:
             primary = await self._finish_boundary_rejection(error)
             if primary is not error:
@@ -278,10 +328,11 @@ class AsyncUnitOfWork:
         self._signals_after_commit.clear()
         for name in names:
             try:
-                _reject_worker_result(
+                envelope = _reject_worker_result(
                     self._commit_signals[name].offer_nowait(),
                     "post-commit signals must be synchronous",
                 )
+                self._adopt_result_envelope(envelope)
             except _RejectedDeferredResult as error:
                 self._signal_failures[name] = self._signal_failures.get(name, 0) + 1
                 primary = await self._finish_boundary_rejection(error)
