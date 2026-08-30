@@ -11,15 +11,20 @@ from __future__ import annotations
 import argparse
 import ast
 import configparser
+import contextlib
 import io
 import json
 import os
 import re
+import selectors
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -52,6 +57,8 @@ MARKDOWN_HEADER = re.compile(r"^<!--\s*(?P<header>.+?)\s*-->\s*$")
 PATH_TOKEN = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$")
 APPEND_WORDS = ("append", "addition", "continued", "extension")
 STRUCTURED_SUFFIXES = {".json", ".toml", ".yaml", ".yml"}
+GENERATOR_DIAGNOSTIC_LIMIT = 1_048_576
+GENERATOR_TIMEOUT_SECONDS = 15
 
 
 class PlanParseError(ValueError):
@@ -92,6 +99,12 @@ class _GeneratorRun:
     returncode: int
     diagnostic: bytes
     output_exceeded: bool
+
+
+@dataclass(frozen=True)
+class FoundationSnapshot:
+    files: dict[str, bytes]
+    source_commit: str
 
 
 @dataclass(frozen=True)
@@ -354,33 +367,132 @@ def _tree_files(root: Path) -> dict[str, bytes]:
 def _run_generator_process(
     argv: tuple[str, ...], *, root: Path, environment: dict[str, str]
 ) -> _GeneratorRun:
-    with (
-        tempfile.TemporaryFile() as stdout,
-        tempfile.TemporaryFile() as stderr,
-        tempfile.TemporaryDirectory(prefix="tuntun-plan-generator-venv-") as uv_environment,
-    ):
+    with tempfile.TemporaryDirectory(
+        prefix="tuntun-plan-generator-runtime-"
+    ) as isolated_runtime:
+        runtime = Path(isolated_runtime)
         isolated_environment = dict(environment)
-        if argv[0] == "uv":
-            isolated_environment["UV_PROJECT_ENVIRONMENT"] = uv_environment
-        result = subprocess.run(
+        isolated_environment.update(
+            {
+                "HOME": str(runtime / "home"),
+                "TMPDIR": str(runtime / "tmp"),
+                "UV_CACHE_DIR": str(runtime / "uv-cache"),
+                "XDG_CACHE_HOME": str(runtime / "xdg-cache"),
+            }
+        )
+        for directory in (
+            isolated_environment["HOME"],
+            isolated_environment["TMPDIR"],
+            isolated_environment["UV_CACHE_DIR"],
+            isolated_environment["XDG_CACHE_HOME"],
+        ):
+            Path(directory).mkdir(parents=True, exist_ok=True)
+        if Path(argv[0]).name == "uv":
+            isolated_environment["UV_PROJECT_ENVIRONMENT"] = str(runtime / "uv-venv")
+            isolated_environment["UV_OFFLINE"] = "1"
+        process = subprocess.Popen(
             argv,
             cwd=root,
             env=isolated_environment,
-            check=False,
-            stdout=stdout,
-            stderr=stderr,
-            timeout=15,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
-        stdout_size = stdout.tell()
-        stderr_size = stderr.tell()
-        stdout.seek(max(0, stdout_size - 2048))
-        stderr.seek(max(0, stderr_size - 2048))
-        diagnostic = stdout.read(2048) + stderr.read(2048)
+        if process.stdout is None or process.stderr is None:
+            raise MaterializationError("generator diagnostic pipes are unavailable")
+        stream_selector = selectors.DefaultSelector()
+        stream_selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        stream_selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        totals = {"stdout": 0, "stderr": 0}
+        tails = {"stdout": bytearray(), "stderr": bytearray()}
+        deadline = time.monotonic() + GENERATOR_TIMEOUT_SECONDS
+        output_exceeded = False
+
+        def terminate() -> None:
+            if process.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+        try:
+            while stream_selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, GENERATOR_TIMEOUT_SECONDS)
+                for key, _ in stream_selector.select(min(remaining, 0.25)):
+                    file_object = key.fileobj
+                    descriptor = (
+                        file_object if isinstance(file_object, int) else file_object.fileno()
+                    )
+                    chunk = os.read(descriptor, 65_536)
+                    if not chunk:
+                        stream_selector.unregister(file_object)
+                        continue
+                    name = key.data
+                    totals[name] += len(chunk)
+                    tails[name].extend(chunk)
+                    if len(tails[name]) > 2048:
+                        del tails[name][:-2048]
+                    if totals[name] > GENERATOR_DIAGNOSTIC_LIMIT:
+                        output_exceeded = True
+                        break
+                if output_exceeded:
+                    terminate()
+                    break
+            if output_exceeded:
+                returncode = process.returncode if process.returncode is not None else -9
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, GENERATOR_TIMEOUT_SECONDS)
+                returncode = process.wait(timeout=remaining)
+        except BaseException:
+            terminate()
+            raise
+        finally:
+            stream_selector.close()
+            for stream in (process.stdout, process.stderr):
+                if not stream.closed:
+                    stream.close()
+        diagnostic = bytes(tails["stdout"] + tails["stderr"])
     return _GeneratorRun(
-        returncode=result.returncode,
+        returncode=returncode,
         diagnostic=diagnostic,
-        output_exceeded=max(stdout_size, stderr_size) >= 1_048_576,
+        output_exceeded=output_exceeded,
     )
+
+
+def _generator_environment(root: Path) -> dict[str, str]:
+    python_paths = (
+        str(root),
+        str(root / "apps/core/src"),
+        str(root / "apps/edge/src"),
+        str(root / "packages/contracts/src"),
+        str(root / "packages/testing/src"),
+    )
+    return {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+        "PYTHONPATH": os.pathsep.join(python_paths),
+        "SOURCE_DATE_EPOCH": "0",
+        "TZ": "UTC",
+    }
+
+
+def _resolved_generator_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
+    if argv[0] != "uv":
+        return (sys.executable, *argv[1:])
+    executable = shutil.which("uv")
+    if executable is None:
+        raise MaterializationError("deterministic generator requires the uv executable")
+    return (executable, *argv[1:])
 
 
 def _execute_generator_once(
@@ -389,21 +501,8 @@ def _execute_generator_once(
     with tempfile.TemporaryDirectory(prefix="tuntun-plan-generator-") as temporary:
         root = Path(temporary)
         write_materialized_tree(root, files)
-        argv = (
-            (sys.executable, *generator.argv[1:])
-            if generator.argv[0] == "python"
-            else generator.argv
-        )
-        environment = dict(os.environ)
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        python_paths = (
-            str(root),
-            str(root / "apps/core/src"),
-            str(root / "apps/edge/src"),
-            str(root / "packages/contracts/src"),
-            str(root / "packages/testing/src"),
-        )
-        environment["PYTHONPATH"] = os.pathsep.join(python_paths)
+        argv = _resolved_generator_argv(generator.argv)
+        environment = _generator_environment(root)
         try:
             result = _run_generator_process(argv, root=root, environment=environment)
         except subprocess.TimeoutExpired as error:
@@ -455,23 +554,9 @@ def _run_generator_check(
             root = Path(temporary)
             write_materialized_tree(root, candidate)
             before = _tree_files(root)
-            environment = dict(os.environ)
-            environment["PYTHONDONTWRITEBYTECODE"] = "1"
-            environment["PYTHONPATH"] = os.pathsep.join(
-                (
-                    str(root),
-                    str(root / "apps/core/src"),
-                    str(root / "apps/edge/src"),
-                    str(root / "packages/contracts/src"),
-                    str(root / "packages/testing/src"),
-                )
-            )
+            environment = _generator_environment(root)
             try:
-                command = (
-                    (sys.executable, *check_argv[1:])
-                    if check_argv[0] == "python"
-                    else check_argv
-                )
+                command = _resolved_generator_argv(check_argv)
                 result = _run_generator_process(
                     command,
                     root=root,
@@ -630,11 +715,26 @@ def materialize_document(
     return files
 
 
-def foundation_files_from_ref(repository_root: Path, foundation_ref: str) -> dict[str, bytes]:
-    """Read an explicit git ref without checking it out or trusting a worktree."""
+def foundation_snapshot_from_ref(
+    repository_root: Path, foundation_ref: str
+) -> FoundationSnapshot:
+    """Resolve and archive one immutable Foundation commit object."""
 
+    resolved = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "rev-parse",
+            "--verify",
+            f"{foundation_ref}^{{commit}}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     archive = subprocess.run(
-        ["git", "-C", str(repository_root), "archive", "--format=tar", foundation_ref],
+        ["git", "-C", str(repository_root), "archive", "--format=tar", resolved],
         check=True,
         capture_output=True,
     ).stdout
@@ -648,7 +748,13 @@ def foundation_files_from_ref(repository_root: Path, foundation_ref: str) -> dic
             if extracted is None:
                 raise MaterializationError(f"git archive member cannot be read: {path}")
             files[path] = extracted.read()
-    return files
+    return FoundationSnapshot(files=files, source_commit=resolved)
+
+
+def foundation_files_from_ref(repository_root: Path, foundation_ref: str) -> dict[str, bytes]:
+    """Compatibility wrapper returning files from one immutable Foundation commit."""
+
+    return foundation_snapshot_from_ref(repository_root, foundation_ref).files
 
 
 def plan_document_from_ref(
@@ -705,12 +811,12 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     repository_root = args.repository_root.resolve()
-    foundation = foundation_files_from_ref(repository_root, args.foundation_ref)
+    foundation = foundation_snapshot_from_ref(repository_root, args.foundation_ref)
     document = plan_document_from_ref(repository_root, args.plan_ref, args.plan_path)
-    files = materialize_document(document, foundation_files=foundation)
+    files = materialize_document(document, foundation_files=foundation.files)
     write_materialized_tree(args.destination.resolve(), files)
     print(
-        f"materialized {len(files)} files from Foundation {args.foundation_ref} "
+        f"materialized {len(files)} files from Foundation {foundation.source_commit} "
         f"and plan {document.source_commit}:{document.source_path} "
         f"into {args.destination.resolve()}"
     )

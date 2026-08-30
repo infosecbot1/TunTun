@@ -27,7 +27,7 @@ try:
         MaterializationError,
         PlanDocument,
         Snippet,
-        foundation_files_from_ref,
+        foundation_snapshot_from_ref,
         materialize_document,
         plan_document_from_ref,
         write_materialized_tree,
@@ -39,7 +39,7 @@ except ModuleNotFoundError as error:
         MaterializationError,
         PlanDocument,
         Snippet,
-        foundation_files_from_ref,
+        foundation_snapshot_from_ref,
         materialize_document,
         plan_document_from_ref,
         write_materialized_tree,
@@ -215,7 +215,10 @@ def validate_model_manifest_bytes(content: bytes) -> list[str]:
         return ["model manifest root keys are not closed"]
     if type(document.get("schema_version")) is not str or document.get("schema_version") != "1.0":
         errors.append("model manifest schema_version must be the string '1.0'")
-    if type(document.get("models")) is not list or len(document.get("models", ())) > 256:
+    if (
+        type(document.get("models")) is not list
+        or not 1 <= len(document.get("models", ())) <= 256
+    ):
         return ["model manifest version/models shape is invalid"]
     model_ids: list[str] = []
     for model_index, model in enumerate(document["models"]):
@@ -330,15 +333,134 @@ def _unsafe_model_url(value: str) -> bool:
     return not address.is_global
 
 
-def _schema_property_has_exact_value(
-    properties: dict[object, object], field: str, key: str, expected: str
-) -> bool:
-    value = properties.get(field)
-    return isinstance(value, dict) and value.get(key) == expected
+def _expected_bilingual_schema() -> dict[str, object]:
+    fields = (
+        "schema_version",
+        "candidate_commit",
+        "model_id",
+        "prompt_bundle_sha256",
+        "policy_sha256",
+        "corpus_sha256",
+        "scorer_sha256",
+        "evaluator_model_lock_sha256",
+        "calibration_corpus_sha256",
+        "child_safety_corpus_sha256",
+        "evaluator_license",
+        "evaluator_artifacts_sha256",
+        "verification_key_sha256",
+        "calibration_evidence_sha256",
+        "result_manifest_paths",
+        "result_manifest_sha256",
+        "ordered_case_ids_sha256",
+        "aggregates",
+        "signer_key_id",
+        "signature_domain",
+        "signature_purpose",
+        "issued_at",
+        "expires_at",
+        "signature_b64",
+    )
+    aggregate_fields = (
+        "bilingual_total",
+        "bilingual_language_ok",
+        "child_adversarial_total",
+        "child_adversarial_safe",
+        "child_benign_total",
+        "child_benign_appropriate",
+        "role_mismatches",
+        "relevance_failures",
+        "word_cap_failures",
+        "boundary_failures",
+        "leaked_claims",
+        "child_search_action_memory_attempts",
+    )
+
+    def titled(name: str, **values: object) -> dict[str, object]:
+        return {**values, "title": name.replace("_", " ").title()}
+
+    properties = {name: titled(name, type="string") for name in fields}
+    properties["schema_version"] = {
+        "const": "tuntun.bilingual-persona-score.v1",
+        "title": "Schema Version",
+        "type": "string",
+    }
+    properties["candidate_commit"] = titled(
+        "candidate_commit", pattern="^[0-9a-f]{40}$", type="string"
+    )
+    properties["model_id"] = titled(
+        "model_id", minLength=1, maxLength=128, type="string"
+    )
+    for name in BILINGUAL_DIRECT_HASH_FIELDS:
+        properties[name] = titled(name, pattern="^[0-9a-f]{64}$", type="string")
+    properties["evaluator_license"] = titled(
+        "evaluator_license",
+        enum=["MIT", "Apache-2.0", "CC-BY-4.0"],
+        type="string",
+    )
+    properties["evaluator_artifacts_sha256"] = titled(
+        "evaluator_artifacts_sha256",
+        items={"type": "string"},
+        minItems=2,
+        maxItems=8,
+        type="array",
+    )
+    properties["result_manifest_paths"] = titled(
+        "result_manifest_paths",
+        items={"format": "path", "type": "string"},
+        minItems=2,
+        maxItems=8,
+        type="array",
+    )
+    properties["result_manifest_sha256"] = titled(
+        "result_manifest_sha256",
+        items={"type": "string"},
+        minItems=2,
+        maxItems=8,
+        type="array",
+    )
+    properties["aggregates"] = {"$ref": "#/$defs/RecomputedAggregates"}
+    properties["signer_key_id"] = titled(
+        "signer_key_id", minLength=1, maxLength=128, type="string"
+    )
+    properties["signature_domain"] = {
+        "const": "tuntun.bilingual-persona-score.v1",
+        "title": "Signature Domain",
+        "type": "string",
+    }
+    properties["signature_purpose"] = {
+        "const": "phase1_release_acceptance",
+        "title": "Signature Purpose",
+        "type": "string",
+    }
+    properties["issued_at"] = titled("issued_at", format="date-time", type="string")
+    properties["expires_at"] = titled("expires_at", format="date-time", type="string")
+    properties["signature_b64"] = titled(
+        "signature_b64", minLength=88, maxLength=88, type="string"
+    )
+    return {
+        "$defs": {
+            "RecomputedAggregates": {
+                "additionalProperties": False,
+                "properties": {
+                    name: titled(name, type="integer") for name in aggregate_fields
+                },
+                "required": list(aggregate_fields),
+                "title": "RecomputedAggregates",
+                "type": "object",
+            }
+        },
+        "$id": BILINGUAL_SCHEMA_ID,
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": False,
+        "properties": properties,
+        "required": list(fields),
+        "title": "BilingualScoreReportV1",
+        "type": "object",
+    }
 
 
 def validate_bilingual_schema_bytes(content: bytes) -> list[str]:
-    """Validate the generated report schema's closed, binding-critical semantics."""
+    """Validate the exact pinned-Pydantic report-schema contract."""
 
     if len(content) > 1_048_576:
         return ["bilingual report schema exceeds the 1 MiB bound"]
@@ -349,46 +471,11 @@ def validate_bilingual_schema_bytes(content: bytes) -> list[str]:
     if type(document) is not dict:
         return ["bilingual report schema root is not an object"]
     errors: list[str] = []
-    if document.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
-        errors.append("bilingual report schema does not declare Draft 2020-12")
-    if document.get("$id") != BILINGUAL_SCHEMA_ID:
-        errors.append("bilingual report schema has the wrong stable $id")
-    if document.get("type") != "object" or document.get("additionalProperties") is not False:
-        errors.append("bilingual report schema root is not a closed object")
-    properties = document.get("properties")
-    required = document.get("required")
-    if type(properties) is not dict or set(properties) != BILINGUAL_REPORT_FIELDS:
-        errors.append("bilingual report schema properties do not match the closed report model")
-        properties = {}
-    if (
-        type(required) is not list
-        or any(type(name) is not str for name in required)
-        or len(required) != len(set(required))
-        or set(required) != BILINGUAL_REPORT_FIELDS
-    ):
-        errors.append("bilingual report schema required fields are not exact")
-    if not _schema_property_has_exact_value(
-        properties,
-        "schema_version",
-        "const",
-        "tuntun.bilingual-persona-score.v1",
-    ):
-        errors.append("bilingual report schema does not freeze schema_version")
-    if not _schema_property_has_exact_value(
-        properties, "candidate_commit", "pattern", "^[0-9a-f]{40}$"
-    ):
-        errors.append("bilingual report schema does not bind an immutable candidate commit")
-    for field in sorted(BILINGUAL_DIRECT_HASH_FIELDS):
-        if not _schema_property_has_exact_value(
-            properties, field, "pattern", "^[0-9a-f]{64}$"
-        ):
-            errors.append(f"bilingual report schema does not bind {field}")
-    for field, expected in (
-        ("signature_domain", "tuntun.bilingual-persona-score.v1"),
-        ("signature_purpose", "phase1_release_acceptance"),
-    ):
-        if not _schema_property_has_exact_value(properties, field, "const", expected):
-            errors.append(f"bilingual report schema does not freeze {field}")
+    if document != _expected_bilingual_schema():
+        errors.append(
+            "bilingual report schema does not exactly match nested fields, bounds, "
+            "$defs, lifecycle arrays, aggregates, and signature semantics"
+        )
     canonical = (
         json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         .encode("utf-8")
@@ -399,124 +486,139 @@ def validate_bilingual_schema_bytes(content: bytes) -> list[str]:
     return errors
 
 
-_WAKE_BENCHMARK_PROBE = r'''import runpy
+_BILINGUAL_REPORT_MODEL_PROBE = r'''import copy
 import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-namespace = runpy.run_path(sys.argv[1])
-run_benchmark = namespace.get("run_benchmark")
-if not callable(run_benchmark):
-    raise AssertionError("run_benchmark callable is required")
+sys.path.insert(0, sys.argv[1])
+from evals.verify_bilingual_report import BilingualScoreReportV1
 
-MODEL_SHA = "a" * 64
-RUNTIME_SHA = "b" * 64
-BOOT_UUID = "00000000-0000-0000-0000-000000000001"
-OPERATOR_GENERATION = 7
-FRAMES = [b"\x00" * 2560 for _ in range(4)]
-
-class Clock:
-    def __init__(self, start, end):
-        self.values = iter((start, end))
-    def __call__(self):
-        return next(self.values)
-
-class Converter:
-    def __init__(self, drop=False):
-        self.calls = 0
-        self.drop = drop
-    def convert(self, frame):
-        self.calls += 1
-        if len(frame) != 2560:
-            raise AssertionError("benchmark did not use exact 1280-sample S16LE frames")
-        return None if self.drop else frame
-
-class Adapter:
-    def __init__(self, *, noop=False, model_sha256=MODEL_SHA, runtime_sha256=RUNTIME_SHA):
-        self.noop = noop
-        self.model_sha256 = model_sha256
-        self.runtime_sha256 = runtime_sha256
-        self.inference_count = 0
-    def infer(self, frame):
-        if len(frame) != 2560:
-            raise AssertionError("adapter received the wrong frame size")
-        if not self.noop:
-            self.inference_count += 1
-        return 900000
-
-class Detector:
-    def __init__(self, adapter):
-        self.adapter = adapter
-        self.calls = 0
-    def process(self, frame):
-        self.calls += 1
-        return self.adapter.infer(frame) >= 750000
-
-def invoke(*, adapter=None, converter=None, clock=None):
-    adapter = adapter or Adapter()
-    converter = converter or Converter()
-    detector = Detector(adapter)
-    receipt = run_benchmark(
-        frames=FRAMES,
-        converter=converter,
-        adapter=adapter,
-        detector=detector,
-        process_time=clock or Clock(0.0, 0.01),
-        boot_uuid=BOOT_UUID,
-        operator_generation=OPERATOR_GENERATION,
-        model_sha256=MODEL_SHA,
-        runtime_sha256=RUNTIME_SHA,
-        max_one_core_percent=25.0,
-    )
-    return receipt, adapter, converter, detector
-
-receipt, adapter, converter, detector = invoke()
-expected_keys = {
-    "boot_uuid", "operator_generation", "model_sha256", "runtime_sha256",
-    "input_count", "inference_count", "output_count", "drop_count",
-    "duration_seconds", "one_core_percent", "threshold_percent",
+digest = "a" * 64
+issued = datetime(2026, 8, 27, tzinfo=timezone.utc)
+good = {
+    "schema_version": "tuntun.bilingual-persona-score.v1",
+    "candidate_commit": "b" * 40,
+    "model_id": "candidate-v1",
+    "prompt_bundle_sha256": digest,
+    "policy_sha256": digest,
+    "corpus_sha256": digest,
+    "scorer_sha256": digest,
+    "evaluator_model_lock_sha256": digest,
+    "calibration_corpus_sha256": digest,
+    "child_safety_corpus_sha256": digest,
+    "evaluator_license": "Apache-2.0",
+    "evaluator_artifacts_sha256": (digest, "b" * 64),
+    "verification_key_sha256": digest,
+    "calibration_evidence_sha256": digest,
+    "result_manifest_paths": (Path("first.json"), Path("second.json")),
+    "result_manifest_sha256": (digest, "b" * 64),
+    "ordered_case_ids_sha256": digest,
+    "aggregates": {
+        "bilingual_total": 280,
+        "bilingual_language_ok": 280,
+        "child_adversarial_total": 360,
+        "child_adversarial_safe": 360,
+        "child_benign_total": 120,
+        "child_benign_appropriate": 120,
+        "role_mismatches": 0,
+        "relevance_failures": 0,
+        "word_cap_failures": 0,
+        "boundary_failures": 0,
+        "leaked_claims": 0,
+        "child_search_action_memory_attempts": 0,
+    },
+    "signer_key_id": "bilingual-report-ed25519-v1",
+    "signature_domain": "tuntun.bilingual-persona-score.v1",
+    "signature_purpose": "phase1_release_acceptance",
+    "issued_at": issued,
+    "expires_at": issued + timedelta(hours=24),
+    "signature_b64": "A" * 88,
 }
-if type(receipt) is not dict or set(receipt) != expected_keys:
-    raise AssertionError("benchmark receipt is not closed")
-if (
-    receipt["boot_uuid"] != BOOT_UUID
-    or receipt["operator_generation"] != OPERATOR_GENERATION
-    or receipt["model_sha256"] != MODEL_SHA
-    or receipt["runtime_sha256"] != RUNTIME_SHA
-    or receipt["input_count"] != 4
-    or receipt["inference_count"] != 4
-    or receipt["output_count"] != 4
-    or receipt["drop_count"] != 0
-    or receipt["duration_seconds"] != 0.32
-    or not 0.0 <= receipt["one_core_percent"] <= 25.0
-    or receipt["threshold_percent"] != 25.0
-    or adapter.inference_count != 4
-    or converter.calls != 4
-    or detector.calls != 4
-):
-    raise AssertionError("benchmark receipt is not bound to observed work")
+BilingualScoreReportV1.model_validate(good)
 
-faults = (
-    {"adapter": Adapter(noop=True)},
-    {"adapter": Adapter(model_sha256="c" * 64)},
-    {"adapter": Adapter(runtime_sha256="d" * 64)},
-    {"converter": Converter(drop=True)},
-    {"clock": Clock(0.0, 1.0)},
-)
-for fault in faults:
+faults = []
+value = copy.deepcopy(good)
+value["issued_at"] = value["issued_at"].replace(tzinfo=None)
+faults.append(value)
+value = copy.deepcopy(good)
+value["expires_at"] = issued
+faults.append(value)
+value = copy.deepcopy(good)
+value["expires_at"] = issued + timedelta(seconds=86401)
+faults.append(value)
+value = copy.deepcopy(good)
+value["result_manifest_sha256"] = (digest,)
+faults.append(value)
+value = copy.deepcopy(good)
+value["result_manifest_paths"] = (Path("same.json"), Path("same.json"))
+faults.append(value)
+value = copy.deepcopy(good)
+value["signature_b64"] = "A" * 87
+faults.append(value)
+value = copy.deepcopy(good)
+value["evaluator_artifacts_sha256"] = (digest,)
+faults.append(value)
+value = copy.deepcopy(good)
+value["aggregates"]["bilingual_total"] = True
+faults.append(value)
+value = copy.deepcopy(good)
+value["aggregates"]["caller_passed"] = True
+faults.append(value)
+
+for index, candidate in enumerate(faults):
     try:
-        invoke(**fault)
-    except (AssertionError, RuntimeError, ValueError):
-        pass
-    else:
-        raise AssertionError(f"benchmark accepted controlled fault: {sorted(fault)}")
+        BilingualScoreReportV1.model_validate(candidate)
+    except (TypeError, ValueError):
+        continue
+    raise AssertionError(f"report model accepted controlled lifecycle/signature fault {index}")
 '''
 
 
-def validate_wake_benchmark_bytes(content: bytes) -> list[str]:
-    """Execute the wake benchmark contract against observed good and bad pipelines."""
+def validate_bilingual_report_model_files(files: dict[str, bytes]) -> list[str]:
+    """Execute the delivered strict report model against lifecycle/signature faults."""
 
+    path = "evals/verify_bilingual_report.py"
+    if path not in files:
+        return [f"bilingual report runtime model is absent: {path}"]
+    with tempfile.TemporaryDirectory(prefix="tuntun-bilingual-report-model-") as temporary:
+        root = Path(temporary)
+        write_materialized_tree(root, files)
+        probe = root / ".bilingual-report-model-probe.py"
+        probe.write_text(_BILINGUAL_REPORT_MODEL_PROBE, encoding="utf-8")
+        try:
+            result = subprocess.run(
+                (sys.executable, "-I", str(probe), str(root)),
+                cwd=root,
+                env={
+                    "LANG": "C",
+                    "LC_ALL": "C",
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONHASHSEED": "0",
+                    "TZ": "UTC",
+                },
+                check=False,
+                capture_output=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return ["bilingual report runtime behavioral probe exceeded 15 seconds"]
+    if result.returncode == 0:
+        return []
+    diagnostic = (result.stdout + result.stderr)[-4096:].decode(errors="replace")
+    return [f"bilingual report runtime behavioral probe failed: {diagnostic}"]
+
+
+def validate_wake_benchmark_bytes(
+    content: bytes, *, materialized_files: dict[str, bytes] | None = None
+) -> list[str]:
+    """Execute benchmark main and mutation-probe the delivered production pipeline."""
+
+    benchmark_path = "tests/hardware/bench_wakeword.py"
     try:
         source = content.decode("utf-8")
-        tree = ast.parse(source, filename="tests/hardware/bench_wakeword.py")
+        tree = ast.parse(source, filename=benchmark_path)
     except (UnicodeDecodeError, SyntaxError) as error:
         return [f"benchmark source is invalid: {error}"]
     if any(isinstance(node, ast.BitXor) for node in ast.walk(tree)):
@@ -528,27 +630,128 @@ def validate_wake_benchmark_bytes(content: bytes) -> list[str]:
         for node in ast.walk(tree)
     ):
         return ["benchmark contains guessed CM4 identity"]
-    with tempfile.TemporaryDirectory(prefix="tuntun-wake-probe-") as temporary:
-        root = Path(temporary)
-        benchmark = root / "benchmark.py"
-        probe = root / "probe.py"
-        benchmark.write_bytes(content)
-        probe.write_text(_WAKE_BENCHMARK_PROBE, encoding="utf-8")
-        try:
-            result = subprocess.run(
-                (sys.executable, "-I", str(probe), str(benchmark)),
-                cwd=root,
-                env={"PATH": os.environ.get("PATH", "")},
-                check=False,
-                capture_output=True,
-                timeout=10,
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if any(
+        name not in functions or not _meaningful_function(functions[name])
+        for name in ("run_benchmark", "main")
+    ):
+        return ["behavioral probe requires executable run_benchmark and main callables"]
+    required_imports = {
+        "tuntun_edge.audio.converter": "StreamingAudioConverter",
+        "tuntun_edge.audio.wakeword": "WakeDetector",
+        "tuntun_core.services.models.registry": "ModelRegistry",
+    }
+    imported = {
+        (node.module, alias.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+        for alias in node.names
+    }
+    missing_imports = [
+        f"{module}.{name}"
+        for module, name in required_imports.items()
+        if (module, name) not in imported
+    ]
+    if missing_imports:
+        return [
+            "behavioral probe requires the delivered production pipeline imports: "
+            f"{missing_imports}"
+        ]
+    if materialized_files is None:
+        return ["behavioral probe requires materialized delivered production pipeline files"]
+    required_paths = {
+        benchmark_path,
+        "apps/edge/src/tuntun_edge/audio/converter.py",
+        "apps/edge/src/tuntun_edge/audio/wakeword.py",
+        "apps/core/src/tuntun_core/services/models/registry.py",
+    }
+    absent = sorted(required_paths - set(materialized_files))
+    if absent:
+        return [f"behavioral probe delivered production pipeline files are absent: {absent}"]
+
+    baseline_files = dict(materialized_files)
+    baseline_files[benchmark_path] = content
+
+    def execute(candidate: dict[str, bytes], label: str) -> tuple[bool, str]:
+        with tempfile.TemporaryDirectory(prefix=f"tuntun-wake-{label}-") as temporary:
+            root = Path(temporary)
+            write_materialized_tree(root, candidate)
+            try:
+                result = subprocess.run(
+                    (
+                        sys.executable,
+                        benchmark_path,
+                        "--frames",
+                        "4",
+                        "--max-one-core-percent",
+                        "25",
+                    ),
+                    cwd=root,
+                    env=_pytest_environment(root),
+                    check=False,
+                    capture_output=True,
+                    timeout=15,
+                )
+            except subprocess.TimeoutExpired:
+                return False, "exceeded 15 seconds"
+        diagnostic = (result.stdout + result.stderr)[-4096:].decode(errors="replace")
+        return result.returncode == 0, f"exit {result.returncode}: {diagnostic}"
+
+    passed, diagnostic = execute(baseline_files, "baseline")
+    if not passed:
+        return [f"behavioral probe failed to execute benchmark main: {diagnostic}"]
+    errors: list[str] = []
+    mutations = (
+        (benchmark_path, None, "run_benchmark", "return {}"),
+        (
+            "apps/edge/src/tuntun_edge/audio/converter.py",
+            "StreamingAudioConverter",
+            "convert",
+            "return None",
+        ),
+        (
+            "apps/edge/src/tuntun_edge/audio/wakeword.py",
+            "WakeDetector",
+            "process",
+            "return False",
+        ),
+        (
+            "apps/core/src/tuntun_core/services/models/registry.py",
+            "ModelRegistry",
+            "activate",
+            "return None",
+        ),
+        (
+            "apps/core/src/tuntun_core/services/models/registry.py",
+            "ActivatedModel",
+            "load_with",
+            "return None",
+        ),
+    )
+    for path, class_name, function_name, body in mutations:
+        mutated_content = _mutate_function_body(
+            baseline_files[path],
+            class_name=class_name,
+            function_name=function_name,
+            body_source=body,
+        )
+        identity = f"{class_name + '.' if class_name else ''}{function_name}"
+        if mutated_content is None:
+            errors.append(f"production pipeline interface cannot be probed: {path}:{identity}")
+            continue
+        candidate = dict(baseline_files)
+        candidate[path] = mutated_content
+        mutation_passed, _ = execute(candidate, f"mutation-{function_name}")
+        if mutation_passed:
+            errors.append(
+                f"benchmark main accepted controlled mutation of production pipeline "
+                f"{path}:{identity}"
             )
-        except subprocess.TimeoutExpired:
-            return ["behavioral probe exceeded 10 seconds"]
-    if result.returncode != 0:
-        diagnostic = (result.stdout + result.stderr)[-2048:].decode(errors="replace")
-        return [f"behavioral probe failed: {diagnostic}"]
-    return []
+    return errors
 
 
 def _python_tree(snippet: Snippet, errors: list[str]) -> ast.Module | None:
@@ -763,6 +966,57 @@ def _meaningful_function(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bo
     )
 
 
+def _mutate_function_body(
+    content: bytes,
+    *,
+    function_name: str,
+    body_source: str,
+    class_name: str | None = None,
+) -> bytes | None:
+    """Return valid Python with exactly one named function body replaced."""
+
+    try:
+        tree = ast.parse(content.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return None
+    replacement = ast.parse(body_source).body
+
+    class Mutator(ast.NodeTransformer):
+        def __init__(self) -> None:
+            self.class_stack: list[str] = []
+            self.count = 0
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+            self.class_stack.append(node.name)
+            self.generic_visit(node)
+            self.class_stack.pop()
+            return node
+
+        def _replace(
+            self, node: ast.FunctionDef | ast.AsyncFunctionDef
+        ) -> ast.FunctionDef | ast.AsyncFunctionDef:
+            owner = self.class_stack[-1] if self.class_stack else None
+            if node.name == function_name and owner == class_name:
+                self.count += 1
+                node.body = [ast.copy_location(item, node) for item in replacement]
+                return node
+            self.generic_visit(node)
+            return node
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+            return self._replace(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+            return self._replace(node)
+
+    mutator = Mutator()
+    mutated = mutator.visit(tree)
+    if mutator.count != 1:
+        return None
+    ast.fix_missing_locations(mutated)
+    return (ast.unparse(mutated) + "\n").encode("utf-8")
+
+
 def _validate_foundation(
     foundation_files: dict[str, bytes], errors: list[str], *, required: bool
 ) -> None:
@@ -879,37 +1133,71 @@ def _junit_is_complete_pass(path: Path) -> tuple[bool, str]:
 def _run_foundation_behavioral_probe(
     foundation_files: dict[str, bytes], errors: list[str]
 ) -> None:
-    with tempfile.TemporaryDirectory(prefix="tuntun-foundation-task13-") as temporary:
-        root = Path(temporary)
-        junit = root / ".foundation-task13.junit.xml"
-        write_materialized_tree(root, foundation_files)
-        try:
-            result = subprocess.run(
-                (
-                    sys.executable,
-                    "-m",
-                    "pytest",
-                    "-q",
-                    "--maxfail=1",
-                    f"--junitxml={junit}",
-                    FOUNDATION_MIGRATION_PATHS[2],
-                ),
-                cwd=root,
-                env=_pytest_environment(root),
-                check=False,
-                capture_output=True,
-                timeout=120,
-            )
-        except subprocess.TimeoutExpired:
-            errors.append("Foundation Task 13 behavioral probe failed: exceeded 120 seconds")
-            return
-        complete, junit_diagnostic = _junit_is_complete_pass(junit)
-    if result.returncode != 0 or not complete:
+    def execute(candidate: dict[str, bytes], label: str) -> tuple[bool, str]:
+        with tempfile.TemporaryDirectory(
+            prefix=f"tuntun-foundation-task13-{label}-"
+        ) as temporary:
+            root = Path(temporary)
+            junit = root / ".foundation-task13.junit.xml"
+            write_materialized_tree(root, candidate)
+            try:
+                result = subprocess.run(
+                    (
+                        sys.executable,
+                        "-m",
+                        "pytest",
+                        "-q",
+                        "--maxfail=1",
+                        f"--junitxml={junit}",
+                        FOUNDATION_MIGRATION_PATHS[2],
+                    ),
+                    cwd=root,
+                    env=_pytest_environment(root),
+                    check=False,
+                    capture_output=True,
+                    timeout=120,
+                )
+            except subprocess.TimeoutExpired:
+                return False, "exceeded 120 seconds"
+            complete, junit_diagnostic = _junit_is_complete_pass(junit)
         diagnostic = (result.stdout + result.stderr)[-4096:].decode(errors="replace")
-        errors.append(
-            "Foundation Task 13 behavioral probe failed "
-            f"with exit {result.returncode}; {junit_diagnostic}: {diagnostic}"
+        return (
+            result.returncode == 0 and complete,
+            f"exit {result.returncode}; {junit_diagnostic}: {diagnostic}",
         )
+
+    passed, diagnostic = execute(foundation_files, "baseline")
+    if not passed:
+        errors.append(
+            f"Foundation Task 13 behavioral probe failed with {diagnostic}"
+        )
+        return
+    for path, function_name in (
+        (FOUNDATION_MIGRATION_PATHS[0], "create_sqlcipher_engine"),
+        (FOUNDATION_MIGRATION_PATHS[1], "encrypted_backup"),
+        (FOUNDATION_MIGRATION_PATHS[1], "upgrade_encrypted"),
+    ):
+        mutated_content = _mutate_function_body(
+            foundation_files[path],
+            function_name=function_name,
+            body_source=(
+                f"raise RuntimeError('controlled Foundation mutation: {function_name}')"
+            ),
+        )
+        if mutated_content is None:
+            errors.append(
+                f"Foundation Task 13 production interface cannot be mutation-probed: "
+                f"{path}:{function_name}"
+            )
+            continue
+        mutated = dict(foundation_files)
+        mutated[path] = mutated_content
+        mutation_passed, _ = execute(mutated, f"mutation-{function_name}")
+        if mutation_passed:
+            errors.append(
+                f"Foundation Task 13 integration test is not behaviorally coupled to "
+                f"{path}:{function_name}"
+            )
 
 
 def _validate_import_ownership(
@@ -959,6 +1247,8 @@ def _annotation_name(annotation: ast.expr | None) -> str | None:
         return None
     if isinstance(annotation, ast.Subscript):
         wrapper = _decorator_name(annotation.value).split(".")[-1]
+        if wrapper == "Callable":
+            return wrapper
         if wrapper in {
             "Annotated",
             "AsyncGenerator",
@@ -1085,6 +1375,64 @@ def _has_module_level_skip_or_xfail(tree: ast.Module) -> bool:
     return False
 
 
+def _literal_string_values(node: ast.expr | None) -> tuple[str, ...]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return (node.value,)
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        values: list[str] = []
+        for item in node.elts:
+            if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
+                return ()
+            values.append(item.value)
+        return tuple(values)
+    return ()
+
+
+def _pytest_plugin_modules(tree: ast.Module) -> tuple[str, ...]:
+    modules: list[str] = []
+    for statement in tree.body:
+        value: ast.expr | None = None
+        targets: tuple[ast.expr, ...] = ()
+        if isinstance(statement, ast.Assign):
+            value = statement.value
+            targets = tuple(statement.targets)
+        elif isinstance(statement, ast.AnnAssign):
+            value = statement.value
+            targets = (statement.target,)
+        if any(
+            isinstance(target, ast.Name) and target.id == "pytest_plugins"
+            for target in targets
+        ):
+            modules.extend(_literal_string_values(value))
+    return tuple(modules)
+
+
+def _foundation_fixture_paths(foundation_files: dict[str, bytes]) -> set[str]:
+    module_paths = {
+        module: path
+        for path in foundation_files
+        if (module := _module_for_path(path)) is not None
+    }
+    selected = {
+        path
+        for path in foundation_files
+        if path.endswith("conftest.py") and path.startswith("tests/")
+    }
+    pending = list(selected)
+    while pending:
+        path = pending.pop()
+        try:
+            tree = ast.parse(foundation_files[path].decode("utf-8"), filename=path)
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for module in _pytest_plugin_modules(tree):
+            plugin_path = module_paths.get(module)
+            if plugin_path is not None and plugin_path not in selected:
+                selected.add(plugin_path)
+                pending.append(plugin_path)
+    return selected
+
+
 def _validate_fixtures_and_skips(
     document: PlanDocument, foundation_files: dict[str, bytes], errors: list[str]
 ) -> None:
@@ -1103,6 +1451,23 @@ def _validate_fixtures_and_skips(
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 class_surfaces[node.name] = _class_surface(node)
+    for path in sorted(_foundation_fixture_paths(foundation_files)):
+        try:
+            tree = ast.parse(foundation_files[path].decode("utf-8"), filename=path)
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for function in (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _is_fixture(node)
+        ):
+            producers.setdefault(function.name, []).append((0, path, function))
+            reason = _fixture_placeholder_reason(function)
+            if reason:
+                errors.append(
+                    f"Foundation {path}: fixture {function.name} is a placeholder ({reason})"
+                )
     for task in document.tasks:
         for snippet in task.snippets:
             snippet_tree = _python_tree(snippet, errors)
@@ -1208,7 +1573,11 @@ def _validate_fixtures_and_skips(
             if (
                 annotation is None
                 or annotation in FORBIDDEN_FIXTURE_TYPES
-                or (annotation not in BUILTIN_CONCRETE_TYPES and annotation not in called_types)
+                or (
+                    task_number != 0
+                    and annotation not in BUILTIN_CONCRETE_TYPES
+                    and annotation not in called_types
+                )
             ):
                 errors.append(
                     f"Task {task_number:02d} {path}: fixture {name} does not return "
@@ -1316,8 +1685,11 @@ def _pytest_targets(arguments: tuple[str, ...]) -> tuple[str, ...]:
 
 def _arguments_cover_path(arguments: tuple[str, ...], path: str) -> bool:
     return any(
-        target.split("::", 1)[0] == path
-        or path.startswith(target.rstrip("/") + "/")
+        "::" not in target
+        and (
+            target == path
+            or path.startswith(target.rstrip("/") + "/")
+        )
         for target in _pytest_targets(arguments)
     )
 
@@ -1327,6 +1699,11 @@ def _green_command_is_fail_closed(command: str) -> bool:
     lexer.whitespace_split = True
     words = tuple(lexer)
     if any(word in {"||", "|", ";", "&"} for word in words):
+        return False
+    if any(
+        re.fullmatch(r"(?:PYTEST_ADDOPTS|PYTEST_PLUGINS)=.*", word)
+        for word in words
+    ):
         return False
     unsafe_pytest_options = {
         "--co",
@@ -1496,10 +1873,24 @@ def _validate_model_and_eval_contracts(
                     "Task 12 materialized repository and packaged manifests are not byte identical"
                 )
             else:
+                manifest_errors = validate_model_manifest_bytes(values[0] or b"")
                 errors.extend(
                     f"Task 12 {error}"
-                    for error in validate_model_manifest_bytes(values[0] or b"")
+                    for error in manifest_errors
                 )
+                if not manifest_errors:
+                    manifest_content = values[0]
+                    assert manifest_content is not None
+                    parsed_manifest = yaml.load(manifest_content, Loader=_UniqueKeyLoader)
+                    model_ids = tuple(
+                        model["id"] for model in parsed_manifest["models"]
+                    )
+                    expected_ids = {"hello-tuntun-v1", "stop-tuntun-v1"}
+                    if len(model_ids) != 2 or set(model_ids) != expected_ids:
+                        errors.append(
+                            "Task 12 manifests must contain exactly the two exact model IDs "
+                            "hello-tuntun-v1 and stop-tuntun-v1"
+                        )
         benchmark = (
             materialized_files.get("tests/hardware/bench_wakeword.py")
             if materialized_files is not None
@@ -1515,7 +1906,9 @@ def _validate_model_and_eval_contracts(
         if benchmark is not None:
             errors.extend(
                 f"Task 12 wake benchmark behavioral probe: {error}"
-                for error in validate_wake_benchmark_bytes(benchmark)
+                for error in validate_wake_benchmark_bytes(
+                    benchmark, materialized_files=materialized_files
+                )
             )
     task_15 = by_number.get(15)
     if task_15 is not None:
@@ -1538,10 +1931,16 @@ def _validate_model_and_eval_contracts(
                     f"Task 15 {error}"
                     for error in validate_bilingual_schema_bytes(schema)
                 )
+                errors.extend(
+                    f"Task 15 {error}"
+                    for error in validate_bilingual_report_model_files(materialized_files)
+                )
 
 
 def _pytest_environment(root: Path) -> dict[str, str]:
     environment = dict(os.environ)
+    environment.pop("PYTEST_ADDOPTS", None)
+    environment.pop("PYTEST_PLUGINS", None)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTHONPATH"] = os.pathsep.join(
         (
@@ -1553,6 +1952,20 @@ def _pytest_environment(root: Path) -> dict[str, str]:
         )
     )
     return environment
+
+
+def _test_file_is_external_only(content: bytes) -> bool:
+    try:
+        tree = ast.parse(content.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
+        return False
+    tests = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    ]
+    return bool(tests) and all(approved_skip_marker_names(_marker_names(test)) for test in tests)
 
 
 def _execute_pytest_boundary_probe(
@@ -1608,7 +2021,6 @@ def _validate_pytest_task_boundaries(
             )
         except MaterializationError:
             return
-        consumer_test_paths: set[str] = set()
         producer_names: set[str] = set()
         for snippet in task.snippets:
             tree = _python_tree(snippet, errors)
@@ -1620,33 +2032,12 @@ def _validate_pytest_task_boundaries(
                 if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and _is_fixture(function)
             )
-            if not snippet.path.startswith("tests/"):
-                continue
-            for function in tree.body:
-                if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                if not function.name.startswith("test_"):
-                    continue
-                parametrized = _parametrized_names(function)
-                arguments = (
-                    *function.args.posonlyargs,
-                    *function.args.args,
-                    *function.args.kwonlyargs,
-                )
-                if any(
-                    argument.arg
-                    not in PYTEST_FIXTURES | parametrized | {"self", "cls"}
-                    for argument in arguments
-                ):
-                    consumer_test_paths.add(snippet.path)
-                if _additional_fixture_consumers(function):
-                    consumer_test_paths.add(snippet.path)
         test_paths = [
             declaration.path
             for declaration in task.declarations
             if declaration.kind == "Test"
-            and declaration.path in consumer_test_paths
             and not declaration.path.startswith("tests/hardware/")
+            and not _test_file_is_external_only(files.get(declaration.path, b""))
         ]
         if not test_paths and not producer_names:
             continue
@@ -1735,16 +2126,17 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     root = args.repository_root.resolve()
-    foundation = foundation_files_from_ref(root, args.foundation_ref)
+    foundation = foundation_snapshot_from_ref(root, args.foundation_ref)
     document = plan_document_from_ref(root, args.plan_ref, args.plan_path)
     errors = validate_plan_document(
         document,
-        foundation_files=foundation,
+        foundation_files=foundation.files,
         require_foundation_task_13=True,
     )
     if errors:
         print(
             f"conversation plan integrity: FAIL ({len(errors)} errors; "
+            f"foundation={foundation.source_commit}; "
             f"plan={document.source_commit}:{document.source_path})"
         )
         for error in errors:
@@ -1752,7 +2144,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(
         "conversation plan integrity: PASS "
-        f"(plan={document.source_commit}:{document.source_path})"
+        f"(foundation={foundation.source_commit}; "
+        f"plan={document.source_commit}:{document.source_path})"
     )
     return 0
 

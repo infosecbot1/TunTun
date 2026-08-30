@@ -24444,6 +24444,7 @@ SCHEMA_ID = "https://tuntun.local/schemas/bilingual-persona-score-v1.schema.json
 def canonical_schema_bytes() -> bytes:
     schema = BilingualScoreReportV1.model_json_schema()
     schema["$id"] = SCHEMA_ID
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     return (
         json.dumps(
             schema,
