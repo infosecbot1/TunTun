@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import importlib
+import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from tuntun_contracts.base import canonical_mapping_bytes
@@ -76,6 +81,15 @@ def _yaml(name: str = "case") -> bytes:
         "language: hinglish\n"
         "outcome: completed\n"
     ).encode()
+
+
+def _load_runner_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("_tuntun_task9_run_scenarios", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise AssertionError("runner-load-failed")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_json_is_canonical_and_process_deterministic() -> None:
@@ -156,6 +170,127 @@ assert json.loads(result.stdout)["schema_version"] == "scenario_result.v1"
     )
     assert result.returncode == 0
     assert result.stdout == result.stderr == b""
+
+
+def test_core_simulate_runs_in_child_without_mutating_parent_network_state() -> None:
+    from typer.testing import CliRunner
+
+    app = importlib.import_module("tuntun_core.cli.main").app
+    original_socket = socket.socket
+    original_getaddrinfo = socket.getaddrinfo
+    result = CliRunner().invoke(
+        app,
+        ["simulate", "--scenario", "tests/fixtures/scenarios/guest-hinglish.yaml", "--json"],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["schema_version"] == "scenario_result.v1"
+    assert socket.socket is original_socket
+    assert socket.getaddrinfo is original_getaddrinfo
+    probe = socket.socket()
+    probe.close()
+    assert socket.getaddrinfo("localhost", 0)
+
+
+@pytest.mark.parametrize(
+    ("code", "sentinel"),
+    [
+        (
+            "after=lambda: (_ for _ in ()).throw(SystemExit('private-after-guard-sentinel')); "
+            "raise SystemExit(main(sys.argv[2:], _repository_root=Path(sys.argv[1]), "
+            "_after_guard=after))",
+            b"private-after-guard-sentinel",
+        ),
+        (
+            "observer=lambda _: (_ for _ in ()).throw(SystemExit('private-execution-sentinel')); "
+            "raise SystemExit(main(sys.argv[2:], _repository_root=Path(sys.argv[1]), "
+            "_turn_observer=observer))",
+            b"private-execution-sentinel",
+        ),
+    ],
+)
+def test_private_main_seams_suppress_baseexception_messages(
+    code: str,
+    sentinel: bytes,
+) -> None:
+    result = _run_at(
+        ROOT,
+        "--turns",
+        "1",
+        "--json",
+        code=(
+            f"import sys; from pathlib import Path; from scripts.run_scenarios import main; {code}"
+        ),
+    )
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b"scenario-gate: failed\n"
+    assert sentinel not in result.stdout + result.stderr
+
+
+def test_resource_gate_counts_fd_leaks_from_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tuntun_testing.scenario as scenario_module
+
+    runner = _load_runner_module()
+    original_runner = scenario_module.ScenarioRunner
+    held_descriptors: list[int] = []
+    call_count = 0
+
+    class LeakyRunner:
+        async def run_async(self, value: ScenarioInput, *, turn_index: int = 0) -> object:
+            nonlocal call_count
+            if call_count == 0:
+                held_descriptors.append(os.open("/dev/null", os.O_RDONLY))
+            call_count += 1
+            return await original_runner().run_async(value, turn_index=turn_index)
+
+    monkeypatch.setattr(scenario_module, "ScenarioRunner", LeakyRunner)
+    value = read_scenario_input(
+        Path("tests/fixtures/scenarios/guest-hinglish.yaml"),
+        trusted_root=ROOT,
+    )
+    try:
+        with pytest.raises(AssertionError, match="resource-bound-failed"):
+            asyncio.run(runner._execute((value,), 1, True, None))
+    finally:
+        for descriptor in held_descriptors:
+            os.close(descriptor)
+
+
+def test_resource_gate_counts_task_leaks_from_warmup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tuntun_testing.scenario as scenario_module
+
+    runner = _load_runner_module()
+    original_runner = scenario_module.ScenarioRunner
+    held_tasks: list[asyncio.Task[object]] = []
+    call_count = 0
+
+    class LeakyRunner:
+        async def run_async(self, value: ScenarioInput, *, turn_index: int = 0) -> object:
+            nonlocal call_count
+            if call_count == 0:
+                held_tasks.append(asyncio.create_task(asyncio.Event().wait()))
+            call_count += 1
+            return await original_runner().run_async(value, turn_index=turn_index)
+
+    async def run_case() -> None:
+        value = read_scenario_input(
+            Path("tests/fixtures/scenarios/guest-hinglish.yaml"),
+            trusted_root=ROOT,
+        )
+        try:
+            with pytest.raises(AssertionError, match="resource-bound-failed"):
+                await runner._execute((value,), 1, True, None)
+        finally:
+            for task in held_tasks:
+                task.cancel()
+            await asyncio.gather(*held_tasks, return_exceptions=True)
+
+    monkeypatch.setattr(scenario_module, "ScenarioRunner", LeakyRunner)
+    asyncio.run(run_case())
 
 
 @pytest.mark.parametrize(

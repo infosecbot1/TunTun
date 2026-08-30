@@ -64,7 +64,7 @@ class FakeClock:
             self._monotonic = handle.deadline
             if not handle.cancelled:
                 handle.callback()
-        self._monotonic = target
+        self._monotonic = max(self._monotonic, target)
 
     async def sleep(self, seconds: float) -> None:
         self.advance(seconds)

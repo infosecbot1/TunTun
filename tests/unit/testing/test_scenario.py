@@ -141,6 +141,16 @@ def test_fake_clock_orders_callbacks_and_returns_immutable_calls() -> None:
         FakeClock(datetime(2026, 8, 27))
 
 
+def test_fake_clock_reentrant_advance_preserves_max_reached_time() -> None:
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    clock.call_later(1.0, lambda: clock.advance(5.0))
+
+    clock.advance(1.0)
+
+    assert clock.monotonic() == 6.0
+    assert clock.now() == datetime(2026, 8, 27, 0, 0, 6, tzinfo=UTC)
+
+
 @pytest.mark.asyncio
 async def test_scripted_fake_checks_arguments_faults_and_exhaustion() -> None:
     request = cast(IdentityRequest, object())

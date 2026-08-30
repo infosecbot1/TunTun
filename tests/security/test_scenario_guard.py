@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import ast
 import os
+import socket
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).absolute().parents[2]
 SCRIPT = ROOT / "scripts/run_scenarios.py"
@@ -85,6 +88,25 @@ def test_testing_is_an_optional_core_extra_and_imports_are_lazy() -> None:
         assert all("tuntun_testing" not in ast.unparse(node) for node in imports)
 
 
+def test_core_wheel_smoke_exports_private_uv_cache_for_dependency_resolution() -> None:
+    result = subprocess.run(
+        ["make", "-n", "core-wheel-smoke"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode == 0
+    recipe = result.stdout.decode("utf-8")
+    assert 'dependency_intent="current-range-compatibility"' in recipe
+    assert 'export UV_CACHE_DIR="${UV_CACHE_DIR:-$smoke/uv-cache}"' in recipe
+    assert 'UV_CACHE_DIR="${UV_CACHE_DIR:-$smoke/uv-cache}" uv build' not in recipe
+    export_position = recipe.index("export UV_CACHE_DIR")
+    assert export_position < recipe.index("uv build")
+    assert export_position < recipe.index("uv venv")
+    assert export_position < recipe.index("uv pip install")
+
+
 def test_guard_is_active_before_a_failing_yaml_import_and_error_is_content_free(
     tmp_path: Path,
 ) -> None:
@@ -127,6 +149,133 @@ raise RuntimeError("private-import-sentinel")
     assert result.stderr == b"scenario-gate: failed\n"
     assert b"traceback" not in result.stderr.lower()
     assert b"private-import-sentinel" not in result.stdout + result.stderr
+
+
+def test_guard_import_baseexception_is_content_free(tmp_path: Path) -> None:
+    shadow = tmp_path / "shadow"
+    package = shadow / "tuntun_testing"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "network_guard.py").write_text(
+        'raise SystemExit("private-guard-sentinel")\n',
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((str(shadow), PYTHON_PATH))
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b"scenario-gate: failed\n"
+    assert b"private-guard-sentinel" not in result.stdout + result.stderr
+
+
+def test_yaml_import_baseexception_is_content_free(tmp_path: Path) -> None:
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    marker = tmp_path / "guard-state.txt"
+    (shadow / "yaml.py").write_text(
+        """
+import os
+import socket
+from pathlib import Path
+try:
+    socket.socket()
+except Exception:
+    Path(os.environ["TUNTUN_GUARD_MARKER"]).write_text("guarded", encoding="utf-8")
+else:
+    Path(os.environ["TUNTUN_GUARD_MARKER"]).write_text("unguarded", encoding="utf-8")
+raise SystemExit("private-import-sentinel")
+""",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": os.pathsep.join((str(shadow), PYTHON_PATH)),
+            "TUNTUN_GUARD_MARKER": str(marker),
+        }
+    )
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    assert marker.read_text(encoding="utf-8") == "guarded"
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr == b"scenario-gate: failed\n"
+    assert b"private-import-sentinel" not in result.stdout + result.stderr
+
+
+def test_child_execution_does_not_inherit_connected_inet_descriptors(tmp_path: Path) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        try:
+            listener.bind(("127.0.0.1", 0))
+        except PermissionError as error:
+            pytest.skip(f"loopback sockets unavailable: {error}")
+        listener.listen(1)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            client.connect(listener.getsockname())
+            server, _address = listener.accept()
+            try:
+                client.set_inheritable(True)
+                server.settimeout(2)
+                shadow = tmp_path / "shadow"
+                shadow.mkdir()
+                (shadow / "yaml.py").write_text(
+                    """
+import os
+try:
+    os.write(int(os.environ["TUNTUN_INHERITED_FD"]), b"private-inherited-sentinel")
+except OSError:
+    pass
+raise RuntimeError("private-import-sentinel")
+""",
+                    encoding="utf-8",
+                )
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "PYTHONPATH": os.pathsep.join((str(shadow), PYTHON_PATH)),
+                        "TUNTUN_INHERITED_FD": str(client.fileno()),
+                    }
+                )
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--turns", "1", "--json"],
+                    cwd=ROOT,
+                    env=environment,
+                    pass_fds=(client.fileno(),),
+                    capture_output=True,
+                    check=False,
+                    timeout=20,
+                )
+                try:
+                    received = server.recv(4096)
+                except TimeoutError:
+                    received = b""
+                assert result.returncode == 1
+                assert result.stdout == b""
+                assert result.stderr == b"scenario-gate: failed\n"
+                assert b"private-import-sentinel" not in result.stdout + result.stderr
+                assert received == b""
+            finally:
+                server.close()
+        finally:
+            client.close()
+    finally:
+        listener.close()
 
 
 def test_synthetic_fixture_policy_names_every_data_boundary() -> None:
