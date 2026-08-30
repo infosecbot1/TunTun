@@ -450,6 +450,24 @@ class GovernedModelCase:
         self.written_inode_identity = (metadata.st_dev, metadata.st_ino)
         return activated
 
+    def require_write_enabled_publish_source(self) -> None:
+        publish = installer_module.atomic_publish_dir_noreplace
+
+        def reject_read_only_source(parent: Any, source: str, target: str) -> None:
+            stage = parent.child(source)
+            try:
+                if stat.S_IMODE(os.fstat(stage.fd).st_mode) != 0o700:
+                    raise PermissionError("filesystem rejects renaming a read-only directory")
+            finally:
+                stage.close()
+            publish(parent, source, target)
+
+        self.monkeypatch.setattr(
+            installer_module,
+            "atomic_publish_dir_noreplace",
+            reject_read_only_source,
+        )
+
     def as_installed_model(self) -> InstalledModel:
         return InstalledModel(
             self.registry,
@@ -563,6 +581,7 @@ class GovernedModelCase:
             "artifact_symlink",
             "artifact_fifo",
             "artifact_device",
+            "unexpected_artifact",
             "wrong_owner",
             "group_writable_root",
             "world_writable_revision",
@@ -604,6 +623,12 @@ class GovernedModelCase:
             else:
                 artifact.symlink_to("/dev/null")
             revision.chmod(0o500)
+        elif mutation == "unexpected_artifact":
+            revision.chmod(0o700)
+            unexpected = revision / "unexpected.onnx"
+            unexpected.write_bytes(b"unexpected")
+            unexpected.chmod(0o400)
+            revision.chmod(0o500)
         elif mutation == "wrong_owner":
             self.monkeypatch.setattr(fs_module, "_effective_user_id", lambda: os.geteuid() + 1)
         elif mutation == "group_writable_root":
@@ -629,6 +654,30 @@ class GovernedModelCase:
 
     def final_revision_exists(self) -> bool:
         return self._revision_path().exists()
+
+    @property
+    def final_revision_mode(self) -> int | None:
+        try:
+            return stat.S_IMODE(self._revision_path().stat(follow_symlinks=False).st_mode)
+        except FileNotFoundError:
+            return None
+
+    def mutate_unsealed_revision(self, mutation: str) -> None:
+        revision = self._revision_path()
+        artifact = self._artifact_path()
+        if mutation == "unexpected_file":
+            unexpected = revision / "unexpected.onnx"
+            unexpected.write_bytes(b"unexpected")
+            unexpected.chmod(0o400)
+        elif mutation == "hash_mismatch":
+            artifact.chmod(0o600)
+            artifact.write_bytes(b"x" * len(self.expected_bytes))
+            artifact.chmod(0o400)
+        elif mutation == "artifact_symlink":
+            artifact.unlink()
+            artifact.symlink_to("/dev/null")
+        else:
+            raise AssertionError(f"unknown unsealed revision mutation: {mutation}")
 
     def final_revision_is_complete_and_verified(self) -> bool:
         try:
@@ -744,6 +793,7 @@ class GovernedModelCase:
             "before_stage_fsync",
             "after_stage_fsync",
             "before_publish",
+            "after_publish_before_seal",
             "after_publish_before_parent_fsync",
         }
         if fault not in allowed:

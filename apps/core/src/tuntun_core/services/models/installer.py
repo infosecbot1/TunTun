@@ -18,7 +18,7 @@ from .fs import (
     open_regular_at,
 )
 from .network import PinnedHttpsTransport
-from .registry import ActivatedModel, ModelFile, ModelRegistry, VerifiedModelFile
+from .registry import ActivatedModel, ModelEntry, ModelFile, ModelRegistry, VerifiedModelFile
 
 WriteOnce = Callable[[int, bytes | memoryview], int]
 FaultHook = Callable[[str], None]
@@ -145,6 +145,70 @@ class ModelInstaller:
                 os.close(write_fd)
             raise
 
+    @staticmethod
+    def _open_existing_revision(model: OwnedDirectory, revision: str) -> OwnedDirectory | None:
+        try:
+            return model.child(revision)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise PermissionError("unsafe model filesystem revision") from error
+
+    def _reuse_or_recover_revision(
+        self,
+        model: OwnedDirectory,
+        entry: ModelEntry,
+    ) -> ActivatedModel | None:
+        revision = self._open_existing_revision(model, entry.revision)
+        if revision is None:
+            return None
+        handles: list[VerifiedModelFile] = []
+        try:
+            mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
+            if mode == 0o500:
+                return self.registry.activate(entry.model_id)
+            if mode != 0o700:
+                raise PermissionError("unsafe model filesystem revision")
+
+            expected_names = tuple(sorted(item.path for item in entry.files))
+            if tuple(sorted(os.listdir(revision.fd))) != expected_names:
+                raise PermissionError("unsafe unsealed model revision")
+            for item in entry.files:
+                descriptor = open_regular_at(
+                    revision,
+                    item.path,
+                    os.O_RDONLY,
+                    mode=0o400,
+                    expected_mode=0o400,
+                )
+                try:
+                    hash_exact_fd(descriptor, item.size, item.sha256)
+                    handles.append(VerifiedModelFile.from_manifest(item, descriptor))
+                except BaseException:
+                    os.close(descriptor)
+                    raise
+
+            revision.chmod(0o500)
+            revision.fsync()
+            if tuple(sorted(os.listdir(revision.fd))) != expected_names:
+                raise PermissionError("unsafe unsealed model revision")
+            for item, handle in zip(entry.files, handles, strict=True):
+                hash_exact_fd(handle.fd, item.size, item.sha256)
+            model.fsync()
+            return ActivatedModel.from_manifest(entry, tuple(handles))
+        except OSError as error:
+            for handle in handles:
+                with contextlib.suppress(OSError):
+                    handle.close()
+            raise PermissionError("unsafe unsealed model revision") from error
+        except BaseException:
+            for handle in handles:
+                with contextlib.suppress(OSError):
+                    handle.close()
+            raise
+        finally:
+            revision.close()
+
     def install(self, model_id: str) -> ActivatedModel:
         entry = self.registry.entry(model_id)
         root = OwnedDirectory.open_or_create(self.registry._root)
@@ -155,8 +219,9 @@ class ModelInstaller:
                     prefix = f".stage-{entry.revision}-"
                     model.remove_private_stages(prefix)
                     model.fsync()
-                    if model.has_child(entry.revision):
-                        return self.registry.activate(model_id)
+                    existing = self._reuse_or_recover_revision(model, entry)
+                    if existing is not None:
+                        return existing
                     stage_name = f"{prefix}{secrets.token_hex(8)}"
                     stage = model.child(stage_name, create=True)
                     stage_identity = stage.identity
@@ -171,12 +236,14 @@ class ModelInstaller:
                         for item, handle in zip(entry.files, handles, strict=True):
                             hash_exact_fd(handle.fd, item.size, item.sha256)
                         self._fault_hook("before_stage_fsync")
-                        stage.chmod(0o500)
                         stage.fsync()
                         self._fault_hook("after_stage_fsync")
                         self._fault_hook("before_publish")
                         atomic_publish_dir_noreplace(model, stage_name, entry.revision)
                         published = True
+                        self._fault_hook("after_publish_before_seal")
+                        stage.chmod(0o500)
+                        stage.fsync()
                         self._fault_hook("after_publish_before_parent_fsync")
                         model.fsync()
                         return ActivatedModel.from_manifest(entry, tuple(handles))
@@ -187,7 +254,10 @@ class ModelInstaller:
                         if not published:
                             model.remove_private_stage(stage_name, stage_identity)
                             model.fsync()
-                        return self.registry.activate(model_id)
+                        existing = self._reuse_or_recover_revision(model, entry)
+                        if existing is None:
+                            raise RuntimeError("model install publication disappeared") from None
+                        return existing
                     except BaseException:
                         for handle in handles:
                             with contextlib.suppress(OSError):

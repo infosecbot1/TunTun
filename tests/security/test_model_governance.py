@@ -141,6 +141,7 @@ def test_manifest_runtime_checks_reject_even_without_json_schema(
         "artifact_symlink",
         "artifact_fifo",
         "artifact_device",
+        "unexpected_artifact",
         "wrong_owner",
         "group_writable_root",
         "world_writable_revision",
@@ -629,6 +630,44 @@ def test_two_installers_publish_one_complete_immutable_revision(
     assert concurrent_model_case.published_revision_count == 1  # type: ignore[attr-defined]
     assert all(result.all_files_verified for result in results)
     assert concurrent_model_case.no_stage_directory_remains()  # type: ignore[attr-defined]
+
+
+def test_publication_supports_filesystems_that_cannot_rename_read_only_directories(
+    governed_model_case: object,
+) -> None:
+    governed_model_case.require_write_enabled_publish_source()  # type: ignore[attr-defined]
+    activated = governed_model_case.install()  # type: ignore[attr-defined]
+    assert activated.all_files_verified
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+
+
+def test_crash_after_publish_before_seal_is_unusable_then_recovered(
+    governed_model_case: object,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_seal"
+    )
+    assert governed_model_case.final_revision_exists()  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
+    assert not governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+    governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("mutation", ("unexpected_file", "hash_mismatch", "artifact_symlink"))
+def test_unsealed_revision_tampering_is_never_sealed_or_loaded(
+    governed_model_case: object,
+    mutation: str,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_seal"
+    )
+    governed_model_case.mutate_unsealed_revision(mutation)  # type: ignore[attr-defined]
+    with pytest.raises((PermissionError, ValueError)):
+        governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
+    assert not governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(

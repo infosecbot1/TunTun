@@ -27852,6 +27852,7 @@ Task 10.
 **Interfaces:**
 - Consumes: owner-invoked immutable HTTPS URL on an exact host allowlist, declared bounded byte size/SHA-256, a bounded duplicate-free manifest, and owner-only no-follow model directory descriptors.
 - Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only a verified exact nonempty tuple of stable read-only file descriptors; immutable private `_ManifestBoundFile(path, size, sha256, device, inode)` expectations; frozen `VerifiedModelFile`/`ActivatedModel`; derived read-only property `ActivatedModel.all_files_verified: bool`; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. Public `fd`, `size`, `sha256`, and `files` are getter-only views. `all_files_verified` and runtime receipt comparison use the sealed private manifest tuple and recheck descriptor access/type/mode/device/inode/size/hash; they never derive trust from a caller-replaceable public field. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
+- Darwin filesystems may reject renaming a write-disabled directory even when source and destination share one parent. The installer therefore keeps the already-complete owner-only stage at `0700` through the exclusive no-replace rename, then seals the retained directory descriptor to exact `0500`, fsyncs it, and only then fsyncs the parent and returns it. `ModelRegistry.activate` continues to require exact `0500`, so the transient final name is unusable by runtime. If the process stops between rename and sealing, the next installer under the same exclusive lock may resume only after opening the exact no-follow `0700` directory, proving its entry set equals the manifest, opening every artifact as exact owner-only `0400`, and rechecking every size/hash before and after sealing. A missing, extra, symlinked, special, writable, or hash-mismatched entry stays unsealed and fails closed; there is no ordinary rename fallback and no unverified byte can become active.
 
 - [ ] **Step 1: Write red model-governance tests**
 
@@ -27900,7 +27901,7 @@ def test_manifest_runtime_checks_reject_even_without_json_schema(
 @pytest.mark.parametrize("mutation",(
     "manifest_symlink","model_root_symlink","model_id_symlink",
     "revision_symlink","artifact_symlink","artifact_fifo","artifact_device",
-    "wrong_owner","group_writable_root","world_writable_revision",
+    "unexpected_artifact","wrong_owner","group_writable_root","world_writable_revision",
 ))
 def test_every_named_filesystem_object_is_nofollow_regular_owner_only(
     governed_model_case,mutation,
@@ -28063,6 +28064,35 @@ def test_two_installers_publish_one_complete_immutable_revision(concurrent_model
     assert all(result.all_files_verified for result in results)
     assert concurrent_model_case.no_stage_directory_remains()
 
+def test_publication_supports_filesystems_that_cannot_rename_read_only_directories(
+    governed_model_case,
+) -> None:
+    governed_model_case.require_write_enabled_publish_source()
+    activated=governed_model_case.install()
+    assert activated.all_files_verified
+    assert governed_model_case.final_revision_mode==0o500
+
+def test_crash_after_publish_before_seal_is_unusable_then_recovered(
+    governed_model_case,
+) -> None:
+    governed_model_case.crash_install_at("after_publish_before_seal")
+    assert governed_model_case.final_revision_mode==0o700
+    assert not governed_model_case.final_revision_is_complete_and_verified()
+    governed_model_case.restart_and_reconcile()
+    assert governed_model_case.final_revision_mode==0o500
+    assert governed_model_case.final_revision_is_complete_and_verified()
+
+@pytest.mark.parametrize("mutation",("unexpected_file","hash_mismatch","artifact_symlink"))
+def test_unsealed_revision_tampering_is_never_sealed_or_loaded(
+    governed_model_case,mutation,
+) -> None:
+    governed_model_case.crash_install_at("after_publish_before_seal")
+    governed_model_case.mutate_unsealed_revision(mutation)
+    with pytest.raises((PermissionError,ValueError)):
+        governed_model_case.restart_and_reconcile()
+    assert governed_model_case.final_revision_mode==0o700
+    assert not governed_model_case.final_revision_is_complete_and_verified()
+
 
 @pytest.mark.parametrize("fault",(
     "after_each_file","before_stage_fsync","after_stage_fsync",
@@ -28122,7 +28152,7 @@ def concurrent_model_case(governed_model_case):
     return governed_model_case.concurrent_view()
 ```
 
-`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`: `manifest`, `model_id`, `expected_bytes`, `expected_sha256`, `network.inject()/followed_redirects`, `mutate_manifest`, `apply_filesystem_mutation`, `registry_or_activate`, `inject_os_write_result`, `inject_repeated_os_write_result`, `install`, `as_installed_model`, `concurrent_view`, `race_activation`, `crash_install_at`, `restart_and_reconcile`, `rehash_exact_descriptor`, and every asserted state/identity/count query. Each mutation/race/fault string in the test has one explicit dispatch-table entry; unknown names raise `AssertionError`. Filesystem mutations use real symlinks/FIFOs/modes/inode replacements, write faults monkeypatch only `os.write`, and network faults drive the injected transport/child-resolver seam. State queries inspect the real staged/final filesystem and live descriptors rather than booleans set by the case.
+`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`: `manifest`, `model_id`, `expected_bytes`, `expected_sha256`, `network.inject()/followed_redirects`, `mutate_manifest`, `apply_filesystem_mutation`, `registry_or_activate`, `inject_os_write_result`, `inject_repeated_os_write_result`, `install`, `as_installed_model`, `concurrent_view`, `race_activation`, `crash_install_at`, `restart_and_reconcile`, `require_write_enabled_publish_source`, `mutate_unsealed_revision`, `final_revision_mode`, `rehash_exact_descriptor`, and every asserted state/identity/count query. Each mutation/race/fault string in the test has one explicit dispatch-table entry; unknown names raise `AssertionError`. Filesystem mutations use real symlinks/FIFOs/modes/inode replacements, write faults monkeypatch only `os.write`, and network faults drive the injected transport/child-resolver seam. State queries inspect the real staged/final filesystem and live descriptors rather than booleans set by the case.
 
 `InstalledModel` exposes only `registry`, `model_id`, `expected_bytes`, `expected_sha256`, and `replace_every_named_path_with_attacker_bytes()`. `ScriptedRuntimeAdapter.load_verified_reader` consumes the bounded reader to EOF, records bytes and open duplicate count, returns an exact per-file receipt, and never accepts a path; `finish_model` returns an unpublished signed candidate; the verifier publishes only after checking the exact domain/generation/expiry/model/revision/ordered file tuple. `mutate_receipt`, `fail_at`, and `abort_model` are closed dispatch methods for the test strings and maintain the asserted `path_opens`, `open_duplicate_fd_count`, `abort_calls`, `published_runtime_count`, and `last_loaded_bytes`. The concurrent view uses two real `ModelInstaller` instances plus a barrier only before lock acquisition, measures lock ownership around the production lock, and derives publication/stage results from disk. This helper contains no pass-through fake of `ModelRegistry`, `ModelInstaller`, descriptor hashing, publication, or receipt comparison.
 
@@ -28546,10 +28576,15 @@ class ModelRegistry:
         try:
             root=OwnedDirectory.open(self._root)
             model=root.child(entry.model_id); revision=model.child(entry.revision,mode=0o500)
+            expected_names=tuple(sorted(item.path for item in entry.files))
+            if tuple(sorted(os.listdir(revision.fd)))!=expected_names:
+                raise PermissionError("unsafe model filesystem revision")
             for item in entry.files:
                 fd=open_regular_at(revision,item.path,os.O_RDONLY)
                 hash_exact_fd(fd,item.size,item.sha256)
                 handles.append(VerifiedModelFile.from_manifest(item,fd))
+            if tuple(sorted(os.listdir(revision.fd)))!=expected_names:
+                raise PermissionError("unsafe model filesystem revision")
             return ActivatedModel.from_manifest(entry,tuple(handles))
         except Exception:
             for handle in handles: os.close(handle.fd)
@@ -28754,10 +28789,9 @@ class ModelInstaller:
                 try:
                     model.remove_private_stages(f".stage-{entry.revision}-")
                     model.fsync()
-                    if model.has_child(entry.revision):
-                        # Existing revisions are immutable: validate and reuse an
-                        # exact complete revision, or fail for owner repair.
-                        return self.registry.activate(model_id)
+                    existing=self._reuse_or_recover_revision(model,entry)
+                    if existing is not None:
+                        return existing
                     stage_name=f".stage-{entry.revision}-{secrets.token_hex(8)}"
                     stage=model.child(stage_name,create=True)
                     stage_identity=stage.identity
@@ -28773,10 +28807,12 @@ class ModelInstaller:
                         # qualifies one pathname and later reopens it.
                         for item,handle in zip(entry.files,handles,strict=True):
                             hash_exact_fd(handle.fd,item.size,item.sha256)
-                        stage.chmod(0o500)
                         stage.fsync()
                         atomic_publish_dir_noreplace(model,stage_name,entry.revision)
                         published=True
+                        self._fault_hook("after_publish_before_seal")
+                        stage.chmod(0o500)
+                        stage.fsync()
                         model.fsync()
                         return ActivatedModel.from_manifest(entry,tuple(handles))
                     except Exception:
@@ -28800,7 +28836,7 @@ class ModelInstaller:
 
 Run: `uv lock && uv run pytest tests/security/test_model_governance.py -q && uv run python scripts/check_model_manifest.py models/manifest.yaml && uv run tuntunctl models list`
 
-Expected: PASS with the full manifest/filesystem/network/race/fault matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, and conflicting publication never expose a revision or runtime bytes; two installers serialize and converge on one complete immutable revision; runtime loads repeatedly see the full exact bytes hashed through stable read-only descriptors regardless of prior offsets; list/verify/startup make zero network requests.
+Expected: PASS with the full manifest/filesystem/network/race/fault matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, and conflicting publication never expose an *activatable* revision or runtime bytes; an exclusively renamed but not yet `0500`-sealed final name is rejected by activation and is resumable only after exact inventory and hash verification. Two installers serialize and converge on one complete immutable revision; runtime loads repeatedly see the full exact bytes hashed through stable read-only descriptors regardless of prior offsets; list/verify/startup make zero network requests.
 
 - [ ] **Step 5: Commit exact Task 10 paths**
 

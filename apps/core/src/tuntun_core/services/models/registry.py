@@ -493,6 +493,9 @@ class ModelRegistry:
             directories.append(model)
             revision = model.child(entry.revision, mode=0o500)
             directories.append(revision)
+            expected_names = tuple(sorted(item.path for item in entry.files))
+            if tuple(sorted(os.listdir(revision.fd))) != expected_names:
+                raise PermissionError("unsafe model filesystem revision")
             for item in entry.files:
                 descriptor = open_regular_at(
                     revision, item.path, os.O_RDONLY, mode=0o400, expected_mode=0o400
@@ -503,6 +506,8 @@ class ModelRegistry:
                 except BaseException:
                     os.close(descriptor)
                     raise
+            if tuple(sorted(os.listdir(revision.fd))) != expected_names:
+                raise PermissionError("unsafe model filesystem revision")
             return ActivatedModel.from_manifest(entry, tuple(handles))
         except BaseException as error:
             for handle in handles:
