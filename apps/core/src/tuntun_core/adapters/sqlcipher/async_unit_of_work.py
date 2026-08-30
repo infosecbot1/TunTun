@@ -3,9 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable, Mapping
-from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from threading import Lock
 from types import TracebackType
 from typing import Protocol, TypeVar, runtime_checkable
 
@@ -21,6 +20,16 @@ from .unit_of_work import UnitOfWork
 
 ResultT = TypeVar("ResultT")
 _ASYNC_CLEANUP_NOTE = "additional async unit-of-work cleanup failure"
+_FACTORY_QUARANTINE_LIMIT = 64
+_PROCESS_LIFETIME_REJECTED_VALUES: list[object] = []
+_PROCESS_LIFETIME_QUARANTINE_LOCK = Lock()
+
+
+def _retain_for_process_lifetime(values: tuple[object, ...]) -> None:
+    """Retain trusted-code invariant violations without invoking their cleanup."""
+
+    with _PROCESS_LIFETIME_QUARANTINE_LOCK:
+        _PROCESS_LIFETIME_REJECTED_VALUES.extend(values)
 
 
 def _record_cleanup_failure(
@@ -58,9 +67,11 @@ class AsyncUnitOfWork:
         repository_facades: Mapping[str, _RepositoryFacadeFactory],
         commit_signals: Mapping[str, _CommitSignal],
         signal_failures: dict[str, int],
+        require_loop: Callable[[], None],
         entry_guard: Callable[[], None],
         claim_owner: Callable[[], None],
         release_owner: Callable[[], None],
+        quarantine_rejected: Callable[[tuple[object, ...]], None],
     ) -> None:
         self._engine = engine
         self._executor = executor
@@ -68,9 +79,11 @@ class AsyncUnitOfWork:
         self._repository_facades = repository_facades
         self._commit_signals = commit_signals
         self._signal_failures = signal_failures
+        self._require_loop = require_loop
         self._entry_guard = entry_guard
         self._claim_owner = claim_owner
         self._release_owner = release_owner
+        self._quarantine_rejected = quarantine_rejected
         self._signals_after_commit: set[str] = set()
         self._sync: UnitOfWork | None = None
         self._entered = False
@@ -78,94 +91,32 @@ class AsyncUnitOfWork:
         self._owns_lock = False
         self._owner_claimed = False
         self._task_owner: asyncio.Task[object] | None = None
+        self._poisoned = False
 
     async def _call(self, operation: Callable[[], ResultT]) -> ResultT:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, operation)
 
-    async def _await_terminal_cleanup(
-        self,
-        cleanup_task: asyncio.Task[None],
-    ) -> asyncio.CancelledError | None:
-        cancellation: asyncio.CancelledError | None = None
-        while not cleanup_task.done():
-            try:
-                await asyncio.shield(cleanup_task)
-            except asyncio.CancelledError as cleanup_cancellation:
-                if cancellation is None:
-                    cancellation = cleanup_cancellation
-        cleanup_task.result()
-        return cancellation
+    def _quarantine_boundary_rejection(self, error: _RejectedDeferredResult) -> None:
+        # This method deliberately performs only identity/list bookkeeping. It
+        # must retain the root and every discovered unsafe object before any
+        # worker frame can release a last reference, and must never call
+        # user-controlled cleanup code.
+        self._quarantine_rejected(error.values)
+        self._poisoned = True
+        self._signals_after_commit.clear()
+        error.add_note(
+            "rejected transaction result is strongly quarantined; no cancellation, "
+            "close, callback, or finalizer was invoked by the unit of work"
+        )
 
-    async def _terminate_one_rejected_deferred_result(
-        self,
-        value: object,
-    ) -> None:
-        if isinstance(value, asyncio.Future):
-            if value is asyncio.current_task():
-                raise RuntimeError("owning task cannot be returned as transaction data")
-
-            async def cancel_and_wait() -> None:
-                value.cancel()
-                with suppress(BaseException):
-                    await value
-
-            owner_loop = value.get_loop()
-            current_loop = asyncio.get_running_loop()
-            if owner_loop is current_loop:
-                cleanup_task = asyncio.create_task(cancel_and_wait())
-            elif owner_loop.is_running():
-
-                async def cancel_cross_loop() -> None:
-                    transfer = asyncio.run_coroutine_threadsafe(
-                        cancel_and_wait(),
-                        owner_loop,
-                    )
-                    await asyncio.wrap_future(transfer)
-
-                cleanup_task = asyncio.create_task(cancel_cross_loop())
-            else:
-                value.cancel()
-                if not value.done():
-                    raise RuntimeError("rejected task belongs to a stopped foreign event loop")
-                return
-        elif isinstance(value, ConcurrentFuture):
-
-            async def cancel_concurrent_future() -> None:
-                value.cancel()
-                with suppress(BaseException):
-                    await asyncio.wrap_future(value)
-
-            cleanup_task = asyncio.create_task(cancel_concurrent_future())
-        elif inspect.isasyncgen(value):
-
-            async def close_async_generator() -> None:
-                await value.aclose()
-
-            cleanup_task = asyncio.create_task(close_async_generator())
-        else:
-            raise AssertionError("unsupported deferred result")
-        await cleanup_task
-
-    async def _terminate_rejected_deferred_result(
+    async def _finish_boundary_rejection(
         self,
         error: _RejectedDeferredResult,
-    ) -> asyncio.CancelledError | None:
-        if not error.values:
-            return None
-
-        async def cleanup_all() -> None:
-            cleanup_tasks = tuple(
-                asyncio.create_task(self._terminate_one_rejected_deferred_result(value))
-                for value in error.values
-            )
-            results = await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, BaseException):
-                    _record_cleanup_failure(error, "rejected value", result)
-
-        cleanup_task = asyncio.create_task(cleanup_all())
-        return await self._await_terminal_cleanup(cleanup_task)
+    ) -> BaseException:
+        self._quarantine_boundary_rejection(error)
+        primary = await self._finish_exit(type(error), error, error.__traceback__)
+        return error if primary is None else primary
 
     async def _terminal_call(self, operation: Callable[[], ResultT]) -> ResultT:
         worker_call = asyncio.create_task(self._call(operation))
@@ -181,16 +132,12 @@ class AsyncUnitOfWork:
         try:
             result = worker_call.result()
         except _RejectedDeferredResult as operation_error:
-            cleanup_cancellation = await self._terminate_rejected_deferred_result(operation_error)
-            if cancellation is None:
-                cancellation = cleanup_cancellation
             if cancellation is not None:
                 _record_cleanup_failure(
-                    cancellation,
-                    "rejected scheduled awaitable",
                     operation_error,
+                    "cancellation deferred behind boundary rejection",
+                    cancellation,
                 )
-                raise cancellation from None
             raise
         except BaseException as operation_error:
             if cancellation is not None:
@@ -202,6 +149,8 @@ class AsyncUnitOfWork:
         return result
 
     def _active_sync(self) -> UnitOfWork:
+        if self._poisoned:
+            raise RuntimeError("async unit of work is poisoned by a rejected result")
         if self._sync is None or not self._sync.active:
             raise RuntimeError("async unit of work is not active")
         self._require_task_owner()
@@ -256,6 +205,7 @@ class AsyncUnitOfWork:
         return primary
 
     async def __aenter__(self) -> AsyncUnitOfWork:
+        self._require_loop()
         if self._terminal_closed:
             raise RuntimeError("async unit of work is closed")
         if self._entered:
@@ -288,16 +238,11 @@ class AsyncUnitOfWork:
                 setattr(self, name, facade)
             return self
         except BaseException as error:
+            primary: BaseException | None
             if isinstance(error, _RejectedDeferredResult):
-                cleanup_cancellation = await self._terminate_rejected_deferred_result(error)
-                if cleanup_cancellation is not None:
-                    _record_cleanup_failure(
-                        cleanup_cancellation,
-                        "rejected scheduled awaitable",
-                        error,
-                    )
-                    error = cleanup_cancellation
-            primary = await self._finish_exit(type(error), error, error.__traceback__)
+                primary = await self._finish_boundary_rejection(error)
+            else:
+                primary = await self._finish_exit(type(error), error, error.__traceback__)
             if primary is not None and primary is not error:
                 raise primary from error
             raise error
@@ -314,7 +259,13 @@ class AsyncUnitOfWork:
                 "unit-of-work operations must return a synchronous data value",
             )
 
-        return await self._terminal_call(invoke)
+        try:
+            return await self._terminal_call(invoke)
+        except _RejectedDeferredResult as error:
+            primary = await self._finish_boundary_rejection(error)
+            if primary is not error:
+                raise primary from error
+            raise
 
     def signal_after_commit(self, name: str) -> None:
         self._active_sync()
@@ -322,10 +273,9 @@ class AsyncUnitOfWork:
             raise RuntimeError("unregistered post-commit signal")
         self._signals_after_commit.add(name)
 
-    async def _deliver_commit_signals(self) -> asyncio.CancelledError | None:
+    async def _deliver_commit_signals(self) -> None:
         names = tuple(sorted(self._signals_after_commit))
         self._signals_after_commit.clear()
-        cancellation: asyncio.CancelledError | None = None
         for name in names:
             try:
                 _reject_worker_result(
@@ -333,13 +283,13 @@ class AsyncUnitOfWork:
                     "post-commit signals must be synchronous",
                 )
             except _RejectedDeferredResult as error:
-                cleanup_cancellation = await self._terminate_rejected_deferred_result(error)
-                if cancellation is None:
-                    cancellation = cleanup_cancellation
                 self._signal_failures[name] = self._signal_failures.get(name, 0) + 1
+                primary = await self._finish_boundary_rejection(error)
+                if self._owns_lock:
+                    raise primary from None
+                break
             except BaseException:
                 self._signal_failures[name] = self._signal_failures.get(name, 0) + 1
-        return cancellation
 
     async def commit(self) -> None:
         sync = self._active_sync()
@@ -352,9 +302,7 @@ class AsyncUnitOfWork:
             if cancellation is not None:
                 raise cancellation
             return
-        signal_cancellation = await self._deliver_commit_signals()
-        if cancellation is None:
-            cancellation = signal_cancellation
+        await self._deliver_commit_signals()
         if cancellation is not None:
             raise cancellation
 
@@ -364,6 +312,7 @@ class AsyncUnitOfWork:
         await self._terminal_call(sync.rollback)
 
     async def aclose(self) -> None:
+        self._require_loop()
         if self._task_owner is not None:
             self._require_task_owner()
         sync = self._sync
@@ -391,6 +340,7 @@ class AsyncUnitOfWork:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> bool:
+        self._require_loop()
         if self._task_owner is not None:
             self._require_task_owner()
         primary = await self._finish_exit(exc_type, exc, traceback)
@@ -428,9 +378,15 @@ class AsyncUnitOfWorkFactory:
             max_workers=1,
             thread_name_prefix="tuntun-sqlcipher",
         )
+        self._loop_guard = Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._transaction_lock = asyncio.Lock()
         self._shutdown_task: asyncio.Task[None] | None = None
         self._active_owner: asyncio.Task[object] | None = None
+        self._quarantined_results: list[object] = []
+        self._quarantined_result_ids: set[int] = set()
+        self._quarantined_result_total = 0
+        self._quarantine_overflowed = False
 
     def register_commit_signal(self, name: str, target: _CommitSignal) -> None:
         if self._registration_closed or self._closing or self._closed:
@@ -451,11 +407,56 @@ class AsyncUnitOfWorkFactory:
     def failed_commit_signal_count(self, name: str) -> int:
         return self._signal_failures.get(name, 0)
 
+    def quarantined_result_count(self) -> int:
+        """Return the number of distinct rejected objects retained by this factory."""
+
+        return self._quarantined_result_total
+
+    def quarantine_overflowed(self) -> bool:
+        """Report whether repeated trusted-code violations exhausted the local bound."""
+
+        return self._quarantine_overflowed
+
+    def _quarantine_rejected_results(self, values: tuple[object, ...]) -> None:
+        overflow: list[object] = []
+        for value in values:
+            identity = id(value)
+            if identity in self._quarantined_result_ids:
+                continue
+            self._quarantined_result_ids.add(identity)
+            self._quarantined_result_total += 1
+            if len(self._quarantined_results) < _FACTORY_QUARANTINE_LIMIT:
+                self._quarantined_results.append(value)
+            else:
+                overflow.append(value)
+                self._quarantine_overflowed = True
+        if overflow:
+            _retain_for_process_lifetime(tuple(overflow))
+
+    def _transfer_quarantine_to_process_lifetime(self) -> None:
+        if not self._quarantined_results:
+            return
+        retained = tuple(self._quarantined_results)
+        _retain_for_process_lifetime(retained)
+        self._quarantined_results.clear()
+
     def _ensure_entry_allowed(self) -> None:
         if self._closed:
             raise RuntimeError("unit-of-work factory is shut down")
         if self._closing:
             raise RuntimeError("unit-of-work factory is shutting down")
+        if self._quarantine_overflowed:
+            raise RuntimeError("unit-of-work factory rejected too many unsafe results")
+
+    def _require_loop(self) -> None:
+        current_loop = asyncio.get_running_loop()
+        with self._loop_guard:
+            owner_loop = self._loop
+            if owner_loop is None:
+                self._loop = current_loop
+                return
+            if owner_loop is not current_loop:
+                raise RuntimeError("async unit-of-work factory belongs to another event loop")
 
     def _claim_transaction_owner(self) -> None:
         owner = asyncio.current_task()
@@ -467,6 +468,7 @@ class AsyncUnitOfWorkFactory:
         self._active_owner = None
 
     def __call__(self) -> AsyncUnitOfWork:
+        self._require_loop()
         self._ensure_entry_allowed()
         self._registration_closed = True
         return AsyncUnitOfWork(
@@ -476,20 +478,24 @@ class AsyncUnitOfWorkFactory:
             self._repository_facades,
             self._commit_signals,
             self._signal_failures,
+            self._require_loop,
             self._ensure_entry_allowed,
             self._claim_transaction_owner,
             self._release_transaction_owner,
+            self._quarantine_rejected_results,
         )
 
     async def _shutdown(self) -> None:
         await self._transaction_lock.acquire()
         try:
             self._executor.shutdown(wait=True, cancel_futures=False)
+            self._transfer_quarantine_to_process_lifetime()
             self._closed = True
         finally:
             self._transaction_lock.release()
 
     async def aclose(self) -> None:
+        self._require_loop()
         if self._closed:
             return
         if self._active_owner is asyncio.current_task():

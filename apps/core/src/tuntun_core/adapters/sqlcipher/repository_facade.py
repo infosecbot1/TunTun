@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import MISSING, FrozenInstanceError, fields, is_dataclass, make_dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -31,47 +31,37 @@ class _RejectedDeferredResult(TypeError):
         self,
         values: tuple[object, ...],
         message: str,
-        cleanup_failures: tuple[tuple[str, BaseException], ...] = (),
     ) -> None:
         super().__init__(message)
         self.values = values
-        for action, error in cleanup_failures:
-            self.add_note(
-                "additional synchronous result cleanup failure "
-                f"({action}): {type(error).__name__}: {error}"
-            )
 
 
 class _ResultInspection:
-    def __init__(self, message: str) -> None:
+    def __init__(self, root: object, message: str) -> None:
+        self.root = root
         self.message = message
-        self.deferred: list[object] = []
-        self.cleanup_failures: list[tuple[str, BaseException]] = []
+        self.retained: list[object] = [root]
+        self.retained_ids: set[int] = {id(root)}
         self.seen: set[int] = set()
         self.visiting: set[int] = set()
         self.rejected = False
 
-    def reject(self) -> None:
+    def retain(self, value: object) -> None:
+        identity = id(value)
+        if identity not in self.retained_ids:
+            self.retained_ids.add(identity)
+            self.retained.append(value)
+
+    def reject(self, value: object) -> None:
         self.rejected = True
-
-    def close(self, value: object, action: str) -> None:
-        self.reject()
-        try:
-            value.close()  # type: ignore[attr-defined]
-        except BaseException as error:
-            self.cleanup_failures.append((action, error))
-
-    def defer(self, value: object) -> None:
-        self.reject()
-        self.deferred.append(value)
+        self.retain(value)
 
     def raise_if_rejected(self) -> None:
         if self.rejected:
-            raise _RejectedDeferredResult(
-                tuple(self.deferred),
-                self.message,
-                tuple(self.cleanup_failures),
-            )
+            # Retain both the root graph and each exact rejected object. The
+            # latter remains safe even if another alias mutates a built-in
+            # container after this inspection discovered a nested capability.
+            raise _RejectedDeferredResult(tuple(self.retained), self.message)
 
 
 _SAFE_ATOMIC_TYPES = (
@@ -258,13 +248,13 @@ def _has_exact_generated_record_shape(
 def _inspect_datetime(value: datetime, inspection: _ResultInspection) -> None:
     zone = value.tzinfo
     if zone is not None and type(zone) is not timezone and type(zone) is not ZoneInfo:
-        inspection.reject()
+        inspection.reject(value)
 
 
 def _inspect_time(value: time, inspection: _ResultInspection) -> None:
     zone = value.tzinfo
     if zone is not None and type(zone) is not timezone and type(zone) is not ZoneInfo:
-        inspection.reject()
+        inspection.reject(value)
 
 
 def _inspect_frozen_record(value: object, inspection: _ResultInspection) -> None:
@@ -280,7 +270,7 @@ def _inspect_frozen_record(value: object, inspection: _ResultInspection) -> None
         or record_type.__bases__ != (object,)
         or not _has_exact_generated_record_shape(record_type, field_names)
     ):
-        inspection.reject()
+        inspection.reject(value)
         return
     for field in record_fields:
         _inspect_data_value(object.__getattribute__(value, field.name), inspection)
@@ -288,10 +278,10 @@ def _inspect_frozen_record(value: object, inspection: _ResultInspection) -> None
 
 def _inspect_contract(value: ContractModel, inspection: _ResultInspection) -> None:
     if type(value) not in registered_contract_models():
-        inspection.reject()
+        inspection.reject(value)
         return
     if value.__pydantic_extra__ or value.__pydantic_private__:
-        inspection.reject()
+        inspection.reject(value)
         return
     for field_name in type(value).model_fields:
         _inspect_data_value(object.__getattribute__(value, field_name), inspection)
@@ -300,31 +290,29 @@ def _inspect_contract(value: ContractModel, inspection: _ResultInspection) -> No
 def _inspect_data_value(value: object, inspection: _ResultInspection) -> None:
     identity = id(value)
     if identity in inspection.visiting:
-        inspection.reject()
+        inspection.reject(value)
         return
     if identity in inspection.seen:
         return
     inspection.seen.add(identity)
 
     if isinstance(value, (asyncio.Future, ConcurrentFuture)) or inspect.isasyncgen(value):
-        inspection.defer(value)
+        inspection.reject(value)
         return
     if inspect.isgenerator(value):
-        inspection.close(value, "generator close")
+        inspection.reject(value)
         return
     if inspect.isawaitable(value):
-        inspection.reject()
-        if isinstance(value, Coroutine):
-            inspection.close(value, "coroutine close")
+        inspection.reject(value)
         return
     if isinstance(value, Result):
-        inspection.close(value, "SQLAlchemy result close")
+        inspection.reject(value)
         return
     if isinstance(value, (Connection, Engine, Transaction, UnitOfWorkProtocol)):
-        inspection.reject()
+        inspection.reject(value)
         return
     if callable(value):
-        inspection.reject()
+        inspection.reject(value)
         return
     if type(value) is datetime:
         _inspect_datetime(value, inspection)
@@ -336,7 +324,7 @@ def _inspect_data_value(value: object, inspection: _ResultInspection) -> None:
         return
     if isinstance(value, Enum):
         if type(value) not in _CONTRACT_ENUM_TYPES:
-            inspection.reject()
+            inspection.reject(value)
             return
         _inspect_data_value(value.value, inspection)
         return
@@ -358,7 +346,7 @@ def _inspect_data_value(value: object, inspection: _ResultInspection) -> None:
         elif is_dataclass(value) and not isinstance(value, type):
             _inspect_frozen_record(value, inspection)
         else:
-            inspection.reject()
+            inspection.reject(value)
     finally:
         inspection.visiting.remove(identity)
 
@@ -367,15 +355,14 @@ def _reject_awaitable[ResultT](
     result: ResultT,
     message: str = "repository operations must return a synchronous data value",
 ) -> ResultT:
-    inspection = _ResultInspection(message)
-    if isinstance(result, (asyncio.Future, ConcurrentFuture)) or inspect.isasyncgen(result):
-        inspection.defer(result)
-    elif inspect.isgenerator(result):
-        inspection.close(result, "generator close")
-    elif inspect.isawaitable(result):
-        inspection.reject()
-        if isinstance(result, Coroutine):
-            inspection.close(result, "coroutine close")
+    inspection = _ResultInspection(result, message)
+    if (
+        isinstance(result, (asyncio.Future, ConcurrentFuture))
+        or inspect.isasyncgen(result)
+        or inspect.isgenerator(result)
+        or inspect.isawaitable(result)
+    ):
+        inspection.reject(result)
     inspection.raise_if_rejected()
     return result
 
@@ -384,7 +371,7 @@ def _reject_worker_result[ResultT](
     result: ResultT,
     message: str = "repository operations must return a synchronous data value",
 ) -> ResultT:
-    inspection = _ResultInspection(message)
+    inspection = _ResultInspection(result, message)
     _inspect_data_value(result, inspection)
     inspection.raise_if_rejected()
     return result
