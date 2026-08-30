@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -97,23 +98,24 @@ def test_child_cleanup_has_no_unbounded_wait() -> None:
         "apps/core/src/tuntun_core/cli/commands/simulate.py",
     ):
         tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
-        cleanup = next(
+        cleanup = [
             node
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == "_terminate_process_group"
-        )
+            and node.name in {"_force_process_group_cleanup", "_shutdown_supervised_process"}
+        ]
+        assert len(cleanup) == 2
         waits = [
             node
-            for node in ast.walk(cleanup)
+            for function in cleanup
+            for node in ast.walk(function)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "wait"
         ]
         assert waits
         assert all(
-            call.args or any(item.arg == "timeout" for item in call.keywords)
-            for call in waits
+            call.args or any(item.arg == "timeout" for item in call.keywords) for call in waits
         )
 
 
@@ -309,7 +311,11 @@ def test_supervisor_startup_structure_is_isolated_and_workspace_first() -> None:
         assert "site.main" not in source
         assert "addsitedir" not in source
         assert "os.environ.copy" not in source
-        assert "for _path in (*expected_workspace_roots, expected_site_packages):" in source
+        assert "class _WorkspaceFinder:" in source
+        assert "sys.meta_path.insert(0, _WorkspaceFinder())" in source
+        assert 'sys.path.append(".")' in source
+        assert "sys.path.append(site_path)" not in source
+        assert "pass_fds=" in source
     runner_tree = ast.parse((ROOT / "scripts/run_scenarios.py").read_text(encoding="utf-8"))
     prepare = next(
         node
@@ -318,6 +324,435 @@ def test_supervisor_startup_structure_is_isolated_and_workspace_first() -> None:
     )
     assert "scenario_io" not in ast.unparse(prepare)
     assert "importlib" not in ast.unparse(prepare)
+
+
+def _runtime_tree(root: Path) -> Path:
+    for relative in (
+        "packages/testing/src",
+        "packages/contracts/src",
+        "apps/core/src",
+        "scripts",
+        f".venv/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages",
+        ".venv/bin",
+    ):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    executable = root / ".venv/bin/python"
+    executable.write_bytes(b"synthetic-interpreter")
+    executable.chmod(0o700)
+    (root / "scripts/run_scenarios.py").write_bytes(b"raise SystemExit(0)\n")
+    (root / "packages/testing/src/original.txt").write_text("original", encoding="utf-8")
+    return executable
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "root-symlink",
+        "site-symlink",
+        "root-writable",
+        "workspace-writable",
+        "site-writable",
+        "interpreter-writable",
+        "prefix",
+    ],
+)
+def test_runtime_layout_rejects_untrusted_symlink_mode_or_interpreter_prefix(
+    tmp_path: Path,
+    target: str,
+    mutation: str,
+) -> None:
+    if target == "runner":
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_runtime_runner", SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        script_relative = "scripts/run_scenarios.py"
+    else:
+        import importlib
+
+        module = importlib.import_module("tuntun_core.cli.commands.simulate")
+        script_relative = None
+    root = tmp_path / "runtime"
+    root.mkdir()
+    executable = _runtime_tree(root)
+    selected_root = root
+    if mutation == "root-symlink":
+        selected_root = tmp_path / "runtime-link"
+        selected_root.symlink_to(root, target_is_directory=True)
+    elif mutation == "site-symlink":
+        site_packages = (
+            root
+            / ".venv/lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+        )
+        site_packages.rmdir()
+        outside = tmp_path / "outside-site"
+        outside.mkdir()
+        site_packages.symlink_to(outside, target_is_directory=True)
+    elif mutation == "root-writable":
+        root.chmod(0o777)
+    elif mutation == "workspace-writable":
+        (root / "packages/testing/src").chmod(0o777)
+    elif mutation == "site-writable":
+        (
+            root
+            / ".venv/lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+        ).chmod(0o777)
+    elif mutation == "interpreter-writable":
+        executable.chmod(0o777)
+    else:
+        executable = tmp_path / "outside-python"
+        executable.write_bytes(b"synthetic-interpreter")
+        executable.chmod(0o700)
+
+    with pytest.raises(ValueError, match="invalid-runtime-path"):
+        module._open_runtime_layout(
+            selected_root,
+            str(executable),
+            script_relative=script_relative,
+        )
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_runtime_layout_descriptors_survive_root_rename_and_replacement(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    if target == "runner":
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_runtime_runner_rename", SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        script_relative = "scripts/run_scenarios.py"
+    else:
+        import importlib
+
+        module = importlib.import_module("tuntun_core.cli.commands.simulate")
+        script_relative = None
+    root = tmp_path / "runtime"
+    root.mkdir()
+    executable = _runtime_tree(root)
+    layout = module._open_runtime_layout(
+        root,
+        str(executable),
+        script_relative=script_relative,
+    )
+    try:
+        moved = tmp_path / "moved-runtime"
+        root.rename(moved)
+        root.mkdir()
+        replacement = root / "packages/testing/src"
+        replacement.mkdir(parents=True)
+        (replacement / "original.txt").write_text("replacement", encoding="utf-8")
+        descriptor = layout.workspace_descriptors[0]
+        original_fd = os.open("original.txt", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+        try:
+            assert os.read(original_fd, 32) == b"original"
+        finally:
+            os.close(original_fd)
+        assert (replacement / "original.txt").read_text(encoding="utf-8") == "replacement"
+    finally:
+        module._close_runtime_layout(layout)
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_descriptor_workspace_loader_handles_package_relative_import_without_lexical_fallback(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    if target == "runner":
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_runtime_runner_loader", SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        script_relative = "scripts/run_scenarios.py"
+    else:
+        import importlib
+
+        module = importlib.import_module("tuntun_core.cli.commands.simulate")
+        script_relative = None
+    root = tmp_path / "runtime"
+    root.mkdir()
+    _runtime_tree(root).unlink()
+    (root / ".venv/bin/python").symlink_to(sys.executable)
+    package = root / "packages/testing/src/tuntun_testing"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "from .submodule import VALUE\n",
+        encoding="utf-8",
+    )
+    (package / "submodule.py").write_text("VALUE = 'original'\n", encoding="utf-8")
+    script = root / "scripts/run_scenarios.py"
+    script.write_text(
+        """
+import os
+import signal
+
+def _child_main_from_stdin(_nonce: str) -> int:
+    import tuntun_testing
+    assert tuntun_testing.VALUE == "original"
+    assert list(tuntun_testing.__spec__.submodule_search_locations) == []
+    os.write(1, b"complete\\n")
+    while True:
+        signal.pause()
+""",
+        encoding="utf-8",
+    )
+    layout = module._open_runtime_layout(
+        root,
+        str(root / ".venv/bin/python"),
+        script_relative=script_relative,
+    )
+    moved = tmp_path / "moved-runtime"
+    marker = tmp_path / "replacement-imported"
+    try:
+        root.rename(moved)
+        root.mkdir()
+        replacement = root / "packages/testing/src/tuntun_testing"
+        replacement.mkdir(parents=True)
+        (replacement / "__init__.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('bad')\n"
+            "VALUE='replacement'\n",
+            encoding="utf-8",
+        )
+        nonce = "a" * 64
+        child_code = """
+import os
+import signal
+import tuntun_testing
+assert tuntun_testing.VALUE == "original"
+assert list(tuntun_testing.__spec__.submodule_search_locations) == []
+os.write(1, b"complete\\n")
+while True:
+    signal.pause()
+"""
+        bootstrap = (
+            module._CHILD_BOOTSTRAP
+            if target == "runner"
+            else module._SIMULATE_BOOTSTRAP + child_code
+        )
+        result = module._run_bounded_process(
+            (
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                bootstrap,
+                nonce,
+                "65536",
+                layout.manifest_b64,
+            ),
+            payload=b"{}",
+            cwd=root,
+            environment={},
+            supervision_nonce=nonce,
+            inherited_descriptors=layout.descriptors,
+        )
+        assert result.returncode == 0
+        assert result.stdout == b"complete\n"
+        assert result.stderr == b""
+        assert not marker.exists()
+    finally:
+        module._close_runtime_layout(layout)
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_site_packages_imports_remain_bound_to_retained_directory_after_replacement(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    if target == "runner":
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_runtime_runner_site", SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        script_relative = "scripts/run_scenarios.py"
+    else:
+        import importlib
+
+        module = importlib.import_module("tuntun_core.cli.commands.simulate")
+        script_relative = None
+    root = tmp_path / "runtime"
+    root.mkdir()
+    _runtime_tree(root).unlink()
+    (root / ".venv/bin/python").symlink_to(sys.executable)
+    site_packages = (
+        root
+        / ".venv/lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    (site_packages / "tuntun_site_probe.py").write_text(
+        "VALUE = 'original'\n",
+        encoding="utf-8",
+    )
+    script = root / "scripts/run_scenarios.py"
+    script.write_text(
+        """
+import os
+import signal
+
+def _child_main_from_stdin(_nonce: str) -> int:
+    import tuntun_site_probe
+    assert tuntun_site_probe.VALUE == "original"
+    os.write(1, b"complete\\n")
+    while True:
+        signal.pause()
+""",
+        encoding="utf-8",
+    )
+    layout = module._open_runtime_layout(
+        root,
+        str(root / ".venv/bin/python"),
+        script_relative=script_relative,
+    )
+    marker = tmp_path / "replacement-site-imported"
+    try:
+        attack = f"""
+moved_site_path = site_path + ".moved"
+os.rename(site_path, moved_site_path)
+os.mkdir(site_path, 0o700)
+with open(site_path + "/tuntun_site_probe.py", "w", encoding="utf-8") as handle:
+    handle.write("from pathlib import Path\\n")
+    handle.write("Path({str(marker)!r}).write_text('bad')\\n")
+    handle.write("VALUE='replacement'\\n")
+"""
+        insertion = "sys.meta_path.insert(0, _WorkspaceFinder())"
+        base_bootstrap = (
+            module._CHILD_BOOTSTRAP if target == "runner" else module._SIMULATE_BOOTSTRAP
+        )
+        assert base_bootstrap.count(insertion) == 1
+        bootstrap = base_bootstrap.replace(insertion, attack + "\n" + insertion)
+        if target == "simulate":
+            bootstrap += """
+import os
+import signal
+import tuntun_site_probe
+assert tuntun_site_probe.VALUE == "original"
+os.write(1, b"complete\\n")
+while True:
+    signal.pause()
+"""
+        nonce = "a" * 64
+        result = module._run_bounded_process(
+            (
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                bootstrap,
+                nonce,
+                "65536",
+                layout.manifest_b64,
+            ),
+            payload=b"{}",
+            cwd=root,
+            environment={},
+            supervision_nonce=nonce,
+            inherited_descriptors=layout.descriptors,
+        )
+        assert result.returncode == 0
+        assert result.stdout == b"complete\n"
+        assert result.stderr == b""
+        assert not marker.exists()
+    finally:
+        module._close_runtime_layout(layout)
+
+
+@pytest.mark.parametrize("target", ["scenario-typecheck", "scenario-check"])
+def test_make_scenario_gate_uses_offline_no_sync_isolated_python(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    real_uv = shutil.which("uv")
+    assert real_uv is not None
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    marker = tmp_path / "sitecustomize-ran"
+    (shadow / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uv_log = tmp_path / "uv-args"
+    uv_wrapper = fake_bin / "uv"
+    uv_wrapper.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$TUNTUN_UV_ARGS"\nexec "$TUNTUN_REAL_UV" "$@"\n',
+        encoding="utf-8",
+    )
+    uv_wrapper.chmod(0o700)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": os.pathsep.join((str(fake_bin), environment["PATH"])),
+            "PYTHONPATH": str(shadow),
+            "TUNTUN_REAL_UV": real_uv,
+            "TUNTUN_UV_ARGS": str(uv_log),
+            "UV_CACHE_DIR": str(tmp_path / "uv-cache"),
+        }
+    )
+
+    result = subprocess.run(
+        ["make", target],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert not marker.exists()
+    arguments = uv_log.read_text(encoding="utf-8").splitlines()
+    assert arguments[:3] == ["run", "--offline", "--no-sync"]
+    assert "-I" in arguments and "-S" in arguments
+
+
+def test_installed_tuntunctl_discloses_trusted_python_startup_boundary(
+    tmp_path: Path,
+) -> None:
+    executable = ROOT / ".venv/bin/tuntunctl"
+    assert executable.is_file()
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    marker = tmp_path / "sitecustomize-ran"
+    (shadow / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(shadow)
+
+    result = subprocess.run(
+        [str(executable), "simulate", "--help"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert marker.exists()
+    assert b"trusted Python environment" in b" ".join(result.stdout.split())
 
 
 def test_core_wheel_smoke_uses_private_cache_and_highest_current_ranges(

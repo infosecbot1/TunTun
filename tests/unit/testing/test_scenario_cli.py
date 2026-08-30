@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import fcntl
@@ -13,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Sequence
 from contextlib import suppress
 from hashlib import sha256
@@ -93,13 +95,16 @@ def _yaml(name: str = "case") -> bytes:
 
 
 def _canonical_line(value: object) -> bytes:
-    return json.dumps(
-        value,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8") + b"\n"
+    return (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
 
 
 def _gate_document(names: list[str], *, turns: int = 1) -> dict[str, object]:
@@ -123,8 +128,7 @@ def _gate_document(names: list[str], *, turns: int = 1) -> dict[str, object]:
             "status": "not_measured",
         },
         "scenarios": [
-            {"name": name, "result_chain_sha256": "0" * 64, "turns": turns}
-            for name in names
+            {"name": name, "result_chain_sha256": "0" * 64, "turns": turns} for name in names
         ],
         "schema_version": "scenario_gate.v1",
         "status": "pass",
@@ -139,7 +143,7 @@ def _gate_child_bytes(configuration: dict[str, object], names: list[str]) -> byt
     return _canonical_line(
         {
             "document": document,
-            "input_references": invocation["inputs"],
+            "input_reference_set_sha256": invocation["input_reference_set_sha256"],
             "invocation_commitment": configuration["invocation_commitment"],
             "nonce": configuration["nonce"],
             "schema_version": "scenario_supervisor_envelope.v1",
@@ -670,8 +674,10 @@ def test_scenario_supervisor_binds_records_to_exact_requested_inputs(
         payload: bytes,
         cwd: Path,
         environment: dict[str, str],
+        supervision_nonce: str,
+        inherited_descriptors: tuple[int, ...],
     ) -> subprocess.CompletedProcess[bytes]:
-        del cwd, environment
+        del cwd, environment, supervision_nonce, inherited_descriptors
         configuration = json.loads(payload)
         names = ["first", "second"]
         if mutation == "omission":
@@ -717,8 +723,10 @@ def test_scenario_supervisor_rejects_replayed_envelope(
         payload: bytes,
         cwd: Path,
         environment: dict[str, str],
+        supervision_nonce: str,
+        inherited_descriptors: tuple[int, ...],
     ) -> subprocess.CompletedProcess[bytes]:
-        del cwd, environment
+        del cwd, environment, supervision_nonce, inherited_descriptors
         if not saved:
             saved.append(_gate_child_bytes(json.loads(payload), ["case"]))
         return subprocess.CompletedProcess(command, 0, saved[0], b"")
@@ -785,18 +793,16 @@ def test_maximum_declared_scenario_set_fits_bounded_child_configuration(
         payload: bytes,
         cwd: Path,
         environment: dict[str, str],
+        supervision_nonce: str,
+        inherited_descriptors: tuple[int, ...],
     ) -> subprocess.CompletedProcess[bytes]:
-        del cwd
+        del cwd, supervision_nonce, inherited_descriptors
         assert environment == {}
         captured_payloads.append(payload)
         return subprocess.CompletedProcess(command, 1, b"", b"")
 
     monkeypatch.setattr(runner, "_run_bounded_process", fake_process)
-    arguments = [
-        item
-        for index in range(32)
-        for item in ("--scenario", f"case-{index:02d}.yaml")
-    ]
+    arguments = [item for index in range(32) for item in ("--scenario", f"case-{index:02d}.yaml")]
     result = runner._run_gate_child((*arguments, "--turns", "1", "--json"), tmp_path)
     captured = capsys.readouterr()
 
@@ -805,6 +811,78 @@ def test_maximum_declared_scenario_set_fits_bounded_child_configuration(
     assert captured.err == "scenario-gate: failed\n"
     assert len(captured_payloads) == 1
     assert 1_048_576 < len(captured_payloads[0]) <= runner._MAX_CHILD_CONFIGURATION_BYTES
+    configuration = json.loads(captured_payloads[0])
+    assert "inputs" not in configuration["invocation"]
+    assert set(configuration["invocation"]) == {
+        "assert_resource_bounds",
+        "input_reference_set_sha256",
+        "json_output",
+        "schema_version",
+        "turns",
+    }
+
+
+def test_maximum_declared_reference_paths_fit_the_bounded_result_envelope() -> None:
+    runner = _load_runner_module()
+    references: list[dict[str, str]] = []
+    for index in range(32):
+        scenario = f"case-{index:02d}"
+        parts = [f"segment-{index:02d}-" + ("x" * 238)] * 16
+        path = "/".join((*parts, f"{scenario}.yaml"))
+        assert len(path.encode("utf-8")) <= 4_096
+        references.append({"content_sha256": f"{index:064x}", "path": path, "scenario": scenario})
+    reference_set_sha256 = runner._reference_set_commitment(tuple(references))
+    invocation = {
+        "assert_resource_bounds": False,
+        "input_reference_set_sha256": reference_set_sha256,
+        "json_output": True,
+        "schema_version": "scenario_invocation.v1",
+        "turns": 1,
+    }
+    prepared = runner._PreparedGateInvocation(
+        values=argparse.Namespace(assert_resource_bounds=False, json=True, turns=1),
+        inputs=(),
+        input_references=tuple(references),
+        input_reference_set_commitment=reference_set_sha256,
+        invocation=invocation,
+        invocation_commitment=sha256(runner._canonical_bytes(invocation)).hexdigest(),
+    )
+    nonce = "a" * 64
+    envelope = _canonical_line(
+        {
+            "document": _gate_document([item["scenario"] for item in references]),
+            "input_reference_set_sha256": reference_set_sha256,
+            "invocation_commitment": prepared.invocation_commitment,
+            "nonce": nonce,
+            "schema_version": "scenario_supervisor_envelope.v1",
+        }
+    )
+
+    assert len(envelope) <= runner._MAX_CHILD_OUTPUT_BYTES
+    assert (
+        json.loads(runner._validated_gate_envelope(envelope, prepared, nonce))["status"] == "pass"
+    )
+
+
+def test_real_longest_portable_scenario_paths_execute_at_count_limit(tmp_path: Path) -> None:
+    path_limit = int(os.pathconf(tmp_path, "PC_PATH_MAX"))
+    target_length = min(700, path_limit - len(os.fsencode(tmp_path)) - 128)
+    relative = Path("deep")
+    while len(str(relative).encode("utf-8")) < target_length - 80:
+        relative /= "segment-" + ("x" * 120)
+    arguments: list[str] = []
+    for index in range(32):
+        scenario = f"case-{index:02d}"
+        path = relative / f"{scenario}.yaml"
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_yaml(scenario))
+        arguments.extend(("--scenario", path.as_posix()))
+
+    result = _run_at(tmp_path, *arguments, "--turns", "1", "--json", timeout=60)
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert len(json.loads(result.stdout)["scenarios"]) == 32
 
 
 @pytest.mark.parametrize(
@@ -840,15 +918,19 @@ def test_gate_child_configuration_validates_exact_field_types_and_bounds(
     elif mutation == "commitment-type":
         configuration["invocation_commitment"] = [prepared.invocation_commitment]
     elif mutation == "path-escape":
-        reference = configuration["invocation"]["inputs"][0]
-        reference["path"] = "../case.yaml"
         configuration["inputs"][0]["path"] = "../case.yaml"
+        references = [
+            {key: configuration["inputs"][0][key] for key in ("content_sha256", "path", "scenario")}
+        ]
+        configuration["invocation"]["input_reference_set_sha256"] = (
+            runner._reference_set_commitment(tuple(references))
+        )
         configuration["invocation_commitment"] = sha256(
             runner._canonical_bytes(configuration["invocation"])
         ).hexdigest()
     elif mutation == "digest-type":
-        configuration["invocation"]["inputs"][0]["content_sha256"] = 7
         configuration["inputs"][0]["content_sha256"] = 7
+        configuration["invocation"]["input_reference_set_sha256"] = "0" * 64
         configuration["invocation_commitment"] = sha256(
             runner._canonical_bytes(configuration["invocation"])
         ).hexdigest()
@@ -922,53 +1004,361 @@ def test_simulation_child_configuration_validates_exact_field_types_and_bounds(
     assert result.stderr == b"simulation-invalid-input\n"
 
 
+def _worker_guard_probe(operation: str) -> str:
+    return f"""
+try:
+    {operation}
+except PermissionError:
+    pass
+else:
+    raise AssertionError("process-operation-was-not-denied")
+"""
+
+
+def _escape_attempt(
+    lock_path: Path,
+    descriptor_path: Path,
+    pid_path: Path,
+    socket_path: Path,
+    *,
+    outcome: str,
+) -> str:
+    holder = f"""
+import fcntl
+import os
+import socket
+import time
+
+lock = open({str(lock_path)!r}, "w")
+fcntl.flock(lock, fcntl.LOCK_EX)
+descriptor = os.open({str(descriptor_path)!r}, os.O_CREAT | os.O_WRONLY, 0o600)
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind({str(socket_path)!r})
+server.listen(1)
+with open({str(pid_path)!r}, "w", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()))
+time.sleep(30)
+"""
+    outcome_code = {
+        "success": "pass",
+        "error": 'raise RuntimeError("synthetic-worker-error")',
+        "timeout": "time.sleep(30)",
+    }[outcome]
+    return f"""
+try:
+    escaped_pid = os.fork()
+except PermissionError:
+    escaped_pid = None
+else:
+    if escaped_pid == 0:
+        os.setsid()
+        os.execl(sys.executable, sys.executable, "-I", "-S", "-c", {holder!r})
+    escape_deadline = time.monotonic() + 3.0
+    while not Path({str(pid_path)!r}).exists() and time.monotonic() < escape_deadline:
+        time.sleep(0.01)
+    if not Path({str(pid_path)!r}).exists():
+        raise RuntimeError("escape-startup-timeout")
+{outcome_code}
+"""
+
+
+def _inject_bootstrap_worker_code(bootstrap: str, worker_code: str) -> str:
+    needle = "_worker_guard_installed = True"
+    assert bootstrap.count(needle) == 1
+    return bootstrap.replace(needle, worker_code + "\n" + needle)
+
+
 @pytest.mark.parametrize("target", ["runner", "simulate"])
-def test_success_path_terminates_descendants_holding_flock(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "os.setsid()",
+        "os.setpgid(0, 0)",
+        "os.system(':')",
+        "os.posix_spawn('/bin/true', ('true',), {})",
+        "__import__('subprocess').run(['/bin/true'], check=True)",
+        "os.execl('/bin/true', 'true')",
+        "(lambda result: (os._exit(0) if result[0] == 0 else "
+        "(os.close(result[1]), os.waitpid(result[0], 0), "
+        "(_ for _ in ()).throw(AssertionError('process-operation-was-not-denied')))))"
+        "(os.forkpty())",
+    ],
+)
+def test_worker_denies_python_process_and_session_operations_before_import(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    operation: str,
+) -> None:
+    runner = _load_runner_module()
+    module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    probe = _worker_guard_probe(operation)
+    if target == "runner":
+        monkeypatch.setattr(
+            runner,
+            "_CHILD_BOOTSTRAP",
+            _inject_bootstrap_worker_code(runner._CHILD_BOOTSTRAP, probe),
+        )
+        assert runner._run_gate_child(("--turns", "1", "--json"), ROOT) == 0
+    else:
+        from typer.testing import CliRunner
+
+        app = importlib.import_module("tuntun_core.cli.main").app
+        monkeypatch.setattr(
+            module,
+            "_SIMULATE_BOOTSTRAP",
+            _inject_bootstrap_worker_code(module._SIMULATE_BOOTSTRAP, probe),
+        )
+        result = CliRunner().invoke(
+            app,
+            [
+                "simulate",
+                "--scenario",
+                "tests/fixtures/scenarios/guest-hinglish.yaml",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.stderr
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_direct_native_syscalls_are_an_explicit_trusted_code_boundary(
     monkeypatch: pytest.MonkeyPatch,
     target: str,
 ) -> None:
-    lock_path = tmp_path / f"{target}.lock"
-    pid_path = tmp_path / f"{target}.pid"
-    child_code = f"""
-import fcntl
-import os
-import time
-from pathlib import Path
-
-pid = os.fork()
-if pid == 0:
-    handle = open({str(lock_path)!r}, "w")
-    fcntl.flock(handle, fcntl.LOCK_EX)
-    Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
-    time.sleep(30)
+    runner = _load_runner_module()
+    module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    probe = """
+import ctypes
+try:
+    os.fork()
+except PermissionError:
+    pass
+else:
+    raise AssertionError("python-fork-was-not-denied")
+native_fork = ctypes.CDLL(None).fork
+native_fork.restype = ctypes.c_int
+native_pid = native_fork()
+if native_pid == 0:
     os._exit(0)
-while not Path({str(pid_path)!r}).exists():
-    time.sleep(0.01)
-os.write(1, b"complete\\n")
+if native_pid < 0:
+    raise RuntimeError("native-fork-failed")
+os.waitpid(native_pid, 0)
 """
+    if target == "runner":
+        monkeypatch.setattr(
+            runner,
+            "_CHILD_BOOTSTRAP",
+            _inject_bootstrap_worker_code(runner._CHILD_BOOTSTRAP, probe),
+        )
+        assert runner._run_gate_child(("--turns", "1", "--json"), ROOT) == 0
+    else:
+        from typer.testing import CliRunner
+
+        app = importlib.import_module("tuntun_core.cli.main").app
+        monkeypatch.setattr(
+            module,
+            "_SIMULATE_BOOTSTRAP",
+            _inject_bootstrap_worker_code(module._SIMULATE_BOOTSTRAP, probe),
+        )
+        result = CliRunner().invoke(
+            app,
+            [
+                "simulate",
+                "--scenario",
+                "tests/fixtures/scenarios/guest-hinglish.yaml",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.stderr
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+@pytest.mark.parametrize("outcome", ["success", "error", "timeout"])
+def test_worker_cannot_escape_session_or_retain_flock_fd_unix_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    outcome: str,
+) -> None:
+    lock_path = tmp_path / f"{target}-{outcome}.lock"
+    descriptor_path = tmp_path / f"{target}-{outcome}.fd"
+    pid_path = tmp_path / f"{target}-{outcome}.pid"
+    socket_path = tmp_path / f"{target}-{outcome}.sock"
+    attack = _escape_attempt(
+        lock_path,
+        descriptor_path,
+        pid_path,
+        socket_path,
+        outcome=outcome,
+    )
     runner = _load_runner_module()
     module = importlib.import_module("tuntun_core.cli.commands.simulate")
     try:
         if target == "runner":
-            runner._run_bounded_process(
-                (sys.executable, "-I", "-S", "-c", child_code),
-                payload=b"{}",
-                cwd=ROOT,
-                environment={},
+            monkeypatch.setattr(
+                runner,
+                "_CHILD_BOOTSTRAP",
+                _inject_bootstrap_worker_code(runner._CHILD_BOOTSTRAP, attack),
             )
+            if outcome == "timeout":
+                monkeypatch.setattr(runner, "_CHILD_TIMEOUT_SECONDS", 0.1)
+            result_code = runner._run_gate_child(("--turns", "1", "--json"), ROOT)
+            assert result_code == (0 if outcome == "success" else 1)
         else:
-            monkeypatch.setattr(module, "_SIMULATE_CHILD_CODE", child_code)
-            parameters = importlib.import_module("inspect").signature(
-                module._run_simulation_child
-            ).parameters
-            kwargs: dict[str, object] = {"repository_root": ROOT}
-            if "configuration" in parameters:
-                kwargs["configuration"] = _canonical_line({"nonce": "a" * 64})[:-1]
-            else:
-                kwargs["environment"] = {}
-            module._run_simulation_child(**kwargs)
+            from typer.testing import CliRunner
 
+            app = importlib.import_module("tuntun_core.cli.main").app
+            monkeypatch.setattr(
+                module,
+                "_SIMULATE_BOOTSTRAP",
+                _inject_bootstrap_worker_code(module._SIMULATE_BOOTSTRAP, attack),
+            )
+            if outcome == "timeout":
+                monkeypatch.setattr(module, "_SIMULATION_TIMEOUT_SECONDS", 0.1)
+            result = CliRunner().invoke(
+                app,
+                [
+                    "simulate",
+                    "--scenario",
+                    "tests/fixtures/scenarios/guest-hinglish.yaml",
+                    "--json",
+                ],
+            )
+            assert result.exit_code == (0 if outcome == "success" else 2)
+
+        assert not pid_path.exists()
+        assert not descriptor_path.exists()
+        assert not socket_path.exists()
+        if lock_path.exists():
+            with lock_path.open("a") as probe_handle:
+                fcntl.flock(probe_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(probe_handle, fcntl.LOCK_UN)
+    finally:
+        if pid_path.exists():
+            with suppress(ProcessLookupError):
+                os.kill(int(pid_path.read_text(encoding="utf-8")), signal.SIGKILL)
+        socket_path.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize(
+    "ack_mode",
+    ["eof", "short", "forged", "duplicate", "leader-death"],
+)
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_supervision_rejects_invalid_shutdown_acknowledgement(
+    tmp_path: Path,
+    ack_mode: str,
+    target: str,
+) -> None:
+    runner = _load_runner_module()
+    simulate_module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    nonce = uuid.uuid4().hex + uuid.uuid4().hex
+    leader = r"""
+import json
+import os
+import sys
+
+nonce = sys.argv[1]
+shutdown_fd = int(sys.argv[-2])
+ack_fd = int(sys.argv[-1])
+worker_pid = 4242
+line = lambda value: (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode()
+os.write(ack_fd, line({"event": "ready", "nonce": nonce, "worker_pid": worker_pid}))
+os.write(1, b"complete\n")
+os.read(shutdown_fd, 4096)
+if sys.argv[2] == "leader-death":
+    os._exit(0)
+if sys.argv[2] == "eof":
+    os.close(ack_fd)
+elif sys.argv[2] == "short":
+    os.write(ack_fd, b"{")
+elif sys.argv[2] == "forged":
+    os.write(ack_fd, line({"event": "stopped", "nonce": "0" * 64, "worker_pid": worker_pid}))
+else:
+    frame = line({"event": "stopped", "nonce": nonce, "worker_pid": worker_pid})
+    os.write(ack_fd, frame + frame)
+os.close(ack_fd)
+"""
+
+    with pytest.raises((RuntimeError, TimeoutError, ValueError)):
+        module = runner if target == "runner" else simulate_module
+        module._run_bounded_process(
+            (sys.executable, "-I", "-S", "-c", leader, nonce, ack_mode),
+            payload=b"{}",
+            cwd=tmp_path,
+            environment={},
+            supervision_nonce=nonce,
+            inherited_descriptors=(),
+        )
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_forged_ready_frame_cannot_select_graceful_cleanup_or_leave_worker_alive(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    runner = _load_runner_module()
+    simulate_module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    module = runner if target == "runner" else simulate_module
+    nonce = uuid.uuid4().hex + uuid.uuid4().hex
+    lock_path = tmp_path / f"{target}-forged-ready.lock"
+    pid_path = tmp_path / f"{target}-forged-ready.pid"
+    leader = r"""
+import fcntl
+import json
+import os
+import signal
+import sys
+import time
+
+nonce, lock_path, pid_path = sys.argv[1:4]
+shutdown_fd = int(sys.argv[-2])
+ack_fd = int(sys.argv[-1])
+ready_read, ready_write = os.pipe()
+worker_pid = os.fork()
+if worker_pid == 0:
+    os.close(ready_read)
+    os.close(shutdown_fd)
+    os.close(ack_fd)
+    lock = open(lock_path, "a")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    with open(pid_path, "w") as handle:
+        handle.write(str(os.getpid()))
+    os.write(ready_write, b"1")
+    while True:
+        signal.pause()
+os.close(ready_write)
+os.read(ready_read, 1)
+line = lambda value: (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode()
+os.write(ack_fd, line({"event": "ready", "nonce": "0" * 64, "worker_pid": worker_pid}))
+control = os.read(shutdown_fd, 4096)
+if control:
+    os.write(ack_fd, line({"event": "stopped", "nonce": nonce, "worker_pid": worker_pid}))
+    os.close(ack_fd)
+    os._exit(0)
+while True:
+    time.sleep(1)
+"""
+
+    try:
+        with pytest.raises(ValueError, match="invalid-ready-acknowledgement"):
+            module._run_bounded_process(
+                (
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    leader,
+                    nonce,
+                    str(lock_path),
+                    str(pid_path),
+                ),
+                payload=b"{}",
+                cwd=tmp_path,
+                environment={},
+                supervision_nonce=nonce,
+                inherited_descriptors=(),
+            )
         with lock_path.open("a") as probe:
             fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(probe, fcntl.LOCK_UN)
@@ -976,6 +1366,133 @@ os.write(1, b"complete\\n")
         if pid_path.exists():
             with suppress(ProcessLookupError):
                 os.kill(int(pid_path.read_text(encoding="utf-8")), signal.SIGKILL)
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_reaped_nonzero_supervisor_is_not_signalled_by_reused_process_group_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    runner = _load_runner_module()
+    simulate_module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    module = runner if target == "runner" else simulate_module
+    nonce = uuid.uuid4().hex + uuid.uuid4().hex
+    leader = r"""
+import json
+import os
+import sys
+
+nonce = sys.argv[1]
+shutdown_fd = int(sys.argv[-2])
+ack_fd = int(sys.argv[-1])
+worker_pid = 4242
+line = lambda value: (json.dumps(value, separators=(",", ":"), sort_keys=True) + "\n").encode()
+os.write(ack_fd, line({"event": "ready", "nonce": nonce, "worker_pid": worker_pid}))
+os.write(1, b"complete\n")
+os.read(shutdown_fd, 4096)
+os.write(ack_fd, line({"event": "stopped", "nonce": nonce, "worker_pid": worker_pid}))
+os.close(ack_fd)
+os._exit(7)
+"""
+    signalled_groups: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        module.os,
+        "killpg",
+        lambda process_group, signal_number: signalled_groups.append(
+            (process_group, signal_number)
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="supervisor-shutdown-failed"):
+        module._run_bounded_process(
+            (sys.executable, "-I", "-S", "-c", leader, nonce),
+            payload=b"{}",
+            cwd=tmp_path,
+            environment={},
+            supervision_nonce=nonce,
+            inherited_descriptors=(),
+        )
+
+    assert signalled_groups == []
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_process_group_permission_denial_fails_closed_and_reaps_owned_leader(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    runner = _load_runner_module()
+    simulate_module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    module = runner if target == "runner" else simulate_module
+
+    class FakeProcess:
+        pid = 4242
+        killed = False
+        waited = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout > 0
+            self.waited = True
+            return -signal.SIGKILL
+
+    process = FakeProcess()
+
+    def deny_group_signal(process_group: int, signal_number: int) -> None:
+        assert process_group == process.pid
+        assert signal_number == signal.SIGKILL
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(module.os, "killpg", deny_group_signal)
+
+    with pytest.raises(RuntimeError, match="process-group-cleanup-permission-denied"):
+        module._force_process_group_cleanup(
+            process,
+            deadline=time.monotonic() + 1.0,
+        )
+
+    assert process.killed
+    assert process.waited
+
+
+@pytest.mark.parametrize("target", ["runner", "simulate"])
+def test_control_pipe_setup_failure_closes_the_first_pipe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    runner = _load_runner_module()
+    simulate_module = importlib.import_module("tuntun_core.cli.commands.simulate")
+    module = runner if target == "runner" else simulate_module
+    real_pipe = os.pipe
+    opened: list[int] = []
+
+    def fail_second_pipe() -> tuple[int, int]:
+        if opened:
+            raise OSError("synthetic-pipe-failure")
+        descriptors = real_pipe()
+        opened.extend(descriptors)
+        return descriptors
+
+    monkeypatch.setattr(module.os, "pipe", fail_second_pipe)
+
+    with pytest.raises(OSError, match="synthetic-pipe-failure"):
+        module._run_bounded_process(
+            (sys.executable, "-I", "-S", "-c", "raise SystemExit(0)"),
+            payload=b"{}",
+            cwd=tmp_path,
+            environment={},
+            supervision_nonce="a" * 64,
+            inherited_descriptors=(),
+        )
+
+    assert len(opened) == 2
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
 
 
 @pytest.mark.parametrize(
@@ -1015,20 +1532,25 @@ def test_scenario_supervisor_requires_exact_schema_and_canonical_json(
     responses = ((wrong_schema, True), (document, False))
 
     for child_document, canonical in responses:
+
         def fake_process(
             command: Sequence[str],
             *,
             payload: bytes,
             cwd: Path,
             environment: dict[str, str],
+            supervision_nonce: str,
+            inherited_descriptors: tuple[int, ...],
             _child_document: object = child_document,
             _canonical: bool = canonical,
         ) -> subprocess.CompletedProcess[bytes]:
-            del cwd, environment
+            del cwd, environment, supervision_nonce, inherited_descriptors
             configuration = json.loads(payload)
             envelope = {
                 "document": _child_document,
-                "input_references": configuration["invocation"]["inputs"],
+                "input_reference_set_sha256": configuration["invocation"][
+                    "input_reference_set_sha256"
+                ],
                 "invocation_commitment": configuration["invocation_commitment"],
                 "nonce": configuration["nonce"],
                 "schema_version": "scenario_supervisor_envelope.v1",
