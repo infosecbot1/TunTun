@@ -14,6 +14,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from .fs import (
+    MODEL_INSTALL_LOCK_NAME,
     OwnedDirectory,
     close_preserving_primary,
     entry_exists_at,
@@ -493,20 +494,49 @@ class ModelRegistry:
 
     def activate(self, model_id: str) -> ActivatedModel:
         entry = self.entry(model_id)
-        handles: list[VerifiedModelFile] = []
-        directories: list[OwnedDirectory] = []
+        activated: ActivatedModel | None = None
+        root: OwnedDirectory | None = None
+        model: OwnedDirectory | None = None
         try:
             root = OwnedDirectory.open(self._root)
-            directories.append(root)
-            model = root.child(entry.model_id)
-            directories.append(model)
+            with root.lock(
+                MODEL_INSTALL_LOCK_NAME,
+                timeout_seconds=30.0,
+                shared=True,
+            ):
+                model = root.child(entry.model_id)
+                activated = self._activate_from_open_model(model, entry)
+                model.close()
+                model = None
+            root.close()
+            root = None
+        except BaseException as error:
+            if activated is not None:
+                close_preserving_primary(activated, ActivatedModel.close, error)
+            if model is not None:
+                close_preserving_primary(model, OwnedDirectory.close, error)
+            if root is not None:
+                close_preserving_primary(root, OwnedDirectory.close, error)
+            raise RuntimeError("model is not installed and verified") from error
+        if activated is None:
+            raise RuntimeError("model is not installed and verified")
+        return activated
+
+    @staticmethod
+    def _activate_from_open_model(
+        model: OwnedDirectory,
+        entry: ModelEntry,
+    ) -> ActivatedModel:
+        handles: list[VerifiedModelFile] = []
+        revision: OwnedDirectory | None = None
+        activated: ActivatedModel | None = None
+        try:
             if publication_is_uncertain(model, entry.revision):
                 raise PermissionError("model revision commit is uncertain")
             pending_name = recovery_pending_name(entry.revision)
             if entry_exists_at(model, pending_name):
                 raise PermissionError("model revision recovery is pending")
             revision = model.child(entry.revision, mode=0o500)
-            directories.append(revision)
             expected_names = tuple(sorted(item.path for item in entry.files))
             if tuple(sorted(os.listdir(revision.fd))) != expected_names:
                 raise PermissionError("unsafe model filesystem revision")
@@ -526,11 +556,19 @@ class ModelRegistry:
                 raise PermissionError("model revision recovery is pending")
             if publication_is_uncertain(model, entry.revision):
                 raise PermissionError("model revision commit is uncertain")
-            return ActivatedModel.from_manifest(entry, tuple(handles))
+            activated = ActivatedModel.from_manifest(entry, tuple(handles))
+            handles.clear()
         except BaseException as error:
             for handle in handles:
                 close_preserving_primary(handle, VerifiedModelFile.close, error)
-            raise RuntimeError("model is not installed and verified") from error
-        finally:
-            for directory in reversed(directories):
-                directory.close()
+            if revision is not None:
+                close_preserving_primary(revision, OwnedDirectory.close, error)
+            raise
+        if activated is None or revision is None:
+            raise RuntimeError("model activation did not retain verified files")
+        try:
+            revision.close()
+        except BaseException as error:
+            close_preserving_primary(activated, ActivatedModel.close, error)
+            raise
+        return activated

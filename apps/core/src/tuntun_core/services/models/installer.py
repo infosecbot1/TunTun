@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .fs import (
+    MODEL_INSTALL_LOCK_NAME,
     OwnedDirectory,
     _mark_publication_uncertain,
     _resolve_publication_uncertainty,
@@ -29,6 +30,7 @@ from .registry import ActivatedModel, ModelEntry, ModelFile, ModelRegistry, Veri
 WriteOnce = Callable[[int, bytes | memoryview], int]
 FaultHook = Callable[[str], None]
 _RECOVERY_ROLLBACK_NOTE = "additional recovery rollback failure"
+_RECOVERY_RESTORE_NOTE = "additional recovery marker restoration failure"
 
 
 def _write_once(descriptor: int, data: bytes | memoryview) -> int:
@@ -218,11 +220,48 @@ class ModelInstaller:
         descriptor: int,
     ) -> None:
         name = recovery_pending_name(revision)
-        ModelInstaller._require_recovery_marker(model, revision, descriptor)
         _mark_publication_uncertain(model, revision)
-        os.unlink(name, dir_fd=model.fd)
-        model.fsync()
+        try:
+            ModelInstaller._require_recovery_marker(model, revision, descriptor)
+            os.unlink(name, dir_fd=model.fd)
+            model.fsync()
+        except BaseException as error:
+            ModelInstaller._restore_recovery_marker(model, revision, error)
+            raise
+        else:
+            _resolve_publication_uncertainty(model, revision)
+
+    @staticmethod
+    def _restore_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        primary_error: BaseException,
+    ) -> bool:
+        try:
+            try:
+                descriptor = ModelInstaller._open_recovery_marker(
+                    model,
+                    revision,
+                    create=True,
+                )
+            except FileExistsError:
+                descriptor = ModelInstaller._open_recovery_marker(
+                    model,
+                    revision,
+                    create=False,
+                )
+            except BaseException:
+                descriptor = ModelInstaller._open_recovery_marker(
+                    model,
+                    revision,
+                    create=False,
+                )
+        except BaseException:
+            primary_error.add_note(_RECOVERY_RESTORE_NOTE)
+            return False
+        close_preserving_primary(descriptor, os.close, primary_error)
         _resolve_publication_uncertainty(model, revision)
+        return True
 
     def _reuse_or_recover_revision(
         self,
@@ -244,8 +283,12 @@ class ModelInstaller:
         transaction_complete = False
         try:
             mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
+            sealed_for_recovery = mode == 0o500
             if mode == 0o500 and not pending_exists:
-                activated = self.registry.activate(entry.model_id)
+                try:
+                    activated = self.registry._activate_from_open_model(model, entry)
+                except BaseException as error:
+                    raise RuntimeError("model is not installed and verified") from error
             else:
                 if mode not in {0o500, 0o700}:
                     raise PermissionError("unsafe model filesystem revision")
@@ -309,16 +352,14 @@ class ModelInstaller:
                 activated = ActivatedModel.from_manifest(entry, tuple(handles))
                 handles.clear()
         except BaseException as error:
-            if (
-                sealed_for_recovery
-                and not transaction_complete
-                and not publication_is_uncertain(model, entry.revision)
-            ):
+            if sealed_for_recovery and not transaction_complete:
                 try:
                     revision.chmod(0o700)
                     revision.fsync()
                 except BaseException:
                     error.add_note(_RECOVERY_ROLLBACK_NOTE)
+                    if publication_is_uncertain(model, entry.revision):
+                        self._restore_recovery_marker(model, entry.revision, error)
             for handle in handles:
                 close_preserving_primary(handle, VerifiedModelFile.close, error)
             if marker_fd is not None:
@@ -343,7 +384,7 @@ class ModelInstaller:
         entry = self.registry.entry(model_id)
         root = OwnedDirectory.open_or_create(self.registry._root)
         try:
-            with root.lock(".model-install.lock", timeout_seconds=30.0):
+            with root.lock(MODEL_INSTALL_LOCK_NAME, timeout_seconds=30.0):
                 model = root.child(entry.model_id, create=True, exist_ok=True)
                 try:
                     prefix = f".stage-{entry.revision}-"
@@ -356,6 +397,7 @@ class ModelInstaller:
                     stage = model.child(stage_name, create=True)
                     stage_identity = stage.identity
                     published = False
+                    sealed_for_publication = False
                     handles: list[VerifiedModelFile] = []
                     marker_fd: int | None = None
                     try:
@@ -389,6 +431,7 @@ class ModelInstaller:
                             create=True,
                         )
                         stage.chmod(0o500)
+                        sealed_for_publication = True
                         stage.fsync()
                         self._fault_hook("after_publish_before_parent_fsync")
                         model.fsync()
@@ -422,6 +465,20 @@ class ModelInstaller:
                             raise RuntimeError("model install publication disappeared") from None
                         return existing
                     except BaseException as error:
+                        if sealed_for_publication and publication_is_uncertain(
+                            model, entry.revision
+                        ):
+                            try:
+                                stage.chmod(0o700)
+                                stage.fsync()
+                            except BaseException:
+                                error.add_note(_RECOVERY_ROLLBACK_NOTE)
+                                if publication_is_uncertain(model, entry.revision):
+                                    self._restore_recovery_marker(
+                                        model,
+                                        entry.revision,
+                                        error,
+                                    )
                         for handle in handles:
                             close_preserving_primary(handle, VerifiedModelFile.close, error)
                         if marker_fd is not None:

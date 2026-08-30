@@ -594,6 +594,29 @@ class GovernedModelCase:
         self.recovery_marker_path.write_bytes(b"")
         self.recovery_marker_path.chmod(0o600)
 
+    def create_sealed_pending_revision(self) -> None:
+        self.crash_install_at("after_publish_before_seal")
+        self.create_interrupted_recovery_marker()
+        model = fs_module.OwnedDirectory.open(self.model_root / self.model_id)
+        revision = model.child(REVISION)
+        marker_fd = fs_module.open_regular_at(
+            model,
+            self.recovery_marker_path.name,
+            os.O_RDWR,
+            mode=0o600,
+            expected_mode=0o600,
+        )
+        try:
+            os.fsync(marker_fd)
+            model.fsync()
+            revision.chmod(0o500)
+            revision.fsync()
+            model.fsync()
+        finally:
+            os.close(marker_fd)
+            revision.close()
+            model.close()
+
     def apply_filesystem_mutation(self, mutation: str) -> None:
         allowed = {
             "manifest_symlink",

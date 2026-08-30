@@ -1245,7 +1245,7 @@ def test_successful_recovery_persists_marker_before_seal_and_removal_after_verif
 
 
 @pytest.mark.parametrize("phase", ("fresh", "recovery"))
-def test_marker_clear_parent_fsync_failure_is_latched_until_process_restart(
+def test_marker_clear_parent_fsync_failure_blocks_cross_process_until_retry(
     governed_model_case: object,
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
@@ -1268,10 +1268,55 @@ def test_marker_clear_parent_fsync_failure_is_latched_until_process_restart(
     marker_descriptors: set[int] = set()
     marker_close_attempts: list[int] = []
     marker_close_fault_injected = False
+    child_returncode_during_window: int | None = None
     real_unlink = os.unlink
     real_fsync = OwnedDirectory.fsync
     real_close = os.close
     real_clear = ModelInstaller._clear_recovery_marker
+    signal_root = governed_model_case.model_root.parent  # type: ignore[attr-defined]
+    child_ready = signal_root / f"activation-ready-{phase}"
+    child_start = signal_root / f"activation-start-{phase}"
+    activation_probe = (
+        "from pathlib import Path\n"
+        "import sys,time\n"
+        "from tuntun_core.services.models.registry import ModelRegistry\n"
+        "manifest,root,model_id,ready,start=Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],Path(sys.argv[4]),Path(sys.argv[5])\n"
+        "registry=ModelRegistry.load(manifest,model_root=root)\n"
+        "ready.write_text('ready',encoding='utf-8')\n"
+        "deadline=time.monotonic()+10\n"
+        "while not start.exists():\n"
+        "    if time.monotonic()>=deadline: raise SystemExit(3)\n"
+        "    time.sleep(0.01)\n"
+        "try:\n"
+        "    activated=registry.activate(model_id)\n"
+        "except RuntimeError:\n"
+        "    raise SystemExit(0)\n"
+        "activated.close()\n"
+        "raise SystemExit(1)\n"
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            activation_probe,
+            str(governed_model_case.manifest),  # type: ignore[attr-defined]
+            str(governed_model_case.model_root),  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+            str(child_ready),
+            str(child_start),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    startup_deadline = time.monotonic() + 10
+    while not child_ready.exists():
+        if process.poll() is not None:
+            _stdout, stderr = process.communicate()
+            pytest.fail(f"activation child exited before readiness: {stderr}")
+        if time.monotonic() >= startup_deadline:
+            pytest.fail("activation child startup timed out")
+        time.sleep(0.01)
 
     def track_marker_unlink(path: str, *, dir_fd: int | None = None) -> None:
         nonlocal marker_unlinked
@@ -1281,9 +1326,15 @@ def test_marker_clear_parent_fsync_failure_is_latched_until_process_restart(
 
     def fail_clear_parent_fsync(directory: OwnedDirectory) -> None:
         nonlocal clear_fsync_attempts
+        nonlocal child_returncode_during_window
         identity = (directory.identity.device, directory.identity.inode)
         if identity == model_identity and marker_unlinked and clear_fsync_attempts == 0:
             clear_fsync_attempts += 1
+            child_start.write_text("activate", encoding="utf-8")
+            observation_deadline = time.monotonic() + 1
+            while process.poll() is None and time.monotonic() < observation_deadline:
+                time.sleep(0.01)
+            child_returncode_during_window = process.poll()
             raise primary
         real_fsync(directory)
 
@@ -1313,19 +1364,23 @@ def test_marker_clear_parent_fsync_failure_is_latched_until_process_restart(
         staticmethod(capture_marker_descriptor),
     )
 
-    caught: BaseException | None = None
     try:
-        governed_model_case.install()  # type: ignore[attr-defined]
-    except BaseException as error:
-        caught = error
+        caught: BaseException | None = None
+        try:
+            governed_model_case.install()  # type: ignore[attr-defined]
+        except BaseException as error:
+            caught = error
 
-    try:
         assert caught is primary
         assert getattr(primary, "__notes__", []) == ["additional descriptor cleanup failure"]
         assert clear_fsync_attempts == 1
         assert len(marker_close_attempts) == 1
-        assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
-        assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+        assert child_returncode_during_window is None
+        _stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr
+        assert governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+        expected_mode = 0o500 if phase == "fresh" else 0o700
+        assert governed_model_case.final_revision_mode == expected_mode  # type: ignore[attr-defined]
         assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
 
         same_process_registry = ModelRegistry.load(
@@ -1343,36 +1398,451 @@ def test_marker_clear_parent_fsync_failure_is_latched_until_process_restart(
             unexpected.close()
         assert same_process_denied
 
-        restart_probe = (
-            "from pathlib import Path\n"
-            "import sys\n"
-            "from tuntun_core.services.models.registry import ModelRegistry\n"
-            "registry = ModelRegistry.load(Path(sys.argv[1]), model_root=Path(sys.argv[2]))\n"
-            "try:\n"
-            "    activated = registry.activate(sys.argv[3])\n"
-            "except RuntimeError:\n"
-            "    raise SystemExit(1)\n"
-            "verified = activated.all_files_verified\n"
-            "activated.close()\n"
-            "raise SystemExit(0 if verified else 2)\n"
+        recovered = governed_model_case._installer().install(  # type: ignore[attr-defined]
+            governed_model_case.model_id  # type: ignore[attr-defined]
         )
-        restarted = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                restart_probe,
-                str(governed_model_case.manifest),  # type: ignore[attr-defined]
-                str(governed_model_case.model_root),  # type: ignore[attr-defined]
-                governed_model_case.model_id,  # type: ignore[attr-defined]
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
+        recovered.close()
+        assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+        assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+        activated = same_process_registry.activate(
+            governed_model_case.model_id  # type: ignore[attr-defined]
         )
-        assert restarted.returncode == 0, restarted.stderr
+        try:
+            assert activated.all_files_verified
+        finally:
+            activated.close()
     finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate()
         governed_model_case.clear_process_publication_uncertainty()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+def test_marker_disappearance_at_clear_revalidation_is_cross_process_quarantined(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    model_path = (
+        governed_model_case.model_root  # type: ignore[attr-defined]
+        / governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    revision_path = model_path / ("a" * 40)
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    primary = OSError("scripted marker disappearance at clear revalidation")
+    fault_injected = False
+    real_require = ModelInstaller._require_recovery_marker
+
+    def remove_marker_at_clear_revalidation(
+        model: OwnedDirectory,
+        revision: str,
+        descriptor: int,
+    ) -> None:
+        nonlocal fault_injected
+        if (
+            not fault_injected
+            and marker_path.exists()
+            and stat.S_IMODE(revision_path.stat(follow_symlinks=False).st_mode) == 0o500
+        ):
+            marker_path.unlink()
+            fault_injected = True
+            raise primary
+        real_require(model, revision, descriptor)
+
+    monkeypatch.setattr(
+        ModelInstaller,
+        "_require_recovery_marker",
+        staticmethod(remove_marker_at_clear_revalidation),
+    )
+
+    caught: BaseException | None = None
+    try:
+        governed_model_case.install()  # type: ignore[attr-defined]
+    except BaseException as error:
+        caught = error
+
+    assert caught is primary
+    assert fault_injected
+    assert governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    expected_mode = 0o500 if phase == "fresh" else 0o700
+    assert governed_model_case.final_revision_mode == expected_mode  # type: ignore[attr-defined]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+    denial_probe = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from tuntun_core.services.models.registry import ModelRegistry\n"
+        "registry=ModelRegistry.load(Path(sys.argv[1]),model_root=Path(sys.argv[2]))\n"
+        "try:\n"
+        "    activated=registry.activate(sys.argv[3])\n"
+        "except RuntimeError:\n"
+        "    raise SystemExit(0)\n"
+        "activated.close()\n"
+        "raise SystemExit(1)\n"
+    )
+    denied = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            denial_probe,
+            str(governed_model_case.manifest),  # type: ignore[attr-defined]
+            str(governed_model_case.model_root),  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert denied.returncode == 0, denied.stderr
+
+    recovered = governed_model_case._installer().install(  # type: ignore[attr-defined]
+        governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    recovered.close()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+@pytest.mark.parametrize(
+    "restoration_fault",
+    ("create", "marker_fsync", "parent_fsync", "close"),
+)
+def test_marker_clear_restoration_fault_falls_back_to_cross_process_quarantine(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    restoration_fault: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    model_path = (
+        governed_model_case.model_root  # type: ignore[attr-defined]
+        / governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    model_metadata = model_path.stat(follow_symlinks=False)
+    model_identity = (model_metadata.st_dev, model_metadata.st_ino)
+    primary = OSError("scripted marker-clear parent fsync failure")
+    restoration_error = OSError(f"scripted marker restoration {restoration_fault} failure")
+    marker_unlinked = False
+    primary_injected = False
+    faults_active = True
+    restoration_attempts = 0
+    restoration_close_attempts = 0
+    real_unlink = os.unlink
+    real_fsync = os.fsync
+    real_close = os.close
+    real_open_marker = ModelInstaller._open_recovery_marker
+
+    def track_marker_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        nonlocal marker_unlinked
+        real_unlink(path, dir_fd=dir_fd)
+        if path == marker_path.name:
+            marker_unlinked = True
+
+    def fail_transaction_fsync(descriptor: int) -> None:
+        nonlocal primary_injected
+        nonlocal restoration_attempts
+        identity = os.fstat(descriptor)
+        descriptor_identity = (identity.st_dev, identity.st_ino)
+        if (
+            faults_active
+            and marker_unlinked
+            and descriptor_identity == model_identity
+            and not primary_injected
+        ):
+            primary_injected = True
+            raise primary
+        if (
+            faults_active
+            and restoration_fault == "parent_fsync"
+            and marker_unlinked
+            and primary_injected
+            and descriptor_identity == model_identity
+        ):
+            restoration_attempts += 1
+            raise restoration_error
+        if (
+            faults_active
+            and restoration_fault == "marker_fsync"
+            and marker_unlinked
+            and stat.S_ISREG(identity.st_mode)
+            and stat.S_IMODE(identity.st_mode) == 0o600
+            and identity.st_size == 0
+        ):
+            restoration_attempts += 1
+            raise restoration_error
+        real_fsync(descriptor)
+
+    def fail_marker_restore_create(
+        model: OwnedDirectory,
+        revision: str,
+        *,
+        create: bool,
+    ) -> int:
+        nonlocal restoration_attempts
+        if faults_active and marker_unlinked and restoration_fault == "create" and create:
+            restoration_attempts += 1
+            raise restoration_error
+        return real_open_marker(model, revision, create=create)
+
+    def fail_marker_restore_close(descriptor: int) -> None:
+        nonlocal restoration_close_attempts
+        is_restored_marker = False
+        if faults_active and marker_unlinked and marker_path.exists():
+            identity = os.fstat(descriptor)
+            named = marker_path.stat(follow_symlinks=False)
+            is_restored_marker = (identity.st_dev, identity.st_ino) == (
+                named.st_dev,
+                named.st_ino,
+            )
+        real_close(descriptor)
+        if restoration_fault == "close" and is_restored_marker:
+            restoration_close_attempts += 1
+            raise restoration_error
+
+    monkeypatch.setattr(os, "unlink", track_marker_unlink)
+    monkeypatch.setattr(os, "fsync", fail_transaction_fsync)
+    monkeypatch.setattr(os, "close", fail_marker_restore_close)
+    monkeypatch.setattr(
+        ModelInstaller,
+        "_open_recovery_marker",
+        staticmethod(fail_marker_restore_create),
+    )
+
+    caught: BaseException | None = None
+    try:
+        governed_model_case.install()  # type: ignore[attr-defined]
+    except BaseException as error:
+        caught = error
+    faults_active = False
+
+    assert caught is primary
+    expected_note = (
+        "additional descriptor cleanup failure"
+        if restoration_fault == "close"
+        else "additional recovery marker restoration failure"
+    )
+    assert getattr(primary, "__notes__", []) == [expected_note]
+    assert restoration_attempts == (
+        1
+        if restoration_fault == "create"
+        else 2
+        if restoration_fault in {"marker_fsync", "parent_fsync"}
+        else 0
+    )
+    assert restoration_close_attempts == (1 if restoration_fault == "close" else 0)
+    expected_mode = 0o500 if phase == "fresh" and restoration_fault == "close" else 0o700
+    assert governed_model_case.final_revision_mode == expected_mode  # type: ignore[attr-defined]
+    assert governed_model_case.recovery_marker_exists is (  # type: ignore[attr-defined]
+        restoration_fault != "create"
+    )
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+    denial_probe = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from tuntun_core.services.models.registry import ModelRegistry\n"
+        "registry=ModelRegistry.load(Path(sys.argv[1]),model_root=Path(sys.argv[2]))\n"
+        "try:\n"
+        "    activated=registry.activate(sys.argv[3])\n"
+        "except RuntimeError:\n"
+        "    raise SystemExit(0)\n"
+        "activated.close()\n"
+        "raise SystemExit(1)\n"
+    )
+    denied = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            denial_probe,
+            str(governed_model_case.manifest),  # type: ignore[attr-defined]
+            str(governed_model_case.model_root),  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert denied.returncode == 0, denied.stderr
+
+    recovered = governed_model_case._installer().install(  # type: ignore[attr-defined]
+        governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    recovered.close()
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+    available = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            denial_probe,
+            str(governed_model_case.manifest),  # type: ignore[attr-defined]
+            str(governed_model_case.model_root),  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert available.returncode == 1, available.stderr
+
+
+@pytest.mark.parametrize("phase", ("fresh", "recovery"))
+@pytest.mark.parametrize("rollback_fault", ("chmod", "fsync"))
+def test_marker_restoration_and_mode_rollback_fault_reestablishes_quarantine(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    rollback_fault: str,
+) -> None:
+    if phase == "recovery":
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+    model_path = (
+        governed_model_case.model_root  # type: ignore[attr-defined]
+        / governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    model_metadata = model_path.stat(follow_symlinks=False)
+    model_identity = (model_metadata.st_dev, model_metadata.st_ino)
+    primary = OSError("scripted marker-clear parent fsync failure")
+    restoration_error = OSError("scripted marker restoration create failure")
+    rollback_error = OSError(f"scripted quarantine rollback {rollback_fault} failure")
+    marker_unlinked = False
+    primary_injected = False
+    restoration_create_failed = False
+    restoration_open_calls: list[bool] = []
+    rollback_injected = False
+    real_unlink = os.unlink
+    real_fsync = OwnedDirectory.fsync
+    real_chmod = OwnedDirectory.chmod
+    real_open_marker = ModelInstaller._open_recovery_marker
+
+    def track_marker_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        nonlocal marker_unlinked
+        real_unlink(path, dir_fd=dir_fd)
+        if path == marker_path.name:
+            marker_unlinked = True
+
+    def fail_clear_or_rollback_fsync(directory: OwnedDirectory) -> None:
+        nonlocal primary_injected
+        nonlocal rollback_injected
+        identity = (directory.identity.device, directory.identity.inode)
+        if marker_unlinked and identity == model_identity and not primary_injected:
+            primary_injected = True
+            raise primary
+        if (
+            rollback_fault == "fsync"
+            and marker_unlinked
+            and identity != model_identity
+            and stat.S_IMODE(os.fstat(directory.fd).st_mode) == 0o700
+            and not rollback_injected
+        ):
+            rollback_injected = True
+            raise rollback_error
+        real_fsync(directory)
+
+    def fail_rollback_chmod(directory: OwnedDirectory, mode: int) -> None:
+        nonlocal rollback_injected
+        identity = (directory.identity.device, directory.identity.inode)
+        if (
+            rollback_fault == "chmod"
+            and marker_unlinked
+            and identity != model_identity
+            and mode == 0o700
+            and not rollback_injected
+        ):
+            rollback_injected = True
+            raise rollback_error
+        real_chmod(directory, mode)
+
+    def fail_first_restore_create(
+        model: OwnedDirectory,
+        revision: str,
+        *,
+        create: bool,
+    ) -> int:
+        nonlocal restoration_create_failed
+        if marker_unlinked:
+            restoration_open_calls.append(create)
+        if marker_unlinked and create and not restoration_create_failed:
+            restoration_create_failed = True
+            raise restoration_error
+        return real_open_marker(model, revision, create=create)
+
+    monkeypatch.setattr(os, "unlink", track_marker_unlink)
+    monkeypatch.setattr(OwnedDirectory, "fsync", fail_clear_or_rollback_fsync)
+    monkeypatch.setattr(OwnedDirectory, "chmod", fail_rollback_chmod)
+    monkeypatch.setattr(
+        ModelInstaller,
+        "_open_recovery_marker",
+        staticmethod(fail_first_restore_create),
+    )
+
+    caught: BaseException | None = None
+    try:
+        governed_model_case.install()  # type: ignore[attr-defined]
+    except BaseException as error:
+        caught = error
+
+    assert caught is primary
+    assert restoration_create_failed
+    assert restoration_open_calls == [True, False, True]
+    assert rollback_injected
+    assert getattr(primary, "__notes__", []) == [
+        "additional recovery marker restoration failure",
+        "additional recovery rollback failure",
+    ]
+    expected_mode = 0o500 if rollback_fault == "chmod" else 0o700
+    assert governed_model_case.final_revision_mode == expected_mode  # type: ignore[attr-defined]
+    assert governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+    denial_probe = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from tuntun_core.services.models.registry import ModelRegistry\n"
+        "registry=ModelRegistry.load(Path(sys.argv[1]),model_root=Path(sys.argv[2]))\n"
+        "try:\n"
+        "    activated=registry.activate(sys.argv[3])\n"
+        "except RuntimeError:\n"
+        "    raise SystemExit(0)\n"
+        "activated.close()\n"
+        "raise SystemExit(1)\n"
+    )
+    denied = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            denial_probe,
+            str(governed_model_case.manifest),  # type: ignore[attr-defined]
+            str(governed_model_case.model_root),  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert denied.returncode == 0, denied.stderr
+
+    governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
 
 
 def test_activation_rechecks_publication_uncertainty_after_verification(
@@ -1421,15 +1891,20 @@ def test_activation_rechecks_publication_uncertainty_after_verification(
 
 
 @pytest.mark.parametrize("durability_fault", ("marker_fsync", "parent_fsync"))
-def test_existing_marker_is_redurably_synced_before_recovery_seal(
+@pytest.mark.parametrize("initial_mode", (0o700, 0o500), ids=("unsealed", "sealed"))
+def test_existing_marker_is_redurably_synced_before_recovery(
     governed_model_case: object,
     monkeypatch: pytest.MonkeyPatch,
     durability_fault: str,
+    initial_mode: int,
 ) -> None:
-    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
-        "after_publish_before_seal"
-    )
-    governed_model_case.create_interrupted_recovery_marker()  # type: ignore[attr-defined]
+    if initial_mode == 0o500:
+        governed_model_case.create_sealed_pending_revision()  # type: ignore[attr-defined]
+    else:
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+        governed_model_case.create_interrupted_recovery_marker()  # type: ignore[attr-defined]
     model_path = (
         governed_model_case.model_root  # type: ignore[attr-defined]
         / governed_model_case.model_id  # type: ignore[attr-defined]
@@ -1513,14 +1988,21 @@ def test_existing_marker_is_redurably_synced_before_recovery_seal(
     assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
 
 
-def test_existing_marker_identity_is_revalidated_after_parent_fsync_before_seal(
+@pytest.mark.parametrize("identity_fault", ("swap", "disappearance"))
+@pytest.mark.parametrize("initial_mode", (0o700, 0o500), ids=("unsealed", "sealed"))
+def test_existing_marker_identity_is_revalidated_after_parent_fsync_before_recovery(
     governed_model_case: object,
     monkeypatch: pytest.MonkeyPatch,
+    identity_fault: str,
+    initial_mode: int,
 ) -> None:
-    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
-        "after_publish_before_seal"
-    )
-    governed_model_case.create_interrupted_recovery_marker()  # type: ignore[attr-defined]
+    if initial_mode == 0o500:
+        governed_model_case.create_sealed_pending_revision()  # type: ignore[attr-defined]
+    else:
+        governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+            "after_publish_before_seal"
+        )
+        governed_model_case.create_interrupted_recovery_marker()  # type: ignore[attr-defined]
     model_path = (
         governed_model_case.model_root  # type: ignore[attr-defined]
         / governed_model_case.model_id  # type: ignore[attr-defined]
@@ -1529,27 +2011,32 @@ def test_existing_marker_identity_is_revalidated_after_parent_fsync_before_seal(
     marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
     model_metadata = model_path.stat(follow_symlinks=False)
     revision_metadata = revision_path.stat(follow_symlinks=False)
+    marker_metadata = marker_path.stat(follow_symlinks=False)
     model_identity = (model_metadata.st_dev, model_metadata.st_ino)
     revision_identity = (revision_metadata.st_dev, revision_metadata.st_ino)
+    marker_identity = (marker_metadata.st_dev, marker_metadata.st_ino)
     model_fsyncs = 0
-    marker_replaced = False
+    marker_mutated = False
     seal_attempts = 0
+    marker_close_attempts = 0
     real_fsync = OwnedDirectory.fsync
     real_chmod = OwnedDirectory.chmod
+    real_close = os.close
 
-    def replace_marker_after_durability_fsync(directory: OwnedDirectory) -> None:
+    def mutate_marker_after_durability_fsync(directory: OwnedDirectory) -> None:
         nonlocal model_fsyncs
-        nonlocal marker_replaced
+        nonlocal marker_mutated
         real_fsync(directory)
         identity = (directory.identity.device, directory.identity.inode)
         if identity != model_identity:
             return
         model_fsyncs += 1
-        if model_fsyncs == 2 and not marker_replaced:
+        if model_fsyncs == 2 and not marker_mutated:
             marker_path.unlink()
-            marker_path.write_bytes(b"")
-            marker_path.chmod(0o600)
-            marker_replaced = True
+            if identity_fault == "swap":
+                marker_path.write_bytes(b"")
+                marker_path.chmod(0o600)
+            marker_mutated = True
 
     def track_seal(directory: OwnedDirectory, mode: int) -> None:
         nonlocal seal_attempts
@@ -1558,18 +2045,30 @@ def test_existing_marker_identity_is_revalidated_after_parent_fsync_before_seal(
             seal_attempts += 1
         real_chmod(directory, mode)
 
-    monkeypatch.setattr(OwnedDirectory, "fsync", replace_marker_after_durability_fsync)
-    monkeypatch.setattr(OwnedDirectory, "chmod", track_seal)
+    def track_marker_close(descriptor: int) -> None:
+        nonlocal marker_close_attempts
+        identity = os.fstat(descriptor)
+        if (identity.st_dev, identity.st_ino) == marker_identity:
+            marker_close_attempts += 1
+        real_close(descriptor)
 
-    with pytest.raises(PermissionError):
+    monkeypatch.setattr(OwnedDirectory, "fsync", mutate_marker_after_durability_fsync)
+    monkeypatch.setattr(OwnedDirectory, "chmod", track_seal)
+    monkeypatch.setattr(os, "close", track_marker_close)
+
+    with pytest.raises(PermissionError) as caught:
         governed_model_case._installer().install(  # type: ignore[attr-defined]
             governed_model_case.model_id  # type: ignore[attr-defined]
         )
 
-    assert marker_replaced
+    assert isinstance(caught.value.__cause__, (FileNotFoundError, PermissionError))
+    assert marker_mutated
     assert seal_attempts == 0
+    assert marker_close_attempts == 1
     assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
-    assert governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert governed_model_case.recovery_marker_exists is (  # type: ignore[attr-defined]
+        identity_fault == "swap"
+    )
     assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
 
     governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]

@@ -22,6 +22,7 @@ from yaml.nodes import MappingNode
 MAX_MANIFEST_BYTES = 1_048_576
 MAX_MANIFEST_EVENTS = 16_384
 MAX_MANIFEST_DEPTH = 32
+MODEL_INSTALL_LOCK_NAME = ".model-install.lock"
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
@@ -314,7 +315,13 @@ class OwnedDirectory:
         os.fsync(self.fd)
 
     @contextlib.contextmanager
-    def lock(self, name: str, *, timeout_seconds: float) -> Iterator[None]:
+    def lock(
+        self,
+        name: str,
+        *,
+        timeout_seconds: float,
+        shared: bool = False,
+    ) -> Iterator[None]:
         deadline = time.monotonic() + timeout_seconds
         while True:
             try:
@@ -331,9 +338,10 @@ class OwnedDirectory:
                     raise TimeoutError("model install lock deadline") from None
                 time.sleep(0.01)
         try:
+            operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
             while True:
                 try:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
