@@ -16,8 +16,8 @@ replace the physical household Intel-Mac run.
 
 | Gate | Result | Evidence / required follow-up |
 | --- | --- | --- |
-| Local macOS arm64, direct storage behavior with an ephemeral synthetic key | PASS | Sanitized result below; focused security gate passed 73 tests. |
-| Production `tuntunctl storage probe --path … --json` | FAIL CLOSED / PENDING | Keychain returned the public error `missing secret` before the database was opened. Run again after owner bootstrap provisions the exact 32-byte database root. |
+| Local macOS arm64, direct storage behavior with an ephemeral synthetic key | PASS | Sanitized result below; focused security gate passed 76 tests. |
+| Production `tuntunctl storage probe --path … --json` | FAIL CLOSED / PENDING | The missing Keychain item is mapped to the stable public error `storage probe: database key unavailable` before the database is opened. Run again after owner bootstrap provisions the exact 32-byte database root. |
 | `macos-15-intel` hosted job | PENDING | Run the same unskipped security gate against the locked wheel. |
 | `ubuntu-24.04` hosted job | PENDING | Run the same unskipped security gate against the locked wheel. |
 | Physical household Intel Mac | PENDING / release blocker | Run the production CLI probe after owner bootstrap and record only its sanitized JSON. |
@@ -64,6 +64,14 @@ close. This avoids an adapter-side descriptor close canceling a healthy peer's P
 A SQLCipher close failure retains the lease and parent for explicit retry or process abort and
 blocks a newly returned connection.
 
+Cyclic garbage collection can invoke a connection finalizer while the same thread is already
+inside the process-local open lock. The lock records its owning thread. In that specific case,
+finalization performs the same SQLCipher/base close, registry release, and parent close under
+the already-held lock without trying to acquire it again. Explicit close and finalization from
+any other thread still serialize through the lock. This preserves close-failure retention and
+peer-lock ownership without converting the lock to a recursive lock or disabling garbage
+collection.
+
 Maintenance must checkpoint WAL before taking a backup, then verify the encrypted backup
 through the governed backup procedure. It must not copy only the main file while live WAL
 content is outstanding.
@@ -91,6 +99,88 @@ key material.
 This adapter therefore does **not** claim descriptor-relative SQLite open or perfect inode
 binding. If protection from that attacker becomes mandatory, stop and require a native
 registered VFS or a different driver with a real file-handle API before proceeding.
+
+## Controller review round 1: RED/GREEN evidence
+
+The round-one controller findings were reproduced before production changes with this exact
+command:
+
+```bash
+uv run pytest tests/security/test_sqlcipher.py -q -k \
+  'cyclic_connection_finalization_during_open_never_deadlocks or real_storage_probe_cli_missing_key_is_content_minimal_without_traceback'
+```
+
+Sanitized RED output, with the prohibited local source path and account name omitted, was:
+
+```text
+FF                                                                       [100%]
+FAILED test_cyclic_connection_finalization_during_open_never_deadlocks
+subprocess.TimeoutExpired: child timed out after 10 seconds
+FAILED test_real_storage_probe_cli_missing_key_is_content_minimal_without_traceback
+AssertionError: standalone stderr contained a Rich traceback and source path
+2 failed, 73 deselected in 10.64s
+```
+
+The finalizer regression became GREEN after the owner-aware non-recursive lifecycle change:
+
+```bash
+uv run pytest tests/security/test_sqlcipher.py -q \
+  -k 'cyclic_connection_finalization_during_open_never_deadlocks'
+```
+
+```text
+.                                                                        [100%]
+1 passed, 74 deselected in 0.32s
+```
+
+The missing-key boundary catches only the exact expected `RuntimeError("missing secret")`,
+prints one content-minimal stderr line, exits nonzero without opening storage, and re-raises
+every differently typed or worded failure. The covering GREEN command and output were:
+
+```bash
+uv run pytest tests/security/test_sqlcipher.py -q -k \
+  'storage_probe_cli_missing_key_fails_before_storage_and_emits_no_input or storage_probe_cli_does_not_mislabel_unexpected_keychain_failure or real_storage_probe_cli_missing_key_is_content_minimal_without_traceback'
+```
+
+```text
+...                                                                      [100%]
+3 passed, 73 deselected in 0.36s
+```
+
+The full focused gate after both fixes was:
+
+```bash
+TMPDIR=/private/tmp uv run pytest tests/security/test_sqlcipher.py -q
+```
+
+```text
+........................................................................ [ 94%]
+....                                                                     [100%]
+76 passed in 2.17s
+```
+
+Post-fix regression and static commands were:
+
+```bash
+uv run pytest tests/security/test_key_handling.py tests/unit/test_cli.py -q
+uv run ruff check .
+uv run mypy apps/core/src apps/edge/src packages/contracts/src packages/testing/src
+uv lock --check --offline
+uv run python scripts/check_import_boundaries.py --all
+uv run python scripts/verify_private_data.py .
+TMPDIR=/private/tmp uv run pytest tests/security -q -m \
+  'not live_cloud and not reachy_hardware'
+```
+
+```text
+69 passed in 0.22s
+All checks passed!
+Success: no issues found in 39 source files
+Resolved 61 packages in 3ms
+import-boundaries: PASS
+private-data scan: PASS
+813 passed in 100.48s (0:01:40)
+```
 
 ## Physical-target completion record
 

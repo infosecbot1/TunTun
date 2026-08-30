@@ -9,6 +9,17 @@ from tuntun_core.adapters.keychain.macos import MacOSKeychainSecretProvider
 from tuntun_core.adapters.sqlcipher.probe import probe_storage
 
 storage_app = typer.Typer(no_args_is_help=True, help="Inspect encrypted local storage.")
+_MISSING_DATABASE_KEY_MESSAGE = "storage probe: database key unavailable"
+
+
+def _read_database_key() -> bytes:
+    try:
+        return MacOSKeychainSecretProvider().get("tuntun.database", "root-v1")
+    except RuntimeError as error:
+        if type(error) is not RuntimeError or error.args != ("missing secret",):
+            raise
+        typer.echo(_MISSING_DATABASE_KEY_MESSAGE, err=True)
+        raise typer.Exit(code=1) from None
 
 
 @storage_app.command("probe")
@@ -23,6 +34,6 @@ def storage_probe(
     ] = False,
 ) -> None:
     """Verify SQLCipher compatibility without exposing the path or key."""
-    key = MacOSKeychainSecretProvider().get("tuntun.database", "root-v1")
+    key = _read_database_key()
     result = probe_storage(path, key).as_dict()
     typer.echo(json.dumps(result, sort_keys=True, indent=None if json_output else 2))

@@ -116,6 +116,39 @@ else:
     if module._registry_snapshot(path) is not None: raise SystemExit(23)
 """
 
+GC_FINALIZER_OPEN_PROBE = r"""\
+import gc,sys
+from pathlib import Path
+from tuntun_core.adapters.sqlcipher import connection as module
+victim_path=Path(sys.argv[1]); next_path=Path(sys.argv[2]); key=bytes.fromhex(sys.argv[3])
+victim=module.open_sqlcipher(victim_path,key)
+victim._test_cycle=victim
+del victim
+original_open=module._open_qualified_database
+def collect_while_open_locked(path):
+    gc.collect()
+    return original_open(path)
+module._open_qualified_database=collect_while_open_locked
+gc.set_threshold(1,1,1)
+next_connection=module.open_sqlcipher(next_path,key)
+next_connection.close()
+if module._registry_snapshot(victim_path) is not None: raise SystemExit(31)
+if module._registry_snapshot(next_path) is not None: raise SystemExit(32)
+"""
+
+MISSING_KEY_CLI_PROBE = r"""\
+import sys
+from tuntun_core.cli import main as cli_module
+from tuntun_core.cli.commands import storage_probe as storage_probe_command
+class MissingProvider:
+    def get(self,service,account):
+        if (service,account)!=("tuntun.database","root-v1"): raise SystemExit(41)
+        raise RuntimeError("missing secret")
+storage_probe_command.MacOSKeychainSecretProvider=MissingProvider
+sys.argv=["tuntunctl","storage","probe","--path",sys.argv[1],"--json"]
+cli_module.app()
+"""
+
 
 def _contend(path: Path, expected_returncode: int) -> None:
     result = subprocess.run(
@@ -157,6 +190,28 @@ def test_open_and_cleanup_lock_ownership_never_deadlocks(
         capture_output=True,
         text=True,
         timeout=15,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_cyclic_connection_finalization_during_open_never_deadlocks(
+    tmp_path: Path,
+) -> None:
+    victim_path = _database_path(tmp_path, "gc-victim.db")
+    next_path = _database_path(tmp_path, "gc-next.db")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            GC_FINALIZER_OPEN_PROBE,
+            os.fspath(victim_path),
+            os.fspath(next_path),
+            KEY.hex(),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
 
@@ -1063,8 +1118,69 @@ def test_storage_probe_cli_missing_key_fails_before_storage_and_emits_no_input(
     )
 
     assert result.exit_code == 1
-    assert isinstance(result.exception, RuntimeError)
-    assert str(result.exception) == "missing secret"
+    assert not isinstance(result.exception, RuntimeError)
     assert not probe_called
-    assert os.fspath(path) not in result.stdout
-    assert KEY.hex() not in result.stdout
+    assert result.stdout == ""
+    assert result.stderr == "storage probe: database key unavailable\n"
+    assert os.fspath(path) not in result.output
+    assert KEY.hex() not in result.output
+
+
+def test_storage_probe_cli_does_not_mislabel_unexpected_keychain_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _database_path(tmp_path, "must-not-be-opened.db")
+
+    class FailedProvider:
+        def get(self, service: str, account: str) -> bytes:
+            assert (service, account) == ("tuntun.database", "root-v1")
+            raise RuntimeError("secret read failed")
+
+    monkeypatch.setattr(
+        storage_probe_command,
+        "MacOSKeychainSecretProvider",
+        FailedProvider,
+    )
+
+    result = CliRunner().invoke(
+        cli_module.app,
+        ["storage", "probe", "--path", os.fspath(path), "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, RuntimeError)
+    assert str(result.exception) == "secret read failed"
+    assert "database key unavailable" not in result.output
+    assert not path.exists()
+
+
+def test_real_storage_probe_cli_missing_key_is_content_minimal_without_traceback(
+    tmp_path: Path,
+) -> None:
+    path = _database_path(tmp_path, "must-not-be-created.db")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            MISSING_KEY_CLI_PROBE,
+            os.fspath(path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
+    )
+    combined = result.stdout + result.stderr
+    source_path = os.fspath(Path(storage_probe_command.__file__).resolve())
+    local_account = Path.home().name
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "storage probe: database key unavailable\n"
+    assert "Traceback" not in combined
+    assert source_path not in combined
+    assert not local_account or local_account not in combined
+    assert os.fspath(path) not in combined
+    assert not path.exists()

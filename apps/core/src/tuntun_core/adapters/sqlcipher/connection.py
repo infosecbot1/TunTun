@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
+from threading import Lock, get_ident
 from typing import Literal
 
 from sqlcipher3 import dbapi2 as sqlcipher3  # type: ignore[import-untyped]
@@ -26,6 +28,24 @@ SQLCIPHER_OPEN_FLAGS = (
     | SQLITE_OPEN_NOFOLLOW
 )
 _OPEN_LOCK = Lock()
+_OPEN_LOCK_OWNER: int | None = None
+
+
+@contextmanager
+def _hold_open_lock() -> Iterator[None]:
+    global _OPEN_LOCK_OWNER
+    owner = get_ident()
+    _OPEN_LOCK.acquire()
+    _OPEN_LOCK_OWNER = owner
+    try:
+        yield
+    finally:
+        _OPEN_LOCK_OWNER = None
+        _OPEN_LOCK.release()
+
+
+def _open_lock_is_owned_by_current_thread() -> bool:
+    return get_ident() == _OPEN_LOCK_OWNER
 
 
 def _reported_owner(name: str, value: os.stat_result) -> int:
@@ -157,7 +177,7 @@ def _reject_registered_identity_alias(path: Path, identity: FileIdentity) -> Non
 
 def _registry_snapshot(path: Path) -> RegistrySnapshot | None:
     absolute = _absolute_database_path(path)
-    with _OPEN_LOCK:
+    with _hold_open_lock():
         state = _ACTIVE_DATABASES.get(absolute)
         if state is None:
             return None
@@ -324,7 +344,7 @@ def _open_qualified_database(path: Path) -> DatabasePathGuard:
 
 
 def qualified_database_identity(path: Path) -> tuple[int, int]:
-    with _OPEN_LOCK:
+    with _hold_open_lock():
         absolute = _absolute_database_path(path)
         try:
             identity = ensure_private_directory(absolute.parent)
@@ -399,26 +419,39 @@ class QualifiedSQLCipherConnection(sqlcipher3.Connection):  # type: ignore[misc]
         guard._close_parent_after_release()
         self._path_guard = None
 
+    def _close_and_release_locked(self) -> DatabasePathGuard:
+        guard = self._path_guard
+        if guard is None:
+            raise RuntimeError("connection path guard is unavailable")
+        try:
+            self._close_sqlcipher_base()
+        except BaseException:
+            guard.mark_sqlcipher_close_failed_locked()
+            raise
+        guard._release_registry_after_sqlcipher_close_locked()
+        return guard
+
     def close(self) -> None:
         guard = self._path_guard
         if guard is None:
             self._close_sqlcipher_base()
             return
-        with _OPEN_LOCK:
-            try:
-                self._close_sqlcipher_base()
-            except BaseException:
-                guard.mark_sqlcipher_close_failed_locked()
-                raise
-            guard._release_registry_after_sqlcipher_close_locked()
+        with _hold_open_lock():
+            guard = self._close_and_release_locked()
         guard._close_parent_after_release()
         self._path_guard = None
 
     def __del__(self) -> None:
         # Leak protection only. A failure becomes Python's unraisable cleanup
         # report; it never releases the reservation or parent out of order.
-        if self._path_guard is not None:
+        if self._path_guard is None:
+            return
+        if not _open_lock_is_owned_by_current_thread():
             self.close()
+            return
+        guard = self._close_and_release_locked()
+        guard._close_parent_after_release()
+        self._path_guard = None
 
 
 _CHECKPOINTS = frozenset(
@@ -442,7 +475,7 @@ def open_sqlcipher(path: Path, key: bytes) -> sqlcipher3.Connection:
         raise ValueError("SQLCipher key must be exactly 32 bytes")
     if sqlcipher3.sqlite_version_info < (3, 31, 0):
         raise RuntimeError("bundled SQLite lacks SQLITE_OPEN_NOFOLLOW")
-    with _OPEN_LOCK:
+    with _hold_open_lock():
         guard: DatabasePathGuard | None = _open_qualified_database(path)
         connection: sqlcipher3.Connection | None = None
         try:
