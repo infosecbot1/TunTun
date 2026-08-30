@@ -267,6 +267,11 @@ class DirectoryIdentity:
     inode: int
 
 
+@dataclass(slots=True)
+class AtomicPublishWitness:
+    committed: bool = False
+
+
 class OwnedDirectory:
     def __init__(self, descriptor: int) -> None:
         self.fd = descriptor
@@ -534,9 +539,17 @@ def hash_exact_fd(descriptor: int, size: int, expected_sha256: str) -> str:
     return actual
 
 
-def atomic_publish_dir_noreplace(parent: OwnedDirectory, source: str, target: str) -> None:
+def atomic_publish_dir_noreplace(
+    parent: OwnedDirectory,
+    source: str,
+    target: str,
+    *,
+    witness: AtomicPublishWitness | None = None,
+) -> None:
     if not _safe_component(source) or not _safe_component(target):
         raise PermissionError("unsafe model filesystem path")
+    if witness is not None and witness.committed:
+        raise ValueError("atomic publication witness already committed")
     libc = ctypes.CDLL(None, use_errno=True)
     source_bytes = os.fsencode(source)
     target_bytes = os.fsencode(target)
@@ -549,3 +562,5 @@ def atomic_publish_dir_noreplace(parent: OwnedDirectory, source: str, target: st
     if result != 0:
         value = ctypes.get_errno()
         raise OSError(value, os.strerror(value), target)
+    if witness is not None:
+        witness.committed = True

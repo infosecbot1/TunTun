@@ -12,9 +12,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .fs import (
+    AtomicPublishWitness,
     OwnedDirectory,
-    _mark_publication_uncertain,
-    _resolve_publication_uncertainty,
     atomic_publish_dir_noreplace,
     close_preserving_primary,
     entry_exists_at,
@@ -22,9 +21,7 @@ from .fs import (
     model_install_lock_name,
     open_regular_at,
     publication_commit_name,
-    publication_is_uncertain,
     recovery_pending_name,
-    require_publication_commit,
 )
 from .network import PinnedHttpsTransport
 from .registry import ActivatedModel, ModelEntry, ModelFile, ModelRegistry, VerifiedModelFile
@@ -32,8 +29,6 @@ from .registry import ActivatedModel, ModelEntry, ModelFile, ModelRegistry, Veri
 WriteOnce = Callable[[int, bytes | memoryview], int]
 FaultHook = Callable[[str], None]
 _RECOVERY_ROLLBACK_NOTE = "additional recovery rollback failure"
-_RECOVERY_RESTORE_NOTE = "additional recovery marker restoration failure"
-_PUBLICATION_PROOF_ROLLBACK_NOTE = "additional publication proof rollback failure"
 
 
 def _write_once(descriptor: int, data: bytes | memoryview) -> int:
@@ -191,19 +186,33 @@ class ModelInstaller:
         create: bool,
     ) -> int:
         name = recovery_pending_name(revision)
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL if create else os.O_RDWR
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL if create else os.O_RDONLY
         descriptor = open_regular_at(
             model,
             name,
             flags,
             mode=0o600,
-            expected_mode=0o600,
+            expected_mode=None,
         )
         try:
-            ModelInstaller._require_recovery_marker(model, revision, descriptor)
+            observed_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+            allowed_modes = {0o600} if create else {0o400, 0o600}
+            if observed_mode not in allowed_modes:
+                raise PermissionError("unsafe model recovery marker")
+            ModelInstaller._require_recovery_marker(
+                model,
+                revision,
+                descriptor,
+                expected_mode=observed_mode,
+            )
             os.fsync(descriptor)
             model.fsync()
-            ModelInstaller._require_recovery_marker(model, revision, descriptor)
+            ModelInstaller._require_recovery_marker(
+                model,
+                revision,
+                descriptor,
+                expected_mode=observed_mode,
+            )
             return descriptor
         except BaseException as error:
             close_preserving_primary(descriptor, os.close, error)
@@ -214,6 +223,8 @@ class ModelInstaller:
         model: OwnedDirectory,
         revision: str,
         descriptor: int,
+        *,
+        expected_mode: int,
     ) -> None:
         name = recovery_pending_name(revision)
         identity = os.fstat(descriptor)
@@ -221,7 +232,7 @@ class ModelInstaller:
         if (
             not stat.S_ISREG(identity.st_mode)
             or identity.st_uid != os.geteuid()
-            or stat.S_IMODE(identity.st_mode) != 0o600
+            or stat.S_IMODE(identity.st_mode) != expected_mode
             or identity.st_nlink != 1
             or identity.st_size != 0
             or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)
@@ -229,94 +240,79 @@ class ModelInstaller:
             raise PermissionError("unsafe model recovery marker")
 
     @staticmethod
-    def _clear_recovery_marker(
+    def _prepare_recovery_marker_as_publication(
         model: OwnedDirectory,
         revision: str,
         descriptor: int,
     ) -> None:
-        name = recovery_pending_name(revision)
-        _mark_publication_uncertain(model, revision)
-        try:
-            ModelInstaller._require_recovery_marker(model, revision, descriptor)
-            os.unlink(name, dir_fd=model.fd)
-            model.fsync()
-        except BaseException as error:
-            ModelInstaller._restore_recovery_marker(model, revision, error)
-            raise
-        else:
-            _resolve_publication_uncertainty(model, revision)
+        observed_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        if observed_mode not in {0o400, 0o600}:
+            raise PermissionError("unsafe model recovery marker")
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=observed_mode,
+        )
+        if observed_mode == 0o600:
+            os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
+        model.fsync()
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=0o400,
+        )
 
     @staticmethod
-    def _restore_recovery_marker(
+    def _publish_prepared_recovery_marker(
         model: OwnedDirectory,
         revision: str,
-        primary_error: BaseException,
-    ) -> bool:
+        expected_identity: tuple[int, int],
+    ) -> None:
+        pending_name = recovery_pending_name(revision)
+        commit_name = publication_commit_name(revision)
+        witness = AtomicPublishWitness()
         try:
+            atomic_publish_dir_noreplace(
+                model,
+                pending_name,
+                commit_name,
+                witness=witness,
+            )
+        except BaseException as error:
+            if witness.committed:
+                return
             try:
-                descriptor = ModelInstaller._open_recovery_marker(
-                    model,
-                    revision,
-                    create=True,
+                pending = os.stat(
+                    pending_name,
+                    dir_fd=model.fd,
+                    follow_symlinks=False,
                 )
-            except FileExistsError:
-                descriptor = ModelInstaller._open_recovery_marker(
-                    model,
-                    revision,
-                    create=False,
+            except FileNotFoundError:
+                pending = None
+            except BaseException:
+                raise error from None
+            try:
+                committed = os.stat(
+                    commit_name,
+                    dir_fd=model.fd,
+                    follow_symlinks=False,
                 )
             except BaseException:
-                descriptor = ModelInstaller._open_recovery_marker(
-                    model,
-                    revision,
-                    create=False,
-                )
-        except BaseException:
-            primary_error.add_note(_RECOVERY_RESTORE_NOTE)
-            return False
-        close_preserving_primary(descriptor, os.close, primary_error)
-        _resolve_publication_uncertainty(model, revision)
-        return True
-
-    @staticmethod
-    def _create_publication_commit(model: OwnedDirectory, revision: str) -> int:
-        descriptor = open_regular_at(
-            model,
-            publication_commit_name(revision),
-            os.O_RDWR | os.O_CREAT | os.O_EXCL,
-            mode=0o600,
-            expected_mode=0o600,
-        )
-        try:
-            require_publication_commit(
-                model,
-                revision,
-                descriptor,
-                expected_mode=0o600,
-                require_read_only=False,
-            )
-            os.fsync(descriptor)
-            model.fsync()
-            require_publication_commit(
-                model,
-                revision,
-                descriptor,
-                expected_mode=0o600,
-                require_read_only=False,
-            )
-            os.fchmod(descriptor, 0o400)
-            os.fsync(descriptor)
-            require_publication_commit(
-                model,
-                revision,
-                descriptor,
-                expected_mode=0o400,
-                require_read_only=False,
-            )
-            return descriptor
-        except BaseException as error:
-            close_preserving_primary(descriptor, os.close, error)
-            raise
+                raise error from None
+            if pending is not None or (
+                not stat.S_ISREG(committed.st_mode)
+                or committed.st_uid != os.geteuid()
+                or stat.S_IMODE(committed.st_mode) != 0o400
+                or committed.st_nlink != 1
+                or committed.st_size != 0
+                or (committed.st_dev, committed.st_ino) != expected_identity
+            ):
+                raise error
+        if not witness.committed:
+            raise RuntimeError("model publication outcome missing")
 
     @staticmethod
     def _remove_publication_commit(model: OwnedDirectory, revision: str) -> None:
@@ -346,17 +342,6 @@ class ModelInstaller:
             raise
         os.close(descriptor)
 
-    @staticmethod
-    def _remove_publication_commit_preserving_primary(
-        model: OwnedDirectory,
-        revision: str,
-        primary_error: BaseException,
-    ) -> None:
-        try:
-            ModelInstaller._remove_publication_commit(model, revision)
-        except BaseException:
-            primary_error.add_note(_PUBLICATION_PROOF_ROLLBACK_NOTE)
-
     def _reuse_or_recover_revision(
         self,
         model: OwnedDirectory,
@@ -373,11 +358,9 @@ class ModelInstaller:
         handles: list[VerifiedModelFile] = []
         activated: ActivatedModel | None = None
         marker_fd: int | None = None
-        commit_fd: int | None = None
         sealed_for_recovery = False
         post_seal_phase = False
         transaction_complete = False
-        commit_attempted = False
         try:
             mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
             sealed_for_recovery = mode == 0o500
@@ -442,42 +425,39 @@ class ModelInstaller:
                     hash_exact_fd(handle.fd, item.size, item.sha256)
                 revision.fsync()
                 model.fsync()
-                commit_attempted = True
-                commit_fd = self._create_publication_commit(model, entry.revision)
-                descriptor_to_close = commit_fd
-                commit_fd = None
-                os.close(descriptor_to_close)
-                self._clear_recovery_marker(model, entry.revision, marker_fd)
+                self._prepare_recovery_marker_as_publication(
+                    model,
+                    entry.revision,
+                    marker_fd,
+                )
+                prepared_marker = os.fstat(marker_fd)
+                prepared_marker_identity = (
+                    prepared_marker.st_dev,
+                    prepared_marker.st_ino,
+                )
                 descriptor_to_close = marker_fd
                 marker_fd = None
                 os.close(descriptor_to_close)
+                self._publish_prepared_recovery_marker(
+                    model,
+                    entry.revision,
+                    prepared_marker_identity,
+                )
                 transaction_complete = True
                 activated = ActivatedModel.from_manifest(entry, tuple(handles))
                 handles.clear()
         except BaseException as error:
-            if commit_attempted and not transaction_complete:
-                self._remove_publication_commit_preserving_primary(
-                    model,
-                    entry.revision,
-                    error,
-                )
             if sealed_for_recovery and not transaction_complete:
                 try:
                     revision.chmod(0o700)
                     revision.fsync()
                 except BaseException:
                     error.add_note(_RECOVERY_ROLLBACK_NOTE)
-                    if publication_is_uncertain(model, entry.revision):
-                        self._restore_recovery_marker(model, entry.revision, error)
             for handle in handles:
                 close_preserving_primary(handle, VerifiedModelFile.close, error)
             if marker_fd is not None:
                 descriptor_to_close = marker_fd
                 marker_fd = None
-                close_preserving_primary(descriptor_to_close, os.close, error)
-            if commit_fd is not None:
-                descriptor_to_close = commit_fd
-                commit_fd = None
                 close_preserving_primary(descriptor_to_close, os.close, error)
             close_preserving_primary(revision, OwnedDirectory.close, error)
             if isinstance(error, OSError) and not post_seal_phase:
@@ -521,10 +501,8 @@ class ModelInstaller:
                             published = False
                             sealed_for_publication = False
                             transaction_complete = False
-                            commit_attempted = False
                             handles: list[VerifiedModelFile] = []
                             marker_fd: int | None = None
-                            commit_fd: int | None = None
                             try:
                                 deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
                                 for item in entry.files:
@@ -596,22 +574,24 @@ class ModelInstaller:
                                         item.size,
                                         item.sha256,
                                     )
-                                commit_attempted = True
-                                commit_fd = self._create_publication_commit(
-                                    model,
-                                    entry.revision,
-                                )
-                                descriptor_to_close = commit_fd
-                                commit_fd = None
-                                os.close(descriptor_to_close)
-                                self._clear_recovery_marker(
+                                self._prepare_recovery_marker_as_publication(
                                     model,
                                     entry.revision,
                                     marker_fd,
                                 )
+                                prepared_marker = os.fstat(marker_fd)
+                                prepared_marker_identity = (
+                                    prepared_marker.st_dev,
+                                    prepared_marker.st_ino,
+                                )
                                 descriptor_to_close = marker_fd
                                 marker_fd = None
                                 os.close(descriptor_to_close)
+                                self._publish_prepared_recovery_marker(
+                                    model,
+                                    entry.revision,
+                                    prepared_marker_identity,
+                                )
                                 transaction_complete = True
                                 activated = ActivatedModel.from_manifest(
                                     entry,
@@ -620,12 +600,12 @@ class ModelInstaller:
                                 handles.clear()
                             except FileExistsError as error:
                                 if published:
-                                    if commit_attempted and not transaction_complete:
-                                        self._remove_publication_commit_preserving_primary(
-                                            model,
-                                            entry.revision,
-                                            error,
-                                        )
+                                    if sealed_for_publication and not transaction_complete:
+                                        try:
+                                            stage.chmod(0o700)
+                                            stage.fsync()
+                                        except BaseException:
+                                            error.add_note(_RECOVERY_ROLLBACK_NOTE)
                                     for handle in handles:
                                         close_preserving_primary(
                                             handle,
@@ -635,14 +615,6 @@ class ModelInstaller:
                                     if marker_fd is not None:
                                         descriptor_to_close = marker_fd
                                         marker_fd = None
-                                        close_preserving_primary(
-                                            descriptor_to_close,
-                                            os.close,
-                                            error,
-                                        )
-                                    if commit_fd is not None:
-                                        descriptor_to_close = commit_fd
-                                        commit_fd = None
                                         close_preserving_primary(
                                             descriptor_to_close,
                                             os.close,
@@ -667,30 +639,12 @@ class ModelInstaller:
                                     ) from None
                                 activated = existing
                             except BaseException as error:
-                                if commit_attempted and not transaction_complete:
-                                    self._remove_publication_commit_preserving_primary(
-                                        model,
-                                        entry.revision,
-                                        error,
-                                    )
-                                if sealed_for_publication and publication_is_uncertain(
-                                    model,
-                                    entry.revision,
-                                ):
+                                if sealed_for_publication and not transaction_complete:
                                     try:
                                         stage.chmod(0o700)
                                         stage.fsync()
                                     except BaseException:
                                         error.add_note(_RECOVERY_ROLLBACK_NOTE)
-                                        if publication_is_uncertain(
-                                            model,
-                                            entry.revision,
-                                        ):
-                                            self._restore_recovery_marker(
-                                                model,
-                                                entry.revision,
-                                                error,
-                                            )
                                 for handle in handles:
                                     close_preserving_primary(
                                         handle,
@@ -700,14 +654,6 @@ class ModelInstaller:
                                 if marker_fd is not None:
                                     descriptor_to_close = marker_fd
                                     marker_fd = None
-                                    close_preserving_primary(
-                                        descriptor_to_close,
-                                        os.close,
-                                        error,
-                                    )
-                                if commit_fd is not None:
-                                    descriptor_to_close = commit_fd
-                                    commit_fd = None
                                     close_preserving_primary(
                                         descriptor_to_close,
                                         os.close,

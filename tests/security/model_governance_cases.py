@@ -466,14 +466,20 @@ class GovernedModelCase:
     def require_write_enabled_publish_source(self) -> None:
         publish = installer_module.atomic_publish_dir_noreplace
 
-        def reject_read_only_source(parent: Any, source: str, target: str) -> None:
-            stage = parent.child(source)
-            try:
-                if stat.S_IMODE(os.fstat(stage.fd).st_mode) != 0o700:
-                    raise PermissionError("filesystem rejects renaming a read-only directory")
-            finally:
-                stage.close()
-            publish(parent, source, target)
+        def reject_read_only_source(
+            parent: Any,
+            source: str,
+            target: str,
+            **kwargs: object,
+        ) -> None:
+            if source.startswith(".stage-"):
+                stage = parent.child(source)
+                try:
+                    if stat.S_IMODE(os.fstat(stage.fd).st_mode) != 0o700:
+                        raise PermissionError("filesystem rejects renaming a read-only directory")
+                finally:
+                    stage.close()
+            publish(parent, source, target, **kwargs)  # type: ignore[arg-type]
 
         self.monkeypatch.setattr(
             installer_module,

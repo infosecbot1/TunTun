@@ -27852,7 +27852,7 @@ Task 10.
 **Interfaces:**
 - Consumes: owner-invoked immutable HTTPS URL on an exact host allowlist, declared bounded byte size/SHA-256, a bounded duplicate-free manifest, and owner-only no-follow model directory descriptors.
 - Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only a verified exact nonempty tuple of stable read-only file descriptors; immutable private `_ManifestBoundFile(path, size, sha256, device, inode)` expectations; frozen `VerifiedModelFile`/`ActivatedModel`; derived read-only property `ActivatedModel.all_files_verified: bool`; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. Public `fd`, `size`, `sha256`, and `files` are getter-only views. `all_files_verified` and runtime receipt comparison use the sealed private manifest tuple and recheck descriptor access/type/mode/device/inode/size/hash; they never derive trust from a caller-replaceable public field. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
-- Darwin filesystems may reject renaming a write-disabled directory even when source and destination share one parent. The installer therefore keeps the already-complete owner-only stage at `0700` through the exclusive no-replace rename, establishes an owner-only descriptor-relative parent recovery marker, then seals the retained directory descriptor to exact `0500`, fsyncs it, and only then fsyncs the parent in the accepted publication order. A newly created or previously existing marker is accepted only as the exact stable owner-owned `0600`, zero-length, single-link regular inode named by the retained model dirfd; every accepted marker descriptor is fsynced, its parent is fsynced, and descriptor/name identity is revalidated after those durability operations before sealing. Initial exact `0500` plus a marker establishes rollback ownership before marker reopen, fsync, parent fsync, or identity revalidation, so every such fault rolls back to exact `0700` and remains unusable. Public `ModelRegistry.activate` holds a shared flock on the root `.model-install-{MODEL_ID}.lock` across model open and exact verification, while installation/recovery for that model holds the same lock exclusively. Different model IDs therefore do not serialize their downloads or activation; the installer's already-under-lock fast path calls a private retained-model-dirfd verifier instead of recursively acquiring the public lock or reopening a path. Consequently, no cooperating interpreter can observe a same-model state-transfer window or decide activation before the exclusive transaction has an outcome. After repeated exact inventory/hash proof plus revision and parent fsync, the installer creates `.publication-verified-{REVISION}` at `0600`, validates and fsyncs the inode, fsyncs its parent, revalidates it, changes it to exact `0400`, fsyncs and revalidates it again, and closes that proof descriptor while the durable recovery marker still exists. Only after every proof operation and close succeeds does it revalidate, unlink, and parent-fsync the recovery marker. Thus a proof chmod, either proof fsync, proof-parent fsync, final proof validation, or proof-close fault leaves the durable marker authoritative across process restart. The failed transaction descriptor-relatively removes any incomplete/complete proof before unlock; a later exclusive retry reopens or creates the exact marker, removes stale proof state, re-verifies the artifacts, and converges. Before final marker revalidation, the installer records `(model-directory device, inode, revision)` in a process-global lock-protected uncertain-publication set; it removes the key only after unlink plus parent fsync succeeds or after an exact replacement marker has itself been opened/created, fsynced, parent-fsynced, and identity-revalidated. If marker clear reports failure, the installer first restores that exact durable marker while still holding the exclusive lock and re-raises the original failure. If restoration cannot be completed, fresh publication and recovery attempt proof removal plus exact `0700`/revision-fsync rollback; if rollback also fails, they make a second exact marker-restoration attempt. Activation additionally retains and revalidates the exact owner-owned `0400`, zero-length, single-link regular `O_RDONLY` proof descriptor before and after exact artifact inventory/hash verification; marker-present, missing, symlinked, special, writable, nonempty, multiply linked, or identity-swapped proof states deny. The process-local uncertainty latch remains additional race containment, never the cross-process or restart authorization boundary. `install` retains ownership of a fresh or reused `ActivatedModel` until stage/model/root directory close, exclusive unlock, and lock-FD close all succeed; any transfer or cleanup failure closes that activation exactly once and preserves the original cleanup exception, with secondary close failures represented only by the established content-minimal note. A missing, extra, symlinked, special, writable, wrong-sized, or hash-mismatched artifact stays unusable and fails closed; there is no ordinary rename fallback, path reopen, or unverified byte that can become active.
+- Darwin filesystems may reject renaming a write-disabled directory even when source and destination share one parent. The installer therefore keeps the already-complete owner-only stage at `0700` through the exclusive no-replace directory rename, creates and durably binds an owner-only descriptor-relative `.recovery-pending-{REVISION}` marker, then seals the retained revision descriptor to exact `0500`, fsyncs it, and fsyncs the parent in the accepted publication order. A new marker is exact owner-owned `0600`; recovery also accepts an interrupted prepared marker at exact `0400`. Both forms must be zero-length, single-link regular inodes with descriptor/name identity equality, and every newly created or reopened marker descriptor plus its parent is fsynced and revalidated before recovery proceeds. Public activation holds the target model's per-model lock shared across model open and exact verification, while installation/recovery holds that lock exclusively; different model IDs remain independent. After repeated exact artifact inventory/hash verification plus revision and parent fsync, the installer validates the retained marker, changes `0600` to exact `0400` when necessary, fsyncs the marker inode, fsyncs its parent, revalidates the same name/inode/mode, records its device/inode identity, and closes it. The marker name remains the authoritative on-disk deny state through every fallible preparation and close operation. The installer then uses the same Darwin `renameatx_np(RENAME_EXCL)` or Linux `renameat2(RENAME_NOREPLACE)` primitive, with no fallback, to atomically rename that exact marker name to `.publication-verified-{REVISION}`. That atomic marker-to-proof rename is the irreversible commit point; because the exact marker inode and parent were fsynced before it, a crash yields either the old deny-marker name or the new positive-proof name. There is deliberately no fallible parent fsync after the commit point. The platform helper receives a fresh caller-owned witness and sets it only after the exclusive rename syscall returns zero, before returning to any outer wrapper. If a wrapper delegates the real rename and then raises, the installer therefore classifies the retained-inode transition as committed without a fallible namespace probe; a defensive exact marker-absent/proof-identity check remains only for a nonconforming wrapper that fails to forward the witness. That proven outcome continues to activation construction and returns success. An unproven rename failure remains precommit, leaves the marker authoritative, and may additionally attempt `0700` rollback without depending on rollback for denial. A later retry accepts and re-durabilizes a prepared `0400` marker, removes any stale proof collision, re-verifies the artifacts, and converges. Activation retains and revalidates the exact stable `0400` proof `O_RDONLY` before and after artifact verification; marker-present, missing, symlinked, special, writable, nonempty, multiply linked, identity-swapped, or content-mismatched states deny. `ActivatedModel` construction occurs after the commit flag; a construction error closes the still-installer-owned artifact handles once and leaves the committed disk state intact. Fresh or reused successful results remain installer-owned until stage/model/root close, exclusive unlock, and lock-FD close all succeed, with exact-once cleanup and primary-error preservation. There is no ordinary rename fallback, path reopen, or unverified byte that can become active.
 
 - [ ] **Step 1: Write red model-governance tests**
 
@@ -28167,7 +28167,7 @@ def concurrent_model_case(governed_model_case):
     return governed_model_case.concurrent_view()
 ```
 
-`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`: `manifest`, `model_id`, `expected_bytes`, `expected_sha256`, `network.inject()/followed_redirects`, `mutate_manifest`, `apply_filesystem_mutation`, `registry_or_activate`, `inject_os_write_result`, `inject_repeated_os_write_result`, `install`, `install_peer_model`, `as_installed_model`, `concurrent_view`, `race_activation`, `crash_install_at`, `restart_and_reconcile`, `restart_with_post_seal_recovery_fault`, `require_write_enabled_publish_source`, `mutate_unsealed_revision`, `create_interrupted_recovery_marker`, `create_sealed_pending_revision`, `clear_process_publication_uncertainty`, `recovery_marker_path`, `publication_commit_path`, `recovery_marker_exists`, `final_revision_mode`, `rehash_exact_descriptor`, and every asserted state/identity/count query. Each mutation/race/fault string in the test has one explicit dispatch-table entry; unknown names raise `AssertionError`. Filesystem mutations use real missing entries, symlinks, FIFOs, modes, sizes, hashes, and inode replacements; the post-seal recovery seam either mutates the artifact or raises before repeated inventory/hash checks. The exact cleanup matrix separately injects raw-descriptor and constructed-wrapper close failures in fresh and recovery transfer windows, asserts the original exception object plus the content-minimal cleanup note, and proves one close attempt/no leak. The install-result ownership matrix captures the real fresh/reused `ActivatedModel` artifact descriptor, independently fails stage/model/root close or exclusive unlock/lock-FD close after result construction, injects a secondary activation-close failure, and proves the primary cleanup exception survives, the activation receives exactly one close attempt, `fstat` rejects the captured descriptor, and the FD delta is zero. The lock-cleanup matrix independently injects raw unlock and close faults around both a successful protected body and a primary body failure, proves exactly one unlock and close attempt, preserves the primary with a content-minimal note, and immediately reacquires the lock. The rollback matrix independently fails recovery chmod, fsync, and revision close, then constructs a fresh registry to prove the parent-directory recovery marker remains an on-disk activation deny before later exact recovery clears it. The durability-order fixture records marker-file fsync, parent fsync, seal, revision fsync, post-seal hash, non-authorizing proof fsync and parent fsync, read-only proof fsync, marker unlink, and final parent fsync in that order. A fresh/recovery proof-fault matrix independently fails initial proof fsync, proof-parent fsync, the `0400` transition, final proof fsync, final validation, and proof close; every case proves the marker remains durable, a fresh interpreter denies activation, the first attempt leaks no descriptor, and a fault-free retry converges to exact verified `0500`/marker-absent/proof-present state. Existing-marker durability and identity matrices start from both realistic `0700` interrupted publication and legitimate durable `0500` plus marker, independently fail marker fsync and parent fsync, or swap/remove the name after parent fsync, and prove rollback to exact `0700`, primary preservation, close-once/no-leak ownership, and later convergence. Fresh and recovery final-parent-fsync probes pause a separate interpreter after marker unlink and prove its same-model shared activation lock cannot pass the installer's exclusive lock; after the failure, the child observes a restored marker or absent positive proof and denies activation. Marker restoration independently fails creation, marker fsync, parent fsync, and close; compound probes then combine both finite restoration failures with rollback chmod failure and require denial by absent positive proof after unlock and simulated restart. Exact proof mutations cover missing, symlinked, FIFO, writable, nonempty, multiply linked, and verification-window identity-swap states. Every case retries under the per-model lock, converges to exact verified `0500`/marker-absent/proof-present, and proves activation succeeds afterward. A verification-window race marks publication uncertain after the registry's first check and proves the second check fails closed. Cross-model concurrency pauses one model's download and proves a different installed model activates through its distinct per-model lock; the corresponding same-model case observes the shared-lock attempt and proves it remains excluded until publication commits. Write faults monkeypatch only `os.write`, and network faults drive the injected transport/child-resolver seam. State queries inspect the real staged/final filesystem and live descriptors rather than booleans set by the case.
+`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`; each mutation/race/fault string has one closed dispatch entry and filesystem mutations use real missing entries, symlinks, FIFOs, modes, sizes, hashes, and inode replacements. Cleanup matrices inject raw-descriptor, wrapper, directory, unlock, and lock-FD failures and prove primary preservation, one ownership-release attempt, closed artifact descriptors, and zero FD delta. The publication durability fixture proves the same marker inode is fsynced at `0600`, parent-synced while authoritative, prepared and fsynced at `0400`, parent-synced again, and atomically promoted to the proof name without a postcommit fsync. The fresh/recovery precommit matrix independently injects prepared-marker fchmod, marker fsync, parent fsync, final validation, close, and atomic-rename failure while also failing `0700` rollback; every case leaves the exact `0400` marker authoritative, denies a fresh interpreter, leaks no descriptor, and converges on retry. A real no-replace proof collision likewise retains the marker and recovers after stale-proof removal. Success-then-error atomic-wrapper probes prove the syscall-success witness treats the retained-inode transition as committed without a namespace probe even when that probe and `0700` rollback are both faulted; both variants perform no rollback, return the verified activation, and are immediately fresh-process activatable. A postcommit `ActivatedModel` construction error and fresh/recovery revision-close faults prove committed disk state is not rolled back while all unreturned artifact handles close exactly once. Existing `0600` and prepared `0400` marker durability/identity matrices reject fsync, parent-fsync, swap, and disappearance faults before sealing/recovery. Exact proof mutations cover missing, symlinked, FIFO, writable, nonempty, multiply linked, and verification-window identity-swap states. Same-model activation remains excluded by the shared/exclusive per-model lock until the atomic transaction has an outcome, while a paused 900-second download for one model does not block another installed model. Every retry verifies real disk state and stable descriptors rather than test-only booleans.
 
 `InstalledModel` exposes only `registry`, `model_id`, `expected_bytes`, `expected_sha256`, and `replace_every_named_path_with_attacker_bytes()`. `ScriptedRuntimeAdapter.load_verified_reader` consumes the bounded reader to EOF, records bytes and open duplicate count, returns an exact per-file receipt, and never accepts a path; `finish_model` returns an unpublished signed candidate; the verifier publishes only after checking the exact domain/generation/expiry/model/revision/ordered file tuple. `mutate_receipt`, `fail_at`, and `abort_model` are closed dispatch methods for the test strings and maintain the asserted `path_opens`, `open_duplicate_fd_count`, `abort_calls`, `published_runtime_count`, and `last_loaded_bytes`. The concurrent view uses two real `ModelInstaller` instances plus a barrier only before lock acquisition, measures lock ownership around the production lock, and derives publication/stage results from disk. This helper contains no pass-through fake of `ModelRegistry`, `ModelInstaller`, descriptor hashing, publication, or receipt comparison.
 
@@ -28478,10 +28478,17 @@ def open_publication_commit(model,revision):
     except BaseException as error:
         close_preserving_primary(descriptor,os.close,error); raise
 
-def atomic_publish_dir_noreplace(parent:OwnedDirectory,source:str,destination:str):
+class AtomicPublishWitness:
+    def __init__(self): self.committed=False
+
+def atomic_publish_dir_noreplace(
+    parent:OwnedDirectory,source:str,destination:str,*,witness=None,
+):
     # Platform adapter uses renameat2(RENAME_NOREPLACE) on Linux or
     # renameatx_np(RENAME_EXCL) on macOS. ENOTSUP is fail-closed; there is no
     # existence-check + rename fallback.
+    if witness is not None and witness.committed:
+        raise ValueError("atomic publication witness already committed")
     libc=ctypes.CDLL(None,use_errno=True)
     if sys.platform=="darwin":
         result=libc.renameatx_np(parent.fd,source.encode(),parent.fd,destination.encode(),0x00000004)
@@ -28490,6 +28497,7 @@ def atomic_publish_dir_noreplace(parent:OwnedDirectory,source:str,destination:st
     else: raise OSError("exclusive directory publication unsupported")
     if result!=0:
         error=ctypes.get_errno(); raise OSError(error,os.strerror(error))
+    if witness is not None: witness.committed=True
 
 def hash_exact_fd(fd:int,expected_size:int,expected_sha256:str):
     digest=hashlib.sha256(); total=0
@@ -28901,494 +28909,698 @@ class PinnedHttpsTransport:
 
 ```python
 # apps/core/src/tuntun_core/services/models/installer.py
-import contextlib,fcntl,hashlib,os,secrets,stat,time
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import hashlib
+import os
+import secrets
+import stat
+import time
+from collections.abc import Callable, Iterator
+from typing import Any
 from urllib.parse import urlsplit
+
 from .fs import (
-    OwnedDirectory,_mark_publication_uncertain,_resolve_publication_uncertainty,
-    atomic_publish_dir_noreplace,close_preserving_primary,entry_exists_at,
-    hash_exact_fd,model_install_lock_name,open_regular_at,
-    publication_commit_name,publication_is_uncertain,recovery_pending_name,
-    require_publication_commit,
+    AtomicPublishWitness,
+    OwnedDirectory,
+    atomic_publish_dir_noreplace,
+    close_preserving_primary,
+    entry_exists_at,
+    hash_exact_fd,
+    model_install_lock_name,
+    open_regular_at,
+    publication_commit_name,
+    recovery_pending_name,
 )
 from .network import PinnedHttpsTransport
-from .registry import ActivatedModel,ModelEntry,VerifiedModelFile
+from .registry import ActivatedModel, ModelEntry, ModelFile, ModelRegistry, VerifiedModelFile
+
+WriteOnce = Callable[[int, bytes | memoryview], int]
+FaultHook = Callable[[str], None]
+_RECOVERY_ROLLBACK_NOTE = "additional recovery rollback failure"
+
+
+def _write_once(descriptor: int, data: bytes | memoryview) -> int:
+    return os.write(descriptor, data)
+
+
+def _no_fault(_point: str) -> None:
+    return None
+
 
 @contextlib.contextmanager
-def _close_owned_directory(directory):
-    try: yield
+def _close_owned_directory(directory: OwnedDirectory) -> Iterator[None]:
+    """Close one directory without replacing an active body failure."""
+    try:
+        yield
     except BaseException as error:
-        close_preserving_primary(directory,OwnedDirectory.close,error); raise
-    else: directory.close()
+        close_preserving_primary(directory, OwnedDirectory.close, error)
+        raise
+    else:
+        directory.close()
+
 
 class ModelInstaller:
-    def __init__(self,registry,allowed_hosts,transport=None):
-        self.registry=registry; self.allowed_hosts=frozenset(allowed_hosts)
-        self.transport=transport or PinnedHttpsTransport()
-    MAX_TOTAL_DOWNLOAD_SECONDS=900.0
-    _RECOVERY_ROLLBACK_NOTE="additional recovery rollback failure"
-    _RECOVERY_RESTORE_NOTE="additional recovery marker restoration failure"
-    _PUBLICATION_PROOF_ROLLBACK_NOTE="additional publication proof rollback failure"
-    def _download(self,stage,item,deadline):
-        parsed=urlsplit(item.url)
-        if parsed.hostname not in self.allowed_hosts:
-            raise PermissionError("model URL is not allowlisted HTTPS")
-        write_fd=open_regular_at(
-            stage,item.path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,mode=0o600,
-        )
-        read_fd=None
+    MAX_TOTAL_DOWNLOAD_SECONDS = 900.0
+
+    def __init__(
+        self,
+        registry: ModelRegistry,
+        allowed_hosts: frozenset[str] | set[str],
+        transport: Any | None = None,
+        *,
+        write_once: WriteOnce | None = None,
+        fault_hook: FaultHook | None = None,
+    ) -> None:
+        self.registry = registry
+        self.allowed_hosts = frozenset(allowed_hosts)
+        self.transport = transport or PinnedHttpsTransport()
+        self._write_once = write_once or _write_once
+        self._fault_hook = fault_hook or _no_fault
+
+    def _download(self, stage: OwnedDirectory, item: ModelFile, deadline: float) -> int:
         try:
-            # Open the only retained descriptor before qualification, while the
-            # private owner-only stage and exclusive writer still name the new
-            # inode. The runtime never receives write authority.
-            read_fd=open_regular_at(stage,item.path,os.O_RDONLY,mode=0o600)
-            written_identity=os.fstat(write_fd); read_identity=os.fstat(read_fd)
+            hostname = urlsplit(item.url).hostname
+        except ValueError as error:
+            raise PermissionError("model URL is not allowlisted HTTPS") from error
+        if hostname not in self.allowed_hosts:
+            raise PermissionError("model URL is not allowlisted HTTPS")
+        write_fd = open_regular_at(
+            stage,
+            item.path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            mode=0o600,
+            expected_mode=0o600,
+        )
+        read_fd: int | None = None
+        try:
+            read_fd = open_regular_at(
+                stage, item.path, os.O_RDONLY, mode=0o600, expected_mode=0o600
+            )
+            written_identity = os.fstat(write_fd)
+            read_identity = os.fstat(read_fd)
             if (
                 not stat.S_ISREG(written_identity.st_mode)
-                or written_identity.st_uid!=os.geteuid()
-                or written_identity.st_nlink!=1
-                or (written_identity.st_dev,written_identity.st_ino)!=
-                   (read_identity.st_dev,read_identity.st_ino)
-                or fcntl.fcntl(read_fd,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY
+                or written_identity.st_uid != os.geteuid()
+                or written_identity.st_nlink != 1
+                or (written_identity.st_dev, written_identity.st_ino)
+                != (read_identity.st_dev, read_identity.st_ino)
+                or fcntl.fcntl(read_fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY
             ):
                 raise PermissionError("model staged descriptor identity invalid")
-            digest=hashlib.sha256(); total=0
-            with self.transport.stream_exact(item.url,self.allowed_hosts,deadline) as response:
-                # No redirect is followed. Any 3xx, changed URL, non-200, or
-                # declared oversized length is rejected before response bytes.
-                if response.status!=200:
+            digest = hashlib.sha256()
+            total = 0
+            with self.transport.stream_exact(item.url, self.allowed_hosts, deadline) as response:
+                if response.status != 200:
                     raise PermissionError("model redirect or response rejected")
-                length=response.headers.get("content-length")
-                encoding=response.headers.get("content-encoding")
-                if encoding not in {None,"identity"}:
+                length = response.headers.get("content-length")
+                encoding = response.headers.get("content-encoding")
+                if encoding not in {None, "identity"}:
                     raise ValueError("model response encoding rejected")
-                if length is not None and (not length.isascii() or not length.isdecimal() or int(length)!=item.size):
+                if length is not None and (
+                    not isinstance(length, str)
+                    or not length.isascii()
+                    or not length.isdecimal()
+                    or int(length) != item.size
+                ):
                     raise ValueError("model size/hash mismatch")
-                while chunk:=response.read(65_536):
-                    total+=len(chunk)
-                    if total>item.size: raise ValueError("model size/hash mismatch")
-                    view=memoryview(chunk)
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("model download total deadline")
+                    chunk = response.read(65_536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > item.size:
+                        raise ValueError("model size/hash mismatch")
+                    view = memoryview(chunk)
                     while view:
-                        written=os.write(write_fd,view)
-                        if written<=0: raise OSError("model artifact write made no progress")
-                        view=view[written:]
+                        written = self._write_once(write_fd, view)
+                        if written <= 0:
+                            raise OSError("model artifact write made no progress")
+                        view = view[written:]
                     digest.update(chunk)
-            if total!=item.size or digest.hexdigest()!=item.sha256:
+            if total != item.size or digest.hexdigest() != item.sha256:
                 raise ValueError("model size/hash mismatch")
-            os.fchmod(write_fd,0o400); os.fsync(write_fd)
-            final_write=os.fstat(write_fd); final_read=os.fstat(read_fd)
+            os.fchmod(write_fd, 0o400)
+            os.fsync(write_fd)
+            final_write = os.fstat(write_fd)
+            final_read = os.fstat(read_fd)
             if (
                 not stat.S_ISREG(final_write.st_mode)
                 or not stat.S_ISREG(final_read.st_mode)
-                or final_write.st_uid!=os.geteuid()
-                or final_read.st_uid!=os.geteuid()
-                or stat.S_IMODE(final_read.st_mode)!=0o400
-                or final_write.st_size!=item.size or final_read.st_size!=item.size
-                or final_write.st_nlink!=1 or final_read.st_nlink!=1
-                or (final_write.st_dev,final_write.st_ino)!=
-                   (written_identity.st_dev,written_identity.st_ino)
-                or (final_read.st_dev,final_read.st_ino)!=
-                   (written_identity.st_dev,written_identity.st_ino)
+                or final_write.st_uid != os.geteuid()
+                or final_read.st_uid != os.geteuid()
+                or stat.S_IMODE(final_read.st_mode) != 0o400
+                or final_write.st_size != item.size
+                or final_read.st_size != item.size
+                or final_write.st_nlink != 1
+                or final_read.st_nlink != 1
+                or (final_write.st_dev, final_write.st_ino)
+                != (written_identity.st_dev, written_identity.st_ino)
+                or (final_read.st_dev, final_read.st_ino)
+                != (written_identity.st_dev, written_identity.st_ino)
             ):
                 raise ValueError("model size/hash mismatch")
-            hash_exact_fd(read_fd,item.size,item.sha256)
-            descriptor_to_close=write_fd; write_fd=-1
+            hash_exact_fd(read_fd, item.size, item.sha256)
+            descriptor_to_close = write_fd
+            write_fd = -1
             os.close(descriptor_to_close)
             return read_fd
         except BaseException as error:
             if read_fd is not None:
-                descriptor_to_close=read_fd; read_fd=None
-                close_preserving_primary(descriptor_to_close,os.close,error)
-            if write_fd>=0:
-                descriptor_to_close=write_fd; write_fd=-1
-                close_preserving_primary(descriptor_to_close,os.close,error)
+                descriptor_to_close = read_fd
+                read_fd = None
+                close_preserving_primary(descriptor_to_close, os.close, error)
+            if write_fd >= 0:
+                descriptor_to_close = write_fd
+                write_fd = -1
+                close_preserving_primary(descriptor_to_close, os.close, error)
             raise
 
     @staticmethod
-    def _open_existing_revision(model,revision):
-        try: return model.child(revision)
-        except FileNotFoundError: return None
+    def _open_existing_revision(model: OwnedDirectory, revision: str) -> OwnedDirectory | None:
+        try:
+            return model.child(revision)
+        except FileNotFoundError:
+            return None
         except OSError as error:
             raise PermissionError("unsafe model filesystem revision") from error
 
     @staticmethod
-    def _open_recovery_marker(model,revision,*,create):
-        flags=os.O_RDWR|os.O_CREAT|os.O_EXCL if create else os.O_RDWR
-        descriptor=open_regular_at(
-            model,recovery_pending_name(revision),flags,
-            mode=0o600,expected_mode=0o600,
+    def _open_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        *,
+        create: bool,
+    ) -> int:
+        name = recovery_pending_name(revision)
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL if create else os.O_RDONLY
+        descriptor = open_regular_at(
+            model,
+            name,
+            flags,
+            mode=0o600,
+            expected_mode=None,
         )
         try:
-            ModelInstaller._require_recovery_marker(model,revision,descriptor)
-            os.fsync(descriptor)           # every accepted marker, including reopen
-            model.fsync()                  # re-establish parent-entry durability
-            ModelInstaller._require_recovery_marker(model,revision,descriptor)
+            observed_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+            allowed_modes = {0o600} if create else {0o400, 0o600}
+            if observed_mode not in allowed_modes:
+                raise PermissionError("unsafe model recovery marker")
+            ModelInstaller._require_recovery_marker(
+                model,
+                revision,
+                descriptor,
+                expected_mode=observed_mode,
+            )
+            os.fsync(descriptor)
+            model.fsync()
+            ModelInstaller._require_recovery_marker(
+                model,
+                revision,
+                descriptor,
+                expected_mode=observed_mode,
+            )
             return descriptor
         except BaseException as error:
-            close_preserving_primary(descriptor,os.close,error); raise
+            close_preserving_primary(descriptor, os.close, error)
+            raise
 
     @staticmethod
-    def _require_recovery_marker(model,revision,descriptor):
-        name=recovery_pending_name(revision)
-        identity=os.fstat(descriptor)
-        named=os.stat(name,dir_fd=model.fd,follow_symlinks=False)
+    def _require_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        descriptor: int,
+        *,
+        expected_mode: int,
+    ) -> None:
+        name = recovery_pending_name(revision)
+        identity = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
         if (
             not stat.S_ISREG(identity.st_mode)
-            or identity.st_uid!=os.geteuid()
-            or stat.S_IMODE(identity.st_mode)!=0o600
-            or identity.st_nlink!=1 or identity.st_size!=0
-            or (identity.st_dev,identity.st_ino)!=(named.st_dev,named.st_ino)
-        ): raise PermissionError("unsafe model recovery marker")
+            or identity.st_uid != os.geteuid()
+            or stat.S_IMODE(identity.st_mode) != expected_mode
+            or identity.st_nlink != 1
+            or identity.st_size != 0
+            or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise PermissionError("unsafe model recovery marker")
 
     @staticmethod
-    def _clear_recovery_marker(model,revision,descriptor):
-        name=recovery_pending_name(revision)
-        # Establish in-process containment before final identity verification;
-        # the exclusive per-model lock prevents another process from observing the
-        # unlink-to-parent-fsync transaction window.
-        _mark_publication_uncertain(model,revision)
+    def _prepare_recovery_marker_as_publication(
+        model: OwnedDirectory,
+        revision: str,
+        descriptor: int,
+    ) -> None:
+        observed_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        if observed_mode not in {0o400, 0o600}:
+            raise PermissionError("unsafe model recovery marker")
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=observed_mode,
+        )
+        if observed_mode == 0o600:
+            os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
+        model.fsync()
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=0o400,
+        )
+
+    @staticmethod
+    def _publish_prepared_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        expected_identity: tuple[int, int],
+    ) -> None:
+        pending_name = recovery_pending_name(revision)
+        commit_name = publication_commit_name(revision)
+        witness = AtomicPublishWitness()
         try:
-            ModelInstaller._require_recovery_marker(model,revision,descriptor)
-            os.unlink(name,dir_fd=model.fd)
-            model.fsync()                   # durable marker removal is commit
+            atomic_publish_dir_noreplace(
+                model,
+                pending_name,
+                commit_name,
+                witness=witness,
+            )
         except BaseException as error:
-            ModelInstaller._restore_recovery_marker(model,revision,error)
-            raise
-        else:
-            _resolve_publication_uncertainty(model,revision)
-
-    @staticmethod
-    def _restore_recovery_marker(model,revision,primary_error):
-        try:
+            if witness.committed:
+                return
             try:
-                descriptor=ModelInstaller._open_recovery_marker(
-                    model,revision,create=True,
+                pending = os.stat(
+                    pending_name,
+                    dir_fd=model.fd,
+                    follow_symlinks=False,
                 )
-            except FileExistsError:
-                descriptor=ModelInstaller._open_recovery_marker(
-                    model,revision,create=False,
+            except FileNotFoundError:
+                pending = None
+            except BaseException:
+                raise error from None
+            try:
+                committed = os.stat(
+                    commit_name,
+                    dir_fd=model.fd,
+                    follow_symlinks=False,
                 )
             except BaseException:
-                descriptor=ModelInstaller._open_recovery_marker(
-                    model,revision,create=False,
-                )
-        except BaseException:
-            primary_error.add_note(ModelInstaller._RECOVERY_RESTORE_NOTE)
-            return False
-        close_preserving_primary(descriptor,os.close,primary_error)
-        _resolve_publication_uncertainty(model,revision)
-        return True
+                raise error from None
+            if pending is not None or (
+                not stat.S_ISREG(committed.st_mode)
+                or committed.st_uid != os.geteuid()
+                or stat.S_IMODE(committed.st_mode) != 0o400
+                or committed.st_nlink != 1
+                or committed.st_size != 0
+                or (committed.st_dev, committed.st_ino) != expected_identity
+            ):
+                raise error
+        if not witness.committed:
+            raise RuntimeError("model publication outcome missing")
 
     @staticmethod
-    def _create_publication_commit(model,revision):
-        descriptor=open_regular_at(
-            model,publication_commit_name(revision),
-            os.O_RDWR|os.O_CREAT|os.O_EXCL,
-            mode=0o600,expected_mode=0o600,
-        )
+    def _remove_publication_commit(model: OwnedDirectory, revision: str) -> None:
+        name = publication_commit_name(revision)
         try:
-            require_publication_commit(
-                model,revision,descriptor,
-                expected_mode=0o600,require_read_only=False,
+            descriptor = open_regular_at(
+                model,
+                name,
+                os.O_RDONLY,
+                expected_mode=None,
             )
-            os.fsync(descriptor); model.fsync()
-            require_publication_commit(
-                model,revision,descriptor,
-                expected_mode=0o600,require_read_only=False,
-            )
-            os.fchmod(descriptor,0o400); os.fsync(descriptor)
-            require_publication_commit(
-                model,revision,descriptor,
-                expected_mode=0o400,require_read_only=False,
-            )
-            return descriptor
-        except BaseException as error:
-            close_preserving_primary(descriptor,os.close,error); raise
-
-    @staticmethod
-    def _remove_publication_commit(model,revision):
-        name=publication_commit_name(revision)
+        except FileNotFoundError:
+            return
         try:
-            descriptor=open_regular_at(
-                model,name,os.O_RDONLY,expected_mode=None,
-            )
-        except FileNotFoundError: return
-        try:
-            identity=os.fstat(descriptor)
-            named=os.stat(name,dir_fd=model.fd,follow_symlinks=False)
+            identity = os.fstat(descriptor)
+            named = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
             if (
-                stat.S_IMODE(identity.st_mode) not in {0o400,0o600}
-                or identity.st_size!=0
-                or (identity.st_dev,identity.st_ino)!=(named.st_dev,named.st_ino)
-            ): raise PermissionError("unsafe model publication commit")
-            os.unlink(name,dir_fd=model.fd); model.fsync()
+                stat.S_IMODE(identity.st_mode) not in {0o400, 0o600}
+                or identity.st_size != 0
+                or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise PermissionError("unsafe model publication commit")
+            os.unlink(name, dir_fd=model.fd)
+            model.fsync()
         except BaseException as error:
-            close_preserving_primary(descriptor,os.close,error); raise
+            close_preserving_primary(descriptor, os.close, error)
+            raise
         os.close(descriptor)
 
-    @staticmethod
-    def _remove_publication_commit_preserving_primary(model,revision,primary_error):
-        try: ModelInstaller._remove_publication_commit(model,revision)
-        except BaseException:
-            primary_error.add_note(ModelInstaller._PUBLICATION_PROOF_ROLLBACK_NOTE)
-
     def _reuse_or_recover_revision(
-        self,model:OwnedDirectory,entry:ModelEntry,
-    ) -> ActivatedModel|None:
-        pending_name=recovery_pending_name(entry.revision)
-        pending_exists=entry_exists_at(model,pending_name)
-        commit_exists=entry_exists_at(model,publication_commit_name(entry.revision))
-        revision=self._open_existing_revision(model,entry.revision)
+        self,
+        model: OwnedDirectory,
+        entry: ModelEntry,
+    ) -> ActivatedModel | None:
+        pending_name = recovery_pending_name(entry.revision)
+        pending_exists = entry_exists_at(model, pending_name)
+        commit_exists = entry_exists_at(model, publication_commit_name(entry.revision))
+        revision = self._open_existing_revision(model, entry.revision)
         if revision is None:
             if pending_exists or commit_exists:
                 raise PermissionError("unsafe model recovery marker")
             return None
-        handles=[]; activated=None; marker_fd=None; commit_fd=None
-        sealed_for_recovery=False; post_seal_phase=False; transaction_complete=False
-        commit_attempted=False
+        handles: list[VerifiedModelFile] = []
+        activated: ActivatedModel | None = None
+        marker_fd: int | None = None
+        sealed_for_recovery = False
+        post_seal_phase = False
+        transaction_complete = False
         try:
-            mode=stat.S_IMODE(os.fstat(revision.fd).st_mode)
-            # Exact initial 0500 means this invocation owns rollback immediately,
-            # before any existing-marker reopen/fsync/revalidation can fail.
-            sealed_for_recovery=mode==0o500
-            if mode==0o500 and not pending_exists and commit_exists:
+            mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
+            sealed_for_recovery = mode == 0o500
+            if mode == 0o500 and not pending_exists and commit_exists:
                 try:
-                    activated=self.registry._activate_from_open_model(model,entry)
+                    activated = self.registry._activate_from_open_model(model, entry)
                 except BaseException as error:
                     raise RuntimeError("model is not installed and verified") from error
             else:
-                if mode not in {0o500,0o700}:
+                if mode not in {0o500, 0o700}:
                     raise PermissionError("unsafe model filesystem revision")
+
                 if pending_exists:
-                    marker_fd=self._open_recovery_marker(
-                        model,entry.revision,create=False,
+                    marker_fd = self._open_recovery_marker(
+                        model,
+                        entry.revision,
+                        create=False,
                     )
-                expected_names=tuple(sorted(item.path for item in entry.files))
-                if tuple(sorted(os.listdir(revision.fd)))!=expected_names:
+
+                expected_names = tuple(sorted(item.path for item in entry.files))
+                if tuple(sorted(os.listdir(revision.fd))) != expected_names:
                     raise PermissionError("unsafe unsealed model revision")
                 for item in entry.files:
-                    descriptor=open_regular_at(
-                        revision,item.path,os.O_RDONLY,
-                        mode=0o400,expected_mode=0o400,
+                    descriptor = open_regular_at(
+                        revision,
+                        item.path,
+                        os.O_RDONLY,
+                        mode=0o400,
+                        expected_mode=0o400,
                     )
                     try:
-                        hash_exact_fd(descriptor,item.size,item.sha256)
-                        handle=VerifiedModelFile.from_manifest(item,descriptor)
+                        hash_exact_fd(descriptor, item.size, item.sha256)
+                        handle = VerifiedModelFile.from_manifest(item, descriptor)
                     except BaseException as error:
-                        close_preserving_primary(descriptor,os.close,error); raise
+                        close_preserving_primary(descriptor, os.close, error)
+                        raise
                     try:
                         self._fault_hook("before_retain_recovery_file")
                         handles.append(handle)
                     except BaseException as error:
-                        close_preserving_primary(handle,VerifiedModelFile.close,error); raise
+                        close_preserving_primary(handle, VerifiedModelFile.close, error)
+                        raise
+
                 if marker_fd is None:
-                    marker_fd=self._open_recovery_marker(
-                        model,entry.revision,create=True,
+                    marker_fd = self._open_recovery_marker(
+                        model,
+                        entry.revision,
+                        create=True,
                     )
-                self._remove_publication_commit(model,entry.revision)
-                if mode==0o700:
-                    revision.chmod(0o500); sealed_for_recovery=True
+                self._remove_publication_commit(model, entry.revision)
+                if mode == 0o700:
+                    revision.chmod(0o500)
+                    sealed_for_recovery = True
                     revision.fsync()
-                else: sealed_for_recovery=True
-                post_seal_phase=True
+                else:
+                    sealed_for_recovery = True
+                post_seal_phase = True
                 self._fault_hook("after_recovery_seal_before_verify")
-                if tuple(sorted(os.listdir(revision.fd)))!=expected_names:
+                if tuple(sorted(os.listdir(revision.fd))) != expected_names:
                     raise PermissionError("unsafe unsealed model revision")
-                for item,handle in zip(entry.files,handles,strict=True):
-                    hash_exact_fd(handle.fd,item.size,item.sha256)
-                revision.fsync(); model.fsync()
-                commit_attempted=True
-                commit_fd=self._create_publication_commit(model,entry.revision)
-                descriptor_to_close=commit_fd; commit_fd=None
+                for item, handle in zip(entry.files, handles, strict=True):
+                    hash_exact_fd(handle.fd, item.size, item.sha256)
+                revision.fsync()
+                model.fsync()
+                self._prepare_recovery_marker_as_publication(
+                    model,
+                    entry.revision,
+                    marker_fd,
+                )
+                prepared_marker = os.fstat(marker_fd)
+                prepared_marker_identity = (
+                    prepared_marker.st_dev,
+                    prepared_marker.st_ino,
+                )
+                descriptor_to_close = marker_fd
+                marker_fd = None
                 os.close(descriptor_to_close)
-                self._clear_recovery_marker(model,entry.revision,marker_fd)
-                descriptor_to_close=marker_fd; marker_fd=None
-                os.close(descriptor_to_close)
-                transaction_complete=True
-                activated=ActivatedModel.from_manifest(entry,tuple(handles))
+                self._publish_prepared_recovery_marker(
+                    model,
+                    entry.revision,
+                    prepared_marker_identity,
+                )
+                transaction_complete = True
+                activated = ActivatedModel.from_manifest(entry, tuple(handles))
                 handles.clear()
         except BaseException as error:
-            if commit_attempted and not transaction_complete:
-                self._remove_publication_commit_preserving_primary(
-                    model,entry.revision,error,
-                )
             if sealed_for_recovery and not transaction_complete:
-                try: revision.chmod(0o700); revision.fsync()
+                try:
+                    revision.chmod(0o700)
+                    revision.fsync()
                 except BaseException:
-                    error.add_note(self._RECOVERY_ROLLBACK_NOTE)
-                    if publication_is_uncertain(model,entry.revision):
-                        self._restore_recovery_marker(model,entry.revision,error)
+                    error.add_note(_RECOVERY_ROLLBACK_NOTE)
             for handle in handles:
-                close_preserving_primary(handle,VerifiedModelFile.close,error)
+                close_preserving_primary(handle, VerifiedModelFile.close, error)
             if marker_fd is not None:
-                descriptor_to_close=marker_fd; marker_fd=None
-                close_preserving_primary(descriptor_to_close,os.close,error)
-            if commit_fd is not None:
-                descriptor_to_close=commit_fd; commit_fd=None
-                close_preserving_primary(descriptor_to_close,os.close,error)
-            close_preserving_primary(revision,OwnedDirectory.close,error)
-            if isinstance(error,OSError) and not post_seal_phase:
+                descriptor_to_close = marker_fd
+                marker_fd = None
+                close_preserving_primary(descriptor_to_close, os.close, error)
+            close_preserving_primary(revision, OwnedDirectory.close, error)
+            if isinstance(error, OSError) and not post_seal_phase:
                 raise PermissionError("unsafe unsealed model revision") from error
             raise
         if activated is None:
             revision.close()
             raise RuntimeError("model revision recovery did not activate")
-        try: revision.close()
+        try:
+            revision.close()
         except BaseException as error:
-            close_preserving_primary(activated,ActivatedModel.close,error); raise
+            close_preserving_primary(activated, ActivatedModel.close, error)
+            raise
         return activated
 
-    def install(self,model_id):
-        entry=self.registry.entry(model_id)
-        activated=None
+    def install(self, model_id: str) -> ActivatedModel:
+        entry = self.registry.entry(model_id)
+        activated: ActivatedModel | None = None
         try:
-            root=OwnedDirectory.open_or_create(self.registry._root)
+            root = OwnedDirectory.open_or_create(self.registry._root)
             with (
                 _close_owned_directory(root),
-                root.lock(model_install_lock_name(entry.model_id),timeout_seconds=30),
+                root.lock(
+                    model_install_lock_name(entry.model_id),
+                    timeout_seconds=30.0,
+                ),
             ):
-                model=root.child(entry.model_id,create=True,exist_ok=True)
+                model = root.child(entry.model_id, create=True, exist_ok=True)
                 with _close_owned_directory(model):
-                    prefix=f".stage-{entry.revision}-"
-                    model.remove_private_stages(prefix); model.fsync()
-                    activated=self._reuse_or_recover_revision(model,entry)
-                    if activated is None:
-                        stage_name=f"{prefix}{secrets.token_hex(8)}"
-                        stage=model.child(stage_name,create=True)
+                    prefix = f".stage-{entry.revision}-"
+                    model.remove_private_stages(prefix)
+                    model.fsync()
+                    existing = self._reuse_or_recover_revision(model, entry)
+                    if existing is not None:
+                        activated = existing
+                    else:
+                        stage_name = f"{prefix}{secrets.token_hex(8)}"
+                        stage = model.child(stage_name, create=True)
                         with _close_owned_directory(stage):
-                            stage_identity=stage.identity
-                            published=False; sealed_for_publication=False
-                            transaction_complete=False; commit_attempted=False
-                            handles=[]; marker_fd=None; commit_fd=None
+                            stage_identity = stage.identity
+                            published = False
+                            sealed_for_publication = False
+                            transaction_complete = False
+                            handles: list[VerifiedModelFile] = []
+                            marker_fd: int | None = None
                             try:
-                                deadline=time.monotonic()+self.MAX_TOTAL_DOWNLOAD_SECONDS
+                                deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
                                 for item in entry.files:
-                                    descriptor=self._download(stage,item,deadline)
+                                    descriptor = self._download(stage, item, deadline)
                                     try:
-                                        handle=VerifiedModelFile.from_manifest(item,descriptor)
+                                        handle = VerifiedModelFile.from_manifest(
+                                            item,
+                                            descriptor,
+                                        )
                                     except BaseException as error:
-                                        close_preserving_primary(descriptor,os.close,error); raise
+                                        close_preserving_primary(
+                                            descriptor,
+                                            os.close,
+                                            error,
+                                        )
+                                        raise
                                     try:
                                         self._fault_hook("before_retain_downloaded_file")
                                         handles.append(handle)
                                     except BaseException as error:
                                         close_preserving_primary(
-                                            handle,VerifiedModelFile.close,error,
-                                        ); raise
-                                for item,handle in zip(entry.files,handles,strict=True):
-                                    hash_exact_fd(handle.fd,item.size,item.sha256)
-                                stage.fsync()
-                                atomic_publish_dir_noreplace(
-                                    model,stage_name,entry.revision,
-                                )
-                                published=True
-                                self._fault_hook("after_publish_before_seal")
-                                marker_fd=self._open_recovery_marker(
-                                    model,entry.revision,create=True,
-                                )
-                                stage.chmod(0o500); sealed_for_publication=True
-                                stage.fsync(); model.fsync()
-                                expected_names=tuple(
-                                    sorted(item.path for item in entry.files)
-                                )
-                                if tuple(sorted(os.listdir(stage.fd)))!=expected_names:
-                                    raise PermissionError(
-                                        "unsafe model filesystem revision"
-                                    )
-                                for item,handle in zip(
-                                    entry.files,handles,strict=True,
+                                            handle,
+                                            VerifiedModelFile.close,
+                                            error,
+                                        )
+                                        raise
+                                    self._fault_hook("after_each_file")
+                                for item, handle in zip(
+                                    entry.files,
+                                    handles,
+                                    strict=True,
                                 ):
-                                    hash_exact_fd(handle.fd,item.size,item.sha256)
-                                # The durable marker remains present through every
-                                # proof fsync/validation and proof-descriptor close.
-                                commit_attempted=True
-                                commit_fd=self._create_publication_commit(
-                                    model,entry.revision,
+                                    hash_exact_fd(
+                                        handle.fd,
+                                        item.size,
+                                        item.sha256,
+                                    )
+                                self._fault_hook("before_stage_fsync")
+                                stage.fsync()
+                                self._fault_hook("after_stage_fsync")
+                                self._fault_hook("before_publish")
+                                atomic_publish_dir_noreplace(
+                                    model,
+                                    stage_name,
+                                    entry.revision,
                                 )
-                                descriptor_to_close=commit_fd; commit_fd=None
-                                os.close(descriptor_to_close)
-                                self._clear_recovery_marker(
-                                    model,entry.revision,marker_fd,
+                                published = True
+                                self._fault_hook("after_publish_before_seal")
+                                marker_fd = self._open_recovery_marker(
+                                    model,
+                                    entry.revision,
+                                    create=True,
                                 )
-                                descriptor_to_close=marker_fd; marker_fd=None
+                                stage.chmod(0o500)
+                                sealed_for_publication = True
+                                stage.fsync()
+                                self._fault_hook("after_publish_before_parent_fsync")
+                                model.fsync()
+                                expected_names = tuple(sorted(item.path for item in entry.files))
+                                if tuple(sorted(os.listdir(stage.fd))) != expected_names:
+                                    raise PermissionError("unsafe model filesystem revision")
+                                for item, handle in zip(
+                                    entry.files,
+                                    handles,
+                                    strict=True,
+                                ):
+                                    hash_exact_fd(
+                                        handle.fd,
+                                        item.size,
+                                        item.sha256,
+                                    )
+                                self._prepare_recovery_marker_as_publication(
+                                    model,
+                                    entry.revision,
+                                    marker_fd,
+                                )
+                                prepared_marker = os.fstat(marker_fd)
+                                prepared_marker_identity = (
+                                    prepared_marker.st_dev,
+                                    prepared_marker.st_ino,
+                                )
+                                descriptor_to_close = marker_fd
+                                marker_fd = None
                                 os.close(descriptor_to_close)
-                                transaction_complete=True
-                                activated=ActivatedModel.from_manifest(
-                                    entry,tuple(handles),
+                                self._publish_prepared_recovery_marker(
+                                    model,
+                                    entry.revision,
+                                    prepared_marker_identity,
+                                )
+                                transaction_complete = True
+                                activated = ActivatedModel.from_manifest(
+                                    entry,
+                                    tuple(handles),
                                 )
                                 handles.clear()
                             except FileExistsError as error:
                                 if published:
-                                    if commit_attempted and not transaction_complete:
-                                        self._remove_publication_commit_preserving_primary(
-                                            model,entry.revision,error,
-                                        )
+                                    if sealed_for_publication and not transaction_complete:
+                                        try:
+                                            stage.chmod(0o700)
+                                            stage.fsync()
+                                        except BaseException:
+                                            error.add_note(_RECOVERY_ROLLBACK_NOTE)
                                     for handle in handles:
                                         close_preserving_primary(
-                                            handle,VerifiedModelFile.close,error,
+                                            handle,
+                                            VerifiedModelFile.close,
+                                            error,
+                                        )
+                                    if marker_fd is not None:
+                                        descriptor_to_close = marker_fd
+                                        marker_fd = None
+                                        close_preserving_primary(
+                                            descriptor_to_close,
+                                            os.close,
+                                            error,
                                         )
                                     raise
                                 for handle in handles:
-                                    with contextlib.suppress(OSError): handle.close()
-                                model.remove_private_stage(stage_name,stage_identity)
+                                    with contextlib.suppress(OSError):
+                                        handle.close()
+                                model.remove_private_stage(
+                                    stage_name,
+                                    stage_identity,
+                                )
                                 model.fsync()
-                                activated=self._reuse_or_recover_revision(model,entry)
-                                if activated is None:
+                                existing = self._reuse_or_recover_revision(
+                                    model,
+                                    entry,
+                                )
+                                if existing is None:
                                     raise RuntimeError(
                                         "model install publication disappeared"
                                     ) from None
+                                activated = existing
                             except BaseException as error:
-                                if commit_attempted and not transaction_complete:
-                                    self._remove_publication_commit_preserving_primary(
-                                        model,entry.revision,error,
-                                    )
-                                if (
-                                    sealed_for_publication
-                                    and publication_is_uncertain(model,entry.revision)
-                                ):
-                                    try: stage.chmod(0o700); stage.fsync()
+                                if sealed_for_publication and not transaction_complete:
+                                    try:
+                                        stage.chmod(0o700)
+                                        stage.fsync()
                                     except BaseException:
-                                        error.add_note(self._RECOVERY_ROLLBACK_NOTE)
-                                        if publication_is_uncertain(
-                                            model,entry.revision,
-                                        ):
-                                            self._restore_recovery_marker(
-                                                model,entry.revision,error,
-                                            )
+                                        error.add_note(_RECOVERY_ROLLBACK_NOTE)
                                 for handle in handles:
                                     close_preserving_primary(
-                                        handle,VerifiedModelFile.close,error,
+                                        handle,
+                                        VerifiedModelFile.close,
+                                        error,
                                     )
                                 if marker_fd is not None:
-                                    descriptor_to_close=marker_fd; marker_fd=None
+                                    descriptor_to_close = marker_fd
+                                    marker_fd = None
                                     close_preserving_primary(
-                                        descriptor_to_close,os.close,error,
-                                    )
-                                if commit_fd is not None:
-                                    descriptor_to_close=commit_fd; commit_fd=None
-                                    close_preserving_primary(
-                                        descriptor_to_close,os.close,error,
+                                        descriptor_to_close,
+                                        os.close,
+                                        error,
                                     )
                                 if not published:
-                                    model.remove_private_stage(stage_name,stage_identity)
-                                    model.fsync()
+                                    try:
+                                        model.remove_private_stage(
+                                            stage_name,
+                                            stage_identity,
+                                        )
+                                        model.fsync()
+                                    except FileNotFoundError:
+                                        pass
                                 raise
         except BaseException as error:
             if activated is not None:
-                close_preserving_primary(activated,ActivatedModel.close,error)
-                activated=None
+                close_preserving_primary(
+                    activated,
+                    ActivatedModel.close,
+                    error,
+                )
+                activated = None
             raise
         if activated is None:
             raise RuntimeError("model install did not activate")
         return activated
 ```
 
-`models/manifest.schema.json` is JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry`/file fields, the same closed ID/revision/file/hash/size/URL bounds, and an array-size cap of 256 models and 64 files. Schema validation is defense in depth: `ModelRegistry.load` independently enforces every invariant, rejects booleans and every other wrong scalar type as `ValueError`, caps models before iteration and files before construction, detects duplicate IDs/files, checks total revision bytes, and uses strict YAML parsing. Only the checked-in bootstrap manifest may have `models: []`; release candidates with enabled local-model capabilities must contain their exact governed entries. `scripts/check_model_manifest.py` uses the same bounded strict read, then the schema and runtime loader; it never performs a second pathname read. Add a Typer `models` sub-app with `list`, `verify`, and explicit owner-presence `install MODEL_ID` commands; registering it must not instantiate the installer/client or perform network I/O. Startup accepts only an `ActivatedModel` whose retained handles are `O_RDONLY`; hashing and adapter reads use explicit-offset `pread`, so prior or concurrent descriptor offsets cannot truncate or redirect a load. The adapter receives only the bounded pread reader, and the runtime’s exact signed loader receipt is authoritative. `receipt_verifier` verifies the canonical signature, non-overlapping domain, exact current key generation, expiry, model/revision, and ordered `(path,size,sha256)` inventory; per-file receipts repeat that exact tuple. The adapter keeps any partly loaded runtime private until verification returns; every load, finish, or verification exception invokes mandatory `abort_model`, and abort failure disables/restarts the model capability rather than exposing the candidate. The installer has one 900-second monotonic deadline shared across bounded DNS resolution, connect, headers, and every artifact body. That long operation holds only the target model's exclusive lock, so activation of another installed model remains available. Before either a fresh or recovered revision changes from `0700` to `0500`, the installer requires an exact owner-only zero-length `.recovery-pending-REVISION` entry through the retained model dirfd, fsyncs every newly created or reopened marker descriptor, fsyncs the model directory, and revalidates descriptor/name identity. Public activation holds the target model's lock shared for the complete proof/marker/mode/inventory/hash decision, while installation and recovery for that model hold it exclusively; the private retained-dirfd verifier prevents installer self-deadlock. Only the exclusive transaction may clear a marker, and it establishes local uncertainty before final marker identity validation and descriptor-relative unlink. Authorization is positive rather than absence-based, but the positive proof is prepared while the durable negative marker is still authoritative: proof creation validates and fsyncs the `0600` inode, fsyncs its parent, revalidates, transitions to `0400`, fsyncs and revalidates again, and closes the descriptor before marker clear begins. Any proof preparation/close failure removes the proof, retains the marker, preserves the primary exception, and denies activation across restart; retry re-verifies and converges. A failed marker clear restores and re-durabilizes the exact marker and removes the proof before unlock; if those cleanup steps cannot all be confirmed, the installer additionally attempts exact durable `0700`, and if rollback also fails, attempts marker restoration again. Initial `0500` plus marker is treated as rollback-owned before marker reopen, so marker fsync, parent fsync, swap, and disappearance cannot leave an authorized revision. Activation opens the exact stable `0400` proof `O_RDONLY` and revalidates descriptor/name identity after artifact verification. Fresh and reused results remain installer-owned until every directory and lock cleanup succeeds; a cleanup failure closes the unreturned activation exactly once without replacing the primary. Cleanup and descriptor-transfer/restoration/rollback failures add only content-minimal notes and every descriptor/unlock operation is attempted at most once. Missing/rejected/unverified/pending/uncertain/proofless models produce a disabled capability.
+`models/manifest.schema.json` is JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry`/file fields, the same closed ID/revision/file/hash/size/URL bounds, and bounded model/file counts. Schema validation is defense in depth beside the runtime loader's independent closed checks. The installer uses one 900-second monotonic deadline and holds only the target model's exclusive lock, so unrelated installed models remain available. Fresh and recovered revisions create or reopen an exact durable `0600`/prepared-`0400` recovery marker before sealing. After repeated artifact verification, that retained marker is prepared to exact `0400`, fsynced with its parent, identity-revalidated, closed, and atomically renamed no-replace to the positive-proof name. This marker-to-proof rename is the commit point; no fallible durability operation follows it, and the helper's caller-owned syscall-success witness makes a success-then-error outcome committed without fallible reclassification. Every precommit fault leaves the marker name authoritative regardless of best-effort `0700` rollback, while every postcommit constructor or cleanup fault leaves the exact proof and `0500` revision committed. Recovery re-durabilizes prepared markers, removes stale proof collisions under lock, re-verifies all artifacts, and retries the same transition. Activation opens the exact stable `0400` proof `O_RDONLY` and revalidates descriptor/name identity after artifact verification. Fresh and reused results remain installer-owned until every directory and lock cleanup succeeds; cleanup failures close unreturned activations once without replacing the primary. Missing, rejected, unverified, pending, proofless, or mismatched models produce a disabled capability.
 
 - [ ] **Step 4: Lock and run the green model gate**
 
 Run: `uv lock && uv run pytest tests/security/test_model_governance.py -q && uv run python scripts/check_model_manifest.py models/manifest.yaml && uv run tuntunctl models list`
 
-Expected: PASS with the full manifest/filesystem/network/race/fault/ownership-transfer/lock-cleanup/rollback/marker-durability/positive-proof/cross-process-commit matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, cleanup failure, and conflicting publication never expose an *activatable* revision or runtime bytes. An exclusively renamed but not yet `0500`-sealed final name is rejected by mode; every accepted existing marker, including legitimate `0500` plus marker state, is re-durably fsynced and identity-revalidated before recovery proceeds. A same-model child activation blocks behind the shared/exclusive per-model lock throughout proof preparation and marker clear. Fresh/recovery proof mode, fsync, parent-fsync, validation, and close faults leave the marker authoritative, deny a fresh interpreter, leak no descriptor, and converge on retry. Missing, special, writable, nonempty, multiply linked, or identity-swapped proofs deny. Independent fresh/reused stage/model/root-close, unlock, and lock-close faults close the constructed but unreturned activation exactly once, preserve the primary cleanup exception, and produce a zero real-FD delta. Marker-restoration create/fsync/parent-fsync/close and compound rollback faults preserve the primary error and close each descriptor at most once. Two installers for one model serialize and converge on one complete immutable revision, while a paused 900-second download for one model does not block activation of another installed model. Runtime loads repeatedly see the full exact bytes hashed through stable read-only descriptors regardless of prior offsets; list/verify/startup make zero network requests.
+Expected: PASS with the full manifest/filesystem/network/race/fault/ownership-transfer/lock-cleanup/rollback/marker-durability/atomic-positive-proof/cross-process-commit matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, cleanup failure, and conflicting publication never expose unverified runtime bytes. The stage directory remains `0700` through Darwin/Linux exclusive no-replace publication; every accepted `0600` or prepared `0400` marker is re-durably fsynced and identity-revalidated before recovery. Same-model activation blocks on the shared/exclusive lock through marker preparation and the atomic marker-to-proof commit, while different models remain available. Fresh/recovery prepared-marker fchmod, marker-fsync, parent-fsync, validation, close, rename, proof-collision, and compound rollback faults retain an on-disk marker, deny a fresh interpreter, close descriptors once, and converge. A real-rename-then-error diagnostic returns a successful owned activation from the syscall-success witness even with namespace-probe and rollback faults; postcommit constructor and cleanup failures never roll back the `0500`/proof state and close every unreturned artifact descriptor exactly once. Missing, special, writable, nonempty, multiply linked, or identity-swapped proofs deny. Two installers for one model serialize and converge on one immutable revision, and runtime loads repeatedly consume the exact bytes through stable read-only descriptors.
 
 - [ ] **Step 5: Commit exact Task 10 paths**
 
