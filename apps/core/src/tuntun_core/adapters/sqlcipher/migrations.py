@@ -17,12 +17,13 @@ from tuntun_core.config.secure_paths import (
     open_owned_directory,
 )
 
-from .connection import FileIdentity, open_sqlcipher
+from .connection import FileIdentity, SQLCipherCleanupError, open_sqlcipher
 from .engine import create_sqlcipher_engine
 
 _CREATE_FLAGS = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
 _OPEN_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOFOLLOW
 _CLEANUP_NOTE = "additional encrypted-backup cleanup failure"
+_QUARANTINE_NOTE = "initialization path guard remains quarantined"
 
 
 def _migration_config_path() -> Path:
@@ -281,6 +282,8 @@ def _encrypted_backup_from_open_source(
 ) -> None:
     destination_db: _GuardedConnection | None = None
     reservation: _ReservedDestination | None = None
+    cleanup_identities_bound = True
+    initialization_guard_retained = False
     error: BaseException | None = None
     try:
         reservation = _ReservedDestination.create(destination)
@@ -301,10 +304,24 @@ def _encrypted_backup_from_open_source(
         if checkpoint != (0, 0, 0):
             raise RuntimeError("encrypted backup checkpoint failed")
         reservation.bind(destination_db)
+        source_db.revalidate_storage_path()
     except BaseException as caught:
         error = caught
+        if isinstance(caught, SQLCipherCleanupError):
+            destination_db = cast(_GuardedConnection, caught.connection)
+            initialization_guard_retained = caught.guard is not None
+            assert reservation is not None
+            try:
+                reservation.bind(destination_db)
+            except BaseException:
+                cleanup_identities_bound = False
+                caught.add_note(_CLEANUP_NOTE)
 
     error, destination_released = _close_connection(destination_db, error)
+    if initialization_guard_retained:
+        destination_released = False
+        assert error is not None
+        error.add_note(_QUARANTINE_NOTE)
     if close_source:
         error, _ = _close_connection(source_db, error)
 
@@ -314,10 +331,12 @@ def _encrypted_backup_from_open_source(
                 reservation.fsync()
             except BaseException as caught:
                 error = caught
-        if error is not None and destination_released:
+        if error is not None and destination_released and cleanup_identities_bound:
             reservation.remove(error)
-        elif error is not None:
+        elif error is not None and not initialization_guard_retained and not destination_released:
             error.add_note("encrypted backup retained because destination close failed")
+        elif error is not None and not initialization_guard_retained:
+            error.add_note("encrypted backup retained because cleanup identities were unavailable")
         error = reservation.close(error)
 
     if error is not None:
@@ -393,6 +412,9 @@ def upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None:
     connection: Connection | None = None
     transaction: Transaction | None = None
     guard: _GuardedConnection | None = None
+    initialization_connection: _GuardedConnection | None = None
+    cleanup_identities_bound = True
+    initialization_guard_retained = False
     error: BaseException | None = None
     connection_released = True
     try:
@@ -444,6 +466,15 @@ def upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None:
             fresh.bind(guard)
     except BaseException as caught:
         error = caught
+        if isinstance(caught, SQLCipherCleanupError):
+            initialization_connection = cast(_GuardedConnection, caught.connection)
+            initialization_guard_retained = caught.guard is not None
+            if fresh is not None:
+                try:
+                    fresh.bind(initialization_connection)
+                except BaseException:
+                    cleanup_identities_bound = False
+                    caught.add_note(_CLEANUP_NOTE)
 
     if transaction is not None and transaction.is_active:
         try:
@@ -469,6 +500,14 @@ def upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None:
                 except BaseException:
                     pass
 
+    if initialization_connection is not None:
+        error, initialization_released = _close_connection(initialization_connection, error)
+        if initialization_guard_retained:
+            initialization_released = False
+            assert error is not None
+            error.add_note(_QUARANTINE_NOTE)
+        connection_released = connection_released and initialization_released
+
     if engine is not None:
         try:
             engine.dispose()
@@ -484,10 +523,12 @@ def upgrade_encrypted(path: Path, key: bytes, backup: Path | None) -> None:
                 fresh.fsync()
             except BaseException as caught:
                 error = caught
-        if error is not None and connection_released:
+        if error is not None and connection_released and cleanup_identities_bound:
             fresh.remove(error)
-        elif error is not None:
+        elif error is not None and not initialization_guard_retained and not connection_released:
             error.add_note("fresh database retained because migration connection close failed")
+        elif error is not None and not initialization_guard_retained:
+            error.add_note("fresh database retained because cleanup identities were unavailable")
         error = fresh.close(error)
 
     if error is not None:

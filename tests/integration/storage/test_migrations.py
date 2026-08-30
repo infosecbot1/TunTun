@@ -13,6 +13,7 @@ from alembic.config import Config
 from sqlalchemy import Column, Integer, MetaData, Table, create_engine, event, text
 from sqlcipher3 import dbapi2 as sqlcipher3  # type: ignore[import-untyped]
 from tuntun_core.adapters.sqlcipher import connection as connection_module
+from tuntun_core.adapters.sqlcipher import engine as engine_module
 from tuntun_core.adapters.sqlcipher import migrations as migration_module
 from tuntun_core.adapters.sqlcipher.connection import open_sqlcipher
 from tuntun_core.adapters.sqlcipher.engine import create_sqlcipher_engine
@@ -76,6 +77,146 @@ def _triggers(db: sqlcipher3.Connection) -> set[str]:
     return {
         str(row[0]) for row in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
     }
+
+
+def _inject_unreleased_initialization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    opener_owner: object,
+    target: Path,
+) -> list[bool]:
+    release_allowed = [False]
+    real_open = connection_module.open_sqlcipher
+    real_base_close = connection_module.QualifiedSQLCipherConnection._close_sqlcipher_base
+
+    def fail_target_close(connection: object) -> None:
+        guard = connection._path_guard  # type: ignore[attr-defined]
+        if guard is not None and guard.path == target and not release_allowed[0]:
+            raise RuntimeError("injected retained initialization close failure")
+        real_base_close(connection)  # type: ignore[arg-type]
+
+    def fail_target_open(path: Path, key: bytes) -> sqlcipher3.Connection:
+        if path != target:
+            return real_open(path, key)
+        real_checkpoint = connection_module._initialization_checkpoint
+
+        def fail_at_integrity(name: str) -> None:
+            real_checkpoint(name)
+            if name == "integrity":
+                raise RuntimeError("injected destination initialization failure")
+
+        connection_module._initialization_checkpoint = fail_at_integrity
+        try:
+            return real_open(path, key)
+        finally:
+            connection_module._initialization_checkpoint = real_checkpoint
+
+    monkeypatch.setattr(
+        connection_module.QualifiedSQLCipherConnection,
+        "_close_sqlcipher_base",
+        fail_target_close,
+    )
+    monkeypatch.setattr(opener_owner, "open_sqlcipher", fail_target_open)
+    return release_allowed
+
+
+def _inject_unreleased_prebind_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+) -> list[bool]:
+    release_allowed = [False]
+    prebind_connections: set[int] = set()
+    real_bind = connection_module.QualifiedSQLCipherConnection._bind_path_guard
+    real_base_close = connection_module.QualifiedSQLCipherConnection._close_sqlcipher_base
+
+    def fail_target_bind(
+        connection: object,
+        guard: connection_module.DatabasePathGuard,
+    ) -> None:
+        if guard.path == target:
+            prebind_connections.add(id(connection))
+            raise RuntimeError("injected pre-bind initialization failure")
+        real_bind(connection, guard)  # type: ignore[arg-type]
+
+    def fail_target_close(connection: object) -> None:
+        if id(connection) in prebind_connections and not release_allowed[0]:
+            raise RuntimeError("injected retained pre-bind close failure")
+        real_base_close(connection)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        connection_module.QualifiedSQLCipherConnection,
+        "_bind_path_guard",
+        fail_target_bind,
+    )
+    monkeypatch.setattr(
+        connection_module.QualifiedSQLCipherConnection,
+        "_close_sqlcipher_base",
+        fail_target_close,
+    )
+    return release_allowed
+
+
+def _release_quarantined_connection(
+    error: connection_module.SQLCipherCleanupError,
+    target: Path,
+    release_allowed: list[bool],
+) -> None:
+    failed_connection = error.connection
+    main, sidecars = failed_connection.storage_identities()  # type: ignore[attr-defined]
+    expected = {
+        target: (main.device, main.inode),
+        **{
+            Path(f"{target}{suffix}"): (identity.device, identity.inode)
+            for suffix, identity in sidecars
+        },
+    }
+    assert set(expected) == {target, Path(f"{target}-wal"), Path(f"{target}-shm")}
+    state = connection_module._registry_snapshot(target)
+    assert state is not None
+    assert (state.active, state.initializing, state.failed_closes) == (0, 1, 1)
+    for candidate, identity in expected.items():
+        value = candidate.stat()
+        assert (value.st_dev, value.st_ino) == identity
+
+    release_allowed[0] = True
+    failed_connection.close()
+    assert connection_module._registry_snapshot(target) is None
+    for candidate, identity in expected.items():
+        if candidate.exists():
+            value = candidate.stat()
+            assert (value.st_dev, value.st_ino) == identity
+            candidate.unlink()
+
+
+def _release_prebind_quarantine(
+    error: connection_module.SQLCipherCleanupError,
+    target: Path,
+    release_allowed: list[bool],
+) -> None:
+    guard = error.guard
+    assert guard is not None
+    assert error.connection._path_guard is None  # type: ignore[attr-defined]
+    assert guard.sidecar_identities == ()
+    expected = (guard.main_identity.device, guard.main_identity.inode)
+    value = target.stat()
+    assert (value.st_dev, value.st_ino) == expected
+    state = connection_module._registry_snapshot(target)
+    assert state is not None
+    assert (state.active, state.initializing, state.failed_closes) == (0, 1, 0)
+    notes = getattr(error, "__notes__", ())
+    assert "initialization path guard remains quarantined" in notes
+
+    release_allowed[0] = True
+    error.connection.close()
+    state = connection_module._registry_snapshot(target)
+    assert state is not None
+    assert (state.active, state.initializing, state.failed_closes) == (0, 1, 0)
+    assert (target.stat().st_dev, target.stat().st_ino) == expected
+    with connection_module._hold_open_lock():
+        guard.rollback_connect_failure_locked()
+    assert connection_module._registry_snapshot(target) is None
+    value = target.stat()
+    assert (value.st_dev, value.st_ino) == expected
+    target.unlink()
 
 
 def _valid_price(identifier: str) -> dict[str, object]:
@@ -621,6 +762,49 @@ def test_failed_backup_removes_only_its_partial_destination(
     assert connection_module._registry_snapshot(destination) is None
 
 
+def test_backup_initialization_close_failure_quarantines_its_live_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _private_path(tmp_path, "cleanup-error-source.db")
+    destination = _private_path(tmp_path, "cleanup-error-backup.db")
+    db = open_sqlcipher(source, KEY)
+    db.execute("CREATE TABLE source_marker(value INTEGER NOT NULL)")
+    db.close()
+    release_allowed = _inject_unreleased_initialization_failure(
+        monkeypatch,
+        migration_module,
+        destination,
+    )
+
+    with pytest.raises(connection_module.SQLCipherCleanupError) as captured:
+        encrypted_backup(source, destination, KEY)
+
+    assert isinstance(captured.value.initialization_error, RuntimeError)
+    assert "destination initialization failure" in str(captured.value.initialization_error)
+    _release_quarantined_connection(captured.value, destination, release_allowed)
+    assert connection_module._registry_snapshot(source) is None
+
+
+def test_backup_prebind_cleanup_error_quarantines_its_separate_path_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _private_path(tmp_path, "prebind-source.db")
+    destination = _private_path(tmp_path, "prebind-backup.db")
+    db = open_sqlcipher(source, KEY)
+    db.execute("CREATE TABLE source_marker(value INTEGER NOT NULL)")
+    db.close()
+    release_allowed = _inject_unreleased_prebind_failure(monkeypatch, destination)
+
+    with pytest.raises(connection_module.SQLCipherCleanupError) as captured:
+        encrypted_backup(source, destination, KEY)
+
+    assert "pre-bind initialization failure" in str(captured.value.initialization_error)
+    _release_prebind_quarantine(captured.value, destination, release_allowed)
+    assert connection_module._registry_snapshot(source) is None
+
+
 def test_failed_backup_preserves_primary_error_when_destination_close_reports_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -796,6 +980,38 @@ def test_backup_cleanup_never_unlinks_a_replaced_sidecar(tmp_path: Path) -> None
     assert replacement.read_bytes() == b"replacement-must-survive"
     assert migration_module._CLEANUP_NOTE in getattr(primary, "__notes__", ())
     replacement.unlink()
+
+
+def test_standalone_backup_revalidates_its_open_source_after_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _private_path(tmp_path, "source-replaced-during-backup.db")
+    parked = _private_path(tmp_path, "parked-source.db")
+    destination = _private_path(tmp_path, "source-replaced-backup.db")
+    replacement_bytes = b"replacement-must-survive"
+    db = open_sqlcipher(source, KEY)
+    db.execute("CREATE TABLE source_marker(value INTEGER NOT NULL)")
+    db.close()
+    real_copy = migration_module._copy_encrypted_pages
+
+    def copy_then_replace(source_db: object, destination_db: object) -> None:
+        real_copy(source_db, destination_db)  # type: ignore[arg-type]
+        source.rename(parked)
+        source.write_bytes(replacement_bytes)
+        source.chmod(0o600)
+
+    monkeypatch.setattr(migration_module, "_copy_encrypted_pages", copy_then_replace)
+    with pytest.raises(PermissionError, match="unsafe database path"):
+        encrypted_backup(source, destination, KEY)
+
+    assert source.read_bytes() == replacement_bytes
+    assert parked.is_file()
+    assert not destination.exists()
+    assert not Path(f"{destination}-wal").exists()
+    assert not Path(f"{destination}-shm").exists()
+    assert connection_module._registry_snapshot(source) is None
+    assert connection_module._registry_snapshot(destination) is None
 
 
 def test_upgrade_refuses_existing_database_without_preupgrade_backup(tmp_path: Path) -> None:
@@ -985,6 +1201,39 @@ def test_failed_fresh_migration_removes_its_exact_main_and_sidecars(
     assert connection_module._registry_snapshot(path) is None
 
 
+def test_fresh_migration_initialization_close_failure_quarantines_its_live_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _private_path(tmp_path, "fresh-cleanup-error.db")
+    release_allowed = _inject_unreleased_initialization_failure(
+        monkeypatch,
+        engine_module,
+        path,
+    )
+
+    with pytest.raises(connection_module.SQLCipherCleanupError) as captured:
+        upgrade_encrypted(path, KEY, None)
+
+    assert isinstance(captured.value.initialization_error, RuntimeError)
+    assert "destination initialization failure" in str(captured.value.initialization_error)
+    _release_quarantined_connection(captured.value, path, release_allowed)
+
+
+def test_fresh_migration_prebind_cleanup_error_quarantines_its_separate_path_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _private_path(tmp_path, "fresh-prebind-error.db")
+    release_allowed = _inject_unreleased_prebind_failure(monkeypatch, path)
+
+    with pytest.raises(connection_module.SQLCipherCleanupError) as captured:
+        upgrade_encrypted(path, KEY, None)
+
+    assert "pre-bind initialization failure" in str(captured.value.initialization_error)
+    _release_prebind_quarantine(captured.value, path, release_allowed)
+
+
 def test_failed_fresh_migration_cleanup_preserves_a_replaced_sidecar(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1139,7 +1388,10 @@ def test_provider_response_cannot_drift_from_its_provider_call(tmp_path: Path) -
         reservation,
         identifier="00000000-0000-0000-0000-000000000621",
         authorization_id="00000000-0000-0000-0000-000000000622",
-    )
+    ) | {
+        "response_key": "provider-response-v1",
+        "response_hmac": "A" * 43 + "=",
+    }
     db.execute(RESERVATION_SQL, reservation)
     db.execute(PROVIDER_CALL_SQL, call)
     household_id = "00000000-0000-0000-0000-000000000101"
@@ -1186,6 +1438,8 @@ def test_provider_response_cannot_drift_from_its_provider_call(tmp_path: Path) -
         {"authorization_id": "00000000-0000-0000-0000-000000000697"},
         {"provider": "qwen"},
         {"model": "qwen3.7-plus"},
+        {"response_key": "different-response-key"},
+        {"response_hmac": "C" * 43 + "="},
     )
     for mutation in mutations:
         with pytest.raises(sqlcipher3.IntegrityError):
@@ -1206,7 +1460,13 @@ def test_cost_ledger_cannot_drift_from_its_settled_reservation(tmp_path: Path) -
     ledger = _valid_ledger(
         reservation,
         identifier="00000000-0000-0000-0000-000000000731",
-    )
+    ) | {
+        "receipt": "{}",
+        "receipt_key": "provider-usage-v1",
+        "receipt_hmac": "A" * 43 + "=",
+        "basis": reservation["basis"],
+        "conservative": 0,
+    }
     mutations = (
         {"month_key": "2026-09"},
         {"reserved": 99},
@@ -1216,6 +1476,7 @@ def test_cost_ledger_cannot_drift_from_its_settled_reservation(tmp_path: Path) -
         {"fx_version": "different-fx-version"},
         {"fx_sha": "d" * 64},
         {"settled_at": "2026-08-27T01:05:03.000004Z"},
+        {"basis": "request_bound_exact"},
     )
     for mutation in mutations:
         candidate = ledger | mutation
@@ -1227,6 +1488,19 @@ def test_cost_ledger_cannot_drift_from_its_settled_reservation(tmp_path: Path) -
         with pytest.raises(sqlcipher3.IntegrityError):
             db.execute(LEDGER_SQL, candidate)
     db.execute(LEDGER_SQL, ledger)
+
+    fallback_reservation = _settled_reservation(
+        "00000000-0000-0000-0000-000000000533",
+        "00000000-0000-0000-0000-000000000534",
+    )
+    db.execute(RESERVATION_SQL, fallback_reservation)
+    db.execute(
+        LEDGER_SQL,
+        _valid_ledger(
+            fallback_reservation,
+            identifier="00000000-0000-0000-0000-000000000732",
+        ),
+    )
     db.close()
 
 
