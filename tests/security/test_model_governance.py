@@ -285,6 +285,95 @@ def test_fresh_install_wrapper_failure_closes_download_descriptor_once(
     assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
 
 
+def test_fresh_install_raw_cleanup_failure_preserves_wrapper_error(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = RuntimeError("scripted wrapper construction failure")
+    retained_descriptor: list[int] = []
+    close_attempts: list[int] = []
+    real_close = os.close
+
+    def fail_from_manifest(
+        _cls: type[VerifiedModelFile], _item: object, descriptor: int
+    ) -> VerifiedModelFile:
+        retained_descriptor.append(descriptor)
+        raise primary
+
+    def fail_retained_close(descriptor: int) -> None:
+        if retained_descriptor and descriptor == retained_descriptor[0]:
+            close_attempts.append(descriptor)
+            real_close(descriptor)
+            raise OSError("scripted retained descriptor close failure")
+        real_close(descriptor)
+
+    monkeypatch.setattr(
+        VerifiedModelFile,
+        "from_manifest",
+        classmethod(fail_from_manifest),
+    )
+    monkeypatch.setattr(os, "close", fail_retained_close)
+
+    with pytest.raises(RuntimeError) as caught:
+        governed_model_case.install()  # type: ignore[attr-defined]
+
+    assert caught.value is primary
+    assert caught.value.__notes__ == ["additional descriptor cleanup failure"]
+    assert close_attempts == retained_descriptor
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_fresh_install_wrapper_cleanup_failure_preserves_transfer_error(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = RuntimeError("scripted downloaded wrapper transfer failure")
+    retained_handle: list[VerifiedModelFile] = []
+    close_attempts: list[int] = []
+    real_from_manifest = VerifiedModelFile.from_manifest
+    real_close = VerifiedModelFile.close
+
+    def capture_from_manifest(
+        _cls: type[VerifiedModelFile], item: object, descriptor: int
+    ) -> VerifiedModelFile:
+        handle = real_from_manifest(item, descriptor)  # type: ignore[arg-type]
+        retained_handle.append(handle)
+        return handle
+
+    def fail_transfer(point: str) -> None:
+        if point == "before_retain_downloaded_file":
+            raise primary
+
+    def fail_handle_close(handle: VerifiedModelFile) -> None:
+        if retained_handle and handle is retained_handle[0]:
+            close_attempts.append(id(handle))
+            real_close(handle)
+            raise OSError("scripted downloaded wrapper close failure")
+        real_close(handle)
+
+    monkeypatch.setattr(
+        VerifiedModelFile,
+        "from_manifest",
+        classmethod(capture_from_manifest),
+    )
+    monkeypatch.setattr(VerifiedModelFile, "close", fail_handle_close)
+
+    caught: RuntimeError | None = None
+    try:
+        activated = governed_model_case._installer(  # type: ignore[attr-defined]
+            fault_hook=fail_transfer
+        ).install(governed_model_case.model_id)  # type: ignore[attr-defined]
+    except RuntimeError as error:
+        caught = error
+    else:
+        activated.close()
+
+    assert caught is primary
+    assert caught.__notes__ == ["additional descriptor cleanup failure"]
+    assert close_attempts == [id(retained_handle[0])]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
 def test_download_write_descriptor_close_failure_is_not_retried(
     governed_model_case: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -747,6 +836,101 @@ def test_crash_after_publish_before_seal_is_unusable_then_recovered(
     assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
 
 
+def test_recovery_raw_cleanup_failure_preserves_wrapper_error(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_seal"
+    )
+    primary = RuntimeError("scripted recovery wrapper construction failure")
+    retained_descriptor: list[int] = []
+    close_attempts: list[int] = []
+    real_close = os.close
+
+    def fail_from_manifest(
+        _cls: type[VerifiedModelFile], _item: object, descriptor: int
+    ) -> VerifiedModelFile:
+        retained_descriptor.append(descriptor)
+        raise primary
+
+    def fail_retained_close(descriptor: int) -> None:
+        if retained_descriptor and descriptor == retained_descriptor[0]:
+            close_attempts.append(descriptor)
+            real_close(descriptor)
+            raise OSError("scripted recovery descriptor close failure")
+        real_close(descriptor)
+
+    monkeypatch.setattr(
+        VerifiedModelFile,
+        "from_manifest",
+        classmethod(fail_from_manifest),
+    )
+    monkeypatch.setattr(os, "close", fail_retained_close)
+
+    with pytest.raises(RuntimeError) as caught:
+        governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
+
+    assert caught.value is primary
+    assert caught.value.__notes__ == ["additional descriptor cleanup failure"]
+    assert close_attempts == retained_descriptor
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+def test_recovery_wrapper_cleanup_failure_preserves_transfer_error(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_seal"
+    )
+    primary = RuntimeError("scripted recovery wrapper transfer failure")
+    retained_handle: list[VerifiedModelFile] = []
+    close_attempts: list[int] = []
+    real_from_manifest = VerifiedModelFile.from_manifest
+    real_close = VerifiedModelFile.close
+
+    def capture_from_manifest(
+        _cls: type[VerifiedModelFile], item: object, descriptor: int
+    ) -> VerifiedModelFile:
+        handle = real_from_manifest(item, descriptor)  # type: ignore[arg-type]
+        retained_handle.append(handle)
+        return handle
+
+    def fail_transfer(point: str) -> None:
+        if point == "before_retain_recovery_file":
+            raise primary
+
+    def fail_handle_close(handle: VerifiedModelFile) -> None:
+        if retained_handle and handle is retained_handle[0]:
+            close_attempts.append(id(handle))
+            real_close(handle)
+            raise OSError("scripted recovery wrapper close failure")
+        real_close(handle)
+
+    monkeypatch.setattr(
+        VerifiedModelFile,
+        "from_manifest",
+        classmethod(capture_from_manifest),
+    )
+    monkeypatch.setattr(VerifiedModelFile, "close", fail_handle_close)
+
+    caught: RuntimeError | None = None
+    try:
+        activated = governed_model_case._installer(  # type: ignore[attr-defined]
+            fault_hook=fail_transfer
+        ).install(governed_model_case.model_id)  # type: ignore[attr-defined]
+    except RuntimeError as error:
+        caught = error
+    else:
+        activated.close()
+
+    assert caught is primary
+    assert caught.__notes__ == ["additional descriptor cleanup failure"]
+    assert close_attempts == [id(retained_handle[0])]
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
 def test_recovery_revision_close_failure_closes_every_artifact_once(
     governed_model_case: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -837,6 +1021,225 @@ def test_recovery_fault_between_seal_and_verification_restores_unsealed_state(
     assert governed_model_case.final_revision_mode == 0o700  # type: ignore[attr-defined]
     assert not governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
     assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("rollback_fault", ("chmod", "fsync", "close"))
+def test_post_seal_failure_remains_quarantined_when_rollback_fails(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+    rollback_fault: str,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_seal"
+    )
+    revision = (
+        governed_model_case.model_root  # type: ignore[attr-defined]
+        / governed_model_case.model_id  # type: ignore[attr-defined]
+        / ("a" * 40)
+    )
+    metadata = revision.stat(follow_symlinks=False)
+    revision_identity = (metadata.st_dev, metadata.st_ino)
+    primary = RuntimeError("scripted post-seal recovery failure")
+    rollback_attempts: list[str] = []
+    real_chmod = OwnedDirectory.chmod
+    real_fsync = OwnedDirectory.fsync
+    real_close = OwnedDirectory.close
+
+    def is_revision(directory: OwnedDirectory) -> bool:
+        return (directory.identity.device, directory.identity.inode) == revision_identity
+
+    def fail_rollback_chmod(directory: OwnedDirectory, mode: int) -> None:
+        if (
+            rollback_fault == "chmod"
+            and is_revision(directory)
+            and mode == 0o700
+            and not rollback_attempts
+        ):
+            rollback_attempts.append("chmod")
+            raise OSError("scripted rollback chmod failure")
+        real_chmod(directory, mode)
+
+    def fail_rollback_fsync(directory: OwnedDirectory) -> None:
+        if (
+            rollback_fault == "fsync"
+            and is_revision(directory)
+            and stat.S_IMODE(os.fstat(directory.fd).st_mode) == 0o700
+            and not rollback_attempts
+        ):
+            rollback_attempts.append("fsync")
+            raise OSError("scripted rollback fsync failure")
+        real_fsync(directory)
+
+    def fail_rollback_close(directory: OwnedDirectory) -> None:
+        if rollback_fault == "close" and is_revision(directory) and not rollback_attempts:
+            rollback_attempts.append("close")
+            real_close(directory)
+            raise OSError("scripted rollback close failure")
+        real_close(directory)
+
+    def fail_after_seal(point: str) -> None:
+        if point == "after_recovery_seal_before_verify":
+            raise primary
+
+    monkeypatch.setattr(OwnedDirectory, "chmod", fail_rollback_chmod)
+    monkeypatch.setattr(OwnedDirectory, "fsync", fail_rollback_fsync)
+    monkeypatch.setattr(OwnedDirectory, "close", fail_rollback_close)
+
+    caught: BaseException | None = None
+    try:
+        governed_model_case._installer(  # type: ignore[attr-defined]
+            fault_hook=fail_after_seal
+        ).install(governed_model_case.model_id)  # type: ignore[attr-defined]
+    except BaseException as error:
+        caught = error
+
+    assert caught is primary
+    assert rollback_attempts == [rollback_fault]
+    expected_note = (
+        "additional descriptor cleanup failure"
+        if rollback_fault == "close"
+        else "additional recovery rollback failure"
+    )
+    assert caught.__notes__ == [expected_note]
+    assert governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_mode == (  # type: ignore[attr-defined]
+        0o500 if rollback_fault == "chmod" else 0o700
+    )
+    assert governed_model_case.open_descriptor_count == 0  # type: ignore[attr-defined]
+
+    activation_probe = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "from tuntun_core.services.models.registry import ModelRegistry\n"
+        "registry = ModelRegistry.load(Path(sys.argv[1]), model_root=Path(sys.argv[2]))\n"
+        "try:\n"
+        "    activated = registry.activate(sys.argv[3])\n"
+        "except RuntimeError:\n"
+        "    raise SystemExit(0)\n"
+        "activated.close()\n"
+        "raise SystemExit(1)\n"
+    )
+    restarted = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            activation_probe,
+            str(governed_model_case.manifest),  # type: ignore[attr-defined]
+            str(governed_model_case.model_root),  # type: ignore[attr-defined]
+            governed_model_case.model_id,  # type: ignore[attr-defined]
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert restarted.returncode == 0, restarted.stderr
+
+    governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
+    assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+
+
+def test_fresh_post_seal_failure_is_durably_quarantined_until_recovery(
+    governed_model_case: object,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_parent_fsync"
+    )
+
+    assert governed_model_case.final_revision_mode == 0o500  # type: ignore[attr-defined]
+    assert governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    fresh_registry = ModelRegistry.load(
+        governed_model_case.manifest,  # type: ignore[attr-defined]
+        model_root=governed_model_case.model_root,  # type: ignore[attr-defined]
+    )
+    with pytest.raises(RuntimeError, match="model is not installed and verified"):
+        fresh_registry.activate(governed_model_case.model_id)  # type: ignore[attr-defined]
+
+    governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
+    assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
+    assert governed_model_case.final_revision_is_complete_and_verified()  # type: ignore[attr-defined]
+
+
+def test_successful_recovery_persists_marker_before_seal_and_removal_after_verify(
+    governed_model_case: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    governed_model_case.crash_install_at(  # type: ignore[attr-defined]
+        "after_publish_before_seal"
+    )
+    model_path = (
+        governed_model_case.model_root  # type: ignore[attr-defined]
+        / governed_model_case.model_id  # type: ignore[attr-defined]
+    )
+    revision_path = model_path / ("a" * 40)
+    marker_path = governed_model_case.recovery_marker_path  # type: ignore[attr-defined]
+    model_metadata = model_path.stat(follow_symlinks=False)
+    revision_metadata = revision_path.stat(follow_symlinks=False)
+    model_identity = (model_metadata.st_dev, model_metadata.st_ino)
+    revision_identity = (revision_metadata.st_dev, revision_metadata.st_ino)
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+    real_chmod = OwnedDirectory.chmod
+    real_hash = installer_module.hash_exact_fd
+
+    def track_fsync(descriptor: int) -> None:
+        identity = os.fstat(descriptor)
+        descriptor_identity = (identity.st_dev, identity.st_ino)
+        if marker_path.exists():
+            marker = marker_path.stat(follow_symlinks=False)
+            if descriptor_identity == (marker.st_dev, marker.st_ino):
+                events.append("marker_fsync")
+            elif descriptor_identity == model_identity:
+                events.append("model_fsync")
+            elif descriptor_identity == revision_identity:
+                events.append("revision_fsync")
+        elif descriptor_identity == model_identity:
+            events.append("model_fsync")
+        elif descriptor_identity == revision_identity:
+            events.append("revision_fsync")
+        real_fsync(descriptor)
+
+    def track_unlink(path: str, *, dir_fd: int | None = None) -> None:
+        if path == marker_path.name:
+            events.append("marker_unlink")
+        real_unlink(path, dir_fd=dir_fd)
+
+    def track_chmod(directory: OwnedDirectory, mode: int) -> None:
+        if (
+            directory.identity.device,
+            directory.identity.inode,
+        ) == revision_identity and mode == 0o500:
+            events.append("seal")
+        real_chmod(directory, mode)
+
+    def track_hash(descriptor: int, size: int, sha256: str) -> str:
+        mode = stat.S_IMODE(revision_path.stat(follow_symlinks=False).st_mode)
+        events.append("post_seal_hash" if mode == 0o500 else "pre_seal_hash")
+        return real_hash(descriptor, size, sha256)
+
+    monkeypatch.setattr(os, "fsync", track_fsync)
+    monkeypatch.setattr(os, "unlink", track_unlink)
+    monkeypatch.setattr(OwnedDirectory, "chmod", track_chmod)
+    monkeypatch.setattr(installer_module, "hash_exact_fd", track_hash)
+
+    governed_model_case.restart_and_reconcile()  # type: ignore[attr-defined]
+
+    marker_fsync = events.index("marker_fsync")
+    assert events[marker_fsync:] == [
+        "marker_fsync",
+        "model_fsync",
+        "seal",
+        "revision_fsync",
+        "post_seal_hash",
+        "revision_fsync",
+        "model_fsync",
+        "marker_unlink",
+        "model_fsync",
+    ]
+    assert not governed_model_case.recovery_marker_exists  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(

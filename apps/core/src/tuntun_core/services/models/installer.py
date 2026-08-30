@@ -14,14 +14,18 @@ from urllib.parse import urlsplit
 from .fs import (
     OwnedDirectory,
     atomic_publish_dir_noreplace,
+    close_preserving_primary,
+    entry_exists_at,
     hash_exact_fd,
     open_regular_at,
+    recovery_pending_name,
 )
 from .network import PinnedHttpsTransport
 from .registry import ActivatedModel, ModelEntry, ModelFile, ModelRegistry, VerifiedModelFile
 
 WriteOnce = Callable[[int, bytes | memoryview], int]
 FaultHook = Callable[[str], None]
+_RECOVERY_ROLLBACK_NOTE = "additional recovery rollback failure"
 
 
 def _write_once(descriptor: int, data: bytes | memoryview) -> int:
@@ -139,17 +143,15 @@ class ModelInstaller:
             write_fd = -1
             os.close(descriptor_to_close)
             return read_fd
-        except BaseException:
+        except BaseException as error:
             if read_fd is not None:
                 descriptor_to_close = read_fd
                 read_fd = None
-                with contextlib.suppress(OSError):
-                    os.close(descriptor_to_close)
+                close_preserving_primary(descriptor_to_close, os.close, error)
             if write_fd >= 0:
                 descriptor_to_close = write_fd
                 write_fd = -1
-                with contextlib.suppress(OSError):
-                    os.close(descriptor_to_close)
+                close_preserving_primary(descriptor_to_close, os.close, error)
             raise
 
     @staticmethod
@@ -161,25 +163,86 @@ class ModelInstaller:
         except OSError as error:
             raise PermissionError("unsafe model filesystem revision") from error
 
+    @staticmethod
+    def _open_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        *,
+        create: bool,
+    ) -> int:
+        name = recovery_pending_name(revision)
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL if create else os.O_RDONLY
+        descriptor = open_regular_at(
+            model,
+            name,
+            flags,
+            mode=0o600,
+            expected_mode=0o600,
+        )
+        try:
+            if os.fstat(descriptor).st_size != 0:
+                raise PermissionError("unsafe model recovery marker")
+            if create:
+                os.fsync(descriptor)
+                model.fsync()
+            return descriptor
+        except BaseException as error:
+            close_preserving_primary(descriptor, os.close, error)
+            raise
+
+    @staticmethod
+    def _clear_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        descriptor: int,
+    ) -> None:
+        name = recovery_pending_name(revision)
+        identity = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or identity.st_uid != os.geteuid()
+            or stat.S_IMODE(identity.st_mode) != 0o600
+            or identity.st_nlink != 1
+            or identity.st_size != 0
+            or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise PermissionError("unsafe model recovery marker")
+        os.unlink(name, dir_fd=model.fd)
+        model.fsync()
+
     def _reuse_or_recover_revision(
         self,
         model: OwnedDirectory,
         entry: ModelEntry,
     ) -> ActivatedModel | None:
+        pending_name = recovery_pending_name(entry.revision)
+        pending_exists = entry_exists_at(model, pending_name)
         revision = self._open_existing_revision(model, entry.revision)
         if revision is None:
+            if pending_exists:
+                raise PermissionError("unsafe model recovery marker")
             return None
         handles: list[VerifiedModelFile] = []
         activated: ActivatedModel | None = None
-        sealed_by_recovery = False
-        post_seal_verified = False
+        marker_fd: int | None = None
+        sealed_for_recovery = False
+        post_seal_phase = False
+        transaction_complete = False
         try:
             mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
-            if mode == 0o500:
+            if mode == 0o500 and not pending_exists:
                 activated = self.registry.activate(entry.model_id)
             else:
-                if mode != 0o700:
+                if mode not in {0o500, 0o700}:
                     raise PermissionError("unsafe model filesystem revision")
+
+                if pending_exists:
+                    marker_fd = self._open_recovery_marker(
+                        model,
+                        entry.revision,
+                        create=False,
+                    )
 
                 expected_names = tuple(sorted(item.path for item in entry.files))
                 if tuple(sorted(os.listdir(revision.fd))) != expected_names:
@@ -195,44 +258,58 @@ class ModelInstaller:
                     try:
                         hash_exact_fd(descriptor, item.size, item.sha256)
                         handle = VerifiedModelFile.from_manifest(item, descriptor)
-                    except BaseException:
-                        with contextlib.suppress(OSError):
-                            os.close(descriptor)
+                    except BaseException as error:
+                        close_preserving_primary(descriptor, os.close, error)
                         raise
                     try:
+                        self._fault_hook("before_retain_recovery_file")
                         handles.append(handle)
-                    except BaseException:
-                        handle.close()
+                    except BaseException as error:
+                        close_preserving_primary(handle, VerifiedModelFile.close, error)
                         raise
 
-                sealed_by_recovery = True
-                revision.chmod(0o500)
-                revision.fsync()
+                if marker_fd is None:
+                    marker_fd = self._open_recovery_marker(
+                        model,
+                        entry.revision,
+                        create=True,
+                    )
+                if mode == 0o700:
+                    revision.chmod(0o500)
+                    sealed_for_recovery = True
+                    revision.fsync()
+                else:
+                    sealed_for_recovery = True
+                post_seal_phase = True
                 self._fault_hook("after_recovery_seal_before_verify")
                 if tuple(sorted(os.listdir(revision.fd))) != expected_names:
                     raise PermissionError("unsafe unsealed model revision")
                 for item, handle in zip(entry.files, handles, strict=True):
                     hash_exact_fd(handle.fd, item.size, item.sha256)
-                post_seal_verified = True
+                revision.fsync()
                 model.fsync()
+                self._clear_recovery_marker(model, entry.revision, marker_fd)
+                transaction_complete = True
+                descriptor_to_close = marker_fd
+                marker_fd = None
+                os.close(descriptor_to_close)
                 activated = ActivatedModel.from_manifest(entry, tuple(handles))
                 handles.clear()
         except BaseException as error:
-            rollback_error: BaseException | None = None
-            if sealed_by_recovery and not post_seal_verified:
+            if sealed_for_recovery and not transaction_complete:
                 try:
                     revision.chmod(0o700)
                     revision.fsync()
-                except BaseException as caught:
-                    rollback_error = caught
+                except BaseException:
+                    error.add_note(_RECOVERY_ROLLBACK_NOTE)
             for handle in handles:
-                with contextlib.suppress(OSError):
-                    handle.close()
-            with contextlib.suppress(OSError):
-                revision.close()
-            if rollback_error is not None:
-                raise PermissionError("unsafe unsealed model revision") from rollback_error
-            if isinstance(error, OSError):
+                close_preserving_primary(handle, VerifiedModelFile.close, error)
+            if marker_fd is not None:
+                descriptor_to_close = marker_fd
+                marker_fd = None
+                close_preserving_primary(descriptor_to_close, os.close, error)
+            close_preserving_primary(revision, OwnedDirectory.close, error)
+            if isinstance(error, OSError) and not post_seal_phase:
                 raise PermissionError("unsafe unsealed model revision") from error
             raise
         if activated is None:
@@ -240,8 +317,8 @@ class ModelInstaller:
             raise RuntimeError("model revision recovery did not activate")
         try:
             revision.close()
-        except BaseException:
-            activated.close()
+        except BaseException as error:
+            close_preserving_primary(activated, ActivatedModel.close, error)
             raise
         return activated
 
@@ -263,19 +340,21 @@ class ModelInstaller:
                     stage_identity = stage.identity
                     published = False
                     handles: list[VerifiedModelFile] = []
+                    marker_fd: int | None = None
                     try:
                         deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
                         for item in entry.files:
                             descriptor = self._download(stage, item, deadline)
                             try:
                                 handle = VerifiedModelFile.from_manifest(item, descriptor)
-                            except BaseException:
-                                os.close(descriptor)
+                            except BaseException as error:
+                                close_preserving_primary(descriptor, os.close, error)
                                 raise
                             try:
+                                self._fault_hook("before_retain_downloaded_file")
                                 handles.append(handle)
-                            except BaseException:
-                                handle.close()
+                            except BaseException as error:
+                                close_preserving_primary(handle, VerifiedModelFile.close, error)
                                 raise
                             self._fault_hook("after_each_file")
                         for item, handle in zip(entry.files, handles, strict=True):
@@ -287,12 +366,34 @@ class ModelInstaller:
                         atomic_publish_dir_noreplace(model, stage_name, entry.revision)
                         published = True
                         self._fault_hook("after_publish_before_seal")
+                        marker_fd = self._open_recovery_marker(
+                            model,
+                            entry.revision,
+                            create=True,
+                        )
                         stage.chmod(0o500)
                         stage.fsync()
                         self._fault_hook("after_publish_before_parent_fsync")
                         model.fsync()
+                        expected_names = tuple(sorted(item.path for item in entry.files))
+                        if tuple(sorted(os.listdir(stage.fd))) != expected_names:
+                            raise PermissionError("unsafe model filesystem revision")
+                        for item, handle in zip(entry.files, handles, strict=True):
+                            hash_exact_fd(handle.fd, item.size, item.sha256)
+                        self._clear_recovery_marker(model, entry.revision, marker_fd)
+                        descriptor_to_close = marker_fd
+                        marker_fd = None
+                        os.close(descriptor_to_close)
                         return ActivatedModel.from_manifest(entry, tuple(handles))
-                    except FileExistsError:
+                    except FileExistsError as error:
+                        if published:
+                            for handle in handles:
+                                close_preserving_primary(handle, VerifiedModelFile.close, error)
+                            if marker_fd is not None:
+                                descriptor_to_close = marker_fd
+                                marker_fd = None
+                                close_preserving_primary(descriptor_to_close, os.close, error)
+                            raise
                         for handle in handles:
                             with contextlib.suppress(OSError):
                                 handle.close()
@@ -303,10 +404,13 @@ class ModelInstaller:
                         if existing is None:
                             raise RuntimeError("model install publication disappeared") from None
                         return existing
-                    except BaseException:
+                    except BaseException as error:
                         for handle in handles:
-                            with contextlib.suppress(OSError):
-                                handle.close()
+                            close_preserving_primary(handle, VerifiedModelFile.close, error)
+                        if marker_fd is not None:
+                            descriptor_to_close = marker_fd
+                            marker_fd = None
+                            close_preserving_primary(descriptor_to_close, os.close, error)
                         if not published:
                             try:
                                 model.remove_private_stage(stage_name, stage_identity)

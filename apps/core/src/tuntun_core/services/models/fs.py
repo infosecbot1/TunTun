@@ -9,7 +9,7 @@ import os
 import stat
 import sys
 import time
-from collections.abc import Hashable, Iterator
+from collections.abc import Callable, Hashable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,38 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_DESCRIPTOR_CLEANUP_NOTE = "additional descriptor cleanup failure"
+
+
+def close_preserving_primary[T](
+    resource: T,
+    closer: Callable[[T], None],
+    primary_error: BaseException,
+) -> None:
+    """Attempt one ownership release without replacing an active failure."""
+    try:
+        closer(resource)
+    except BaseException:
+        primary_error.add_note(_DESCRIPTOR_CLEANUP_NOTE)
+
+
+def recovery_pending_name(revision: str) -> str:
+    name = f".recovery-pending-{revision}"
+    if not _safe_component(name):
+        raise PermissionError("unsafe model filesystem path")
+    return name
+
+
+def entry_exists_at(directory: OwnedDirectory, name: str) -> bool:
+    if not _safe_component(name):
+        raise PermissionError("unsafe model filesystem path")
+    try:
+        os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise PermissionError("unsafe model filesystem path") from error
+    return True
 
 
 def _effective_user_id() -> int:

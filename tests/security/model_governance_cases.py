@@ -572,6 +572,14 @@ class GovernedModelCase:
     def _artifact_path(self) -> Path:
         return self._revision_path() / "mini.onnx"
 
+    @property
+    def recovery_marker_path(self) -> Path:
+        return self.model_root / self.model_id / f".recovery-pending-{REVISION}"
+
+    @property
+    def recovery_marker_exists(self) -> bool:
+        return self.recovery_marker_path.exists()
+
     def apply_filesystem_mutation(self, mutation: str) -> None:
         allowed = {
             "manifest_symlink",

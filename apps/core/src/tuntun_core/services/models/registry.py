@@ -13,7 +13,15 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from .fs import OwnedDirectory, hash_exact_fd, open_regular_at, read_bounded_strict_yaml
+from .fs import (
+    OwnedDirectory,
+    close_preserving_primary,
+    entry_exists_at,
+    hash_exact_fd,
+    open_regular_at,
+    read_bounded_strict_yaml,
+    recovery_pending_name,
+)
 
 SAFE_SUFFIXES = {".json", ".onnx", ".safetensors", ".tflite", ".txt"}
 MODEL_ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
@@ -491,6 +499,9 @@ class ModelRegistry:
             directories.append(root)
             model = root.child(entry.model_id)
             directories.append(model)
+            pending_name = recovery_pending_name(entry.revision)
+            if entry_exists_at(model, pending_name):
+                raise PermissionError("model revision recovery is pending")
             revision = model.child(entry.revision, mode=0o500)
             directories.append(revision)
             expected_names = tuple(sorted(item.path for item in entry.files))
@@ -503,16 +514,17 @@ class ModelRegistry:
                 try:
                     hash_exact_fd(descriptor, item.size, item.sha256)
                     handles.append(VerifiedModelFile.from_manifest(item, descriptor))
-                except BaseException:
-                    os.close(descriptor)
+                except BaseException as error:
+                    close_preserving_primary(descriptor, os.close, error)
                     raise
             if tuple(sorted(os.listdir(revision.fd))) != expected_names:
                 raise PermissionError("unsafe model filesystem revision")
+            if entry_exists_at(model, pending_name):
+                raise PermissionError("model revision recovery is pending")
             return ActivatedModel.from_manifest(entry, tuple(handles))
         except BaseException as error:
             for handle in handles:
-                with contextlib.suppress(OSError):
-                    handle.close()
+                close_preserving_primary(handle, VerifiedModelFile.close, error)
             raise RuntimeError("model is not installed and verified") from error
         finally:
             for directory in reversed(directories):
