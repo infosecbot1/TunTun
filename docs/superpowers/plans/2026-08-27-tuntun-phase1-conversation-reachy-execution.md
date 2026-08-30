@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - The normative specification is `docs/superpowers/specs/2026-08-27-tuntun-phase1-anchor-design.md`; changing a locked decision requires a specification update and ADR before implementation.
-- The Mac core/tooling is exactly Python 3.12 and the first SQLCipher compatibility candidate is `sqlcipher3==0.6.2` on macOS x86_64. Reachy uses only the exact delivered `/venvs/apps_venv/bin/python3` runtime after Task 08/12 accepts a closed Python 3.11-or-3.12 ABI, target-tag-set digest, and required-runtime-inventory digest. Tuntun's two project wheels must be pure `py3-none-any`; native/vendor dependencies, including PyGObject, remain in the accepted onboard runtime and are never guessed or rebuilt as generic manylinux wheels. An unsupported or drifted runtime blocks edge packaging. No plaintext database fallback is permitted.
+- The Mac core/tooling is exactly Python 3.12 and the first SQLCipher compatibility candidate is `sqlcipher3==0.6.2`; it must pass the blocking encrypted-page/import/wrong-key gate on the active Darwin arm64 host and the separate mandatory macOS x86_64 distribution gate. Reachy uses only the exact delivered `/venvs/apps_venv/bin/python3` runtime after Task 08/12 accepts a closed Python 3.11-or-3.12 ABI, target-tag-set digest, and required-runtime-inventory digest. Tuntun's two project wheels must be pure `py3-none-any`; native/vendor dependencies, including PyGObject, remain in the accepted onboard runtime and are never guessed or rebuilt as generic manylinux wheels. An unsupported or drifted runtime blocks edge packaging. No plaintext database fallback is permitted.
 - Conversation concurrency is exactly one active household conversation.
 - Raw pre-wake/post-wake audio, frames/crops, verbatim transcripts, provider bodies, and generated speech remain ephemeral and never enter application storage, logs, checkpoints, reports, or telemetry.
 - Cloud STT, reasoning, and TTS each require a current purpose-specific consent receipt and a purpose/attempt/input-bound route authorization.
@@ -80,7 +80,7 @@ The machine-checkable exact fixture manifest is:
 - `tests/fixtures/provider_calls.py`: `call_repository_fault_case`, `core_container`
 - `tests/fixtures/budget.py`: `budget_evidence`, `catalog`, `direct_release_case`, `durable_turn_attempt_case`, `expiry_atomic_fault_case`, `expiry_case`, `production_budget_lifecycle_case`, `production_container`, `production_provider_gateway_case`, `production_stream_gateway_case`, `provider_reviews`, `runtime_provider_identity`, `settlement_case`
 - `tests/fixtures/provider_adapters.py`: `action_intent_factory`, `action_repository_spy`, `assistant_turn`, `authorized_reasoning_request`, `captures`, `fake_responses_stream`, `macos_say_process_case`, `mapper_factory`, `offline_tts_probe`, `output_pipeline`, `raw_invalid_output`, `receipt_service`, `sol_adapter`, `sol_stream_case`, `stt_accounting_case`, `tts_accounting_case`, `tts_activation_case`, `verified_response_receipt`
-- `tests/fixtures/conversation_workflow.py`: `blocking_completed_audio`, `blocking_engine`, `cancellation_boundary_case`, `cancellation_budget_failure_case`, `completed_audio`, `completed_audio_case`, `completed_audio_source`, `coordinator`, `core_listener_config`, `engine_case`, `engine_spy`, `external_cancel_finish_race`, `lifecycle_case`, `persistent_audio_claims`, `turn_input`, `turn_input_json`, `workflow_spy`
+- `tests/fixtures/conversation_workflow.py`: `blocking_completed_audio`, `blocking_engine`, `cancellation_boundary_case`, `cancellation_budget_failure_case`, `completed_audio`, `completed_audio_case`, `completed_audio_source`, `coordinator`, `core_listener_config`, `engine_spy`, `external_cancel_finish_race`, `lifecycle_case`, `persistent_audio_claims`, `turn_input`, `turn_input_json`, `workflow_spy`
 - `tests/fixtures/reachy_commissioning.py`: `approved_inventory_case`, `commissioner`, `commissioning_dependencies`, `commissioning_exchange`, `commissioning_issuer`, `commissioning_repository`, `commissioning_service`, `commissioning_state_case`, `delivered_assistant_qualification`, `delivered_reachy_gate`, `deny_network_and_subprocess`, `deployment_inventory`, `endpoint`, `endpoint_request`, `live_commissioning_acceptance`, `local_physical_proof`, `operator_file_fault`, `qualified_operator_files`, `reachy_key_backend`, `repo_free_core_cli`, `secure_time_case`
 - `tests/fixtures/reachy_protocol.py`: `frame_case`, `pairing`, `pairing_resolver`, `production_pairing_session_case`, `recommission_case`, `rotation_case`
 - `tests/fixtures/reachy_media.py`: `authenticated_reachy_control`, `core_disconnect_case`, `duplex_state_case`, `edge_disconnect_case`, `frame_crypto`, `frame_pairing_case`, `production_edge_container`, `real_tls_case`, `signed_control_payload_case`, `tls_material`, `wss_case`
@@ -94,6 +94,8 @@ The foundation DTOs and ports are immutable and authoritative. This plan imports
 
 Foundation Task 9 is an external serial prerequisite wherever this plan imports or extends its deterministic testing surface. Task 02 and Task 06 may use `FakeClock` only after the accepted Foundation Task 9 commit is merged into this branch; Task 06 may append recording provider fakes only after Foundation Task 9 owns `fake_providers.py`; Tasks 07 and 16 may use `guest_hinglish_scenario()` only after that scenario API is present; and Task 08 must follow Foundation Task 9 before extending `fake_reachy.py`, `apps/core/src/tuntun_core/cli/main.py`, project files, or `uv.lock`. Workspace lock mutations are strictly serialized in task order: Task 04, Task 06, Task 07, Task 08, Task 10, Task 12, then Task 16 each regenerate `uv.lock` once from the accepted predecessor state. Task 15 owns a separate `evals/uv.lock` and never modifies the workspace lock. The concurrently executing Foundation Task 9 branch is not edited by this plan.
 
+The repository bootstrap is also a blocking execution prerequisite for the active Darwin arm64 household host: before Task 01 starts, the exact pinned SQLCipher candidate must build/install on that arm64 host, import under the workspace interpreter, create an encrypted database whose raw pages do not expose a sentinel, reopen with the correct key, and reject a wrong key. Failure blocks this plan before Task 01; it is not waived by the separate mandatory Intel macOS/x86_64 distribution-CI receipt. Task 01 itself remains stdlib-only and owns no dependency or lock change.
+
 Reachy commissioning authorization is controlled by an opaque owner-approved host-inventory record reference, not by a physical model or product string. The active household target record must attest Darwin arm64 local-host facts for the approved core host while distribution qualification also preserves mandatory Intel macOS/x86_64 support. Hardware names, purchase descriptions, marketing model names, architecture strings, or product-year labels may appear only as evidence fields inside signed inventory records; none may be accepted as authorization.
 
 ---
@@ -101,7 +103,7 @@ Reachy commissioning authorization is controlled by an opaque owner-approved hos
 ### Task 01: Master WP07 — Pure Conversation State Machine
 
 **Master package:** WP07
-**Depends on:** Foundation contracts and repository bootstrap. This task is stdlib-only and does not consume Task 02 output or Foundation Task 9 testing helpers.
+**Depends on:** Foundation contracts and repository bootstrap, including the blocking encrypted-page/import/wrong-key SQLCipher acceptance probe on the active Darwin arm64 host; Intel macOS/x86_64 remains a separate mandatory distribution gate. This task is stdlib-only, owns no dependency/lock mutation, and does not consume Task 02 output or Foundation Task 9 testing helpers.
 **Estimated effort:** 1.5 person-days
 
 **Files:**
@@ -110,8 +112,8 @@ Reachy commissioning authorization is controlled by an opaque owner-approved hos
 
 **Interfaces:**
 - Consumes: no project runtime contract; only Python stdlib `dataclasses` and `enum`.
-- Produces: `TurnState`, `TurnEvent`, exact-runtime-validated `Transition`, and `transition(state: TurnState, event: TurnEvent) -> Transition`, including declarative effect labels `finish_turn` and `clear_ephemeral` for the normal `SPEAKING + PLAYBACK_END -> IDLE` terminal transition. Privacy and error-safe states remain latched after terminal cleanup; only already-authorized `PRIVACY_DEACTIVATED` and verified-local-owner `OWNER_RECOVERED` events respectively return them to `IDLE`. Authentication/owner proof happens outside this pure state machine.
-- Integration owner: Task 07 is the first executable owner of Task 01's transition output. It must dispatch `finish_turn` to Task 02's `TurnCoordinator.finish(turn_id)` and dispatch `clear_ephemeral` to `EphemeralTurnContext.clear(turn_id)` only after the finish barrier releases. Task 02 owns the locked finish/cancel safety barriers but does not import this pure state machine.
+- Produces: `TurnState`, `TurnEvent`, exact-runtime-validated `Transition`, and `transition(state: TurnState, event: TurnEvent) -> Transition`, including declarative effect labels `finish_turn` and `clear_ephemeral` for the normal terminal path. Privacy and error-safe conditions are independent latches: observing both yields `PRIVACY_ERROR_SAFE`, terminal cleanup never clears either latch, and the two already-authorized recovery events clear only their own latch. Authentication/owner proof happens outside this pure state machine.
+- Integration owner: Task 07 is the first executable owner of Task 01's transition output. It acquires Task 02's terminal `FINALIZING` lease, dispatches `clear_ephemeral` to the same engine context under a bound, and only after successful clear asks Task 02 to release the coordinator lease. Cancellation uses the same order after its cancel barrier. Task 02 owns admission and the safety/budget barrier but does not import this pure state machine or release before Task 07 proves content clearing.
 
 - [ ] **Step 1: Write the failing transition tests**
 
@@ -119,7 +121,7 @@ Reachy commissioning authorization is controlled by an opaque owner-approved hos
 # tests/unit/conversation/test_state_machine.py
 import pytest
 
-from tuntun_core.domain.conversation import TurnEvent, TurnState, transition
+from tuntun_core.domain.conversation import Transition, TurnEvent, TurnState, transition
 
 
 @pytest.mark.parametrize(
@@ -174,7 +176,9 @@ def test_privacy_preempts_thinking() -> None:
 @pytest.mark.parametrize("event",(
     TurnEvent.STOP,TurnEvent.CANCEL,TurnEvent.TIMEOUT,TurnEvent.DISCONNECT,
 ))
-@pytest.mark.parametrize("latched",(TurnState.PRIVACY,TurnState.ERROR_SAFE))
+@pytest.mark.parametrize("latched",(
+    TurnState.PRIVACY,TurnState.ERROR_SAFE,TurnState.PRIVACY_ERROR_SAFE,
+))
 def test_exceptional_states_stay_latched_after_terminal_cleanup(latched,event) -> None:
     result=transition(latched,event)
     assert result.state is latched
@@ -197,10 +201,42 @@ def test_only_explicit_preauthorized_recovery_events_unlatch_exceptional_states(
         transition(TurnState.ERROR_SAFE,TurnEvent.PRIVACY_DEACTIVATED)
 
 
+@pytest.mark.parametrize("first,second",(
+    (TurnEvent.PRIVACY,TurnEvent.INVARIANT_FAILURE),
+    (TurnEvent.INVARIANT_FAILURE,TurnEvent.PRIVACY),
+))
+def test_privacy_and_error_safe_latches_combine_in_either_event_order(first,second) -> None:
+    state=TurnState.THINKING
+    state=transition(state,first).state
+    result=transition(state,second)
+    assert result.state is TurnState.PRIVACY_ERROR_SAFE
+    assert result.effects == (
+        "close_media_egress","cancel_turn","stop_reachy",
+        "reconcile_budget","clear_ephemeral",
+    )
+
+
+@pytest.mark.parametrize("first_recovery,intermediate,second_recovery",(
+    (TurnEvent.PRIVACY_DEACTIVATED,TurnState.ERROR_SAFE,TurnEvent.OWNER_RECOVERED),
+    (TurnEvent.OWNER_RECOVERED,TurnState.PRIVACY,TurnEvent.PRIVACY_DEACTIVATED),
+))
+def test_combined_latch_requires_both_distinct_authorized_recoveries(
+    first_recovery,intermediate,second_recovery,
+) -> None:
+    first=transition(TurnState.PRIVACY_ERROR_SAFE,first_recovery)
+    assert first == Transition(intermediate,("clear_ephemeral",))
+    assert transition(first.state,second_recovery) == Transition(
+        TurnState.IDLE,("clear_ephemeral",),
+    )
+
+
 @pytest.mark.parametrize("state",tuple(TurnState))
 def test_invariant_failure_latches_error_safe_and_attempts_full_cleanup(state) -> None:
     result=transition(state,TurnEvent.INVARIANT_FAILURE)
-    assert result.state is TurnState.ERROR_SAFE
+    expected=(TurnState.PRIVACY_ERROR_SAFE
+              if state in (TurnState.PRIVACY,TurnState.PRIVACY_ERROR_SAFE)
+              else TurnState.ERROR_SAFE)
+    assert result.state is expected
     assert result.effects == (
         "close_media_egress","cancel_turn","stop_reachy",
         "reconcile_budget","clear_ephemeral",
@@ -265,6 +301,7 @@ class TurnState(StrEnum):
     SPEAKING = "speaking"
     PRIVACY = "privacy"
     ERROR_SAFE = "error_safe"
+    PRIVACY_ERROR_SAFE = "privacy_error_safe"
 
 
 class TurnEvent(StrEnum):
@@ -324,6 +361,10 @@ _FORWARD = (
      Transition(TurnState.IDLE,("clear_ephemeral",))),
     (TurnState.ERROR_SAFE,TurnEvent.OWNER_RECOVERED,
      Transition(TurnState.IDLE,("clear_ephemeral",))),
+    (TurnState.PRIVACY_ERROR_SAFE,TurnEvent.PRIVACY_DEACTIVATED,
+     Transition(TurnState.ERROR_SAFE,("clear_ephemeral",))),
+    (TurnState.PRIVACY_ERROR_SAFE,TurnEvent.OWNER_RECOVERED,
+     Transition(TurnState.PRIVACY,("clear_ephemeral",))),
 )
 
 
@@ -334,25 +375,33 @@ def transition(state: TurnState, event: TurnEvent) -> Transition:
         TurnEvent.STOP,TurnEvent.CANCEL,TurnEvent.TIMEOUT,TurnEvent.DISCONNECT,
     )
     if state is not TurnState.IDLE and event in exceptional:
-        terminal_state=state if state in (TurnState.PRIVACY,TurnState.ERROR_SAFE) else TurnState.IDLE
+        terminal_state=state if state in (
+            TurnState.PRIVACY,TurnState.ERROR_SAFE,TurnState.PRIVACY_ERROR_SAFE,
+        ) else TurnState.IDLE
         return Transition(terminal_state,_TERMINAL_EFFECTS)
     if state is not TurnState.IDLE and event is TurnEvent.PRIVACY:
-        return Transition(TurnState.PRIVACY,_TERMINAL_EFFECTS)
+        target=(TurnState.PRIVACY_ERROR_SAFE
+                if state in (TurnState.ERROR_SAFE,TurnState.PRIVACY_ERROR_SAFE)
+                else TurnState.PRIVACY)
+        return Transition(target,_TERMINAL_EFFECTS)
     if event is TurnEvent.INVARIANT_FAILURE:
-        return Transition(TurnState.ERROR_SAFE,_TERMINAL_EFFECTS)
+        target=(TurnState.PRIVACY_ERROR_SAFE
+                if state in (TurnState.PRIVACY,TurnState.PRIVACY_ERROR_SAFE)
+                else TurnState.ERROR_SAFE)
+        return Transition(target,_TERMINAL_EFFECTS)
     for source,cause,result in _FORWARD:
         if state is source and event is cause:
             return result
     raise ValueError("illegal conversation transition")
 ```
 
-`finish_turn` and `clear_ephemeral` are declarative effect labels, not local side effects in Task 01. Task 07 must be the first task to execute them, and Task 02's `TurnCoordinator.finish` remains the only normal-terminal owner of Reachy output silence, motion stop, buffer clear, unsettled-attempt rejection, and turn release.
+`finish_turn` and `clear_ephemeral` are declarative effect labels, not local side effects in Task 01. Task 07 is their first executable owner: Task 02's `TurnCoordinator.finish` exclusively owns Reachy silence/motion/buffer safety and unsettled-attempt rejection while retaining `FINALIZING`; Task 07 clears the same engine and then calls Task 02's exact lease release.
 
 - [ ] **Step 4: Run the green test and static checks**
 
 Run: `uv run pytest tests/unit/conversation/test_state_machine.py -q`
 
-Expected: PASS with `42 passed`; ordinary terminals cleanly return to idle, privacy/error-safe remain latched until their distinct already-authorized recovery events, hostile runtime types fail with fixed messages, and the transition authority cannot be mutated.
+Expected: PASS with `51 passed`; ordinary terminals cleanly return to idle, privacy/error-safe combine in either order and remain independently latched until both distinct already-authorized recovery events occur, hostile runtime types fail with fixed messages, and the transition authority cannot be mutated.
 
 Run: `uv run ruff check apps/core/src/tuntun_core/domain/conversation.py tests/unit/conversation/test_state_machine.py && uv run mypy apps/core/src/tuntun_core/domain/conversation.py`
 
@@ -386,7 +435,7 @@ git commit -m "feat(conversation): add fail-closed turn state machine"
 
 **Interfaces:**
 - Consumes: foundation `BudgetPort`, foundation `ReachyPort`, monotonic `ClockPort`, and Foundation Task 9's `FakeClock` in tests only. It does not import or execute Task 01's `transition`; Task 07 owns that executable integration.
-- Produces: `TurnCoordinator.start`, synchronous `track_reservation`/`complete_reservation` methods that satisfy Task 06's structural `TurnAttemptTracker` Protocol, full-barrier `TurnCoordinator.finish`, shielded `TurnCoordinator.cancel`, fresh-local-owner-only `TurnCoordinator.recover_safety_block`, closed `CoordinatorState`, bounded `CancellationHealthRecorder`, `IdempotencyStore.claim`, and a `manager.py` compatibility module that re-exports `TurnCoordinator`. There is no separate public `SessionManager` class or `SessionManager.open` method in Phase 1. The coordinator consumes only the exact frozen `ReachyPort.stop_all(...) -> SafetyReceipt`: exact type and turn binding plus `playback_stopped`, `motion_stopped`, and `buffers_cleared` all true are the complete output-silenced/motion-stopped/buffer-cleared proof. Any false, subclass/private DTO, malformed, wrong-turn, raised, or timed-out result latches error-safe `SAFETY_BLOCKED` with the active turn retained. Cancellation releases ownership only after tracked work is joined, Reachy safety is exact, and every tracked budget attempt is successfully reconciled; a reconciliation failure retains the same attempts for verified-owner retry. Ordinary finish rejects any tracked unsettled attempt, then owns the same exact Reachy/output barrier before release. Task 07 maps Task 01's normal-terminal `finish_turn` effect to this `finish` method and maps `clear_ephemeral` to its workflow context only after `finish` releases.
+- Produces: `TurnCoordinator.start`, synchronous `track_reservation`/`complete_reservation`, full-barrier `TurnCoordinator.finish` and shielded `TurnCoordinator.cancel` returning an exact `TerminalLease`, `release_terminal` only after Task 07's same-engine clear proof, `quarantine_terminal_clear`, verified recovery, closed `CoordinatorState`, bounded `CancellationHealthRecorder`, and `IdempotencyStore.claim`. `FINALIZING` retains the active turn and denies every successor after the safety/budget barrier; neither finish nor cancel releases admission. A clear failure transitions to `FINALIZATION_BLOCKED`, remains unready, retains the same turn/lease for owner recovery, and applies to completed, denied, cancelled, timeout, privacy, and error-safe primary outcomes. Only exact lease identity plus successful Task-07 clear permits release to `IDLE`. Any safety receipt defect instead latches `SAFETY_BLOCKED`. The coordinator does not import Task 01 or clear content itself.
 
 - [ ] **Step 1: Write failing exclusivity and cancellation tests**
 
@@ -448,13 +497,16 @@ async def test_cancel_conservatively_settles_every_tracked_attempt() -> None:
     coordinator.track_reservation(turn_id, *first)
     coordinator.track_reservation(turn_id, *second)
 
-    await coordinator.cancel(turn_id, "privacy")
+    lease=await coordinator.cancel(turn_id, "privacy")
 
     assert budget.reconciliations[0].turn_id == turn_id
     assert {(p.reservation_id, p.attempt_id, p.disposition) for p in budget.reconciliations[0].proofs} == {
         (*first, "unknown"), (*second, "unknown")
     }
     assert reachy.stopped_turns == [turn_id]
+    assert coordinator.state is CoordinatorState.FINALIZING
+    assert coordinator.is_current(turn_id) is True
+    await coordinator.release_terminal(lease)
     assert coordinator.is_current(turn_id) is False
 
 
@@ -518,11 +570,12 @@ async def test_finish_racing_cancel_leaves_one_terminal_owner() -> None:
     cancel = asyncio.create_task(coordinator.cancel(turn_id, "privacy"))
     await coordinator.cancel_started.wait()
     finished = await coordinator.finish(turn_id)
-    await cancel
-    assert finished is False
+    lease=await cancel
+    assert finished is lease
     assert len(budget.reconciliations) == 1
     assert reachy.stopped_turns == [turn_id]
-    assert coordinator.is_current(turn_id) is False
+    assert coordinator.state is CoordinatorState.FINALIZING
+    await coordinator.release_terminal(lease)
 
 
 @pytest.mark.asyncio
@@ -560,9 +613,10 @@ async def test_transient_reconciliation_failure_retries_same_attempts_before_rel
     with pytest.raises(RuntimeError,match="reconciliation failed"):
         await coordinator.cancel(turn_id,"privacy")
     assert coordinator.active_turn_id()==turn_id
-    await coordinator.recover_safety_block(turn_id,fresh_local_owner_proof)
+    lease=await coordinator.recover_safety_block(turn_id,fresh_local_owner_proof)
     assert fails_once_budget.attempt_sets==[{attempt},{attempt}]
-    assert coordinator.active_turn_id() is None
+    assert coordinator.state is CoordinatorState.FINALIZING
+    await coordinator.release_terminal(lease)
 
 
 @pytest.mark.asyncio
@@ -586,8 +640,9 @@ async def test_reconciliation_hang_keeps_ownership_but_not_output_active() -> No
     assert coordinator.is_current(turn_id) is True
 
     budget.release.set()
-    await asyncio.wait_for(cancellation, timeout=0.1)
-    assert coordinator.is_current(turn_id) is False
+    lease=await asyncio.wait_for(cancellation, timeout=0.1)
+    assert coordinator.state is CoordinatorState.FINALIZING
+    await coordinator.release_terminal(lease)
 
 
 @pytest.mark.asyncio
@@ -607,10 +662,11 @@ async def test_external_leader_cancel_at_each_await_cannot_cancel_ownership_barr
     assert case.coordinator.is_current(case.turn_id) is True
     assert follower.done() is False
     case.release_phase.set()
-    await asyncio.wait_for(follower,timeout=0.1)
+    lease=await asyncio.wait_for(follower,timeout=0.1)
     assert case.reachy.stopped_turns==[case.turn_id]
     assert case.budget.reconciliation_count==1
-    assert case.coordinator.is_current(case.turn_id) is False
+    assert case.coordinator.state is CoordinatorState.FINALIZING
+    await case.coordinator.release_terminal(lease)
 
 
 @pytest.mark.asyncio
@@ -629,7 +685,9 @@ async def test_late_task_and_reservation_registration_are_rejected_once_cancelli
     with pytest.raises(RuntimeError,match="turn cancellation in progress"):
         case.coordinator.track_reservation(case.turn_id,uuid4(),uuid4())
     case.release_phase.set()
-    await cancellation
+    lease=await cancellation
+    assert case.coordinator.state is CoordinatorState.FINALIZING
+    await case.coordinator.release_terminal(lease)
 
 
 @pytest.mark.asyncio
@@ -650,9 +708,10 @@ async def test_safety_failure_latches_active_turn_until_verified_owner_recovery(
     with pytest.raises(RuntimeError,match="household safety blocked"):
         await case.coordinator.start(uuid4())
     case.make_safety_succeed()
-    await case.coordinator.recover_safety_block(case.turn_id,case.fresh_local_owner_proof)
-    assert case.coordinator.state is CoordinatorState.IDLE
-    assert case.coordinator.active_turn_id() is None
+    lease=await case.coordinator.recover_safety_block(case.turn_id,case.fresh_local_owner_proof)
+    assert case.coordinator.state is CoordinatorState.FINALIZING
+    assert case.coordinator.active_turn_id()==case.turn_id
+    await case.coordinator.release_terminal(lease)
     await case.coordinator.start(uuid4())
 
 
@@ -683,10 +742,11 @@ async def test_create_task_factory_failure_uses_owned_fallback_and_never_skips_s
     task_factory_failure_case,factory_point,
 ) -> None:
     case=await task_factory_failure_case(fail_once_at=factory_point)
-    await case.coordinator.cancel(case.turn_id,"privacy")
+    lease=await case.coordinator.cancel(case.turn_id,"privacy")
     assert case.reachy.stopped_turns==[case.turn_id]
     assert case.budget.reconciliation_count==1
-    assert case.coordinator.active_turn_id() is None
+    assert case.coordinator.state is CoordinatorState.FINALIZING
+    await case.coordinator.release_terminal(lease)
     assert factory_point in case.health.task_factory_failure_points
     assert case.loop_unhandled_task_errors==()
 
@@ -726,11 +786,12 @@ async def test_forever_hung_reconciliation_times_out_blocked_and_retries_same_at
     assert case.coordinator.state is CoordinatorState.SAFETY_BLOCKED
     assert case.first_reconciliation_is_retained_and_observed
     case.allow_fresh_reconciliation()
-    await case.coordinator.recover_safety_block(
+    lease=await case.coordinator.recover_safety_block(
         case.turn_id,case.fresh_local_owner_proof,
     )
     assert case.budget.attempt_sets==[case.original_attempts,case.original_attempts]
-    assert case.coordinator.active_turn_id() is None
+    assert case.coordinator.state is CoordinatorState.FINALIZING
+    await case.coordinator.release_terminal(lease)
 ```
 
 ```python
@@ -742,7 +803,9 @@ import pytest
 
 from tuntun_contracts.reachy import SafetyReceipt
 from tuntun_core.services.sessions import manager as session_manager
-from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
+from tuntun_core.services.sessions.turn_coordinator import (
+    CoordinatorState,TerminalLease,TurnCoordinator,
+)
 from tuntun_testing.fake_clock import FakeClock
 
 
@@ -771,7 +834,7 @@ def test_manager_module_is_a_compatibility_export_not_a_second_session_api() -> 
 
 
 @pytest.mark.asyncio
-async def test_single_household_turn_admits_successor_only_after_finish_barrier() -> None:
+async def test_single_household_turn_admits_successor_only_after_clear_and_release() -> None:
     coordinator = TurnCoordinator(
         budget=BudgetFake(),
         reachy=ReachyFake(),
@@ -781,7 +844,12 @@ async def test_single_household_turn_admits_successor_only_after_finish_barrier(
     await coordinator.start(first)
     with pytest.raises(RuntimeError, match="household conversation busy"):
         await coordinator.start(second)
-    assert await coordinator.finish(first) is True
+    lease=await coordinator.finish(first)
+    assert type(lease) is TerminalLease
+    assert coordinator.state is CoordinatorState.FINALIZING
+    with pytest.raises(RuntimeError, match="household conversation busy"):
+        await coordinator.start(second)
+    await coordinator.release_terminal(lease)
     await coordinator.start(second)
     assert coordinator.is_current(second) is True
 ```
@@ -800,7 +868,7 @@ import asyncio
 from collections import defaultdict,deque
 from dataclasses import dataclass
 from enum import StrEnum
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from tuntun_contracts.budget import BudgetReconciliationRequest, TransportProof
 from tuntun_contracts.ports import BudgetPort, ReachyPort
@@ -810,7 +878,15 @@ class CoordinatorState(StrEnum):
     IDLE="idle"
     ACTIVE="active"
     CANCELLING="cancelling"
+    FINALIZING="finalizing"
+    FINALIZATION_BLOCKED="finalization_blocked"
     SAFETY_BLOCKED="safety_blocked"
+
+@dataclass(frozen=True,slots=True)
+class TerminalLease:
+    turn_id: UUID
+    nonce: UUID
+    terminal_kind: str
 
 @dataclass(frozen=True,slots=True)
 class SafetyBlockedRecord:
@@ -864,6 +940,7 @@ class TurnCoordinator:
         self._background:set[asyncio.Task[object]]=set()
         self._lock = asyncio.Lock()
         self._cancelling: dict[UUID, asyncio.Task[None]] = {}
+        self._terminal_lease: TerminalLease | None = None
         self.cancel_started = asyncio.Event()
 
     @property
@@ -887,6 +964,23 @@ class TurnCoordinator:
         if self._state is not CoordinatorState.ACTIVE or turn_id in self._cancelling:
             raise RuntimeError("turn cancellation in progress")
         self._tasks[turn_id].add(task)
+
+    def spawn_owned(self,turn_id:UUID,factory,*,name:str):
+        """Task-02 fresh-coroutine fallback; factories prevent coroutine leaks."""
+        if turn_id!=self._active or self._state not in (
+            CoordinatorState.ACTIVE,CoordinatorState.CANCELLING,CoordinatorState.FINALIZING,
+        ):
+            raise RuntimeError("stale turn")
+        return self._spawn_owned(factory,name=name)
+
+    def observe_owned(self,task):
+        return self._retain_background(task)
+
+    def spawn_cleanup_owned(self,turn_id:UUID,factory,*,name:str):
+        """Only the terminal content clearer may run while a turn is blocked."""
+        if turn_id!=self._active or self._state is CoordinatorState.IDLE:
+            raise RuntimeError("stale turn")
+        return self._spawn_owned(factory,name=name)
 
     def untrack_task(self, turn_id: UUID, task: asyncio.Task[object]) -> None:
         tracked = self._tasks.get(turn_id)
@@ -925,24 +1019,35 @@ class TurnCoordinator:
         """Content-free health/test projection; never contains provider payloads."""
         return frozenset(self._attempts.get(turn_id,()))
 
-    async def finish(self, turn_id: UUID) -> bool:
-        """Run the normal terminal safety barrier and release exactly once."""
+    async def finish(self, turn_id: UUID) -> TerminalLease | None:
+        """Run safety/budget to FINALIZING; retain admission for content clear."""
         async with self._lock:
-            if turn_id != self._active or self._state is not CoordinatorState.ACTIVE:
-                return False
-            if self._attempts.get(turn_id):
-                raise RuntimeError("turn_has_unsettled_budget_attempts")
-            self._state=CoordinatorState.CANCELLING
-            barrier=self._create_barrier(turn_id,"normal_finish")
+            if turn_id != self._active:
+                return None
+            if self._state is CoordinatorState.CANCELLING:
+                barrier=self._cancelling[turn_id]
+            elif self._state is CoordinatorState.FINALIZING:
+                return self._terminal_lease
+            elif self._state is CoordinatorState.ACTIVE:
+                if self._attempts.get(turn_id):
+                    raise RuntimeError("turn_has_unsettled_budget_attempts")
+                self._state=CoordinatorState.CANCELLING
+                barrier=self._create_barrier(turn_id,"normal_finish")
+            else:
+                raise SafetyBlockedError("turn_safety_blocked:owner_recovery_required")
         # A caller cancellation cannot cancel this release owner. The workflow
         # converts cancellation during finish into a follower of this barrier.
         await asyncio.shield(barrier)
-        return True
+        return self._terminal_lease
 
-    async def cancel(self, turn_id: UUID, reason: str) -> None:
+    async def cancel(self, turn_id: UUID, reason: str) -> TerminalLease | None:
         async with self._lock:
             if turn_id != self._active:
                 return
+            if self._state is CoordinatorState.FINALIZING:
+                return self._terminal_lease
+            if self._state is CoordinatorState.FINALIZATION_BLOCKED:
+                raise SafetyBlockedError("turn_finalization_blocked:owner_recovery_required")
             if self._state is CoordinatorState.SAFETY_BLOCKED:
                 raise SafetyBlockedError("turn_safety_blocked:owner_recovery_required")
             barrier = self._cancelling.get(turn_id)
@@ -954,8 +1059,34 @@ class TurnCoordinator:
         # owned barrier. Every follower observes the same terminal result only
         # after that barrier has closed all safety effects and ownership.
         await asyncio.shield(barrier)
+        return self._terminal_lease
 
-    async def recover_safety_block(self,turn_id:UUID,proof) -> None:
+    async def release_terminal(self,lease:TerminalLease) -> None:
+        async with self._lock:
+            if type(lease) is not TerminalLease or lease is not self._terminal_lease:
+                raise RuntimeError("invalid_terminal_lease")
+            if self._state is not CoordinatorState.FINALIZING or self._active!=lease.turn_id:
+                raise RuntimeError("terminal_not_releasable")
+            self._active=None; self._state=CoordinatorState.IDLE
+            self._terminal_lease=None; self._safety_blocked_record=None
+            self._tasks.pop(lease.turn_id,None); self._attempts.pop(lease.turn_id,None)
+
+    async def quarantine_terminal_clear(self,lease:TerminalLease) -> None:
+        async with self._lock:
+            if type(lease) is not TerminalLease or lease is not self._terminal_lease:
+                raise RuntimeError("invalid_terminal_lease")
+            self._state=CoordinatorState.FINALIZATION_BLOCKED
+
+    async def recover_terminal_clear(self,lease:TerminalLease,proof) -> None:
+        await self._owner_recovery.require_fresh_local_owner(
+            proof,action="turn.content_recover",turn_id=lease.turn_id,
+        )
+        async with self._lock:
+            if lease is not self._terminal_lease or self._state is not CoordinatorState.FINALIZATION_BLOCKED:
+                raise RuntimeError("turn is not finalization blocked")
+            self._state=CoordinatorState.FINALIZING
+
+    async def recover_safety_block(self,turn_id:UUID,proof) -> TerminalLease:
         if self._process_restart_required:
             raise SafetyBlockedError("turn_safety_blocked:process_restart_required")
         if self._owner_recovery is None:
@@ -969,6 +1100,10 @@ class TurnCoordinator:
             self._state=CoordinatorState.CANCELLING
             barrier=self._create_barrier(turn_id,"verified_owner_recovery")
         await asyncio.shield(barrier)
+        lease=self._terminal_lease
+        if type(lease) is not TerminalLease:
+            raise SafetyBlockedError("turn_safety_blocked:recovery_incomplete")
+        return lease
 
     def _create_barrier(self,turn_id,reason):
         try:
@@ -1115,7 +1250,8 @@ class TurnCoordinator:
                 if self._cancelling.get(turn_id) is asyncio.current_task():
                     self._cancelling.pop(turn_id,None)
                 if barrier_verified:
-                    self._active=None; self._state=CoordinatorState.IDLE
+                    self._state=CoordinatorState.FINALIZING
+                    self._terminal_lease=TerminalLease(turn_id,uuid4(),reason)
                     self._safety_blocked_record=None
                     self._process_restart_required=False
                     self._tasks.pop(turn_id,None); self._attempts.pop(turn_id,None)
@@ -1228,7 +1364,7 @@ async def shutdown(coordinator: TurnCoordinator) -> None:
         await coordinator.cancel(active, "shutdown")
 ```
 
-`TurnCoordinator` runs on the household event loop. `track_task` and `track_reservation` reject synchronously after cancellation publication. A provider path calls `complete_reservation` only after the exact reservation/attempt settlement or unsent-release transaction has durably committed; unknown, duplicate, pre-commit, or post-cancellation completion is rejected. Ordinary `finish` refuses to begin while even one tracked tuple remains. It then changes state under the ownership lock and runs the same exact Reachy/output safety barrier before release, so normal playback acceptance is never mistaken for playback completion. The coordinator creates one barrier under the ownership lock, immediately attaches its own done callback, and every external caller shield-awaits it. Every task creation goes through one owned helper: a configured/injected `create_task` failure is recorded and retried by direct loop-bound `Task` construction from a fresh coroutine. If even that fallback cannot create the outer owner, the turn is synchronously latched `SAFETY_BLOCKED`, permanently requires process restart, and never returns to `ACTIVE`/`IDLE`. The callback always calls `task.result()` and records a bounded health reason, so a sole cancelled waiter cannot leave a detached `Task exception was never retrieved`. Inside the owner, Reachy safety is created first; tracked-task join and budget reconciliation then start independently. A factory, proof, reconciliation, or join failure therefore cannot suppress the Reachy stop and cannot release ownership. Cancellation-path tracked attempt tuples are removed only after successful reconciliation, so recovery retries the same idempotent proof set rather than silently losing budget work.
+`TurnCoordinator` runs on the household event loop. Ordinary `finish` refuses unsettled tuples, runs the exact Reachy/output safety barrier, and enters `FINALIZING` without releasing admission. Cancel does the same after join/reconciliation. Only Task 07's successful bounded same-engine clear can call `release_terminal`; a clear defect enters `FINALIZATION_BLOCKED`. Every task creation uses the owned fresh-coroutine factory fallback, and even fallback failure remains `SAFETY_BLOCKED`. Recovery never admits a successor between barrier and clear.
 
 Each safety attempt invokes the idempotent frozen `ReachyPort.stop_all` and accepts only `type(receipt) is SafetyReceipt` with the exact active `turn_id` and all three authoritative booleans true. `playback_stopped=true` is the output-silenced proof; `motion_stopped=true` and `buffers_cleared=true` close the other Reachy effects. A raise, timeout, cancellation, malformed/subclass/wrong-turn receipt, or any false field retries at most three times with a 250 ms per-attempt bound. Timed-out safety-only tasks are cancelled, retained until terminal, and observed by a done callback; they have no authority to reopen output. Tracked-task join and budget reconciliation have separate finite bounds. A cancellation-resistant tracked task stays attached to the active turn and makes every recovery barrier fail until the task is actually terminal; a forever-hung task therefore requires process restart, whose startup global stop and prior-process reconciliation run before readiness. A timed-out budget reconciliation is cancelled/retained/observed and retains the same attempt set; a fresh owner recovery may retry the idempotent durable reconciliation, but a wedged writer likewise requires restart. Any incomplete safety, task, or budget leg atomically latches error-safe `SAFETY_BLOCKED`, retains the active turn and a bounded `SafetyBlockedRecord`, refuses `start`, `finish`, ordinary `cancel`, and late registration, and keeps durable reconciliation/background observation alive. Only `recover_safety_block` with a fresh local-owner proof may create another barrier, except the catastrophic no-outer-owner state which is explicitly restart-only. A fresh exact frozen receipt plus successful reconciliation and terminal work owned by that recovery barrier transitions to `IDLE`; older detached idempotent safety/reconciliation tasks remain callback-observed and cannot authorize or reopen a turn. A failed recovery remains latched. Normal non-cancellation terminals use the separately locked full-barrier `finish`; cancellation never falls back to it. No private safety-ack DTO or parallel output-silence authority exists.
 
@@ -1236,7 +1372,7 @@ Each safety attempt invokes the idempotent frozen `ReachyPort.stop_all` and acce
 
 Run: `uv run pytest tests/integration/test_turn_cancellation.py tests/integration/test_session_exclusivity.py tests/unit/conversation -q`
 
-Expected: PASS with sequential turns admitted only after normal finish's exact Reachy barrier, unsettled attempts rejected without ownership loss, every terminal release idempotent, cancellation effects exactly once on the success path, every injected task-factory failure falling back without skipping Reachy stop, bounded tracked-task/reconciliation hangs latched in `SAFETY_BLOCKED`, the same tracked attempts retried under explicit verified-owner recovery where safe, restart-only handling for a live cancellation-resistant task or unavailable outer owner, observed detached barrier exceptions, and no finish/cancel race admitting a new turn before the full safety/budget barrier completes.
+Expected: PASS with sequential turns admitted only after barrier, same-engine clear, and exact lease release; `FINALIZING` and both blocked states deny successors; unsettled attempts retain ownership; injected task-factory failures leak no coroutine and skip no stop; safety recovery retains admission until Task 07 clears; and no finish/cancel race admits a turn between barrier and content removal.
 
 Run: `uv run ruff check apps/core/src/tuntun_core/services/sessions apps/core/src/tuntun_core/bootstrap/lifecycle.py && uv run mypy apps/core/src/tuntun_core/services/sessions`
 
@@ -7742,7 +7878,7 @@ git commit -m "feat(providers): add explicitly budgeted OpenAI attempts"
 
 **Interfaces:**
 - Consumes: foundation `TurnInput`/`TurnOutput`, Task 01 `TurnState`/`TurnEvent`/`transition`, Task 02 coordinator, Task 04 gateway, Task 05 budget, Task 06 adapters, a bounded RAM-only `CompletedTurnAudioPort`, Foundation Task 9's fake Guest identity/scenario API, and empty memory context.
-- Produces: public `ContractConversationWorkflow.run(turn: TurnInput) -> TurnOutput`; private deterministic `LinearConversationEngine.run(turn: TurnRequest) -> TurnOutcome`; the executable Task-01 effect dispatcher for `finish_turn` and `clear_ephemeral`; `EphemeralTurnContext.put/pop/clear`; a real workflow-owned `effect_order` recorder; and the first-owned minimal FastAPI composition (`api/app.py`, `dependencies.py`, `routes/session.py`, `routes/health.py`) exposing only the simulated local session and readiness surface. `finish_turn` maps only to awaited `TurnCoordinator.finish(turn_id)` and, only after that finish barrier returns or terminates with a bounded failure, `clear_ephemeral` maps to `LinearConversationEngine.clear_ephemeral(turn_id)` on the same engine instance. Cancellation uses the awaited coordinator cancel barrier instead of finish and then clears that same engine context. Both paths always attempt content clearing, while a primary turn/barrier failure remains primary and cleanup contributes only a bounded reason. Task 14 reuses this adapter unchanged. Every later phase modifies this one app/composition root rather than assuming an anchor-only file.
+- Produces: public `ContractConversationWorkflow.run(turn: TurnInput) -> TurnOutput`; private deterministic `LinearConversationEngine.run`; the sole executable Task-01 effect dispatcher; bounded same-engine clearing; real `effect_order`; and the first FastAPI composition. Finish/cancel first returns Task 02's `FINALIZING` lease while admission remains held; the workflow then clears the exact engine context and finally releases the lease. Clear timeout/failure quarantines readiness/admission for every primary outcome, and verified recovery retries that same engine/lease before release. Unexpected outcome type/effects or any unclassified `BaseException` dispatches `INVARIANT_FAILURE` into the error-safe cancel barrier. Every task is created from a fresh coroutine factory through Task 02's owned fallback, so a failed task factory leaks no coroutine. Task 14 and Task 16 reuse this adapter unchanged.
 
 - [ ] **Step 1: Write the failing order and cleanup test**
 
@@ -7805,7 +7941,9 @@ async def test_stop_cancels_the_registered_workflow_task_before_it_can_continue(
 ) -> None:
     await coordinator.start(turn_input.turn_id)
     workflow = ContractConversationWorkflow(completed_audio, blocking_engine, coordinator)
-    workflow_task = asyncio.create_task(workflow.run(turn_input))
+    workflow_task = coordinator.spawn_owned(
+        turn_input.turn_id,lambda:workflow.run(turn_input),name="workflow_test",
+    )
     await blocking_engine.entered.wait()
 
     await coordinator.cancel(turn_input.turn_id, "physical_stop")
@@ -7824,7 +7962,9 @@ async def test_stop_during_completed_audio_consumption_never_enters_engine(
 ) -> None:
     await coordinator.start(turn_input.turn_id)
     workflow = ContractConversationWorkflow(blocking_completed_audio, engine_spy, coordinator)
-    workflow_task = asyncio.create_task(workflow.run(turn_input))
+    workflow_task = coordinator.spawn_owned(
+        turn_input.turn_id,lambda:workflow.run(turn_input),name="workflow_test",
+    )
     await blocking_completed_audio.entered.wait()
 
     await coordinator.cancel(turn_input.turn_id, "privacy_shield")
@@ -7843,7 +7983,9 @@ async def test_caller_cancellation_waits_for_coordinator_owned_safety_barrier(
 ) -> None:
     await coordinator.start(turn_input.turn_id)
     workflow = ContractConversationWorkflow(completed_audio, blocking_engine, coordinator)
-    caller = asyncio.create_task(workflow.run(turn_input))
+    caller = coordinator.spawn_owned(
+        turn_input.turn_id,lambda:workflow.run(turn_input),name="workflow_test",
+    )
     await blocking_engine.entered.wait()
 
     coordinator.hold_safety_barrier()
@@ -7875,7 +8017,9 @@ async def test_cancellation_at_every_engine_or_finalization_await_uses_safety_ba
     cancellation_boundary_case, boundary,
 ) -> None:
     case = cancellation_boundary_case(boundary)
-    caller = asyncio.create_task(case.workflow.run(case.turn))
+    caller = case.coordinator.spawn_owned(
+        case.turn.turn_id,lambda:case.workflow.run(case.turn),name="workflow_test",
+    )
     await case.boundary_entered.wait()
     caller.cancel()
     await case.coordinator.cancel_started.wait()
@@ -7892,7 +8036,9 @@ async def test_external_coordinator_cancel_winning_finish_race_is_awaited(
     external_cancel_finish_race,
 ) -> None:
     case=external_cancel_finish_race()
-    caller=asyncio.create_task(case.workflow.run(case.turn))
+    caller=case.coordinator.spawn_owned(
+        case.turn.turn_id,lambda:case.workflow.run(case.turn),name="workflow_test",
+    )
     await case.engine.entered.wait()
     case.engine.release_success()
     await case.finish_attempted.wait()
@@ -7924,6 +8070,7 @@ async def test_failed_budget_barrier_never_falls_back_to_finish_or_releases(
 import pytest
 
 from tuntun_core.domain.conversation import TurnEvent, TurnState, transition
+from tuntun_core.services.sessions.turn_coordinator import CoordinatorState
 
 
 @pytest.mark.asyncio
@@ -7949,21 +8096,24 @@ async def test_cancellation_terminal_path_uses_cancel_barrier_and_never_finish(l
 
 
 @pytest.mark.asyncio
-async def test_start_failure_plus_cleanup_failure_preserves_primary_error(engine_case):
-    engine_case.ports.start_error = PermissionError("provider_denied")
-    engine_case.ports.finish_error = RuntimeError("cleanup_failed")
-    with pytest.raises(PermissionError, match="provider_denied"):
-        await engine_case.engine.run(engine_case.turn)
-    assert engine_case.engine.ephemeral.contains(engine_case.turn.turn_id) is False
-    assert engine_case.engine.cleanup_reason_codes == ["turn_cleanup_failed"]
+async def test_start_failure_plus_cleanup_failure_is_classified_through_contract_workflow(
+    lifecycle_case,
+):
+    case=lifecycle_case("ingress_failure",clear_failure="raises")
+    output=await case.workflow.run(case.turn)
+    assert output.outcome=="failed"
+    assert case.primary_classification=="ingress_failure"
+    assert case.workflow.cleanup_reason_codes==("turn_content_clear_failed",)
+    assert case.coordinator.state is CoordinatorState.FINALIZATION_BLOCKED
 
 
 @pytest.mark.asyncio
-async def test_content_replacement_cannot_erase_start_lifecycle_state(engine_case):
-    await engine_case.engine.run(engine_case.turn)
-    assert engine_case.ports.start_calls == [engine_case.turn.turn_id]
-    assert engine_case.ports.finish_calls == [engine_case.turn.turn_id]
-    assert "start_attempted" not in engine_case.serialized_ephemeral_keys
+async def test_content_replacement_cannot_erase_start_lifecycle_state(lifecycle_case):
+    case=lifecycle_case("success")
+    await case.workflow.run(case.turn)
+    assert case.ports.start_calls == [case.turn.turn_id]
+    assert case.ports.finish_calls == [case.turn.turn_id]
+    assert "start_attempted" not in case.serialized_ephemeral_keys
 
 
 @pytest.mark.asyncio
@@ -8006,6 +8156,60 @@ async def test_task01_playback_terminal_dispatches_finish_before_ephemeral_clear
     assert output.outcome == "completed"
     assert case.workflow.effect_order[-2:] == ("finish_turn", "clear_ephemeral")
     assert case.coordinator.finish_calls == [case.turn.turn_id]
+    assert case.engine.ephemeral.contains(case.turn.turn_id) is False
+    assert case.lifecycle_events[-3:]==[
+        "coordinator.finalizing","turn.clear","coordinator.release",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_successor_is_denied_while_same_engine_clear_is_in_progress(lifecycle_case):
+    case=lifecycle_case("success",clear_failure="block")
+    caller=case.coordinator.spawn_owned(
+        case.turn.turn_id,lambda:case.workflow.run(case.turn),name="workflow_test",
+    )
+    await case.engine.clear_entered.wait()
+    assert case.coordinator.state is CoordinatorState.FINALIZING
+    with pytest.raises(RuntimeError,match="household conversation busy"):
+        await case.coordinator.start(case.next_turn_id)
+    case.engine.release_clear()
+    assert (await caller).outcome=="completed"
+    assert case.lifecycle_events[-3:]==[
+        "coordinator.finalizing","turn.clear","coordinator.release",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal",(
+    "success","denied","cancelled","timeout","privacy","error","ingress_failure",
+))
+async def test_clear_failure_quarantines_every_primary_outcome_and_denies_successor(
+    lifecycle_case,terminal,
+) -> None:
+    case=lifecycle_case(terminal,clear_failure="raises")
+    output=await case.workflow.run(case.turn)
+    assert output.outcome=="failed"
+    assert case.coordinator.state is CoordinatorState.FINALIZATION_BLOCKED
+    assert case.coordinator.active_turn_id()==case.turn.turn_id
+    with pytest.raises(RuntimeError,match="household conversation busy"):
+        await case.coordinator.start(case.next_turn_id)
+    case.engine.make_clear_succeed()
+    await case.workflow.recover_terminal_clear(case.local_owner_proof)
+    assert case.coordinator.active_turn_id() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect",(
+    "outcome_subclass","wrong_effects","unclassified_exception",
+))
+async def test_unexpected_engine_boundary_dispatches_invariant_failure_error_safe(
+    lifecycle_case,defect,
+) -> None:
+    case=lifecycle_case("success",engine_defect=defect)
+    output=await case.workflow.run(case.turn)
+    assert output.outcome=="failed"
+    assert case.workflow.terminal_state is TurnState.ERROR_SAFE
+    assert case.coordinator.cancel_calls[-1][1]=="workflow_invariant_failure"
     assert case.engine.ephemeral.contains(case.turn.turn_id) is False
 ```
 
@@ -8125,7 +8329,8 @@ class LinearConversationEngine:
 import asyncio
 from typing import Protocol
 from tuntun_contracts.ports import TurnInput, TurnOutput
-from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
+from tuntun_core.domain.conversation import TurnEvent,TurnState,transition
+from tuntun_core.services.sessions.turn_coordinator import TerminalLease,TurnCoordinator
 from tuntun_core.workflows.conversation import TurnOutcome, TurnRequest
 
 class CompletedTurnAudioPort(Protocol):
@@ -8136,20 +8341,31 @@ class ConversationEngine(Protocol):
     async def clear_ephemeral(self, turn_id) -> None: raise NotImplementedError
 
 class ContractConversationWorkflow:
-    def __init__(self, audio: CompletedTurnAudioPort, engine: ConversationEngine, coordinator: TurnCoordinator):
+    def __init__(self, audio: CompletedTurnAudioPort, engine: ConversationEngine, coordinator: TurnCoordinator,clear_timeout:float=.250):
         self._audio, self._engine, self._coordinator = audio, engine, coordinator
+        self._clear_timeout=clear_timeout
         self._cleanup_reason_codes: list[str] = []
         self._effect_order: list[str] = []
+        self._blocked_lease: TerminalLease|None=None
+        self._terminal_state=TurnState.IDLE
 
     @property
     def effect_order(self) -> tuple[str, ...]:
         return tuple(self._effect_order)
 
-    async def _complete_cancel_barrier(self, turn_id, reason: str) -> None:
+    @property
+    def cleanup_reason_codes(self)->tuple[str,...]:
+        return tuple(self._cleanup_reason_codes)
+
+    @property
+    def terminal_state(self)->TurnState:
+        return self._terminal_state
+
+    async def _complete_cancel_barrier(self, turn_id, reason: str) -> TerminalLease|None:
         """Wait through repeated caller cancellation without cancelling the owner barrier."""
-        barrier_waiter = asyncio.create_task(
-            self._coordinator.cancel(turn_id, reason),
-            name=f"workflow-cancel-barrier:{turn_id}",
+        barrier_waiter = self._coordinator.spawn_owned(
+            turn_id,lambda:self._coordinator.cancel(turn_id, reason),
+            name=f"workflow_cancel_barrier:{turn_id}",
         )
         while not barrier_waiter.done():
             try:
@@ -8160,7 +8376,47 @@ class ContractConversationWorkflow:
                 continue
         # Retrieve the exact terminal result, including SAFETY_BLOCKED. Never
         # fall back to finish when the barrier fails or remains safety-blocked.
-        barrier_waiter.result()
+        return barrier_waiter.result()
+
+    async def _bounded_clear(self,turn_id)->bool:
+        try:
+            operation=self._coordinator.spawn_cleanup_owned(
+                turn_id,lambda:self._engine.clear_ephemeral(turn_id),
+                name=f"turn_content_clear:{turn_id}",
+            )
+            waiter=self._coordinator.spawn_cleanup_owned(
+                turn_id,lambda:asyncio.wait({operation},timeout=self._clear_timeout),
+                name=f"turn_content_clear_wait:{turn_id}",
+            )
+        except BaseException:
+            if "operation" in locals():
+                operation.cancel(); self._coordinator.observe_owned(operation)
+            self._cleanup_reason_codes.append("turn_content_clear_failed")
+            return False
+        while not waiter.done():
+            try: await asyncio.shield(waiter)
+            except asyncio.CancelledError: continue
+        done,pending=waiter.result()
+        if pending:
+            operation.cancel(); self._coordinator.observe_owned(operation)
+            self._cleanup_reason_codes.append("turn_content_clear_timeout")
+            return False
+        try: operation.result()
+        except BaseException:
+            self._cleanup_reason_codes.append("turn_content_clear_failed")
+            return False
+        return True
+
+    async def recover_terminal_clear(self,proof)->None:
+        lease=self._blocked_lease
+        if type(lease) is not TerminalLease:
+            raise RuntimeError("no_terminal_clear_recovery")
+        await self._coordinator.recover_terminal_clear(lease,proof)
+        if not await self._bounded_clear(lease.turn_id):
+            await self._coordinator.quarantine_terminal_clear(lease)
+            raise RuntimeError("turn_content_clear_failed")
+        await self._coordinator.release_terminal(lease)
+        self._blocked_lease=None
 
     async def run(self, turn: TurnInput) -> TurnOutput:
         task: asyncio.Task[TurnOutcome] | None = None
@@ -8170,8 +8426,8 @@ class ContractConversationWorkflow:
             wav_bytes = await self._audio.consume_once(turn)
             return await self._engine.run(TurnRequest(turn_id=turn.turn_id, wav_bytes=wav_bytes))
         try:
-            task = asyncio.create_task(
-                execute(),
+            task = self._coordinator.spawn_owned(
+                turn.turn_id,execute,
                 name=f"conversation:{turn.turn_id}",
             )
             try:
@@ -8183,8 +8439,14 @@ class ContractConversationWorkflow:
                 cancel_reason = "workflow_cancelled"
             else:
                 outcome = await task
-                if outcome.terminal_effects != ("finish_turn", "clear_ephemeral"):
-                    raise RuntimeError("unexpected Task 01 terminal effects")
+                if type(outcome) is not TurnOutcome or outcome.terminal_effects != (
+                    "finish_turn", "clear_ephemeral",
+                ):
+                    cancel_reason="workflow_invariant_failure"
+                    self._terminal_state=transition(
+                        TurnState.THINKING,TurnEvent.INVARIANT_FAILURE,
+                    ).state
+                    raise RuntimeError("workflow_invariant_failure")
                 result = "completed" if outcome.spoken else "denied"
         except asyncio.CancelledError:
             result = "cancelled"
@@ -8194,69 +8456,58 @@ class ContractConversationWorkflow:
             cancel_reason = "workflow_timeout"
         except PermissionError:
             result = "denied"
-        except Exception:
+        except BaseException:
             result = "failed"
+            cancel_reason="workflow_invariant_failure"
+            self._terminal_state=transition(
+                self._terminal_state if self._terminal_state is not TurnState.IDLE else TurnState.THINKING,
+                TurnEvent.INVARIANT_FAILURE,
+            ).state
         finally:
             if task is not None:
                 self._coordinator.untrack_task(turn.turn_id, task)
-            barrier_failure = False
+            lease:TerminalLease|None=None
             if cancel_reason is not None:
                 self._effect_order.append("cancel_turn")
                 try:
-                    await self._complete_cancel_barrier(turn.turn_id, cancel_reason)
-                except asyncio.CancelledError:
-                    raise AssertionError("shielded cancellation barrier leaked cancellation")
+                    lease=await self._complete_cancel_barrier(turn.turn_id, cancel_reason)
                 except BaseException:
                     self._cleanup_reason_codes.append("coordinator_cancel_barrier_failed")
-                    barrier_failure = True
                     result = "failed"
             else:
                 self._effect_order.append("finish_turn")
                 try:
-                    released=await self._coordinator.finish(turn.turn_id)
+                    lease=await self._coordinator.finish(turn.turn_id)
                 except asyncio.CancelledError:
                     result = "cancelled"
                     cancel_reason = "workflow_cancelled_during_finish"
                     try:
-                        await self._complete_cancel_barrier(turn.turn_id, cancel_reason)
+                        lease=await self._complete_cancel_barrier(turn.turn_id, cancel_reason)
                     except BaseException:
                         self._cleanup_reason_codes.append("coordinator_cancel_barrier_failed")
-                        barrier_failure = True
                         result = "failed"
                 except BaseException:
-                    # Ownership was not released (including an unsettled
-                    # reservation rejection), so no terminal outcome is safe.
                     self._cleanup_reason_codes.append("coordinator_finish_failed")
-                    barrier_failure = True
                     result = "failed"
-                else:
-                    if not released:
-                        result="cancelled"
-                        cancel_reason="workflow_observed_external_cancel"
-                        try:
-                            await self._complete_cancel_barrier(turn.turn_id,cancel_reason)
-                        except BaseException:
-                            self._cleanup_reason_codes.append("coordinator_cancel_barrier_failed")
-                            barrier_failure = True
-                            result="failed"
-            # This is the literal Task-01 clear_ephemeral effect. It is issued
-            # only after the selected finish/cancel barrier terminates, and it
-            # always targets the same engine instance that ran the turn.
             self._effect_order.append("clear_ephemeral")
-            try:
-                await self._engine.clear_ephemeral(turn.turn_id)
-            except BaseException:
-                self._cleanup_reason_codes.append("turn_content_clear_failed")
-                if not barrier_failure and result == "completed":
+            clear_succeeded=await self._bounded_clear(turn.turn_id)
+            if type(lease) is TerminalLease:
+                if clear_succeeded:
+                    await self._coordinator.release_terminal(lease)
+                else:
+                    await self._coordinator.quarantine_terminal_clear(lease)
+                    self._blocked_lease=lease
                     result = "failed"
+            elif not clear_succeeded:
+                result="failed"
         return TurnOutput(turn_id=turn.turn_id, outcome=result)
 ```
 
-`start_attempted` is lifecycle control state, never transient conversation content. The linear engine keeps it outside the content dictionary. The adapter owns the only effect dispatcher: it records and awaits `finish_turn`, or the cancel barrier for cancellation, before recording and attempting `clear_ephemeral` on the same engine. No fixture synthesizes `effect_order`. A primary engine or barrier classification is preserved; clear failures add only `turn_content_clear_failed`, and only an otherwise successful turn becomes failed. A `finish=False` result means another cancellation owner won the lock; the workflow follows that same cancel barrier before clearing content. Therefore Reachy output/motion/buffer safety and budget reconciliation reach a terminal barrier before content clearing, and content clearing is still attempted on every primary-failure path.
-The adapter rejects any successful engine result whose exact Task-01 terminal effect tuple is not `("finish_turn", "clear_ephemeral")`; only after that equality does it execute those labels. Thus the observable order is produced by the real dispatcher, not copied from a fixture.
+`start_attempted` is lifecycle control state, never transient conversation content. The adapter owns the only effect dispatcher and produces `effect_order` in real code. Safety/budget reaches `FINALIZING` first while admission remains held; bounded same-engine clearing follows; coordinator release is last and is intentionally not a Task-01 content effect. Any clear failure quarantines every primary classification and requires verified same-engine recovery. Exact outcome/effect validation and all unclassified exceptions dispatch the Task-01 invariant-failure path. Every task factory passes through Task 02's fresh-coroutine fallback; there is no raw `asyncio.create_task` and no un-awaited coroutine on either factory failure.
 
 ```python
 # apps/core/src/tuntun_core/adapters/reachy/completed_audio.py
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import timedelta
@@ -8297,8 +8548,11 @@ class PersistentTurnAudioClaims:
 
 class BoundedCompletedTurnAudio:
     """Concrete RAM-only consume-once bridge used by ContractConversationWorkflow."""
-    def __init__(self, source, claims: PersistentTurnAudioClaims) -> None:
+    def __init__(self, source, claims: PersistentTurnAudioClaims,task_owner,close_timeout:float=.250) -> None:
         self._source, self._claims = source, claims
+        self._task_owner=task_owner
+        if not 0<close_timeout<=1.0: raise ValueError("invalid_completed_audio_close_timeout")
+        self._close_timeout=close_timeout
         self.cleanup_reason_codes: list[str] = []
 
     async def consume_once(self, turn: TurnInput) -> bytes:
@@ -8317,9 +8571,9 @@ class BoundedCompletedTurnAudio:
                 async for chunk in stream.chunks:
                     if not chunk or len(chunk) > 65_536:
                         raise ValueError("completed_audio_chunk_outside_bound")
-                    buffer.extend(chunk)
-                    if len(buffer) > 8_388_608:
+                    if len(buffer)+len(chunk) > 8_388_608:
                         raise ValueError("completed_audio_turn_outside_bound")
+                    buffer.extend(chunk)
                 if not buffer:
                     raise ValueError("completed_audio_empty")
                 result = bytes(buffer)
@@ -8329,7 +8583,15 @@ class BoundedCompletedTurnAudio:
             primary = error
         finally:
             try:
-                await self._source.close_completed(stream.turn_id)
+                close=self._task_owner.spawn_owned(
+                    turn.turn_id,lambda:self._source.close_completed(stream.turn_id),
+                    name=f"completed_audio_close:{turn.turn_id}",
+                )
+                done,pending=await asyncio.wait({close},timeout=self._close_timeout)
+                if pending:
+                    close.cancel(); self._task_owner.observe_owned(close)
+                    raise TimeoutError("completed_audio_close_timeout")
+                close.result()
             except BaseException:
                 close_failed = True
                 self.cleanup_reason_codes.append("completed_audio_close_failed")
@@ -8354,8 +8616,8 @@ from tuntun_core.adapters.reachy.completed_audio import BoundedCompletedTurnAudi
 
 
 @pytest.mark.asyncio
-async def test_completed_audio_is_exact_bounded_and_consume_once(turn_input, completed_audio_source, persistent_audio_claims) -> None:
-    adapter = BoundedCompletedTurnAudio(completed_audio_source, persistent_audio_claims)
+async def test_completed_audio_is_exact_bounded_and_consume_once(turn_input, completed_audio_source, persistent_audio_claims,coordinator) -> None:
+    adapter = BoundedCompletedTurnAudio(completed_audio_source, persistent_audio_claims,coordinator)
     assert await adapter.consume_once(turn_input) == completed_audio_source.expected_bytes
     with pytest.raises(PermissionError, match="completed_turn_audio_already_consumed"):
         await adapter.consume_once(turn_input)
@@ -8363,9 +8625,9 @@ async def test_completed_audio_is_exact_bounded_and_consume_once(turn_input, com
 
 
 @pytest.mark.asyncio
-async def test_wrong_device_or_oversize_chunk_denies_without_returning_content(turn_input, completed_audio_source, persistent_audio_claims) -> None:
+async def test_wrong_device_or_oversize_chunk_denies_without_returning_content(turn_input, completed_audio_source, persistent_audio_claims,coordinator) -> None:
     completed_audio_source.use_wrong_device_then_oversize_chunk()
-    adapter = BoundedCompletedTurnAudio(completed_audio_source, persistent_audio_claims)
+    adapter = BoundedCompletedTurnAudio(completed_audio_source, persistent_audio_claims,coordinator)
     with pytest.raises(PermissionError, match="binding_or_duration_invalid"):
         await adapter.consume_once(turn_input)
     assert completed_audio_source.open_streams == 0
@@ -8382,6 +8644,16 @@ async def test_every_post_open_primary_failure_still_closes_and_zeroizes(
     assert case.source.close_calls == [turn_input.turn_id]
     assert case.source.observed_buffers == [b""]
     assert case.adapter.cleanup_reason_codes == ["completed_audio_close_failed"]
+
+
+@pytest.mark.asyncio
+async def test_hung_close_is_bounded_zeroizes_and_preserves_primary(completed_audio_case,turn_input):
+    case=completed_audio_case(failure="read",close_failure="hang",close_timeout=.01)
+    with pytest.raises(case.primary_type,match=case.primary_message):
+        await case.adapter.consume_once(turn_input)
+    assert case.source.close_cancelled is True
+    assert case.source.observed_buffers==[b""]
+    assert case.adapter.cleanup_reason_codes==["completed_audio_close_failed"]
 ```
 
 ```python
@@ -8592,7 +8864,7 @@ git commit -m "feat(core): add ephemeral simulated guest conversation"
 
 **Interfaces:**
 - Consumes: Foundation Task 9's accepted `packages/testing/src/tuntun_testing/fake_reachy.py`, delivered `ReachyMini(media_backend="local")`, a local daemon API, and an opaque owner-approved core-host inventory record loaded only from fixed owner-only production files. Physical model/product strings, architecture names, purchase names, or year labels are signed/current evidence only and never authorization. The active Phase-1 household host is the owner-approved verified Darwin arm64 Mac; Intel macOS/x86_64 remains a mandatory distribution-CI target.
-- Produces: the Task-08 `FakeReachyProbe` test producer appended to `fake_reachy.py`; `CapabilityReport` with sanitized media/AEC/DoA/app-lock/controller/port/key-storage, cold-boot RTC, local SSH principal and target-interpreter qualification facts plus bounded SHA-256 acceptance fields for SSH, runtime, target-tag set, runtime inventory, and approved host inventory; `probe(reachy) -> CapabilityReport`; a closed boot-time `SecureTimeGate`; local-physical `ReachyCommissioningService`; and `ApprovedHostInventoryResolver.from_fixed_owner_files()` over canonical `/private/etc/tuntun/host-inventory/current-ref.json` and `/private/var/lib/tuntun/host-inventory/approved-records.json`. `HostInventoryRefV1` accepts only `host-inventory:[0-9a-f]{32}`. Resolution requires exactly one current, approved, `reachy_core_commissioning`-purpose record whose canonical digest binds the `LocalPhysicalProof`, requested numeric endpoint, and current generation; zero, stale, ambiguous, unapproved, wrong-purpose, proof-mismatched, or endpoint-mismatched records deny. The service resolves this record before any key generation or persistence. The owner-only file walker is fixed-path, descriptor/nofollow, exact owner/mode/inode/canonical-byte checked, with no environment/argv alternative. The sole registered `tuntun-edge = tuntun_edge.cli.main:main` dispatcher exposes only closed `reachy commission|recommission` commands; atomic `CommissioningRepository` persists the authorized numeric endpoint and separate Reachy NIC configuration. Architecture/model/year/platform strings are excluded from the authorization projection. Signed current evidence separately records the active owner-approved Darwin arm64 household host and mandatory Intel macOS/x86_64 distribution-CI receipt. Later tasks extend this one dispatcher rather than registering another executable. The shared `ReachyOperatorStateV1` includes sanitized SSH/runtime/tag/inventory/host-inventory acceptance digests, and publication requires exact equality with the accepted `CapabilityReport`, resolver record, endpoint, and commissioning generation. The explicit delivered-hardware test publishes it atomically only after all assertions pass. This task also owns `ReachyOperatorReader.from_fixed_owner_file()` and the `tuntunctl reachy` commands described below. Reachy client-TLS and Ed25519 frame-signing private keys are generated on Reachy; no private or symmetric key bytes cross the ceremony boundary.
+- Produces: a complete `ProbeSource`/`LocalReachyCapabilityAdapter`, sanitized raw `CapabilityReport`, and a distinct `AcceptedCapabilityReportV1` whose digest binds the raw-report digest to SSH/runtime/tag/inventory acceptances, opaque approved-host receipt, endpoint, and commissioning generation. `ApprovedHostInventoryResolver.from_fixed_owner_files()` uses fixed nofollow owner-only canonical current-record/public-key files; it verifies the owner Ed25519 signature, exact current opaque ref, validity, purpose, approval, proof/endpoint commitments and generation before any key generator is called. `LocalPhysicalProof` carries the opaque ref and record commitment. The Mac persists the signed generation-bound `ApprovedHostReceiptV1` in endpoint, commissioning, and operator state; startup re-resolves and revalidates it before loading keys/readiness. Reachy receives only that signed opaque receipt, never the raw record/evidence/model/platform/architecture. Missing, stale, ambiguous, unapproved, wrong-purpose, mismatched, invalid-signature, or startup-drift records cause zero keygen and no readiness. Active Darwin arm64 and mandatory Intel distribution facts remain signed evidence only.
 
 - [ ] **Step 1: Write a fake-hardware probe test that rejects identifiers**
 
@@ -8672,6 +8944,32 @@ def test_authorization_projection_excludes_architecture_and_product_facts(
         assert forbidden not in authority
     assert record.evidence.active_household_target == "darwin-arm64"
     assert "macos-x86_64" in record.evidence.distribution_support_targets
+
+
+@pytest.mark.parametrize("defect",(
+    "missing","stale","ambiguous","unapproved","wrong_purpose",
+    "physical_proof_mismatch","endpoint_mismatch","generation_mismatch",
+    "record_commitment_mismatch","invalid_owner_signature",
+))
+def test_commissioning_resolves_authority_before_any_key_generation(
+    approved_inventory_case,defect,
+) -> None:
+    case=approved_inventory_case(defect)
+    with pytest.raises(PermissionError,match="approved_host_inventory_invalid"):
+        case.service.commission_local(case.local_physical_proof)
+    assert case.key_generation_calls==0
+    assert case.repository.has_current() is False
+
+
+def test_startup_revalidates_persisted_receipt_before_loading_keys(approved_inventory_case):
+    case=approved_inventory_case("valid")
+    state=case.service.commission_local(case.local_physical_proof)
+    case.owner_records.rotate_or_revoke_current()
+    restarted=case.service.reopen()
+    with pytest.raises(PermissionError,match="approved_host_inventory_invalid"):
+        restarted.resume_current_activation()
+    assert restarted.key_load_calls==0
+    assert restarted.ready is False
 ```
 
 ```python
@@ -8704,46 +9002,270 @@ class ApprovedHostRecordV1(ContractModel):
     physical_proof_commitment: Commitment
     endpoint_commitment: Commitment
     commissioning_generation: Annotated[int, Field(ge=1)]
+    record_commitment: Commitment
     evidence: HostArchitectureEvidenceV1
+
+
+class ApprovedHostReceiptV1(ContractModel):
+    """Opaque generation-bound authority safe to deliver to Reachy/edge."""
+    inventory_ref: OpaqueHostInventoryRef
+    purpose: Literal["reachy_core_commissioning"]
+    record_commitment: Commitment
+    physical_proof_commitment: Commitment
+    endpoint_commitment: Commitment
+    commissioning_generation: Annotated[int,Field(ge=1)]
+    signer_key_id: Annotated[str,Field(pattern=r"^owner-host-inventory-[0-9a-f]{16}$")]
+    signature_b64: Annotated[str,Field(pattern=r"^[A-Za-z0-9_-]{86}$")]
 ```
 
 ```python
 # packages/contracts/src/tuntun_contracts/__init__.py (Task 08 exports)
 from tuntun_contracts.host_inventory import (
-    ApprovedHostRecordV1, HostArchitectureEvidenceV1, HostInventoryRefV1,
+    ApprovedHostReceiptV1,ApprovedHostRecordV1,HostArchitectureEvidenceV1,HostInventoryRefV1,
 )
 from tuntun_contracts.reachy_operator import ReachyOperatorStateV1
 from tuntun_contracts.reachy_time import ReachySecureTimeReceiptV1
 
 __all__ += (
-    "ApprovedHostRecordV1", "HostArchitectureEvidenceV1", "HostInventoryRefV1",
+    "ApprovedHostReceiptV1","ApprovedHostRecordV1","HostArchitectureEvidenceV1","HostInventoryRefV1",
     "ReachyOperatorStateV1", "ReachySecureTimeReceiptV1",
 )
 ```
 
-`tests/contract/test_v1_types_and_ports.py` adds all five exported Task-08 DTOs to its closed public-schema registry and proves `extra="forbid"`, frozen instances, bounded canonical JSON, and rejection of subclasses. `tests/fixtures/reachy_commissioning.py` is the sole producer for `commissioner`, `endpoint_request`, `commissioning_state_case`, `local_physical_proof`, `deployment_inventory`, `approved_inventory_case`, and all ceremony dependency fakes; `tests/conftest.py` registers it through `pytest_plugins`. No commissioning test relies on an undeclared fixture.
+`tests/contract/test_v1_types_and_ports.py` adds all six exported Task-08 DTOs to its closed public-schema registry and proves `extra="forbid"`, frozen instances, bounded canonical JSON, and rejection of subclasses. `tests/fixtures/reachy_commissioning.py` is the sole producer for `commissioner`, `endpoint_request`, `commissioning_state_case`, `local_physical_proof`, `deployment_inventory`, `approved_inventory_case`, and all ceremony dependency fakes; `tests/conftest.py` registers it through `pytest_plugins`. No commissioning test relies on an undeclared fixture.
 
 ```python
 # apps/edge/src/tuntun_edge/transport/host_inventory.py
+import base64,json,os,stat
+import hashlib,hmac
+from dataclasses import asdict,dataclass,is_dataclass
+from pathlib import Path
+from typing import Literal
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,Ed25519PublicKey
+from pydantic import Field
+from tuntun_contracts.base import Commitment,ContractModel
+from tuntun_contracts.host_inventory import ApprovedHostReceiptV1,ApprovedHostRecordV1,HostInventoryRefV1
+
+def canonical_bytes(value)->bytes:
+    payload=(value.model_dump(mode="json") if hasattr(value,"model_dump")
+             else asdict(value) if is_dataclass(value) else value)
+    return json.dumps(
+        payload,sort_keys=True,separators=(",",":"),ensure_ascii=True,
+        default=lambda item:item.model_dump(mode="json"),
+    ).encode("ascii")
+
+def require_bounded_json(value,depth=0):
+    if depth>8: raise PermissionError("approved_host_inventory_invalid")
+    if type(value) is dict:
+        if len(value)>256: raise PermissionError("approved_host_inventory_invalid")
+        for key,item in value.items():
+            if type(key) is not str or not key or len(key)>96: raise PermissionError("approved_host_inventory_invalid")
+            require_bounded_json(item,depth+1)
+    elif type(value) is list:
+        if len(value)>256: raise PermissionError("approved_host_inventory_invalid")
+        for item in value: require_bounded_json(item,depth+1)
+    elif type(value) is str:
+        if len(value)>4096: raise PermissionError("approved_host_inventory_invalid")
+    elif type(value) not in (int,bool,type(None)):
+        raise PermissionError("approved_host_inventory_invalid")
+
+def compare_commitment(left,right)->bool:
+    return type(left) is Commitment and type(right) is Commitment and hmac.compare_digest(
+        canonical_bytes(left),canonical_bytes(right),
+    )
+
+class HostInventoryCommitter:
+    KEY="/private/var/lib/tuntun/host-inventory/commitment-hmac.key"
+    def __init__(self,key): self._key=key
+    @classmethod
+    def from_fixed_owner_file(cls):
+        return cls(OwnerOnlyBytes(cls.KEY,expected_uid=0,mode=0o600,max_bytes=32).read())
+    def commit(self,purpose,value)->Commitment:
+        framed=b"TUNTUN-HOST-INVENTORY-V1\0"+purpose.encode("ascii")+b"\0"+canonical_bytes(value)
+        digest=hmac.new(self._key,framed,hashlib.sha256).digest()
+        return Commitment(
+            algorithm="HMAC-SHA-256",key_id="host-inventory-hmac-v1",
+            value_b64=base64.b64encode(digest).decode("ascii"),
+        )
+
+class SignedApprovedHostRecordSet(ContractModel):
+    records: tuple[ApprovedHostRecordV1,...]
+    signature_b64: str=Field(pattern=r"^[A-Za-z0-9_-]{86}$")
+    @property
+    def signature(self): return base64.urlsafe_b64decode(self.signature_b64+"==")
+    def canonical_payload(self): return canonical_bytes({"records":[r.model_dump(mode="json") for r in self.records]})
+
+class UnsignedApprovedHostReceipt(ContractModel):
+    inventory_ref: str
+    purpose: Literal["reachy_core_commissioning"]
+    record_commitment: Commitment
+    physical_proof_commitment: Commitment
+    endpoint_commitment: Commitment
+    commissioning_generation: int
+    signer_key_id: str
+    def canonical_bytes(self): return canonical_bytes(self)
+
+@dataclass(frozen=True,slots=True)
+class ResolvedApprovedHostRecord:
+    record: ApprovedHostRecordV1
+    physical_proof_commitment: Commitment
+    endpoint_commitment: Commitment
+    generation: int
+    @classmethod
+    def from_verified(cls,record,proof_commitment,endpoint_commitment,generation):
+        return cls(record,proof_commitment,endpoint_commitment,generation)
+    def unsigned_receipt(self,*,signer_key_id):
+        return UnsignedApprovedHostReceipt(
+            inventory_ref=self.record.inventory_ref,purpose=self.record.purpose,
+            record_commitment=self.record.record_commitment,
+            physical_proof_commitment=self.physical_proof_commitment,
+            endpoint_commitment=self.endpoint_commitment,
+            commissioning_generation=self.generation,signer_key_id=signer_key_id,
+        )
+    def verifies_receipt(self,receipt,public_key):
+        if type(receipt) is not ApprovedHostReceiptV1: return False
+        unsigned=self.unsigned_receipt(signer_key_id=receipt.signer_key_id)
+        if unsigned.model_dump()!=receipt.model_dump(exclude={"signature_b64"}): return False
+        try: public_key.verify(base64.urlsafe_b64decode(receipt.signature_b64+"=="),unsigned.canonical_bytes())
+        except BaseException: return False
+        return True
+
+class OwnerOnlyBytes:
+    def __init__(self,path,*,expected_uid,mode,max_bytes):
+        self.path=Path(path); self.expected_uid=expected_uid
+        self.mode,self.max_bytes=mode,max_bytes
+    def _open_fixed(self):
+        if not self.path.is_absolute() or ".." in self.path.parts:
+            raise PermissionError("approved_host_inventory_invalid")
+        parent=os.open("/",os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            for component in self.path.parts[1:-1]:
+                child=os.open(component,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+                meta=os.fstat(child)
+                if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid!=0
+                    or stat.S_IMODE(meta.st_mode)&0o022):
+                    os.close(child); raise PermissionError("approved_host_inventory_invalid")
+                os.close(parent); parent=child
+            return os.open(self.path.name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=parent)
+        finally: os.close(parent)
+    def read(self):
+        fd=self._open_fixed()
+        try:
+            before=os.fstat(fd); data=os.read(fd,self.max_bytes+1); after=os.fstat(fd)
+            if (before!=(after) or not stat.S_ISREG(before.st_mode)
+                or before.st_uid!=self.expected_uid
+                or stat.S_IMODE(before.st_mode)!=self.mode
+                or not data or len(data)>self.max_bytes):
+                raise PermissionError("approved_host_inventory_invalid")
+            return data
+        finally: os.close(fd)
+
+class OwnerOnlyCanonicalJson(OwnerOnlyBytes):
+    def __init__(self,path,*,expected_uid,mode):
+        super().__init__(path,expected_uid=expected_uid,mode=mode,max_bytes=262_144)
+    def read_canonical(self):
+        raw=self.read()
+        def pairs(items):
+            if len({key for key,_ in items})!=len(items):
+                raise ValueError("duplicate inventory key")
+            return dict(items)
+        value=json.loads(raw,object_pairs_hook=pairs)
+        require_bounded_json(value)
+        canonical=json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii")
+        if raw!=canonical: raise PermissionError("approved_host_inventory_invalid")
+        return raw
+
+class ApprovedHostReceiptSigner:
+    PRIVATE_KEY="/private/var/lib/tuntun/host-inventory/owner-receipt-ed25519.key"
+    KEY_ID="owner-host-inventory-0000000000000001"
+
+    def __init__(self,key): self._key=key
+
+    @classmethod
+    def from_fixed_owner_file(cls):
+        raw=OwnerOnlyBytes(cls.PRIVATE_KEY,expected_uid=0,mode=0o600,max_bytes=32).read()
+        return cls(Ed25519PrivateKey.from_private_bytes(raw))
+
+    def issue(self,resolved):
+        unsigned=resolved.unsigned_receipt(signer_key_id=self.KEY_ID)
+        signature=self._key.sign(unsigned.canonical_bytes())
+        return ApprovedHostReceiptV1.model_validate(
+            unsigned.model_dump()|{"signature_b64":base64.urlsafe_b64encode(signature).decode().rstrip("=")},
+        )
+
+
 class ApprovedHostInventoryResolver:
     CURRENT = "/private/etc/tuntun/host-inventory/current-ref.json"
     RECORDS = "/private/var/lib/tuntun/host-inventory/approved-records.json"
+    OWNER_PUBLIC_KEY = "/private/etc/tuntun/host-inventory/owner-ed25519.pub"
+
+    def __init__(self,current,records,owner_public_key,committer,*,clock):
+        self._current,self._records,self._clock=current,records,clock
+        self._owner_key=Ed25519PublicKey.from_public_bytes(owner_public_key.read())
+        self._committer=committer
+
+    def current_reference(self):
+        return HostInventoryRefV1.model_validate_json(self._current.read_canonical())
+
+    def current_record_commitment(self,reference):
+        if type(reference) is not HostInventoryRefV1 or reference!=self.current_reference():
+            raise PermissionError("approved_host_inventory_invalid")
+        envelope=SignedApprovedHostRecordSet.model_validate_json(self._records.read_canonical())
+        self._owner_key.verify(envelope.signature,envelope.canonical_payload())
+        matches=tuple(r for r in envelope.records if r.inventory_ref==reference.value)
+        if len(matches)!=1: raise PermissionError("approved_host_inventory_invalid")
+        return matches[0].record_commitment
 
     @classmethod
     def from_fixed_owner_files(cls):
-        return cls(OwnerOnlyCanonicalJson(cls.CURRENT), OwnerOnlyCanonicalJson(cls.RECORDS))
+        return cls(
+            OwnerOnlyCanonicalJson(cls.CURRENT,expected_uid=0,mode=0o600),
+            OwnerOnlyCanonicalJson(cls.RECORDS,expected_uid=0,mode=0o600),
+            OwnerOnlyBytes(cls.OWNER_PUBLIC_KEY,expected_uid=0,mode=0o600,max_bytes=64),
+            HostInventoryCommitter.from_fixed_owner_file(),
+            clock=SystemClock(),
+        )
 
     def resolve_for_commissioning(self, reference, proof, endpoint, generation):
-        candidates = self._current_candidates(reference)
-        valid = tuple(record for record in candidates if self._is_exact_current_binding(
-            record, proof, endpoint, generation,
+        from tuntun_edge.transport.commissioning import LocalPhysicalProof,ReachyCommissioningRequest
+        if (type(reference) is not HostInventoryRefV1
+            or type(proof) is not LocalPhysicalProof
+            or type(endpoint) is not ReachyCommissioningRequest
+            or type(generation) is not int):
+            raise PermissionError("approved_host_inventory_invalid")
+        current=HostInventoryRefV1.model_validate_json(self._current.read_canonical())
+        if current!=reference or proof.inventory_ref!=reference.value:
+            raise PermissionError("approved_host_inventory_invalid")
+        envelope=SignedApprovedHostRecordSet.model_validate_json(self._records.read_canonical())
+        self._owner_key.verify(envelope.signature,envelope.canonical_payload())
+        candidates=tuple(r for r in envelope.records if r.inventory_ref==reference.value)
+        now=self._clock.epoch_seconds()
+        valid=tuple(record for record in candidates if (
+            record.approved is True
+            and record.purpose=="reachy_core_commissioning"
+            and record.valid_from_epoch_s<=now<=record.valid_until_epoch_s
+            and record.commissioning_generation==generation
+            and compare_commitment(record.physical_proof_commitment,self._committer.commit("physical-proof",proof))
+            and compare_commitment(record.endpoint_commitment,self._committer.commit("endpoint",endpoint))
+            and compare_commitment(record.record_commitment,proof.record_commitment)
         ))
         if len(valid) != 1:
             raise PermissionError("approved_host_inventory_invalid")
-        return ResolvedApprovedHostRecord(valid[0])
+        return ResolvedApprovedHostRecord.from_verified(
+            valid[0],self._committer.commit("physical-proof",proof),
+            self._committer.commit("endpoint",endpoint),generation,
+        )
+
+    def revalidate_receipt(self,receipt,proof,endpoint,generation):
+        resolved=self.resolve_for_commissioning(
+            HostInventoryRefV1(value=receipt.inventory_ref),proof,endpoint,generation,
+        )
+        if not resolved.verifies_receipt(receipt,self._owner_key):
+            raise PermissionError("approved_host_inventory_invalid")
+        return resolved
 ```
 
-The omitted private predicates are implemented in this file, not injected by tests: they require exact `type` identities for DTOs, approval/purpose/current-time equality, constant-time commitment equality for physical proof and endpoint canonical bytes, the current generation, and the current opaque reference file. `ResolvedApprovedHostRecord.authorization_bytes` contains only opaque references, commitments, purpose, approval, validity and generation; its separately signed `evidence` is not consulted for authorization.
+`OwnerOnlyCanonicalJson`, `OwnerOnlyBytes`, `SignedApprovedHostRecordSet`, `ResolvedApprovedHostRecord.from_verified`, canonical commitment functions, constant-time comparisons, and the Ed25519 verification/signing receipt implementation are all concrete definitions in this file; none are fixture-injected or omitted predicates. Reads use `openat`/`O_NOFOLLOW`, fstat before/after, exact root owner/mode/regular-file identity, byte/depth/count bounds, duplicate-key rejection and canonical re-encoding. `authorization_bytes` and `ApprovedHostReceiptV1` contain only opaque refs, commitments, purpose, validity, generation and signature metadata; separately signed architecture evidence is never consulted for authorization.
 
 ```python
 # tests/hardware/test_reachy_capabilities_live.py
@@ -8763,18 +9285,21 @@ def test_real_local_reachy_is_probed_and_operator_acceptance_is_published(
     if os.environ.get("TUNTUN_ALLOW_REACHY_HARDWARE") != "1":
         pytest.skip("explicit delivered-hardware opt-in required")
     with ReachyMini(media_backend="local") as reachy:
-        report = probe(LocalReachyCapabilityAdapter(reachy))
-    assert report.stop_during_playback_tested is True
-    assert report.competing_controller_detectable is True
+        raw_report = probe(LocalReachyCapabilityAdapter(reachy))
+    assert raw_report.stop_during_playback_tested is True
+    assert raw_report.competing_controller_detectable is True
+    assert "acceptance_sha256" not in raw_report.model_fields
+    accepted = live_commissioning_acceptance.accept(raw_report)
     for field in (
         "ssh_acceptance_sha256", "runtime_acceptance_sha256",
-        "target_tag_set_sha256", "runtime_inventory_sha256",
-        "host_inventory_acceptance_sha256",
+        "target_tag_set_sha256", "runtime_inventory_sha256", "endpoint_sha256",
     ):
-        assert len(getattr(report, field)) == 64
-    published = live_commissioning_acceptance.publish(report)
-    assert published.acceptance_sha256 == report.acceptance_sha256
-    assert published.host_inventory_acceptance_sha256 == report.host_inventory_acceptance_sha256
+        assert len(getattr(accepted, field)) == 64
+    assert accepted.raw_capability_report_sha256==raw_report.canonical_sha256()
+    assert accepted.approved_host_receipt==live_commissioning_acceptance.persisted_receipt
+    published = live_commissioning_acceptance.publish(accepted)
+    assert published.accepted_capability==accepted
+    assert published.approved_host_receipt==accepted.approved_host_receipt
 ```
 
 ```python
@@ -8784,17 +9309,44 @@ class LocalReachyCapabilityAdapter:
     def __init__(self, reachy) -> None:
         self._reachy = reachy
 
-    def media_capabilities(self):
-        return self._reachy.media.get_capabilities()
+    def __getattr__(self,name):
+        raise AttributeError("unregistered Reachy probe fact")
 
-    def stop_during_playback(self):
-        return self._reachy.stop_all()
-
-    def controller_state(self):
-        return self._reachy.get_controller_state()
+    @property
+    def daemon_version(self): return exact_semver(self._reachy.daemon.version())
+    @property
+    def sdk_version(self): return exact_semver(importlib.metadata.version("reachy-mini"))
+    @property
+    def input_rate_hz(self): return exact_int(self._reachy.media.input_format().rate)
+    @property
+    def input_channels(self): return exact_int(self._reachy.media.input_format().channels)
+    @property
+    def output_rate_hz(self): return exact_int(self._reachy.media.output_format().rate)
+    @property
+    def output_channels(self): return exact_int(self._reachy.media.output_format().channels)
+    @property
+    def aec_available(self): return exact_bool(self._reachy.media.aec_available())
+    @property
+    def doa_available(self): return exact_bool(self._reachy.media.doa_available())
+    @property
+    def daemon_ports(self): return exact_ports(self._reachy.daemon.bound_ports())
+    @property
+    def secure_key_storage_available(self): return exact_bool(keyring_probe())
+    @property
+    def managed_app_lock_available(self): return exact_bool(managed_app_lock_probe())
+    @property
+    def competing_controller_detectable(self): return exact_bool(self._reachy.daemon.controller_lock_test())
+    @property
+    def stop_during_playback_tested(self): return exact_bool(run_bounded_stop_playback_probe(self._reachy))
+    @property
+    def rtc_available(self): return exact_bool(read_cold_boot_receipt().rtc_available)
+    @property
+    def rtc_cold_boot_retains_utc(self): return exact_bool(read_cold_boot_receipt().retains_utc)
+    @property
+    def rtc_max_drift_seconds_30d(self): return exact_optional_float(read_cold_boot_receipt().drift_30d)
 ```
 
-The adapter uses only methods verified against the delivered SDK during the isolated RED run; if the installed SDK exposes different names, Task 08 updates this concrete adapter and its fake parity test rather than weakening or mocking the live gate.
+The imported helpers above are concrete bounded implementations in `local_adapter.py`: exact-type validators, the completed-playback stop probe, owner-only cold-boot receipt reader, key-store/app-lock probes and installed-SDK metadata lookup. A fake-parity test enumerates every `ProbeSource` member and fails if either fake or live adapter omits one. The isolated RED run records the delivered SDK call surface; if it differs, this adapter is updated before the live gate rather than mocked or left as pseudocode.
 
 ```python
 # tests/security/test_reachy_endpoint_commissioning.py
@@ -8810,6 +9362,27 @@ def test_commissioning_persists_exact_numeric_endpoint_owner_only(commissioner, 
     assert endpoint.server_ip_sans == (endpoint.core_ipv4,)
     assert commissioner.persisted_mode == 0o600
     assert commissioner.persisted_endpoint == endpoint
+    assert commissioner.persisted_state.approved_host_receipt==endpoint.approved_host_receipt
+
+
+def test_edge_receives_only_signed_generation_bound_opaque_host_receipt(commissioner,endpoint_request):
+    endpoint=commissioner.commission(endpoint_request)
+    payload=commissioner.ceremony.observed_reachy_payload
+    assert payload.approved_host_receipt==endpoint.approved_host_receipt
+    encoded=payload.canonical_bytes().lower()
+    for forbidden in (b"evidence",b"darwin",b"arm64",b"x86_64",b"intel",b"macbook"):
+        assert forbidden not in encoded
+    assert payload.approved_host_receipt.commissioning_generation==endpoint.generation
+
+
+def test_raw_probe_digest_and_accepted_projection_are_distinct_and_exact(delivered_reachy_gate):
+    raw=delivered_reachy_gate.raw_report()
+    accepted=delivered_reachy_gate.accept(raw)
+    assert accepted.raw_capability_report_sha256==raw.canonical_sha256()
+    assert accepted.endpoint_sha256==delivered_reachy_gate.endpoint.canonical_sha256()
+    assert accepted.commissioning_generation==delivered_reachy_gate.endpoint.generation
+    assert accepted.approved_host_receipt==delivered_reachy_gate.endpoint.approved_host_receipt
+    assert not any(name.endswith("acceptance_sha256") for name in raw.model_fields)
 
 
 def test_endpoint_ip_san_inventory_is_exactly_one_current_core_address(endpoint_request) -> None:
@@ -9145,6 +9718,8 @@ class FakeReachyProbe:
 
 ```python
 # apps/edge/src/tuntun_edge/reachy/probe.py
+import hashlib
+import json
 from typing import Annotated, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -9188,6 +9763,14 @@ class CapabilityReport(BaseModel):
     rtc_cold_boot_retains_utc: bool
     rtc_max_drift_seconds_30d: float | None = Field(default=None,ge=0,le=300)
     rtc_qualified: bool
+
+    def canonical_sha256(self)->str:
+        return hashlib.sha256(
+            json.dumps(
+                self.model_dump(mode="json"),sort_keys=True,separators=(",",":"),
+                ensure_ascii=True,
+            ).encode("ascii"),
+        ).hexdigest()
 
     @field_validator("daemon_ports")
     @classmethod
@@ -9406,6 +9989,7 @@ from ipaddress import IPv4Address, IPv4Network
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from tuntun_contracts.host_inventory import ApprovedHostReceiptV1
 
 
 MacAddress = Annotated[
@@ -9438,6 +10022,7 @@ class ReachyCoreEndpointV1(BaseModel):
     hmac_key_generation: int = Field(ge=1)
     hmac_key_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     dhcp_reservation_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approved_host_receipt: ApprovedHostReceiptV1
 
     @field_validator("core_ipv4")
     @classmethod
@@ -9667,12 +10252,16 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey,X2
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.x509.oid import NameOID
 from pydantic import BaseModel,ConfigDict,Field,field_validator
+from tuntun_contracts.base import Commitment
+from tuntun_contracts.host_inventory import ApprovedHostReceiptV1,HostInventoryRefV1
 
 
 class CommissioningStateV1(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     schema_version: Literal["tuntun.reachy-commissioning-state.v1"]
     endpoint: ReachyCoreEndpointV1
+    local_physical_proof: "LocalPhysicalProof"
+    approved_host_receipt: ApprovedHostReceiptV1
     revoked_key_ids: Annotated[tuple[str, ...],Field(min_length=0,max_length=4)] = ()
     revoked_certificate_sha256: Annotated[tuple[str, ...],Field(min_length=0,max_length=2)] = ()
 
@@ -9701,11 +10290,45 @@ class CommissioningRepositoryPort(Protocol):
 
 
 @dataclass(frozen=True,slots=True)
+class ReachyCommissioningRequest:
+    core_ipv4: IPv4Address
+    core_link_address: str
+    household_ca_sha256: str
+    server_leaf_sha256: str
+    server_key_id: str
+    dhcp_reservation_receipt_sha256: str
+    core_hmac_agreement_public_key: bytes
+
+    def to_endpoint(self,*,generation:int,approved_host_receipt,**generated):
+        return ReachyCoreEndpointV1(
+            schema_version="tuntun.reachy-core-endpoint.v1",generation=generation,
+            certificate_generation=generation,server_key_generation=generation,
+            trust_digest_generation=generation,core_ipv4=self.core_ipv4,
+            core_link_address=self.core_link_address,port=7443,
+            household_ca_sha256=self.household_ca_sha256,
+            server_leaf_sha256=self.server_leaf_sha256,server_key_id=self.server_key_id,
+            server_ip_sans=(self.core_ipv4,),
+            dhcp_reservation_receipt_sha256=self.dhcp_reservation_receipt_sha256,
+            approved_host_receipt=approved_host_receipt,**generated,
+        )
+
+
+@dataclass(frozen=True,slots=True)
 class LocalPhysicalProof:
     local_tty: bool
     ssh_host_key_verified: bool
     one_time_code_verified: bool
     dhcp_reservations_verified: bool
+    inventory_ref: str
+    record_commitment: Commitment
+
+    def __post_init__(self):
+        if (any(type(value) is not bool for value in (
+                self.local_tty,self.ssh_host_key_verified,
+                self.one_time_code_verified,self.dhcp_reservations_verified,
+            )) or type(self.inventory_ref) is not str
+            or type(self.record_commitment) is not Commitment):
+            raise ValueError("invalid_local_physical_proof")
 
 
 @dataclass(frozen=True,slots=True)
@@ -9791,9 +10414,11 @@ class ReachyPrivateMaterialGenerator:
 
 
 class ReachyCommissioningService:
-    def __init__(self,repository:CommissioningRepositoryPort,generator,issuer,request_factory) -> None:
+    def __init__(self,repository,generator,issuer,request_factory,inventory_resolver,receipt_signer) -> None:
         self._repository,self._generator=repository,generator
         self._issuer,self._request_factory=issuer,request_factory
+        self._inventory=inventory_resolver
+        self._receipt_signer=receipt_signer
 
     def _require_local(self,proof:LocalPhysicalProof) -> None:
         if not all((proof.local_tty,proof.ssh_host_key_verified,
@@ -9804,21 +10429,29 @@ class ReachyCommissioningService:
         self._require_local(proof)
         if self._repository.has_current():
             raise PermissionError("already_commissioned_use_recommission")
-        return self._replace(None,1)
+        return self._replace(None,1,proof)
 
     def recommission_local(self,proof:LocalPhysicalProof) -> CommissioningStateV1:
         self._require_local(proof)
         current=self._repository.require_current()
-        return self._replace(current,current.endpoint.generation+1)
+        return self._replace(current,current.endpoint.generation+1,proof)
 
     def resume_current_activation(self) -> CommissioningStateV1:
         """Required startup gate; activation is idempotent and generation-bound."""
         state=self._repository.require_current()
+        self._inventory.revalidate_receipt(
+            state.approved_host_receipt,state.local_physical_proof,
+            state.endpoint,state.endpoint.generation,
+        )
         self._issuer.activate_staged_generation(state.endpoint.generation,state.endpoint)
         return state
 
-    def _replace(self,current:CommissioningStateV1|None,generation:int) -> CommissioningStateV1:
+    def _replace(self,current:CommissioningStateV1|None,generation:int,proof:LocalPhysicalProof) -> CommissioningStateV1:
         request=self._request_factory.current_rfc1918_request()
+        resolved=self._inventory.resolve_for_commissioning(
+            HostInventoryRefV1(value=proof.inventory_ref),proof,request,generation,
+        )
+        approved_host_receipt=self._receipt_signer.issue(resolved)
         generated=self._generator.generate(
             generation,request.core_hmac_agreement_public_key,
         )
@@ -9836,6 +10469,7 @@ class ReachyCommissioningService:
                 raise PermissionError("commissioning_hmac_derivation_mismatch")
             endpoint=request.to_endpoint(
                 generation=generation,
+                approved_host_receipt=approved_host_receipt,
                 # TLS peers fingerprint the wire DER leaf, never PEM container
                 # bytes whose wrapping/line endings are not identity.
                 client_certificate_sha256=hashlib.sha256(
@@ -9864,6 +10498,8 @@ class ReachyCommissioningService:
             state=CommissioningStateV1(
                 schema_version="tuntun.reachy-commissioning-state.v1",
                 endpoint=endpoint,
+                local_physical_proof=proof,
+                approved_host_receipt=approved_host_receipt,
                 revoked_key_ids=revoked_ids,revoked_certificate_sha256=revoked_certs,
             )
             self._repository.replace_atomic(state)
@@ -9954,9 +10590,14 @@ RFC1918=(
 )
 
 
-class ReachyAcceptedCapabilityV1(ContractModel):
-    capability_report_sha256: str=Field(pattern=r"^[0-9a-f]{64}$")
+class AcceptedCapabilityReportV1(ContractModel):
+    raw_capability_report_sha256: str=Field(pattern=r"^[0-9a-f]{64}$")
     acceptance_receipt_sha256: str=Field(pattern=r"^[0-9a-f]{64}$")
+    ssh_acceptance_sha256: str=Field(pattern=r"^[0-9a-f]{64}$")
+    runtime_acceptance_sha256: str=Field(pattern=r"^[0-9a-f]{64}$")
+    approved_host_receipt: ApprovedHostReceiptV1
+    endpoint_sha256: str=Field(pattern=r"^[0-9a-f]{64}$")
+    commissioning_generation: int=Field(ge=1)
     sdk_version: str=Field(pattern=r"^[0-9]+[.][0-9]+[.][0-9]+$")
     daemon_version: str=Field(pattern=r"^[0-9]+[.][0-9]+[.][0-9]+$")
     ssh_username: str=Field(pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
@@ -9985,7 +10626,8 @@ class ReachyOperatorStateV1(ContractModel):
     core_ipv4: IPv4Address
     pinned_ssh_host_key_sha256: str=Field(pattern=r"^[0-9a-f]{64}$")
     dhcp_receipt_sha256: str=Field(pattern=r"^[0-9a-f]{64}$")
-    accepted_capability: ReachyAcceptedCapabilityV1|None
+    approved_host_receipt: ApprovedHostReceiptV1
+    accepted_capability: AcceptedCapabilityReportV1|None
 
     @model_validator(mode="after")
     def exact_distinct_rfc1918_hosts(self):
@@ -9993,7 +10635,9 @@ class ReachyOperatorStateV1(ContractModel):
             or not any(self.reachy_ipv4 in network for network in RFC1918)
             or not any(self.core_ipv4 in network for network in RFC1918)
             or (self.accepted_capability is not None
-                and self.ssh_username!=self.accepted_capability.ssh_username)):
+                and (self.ssh_username!=self.accepted_capability.ssh_username
+                     or self.approved_host_receipt!=self.accepted_capability.approved_host_receipt
+                     or self.commissioning_generation!=self.accepted_capability.commissioning_generation))):
             raise ValueError("operator endpoints must be distinct RFC1918 hosts")
         return self
 ```
@@ -10219,15 +10863,18 @@ from tuntun_edge.transport.commissioning import LocalPhysicalProof
 
 def run(
     args,service,host_key_verifier,physical_code_verifier,dhcp_verifier,
-    physical_code:str,
+    inventory_resolver,physical_code:str,
 ) -> int:
     if not sys.stdin.isatty() or os.environ.get("SSH_CONNECTION"):
         raise PermissionError("local_physical_commissioning_required")
+    reference=inventory_resolver.current_reference()
     proof=LocalPhysicalProof(
         local_tty=True,
         ssh_host_key_verified=host_key_verifier.verify_pinned(args.ssh_host_key_sha256),
         one_time_code_verified=physical_code_verifier.verify_once(physical_code),
         dhcp_reservations_verified=dhcp_verifier.verify_receipts(tuple(args.dhcp_receipt)),
+        inventory_ref=reference.value,
+        record_commitment=inventory_resolver.current_record_commitment(reference),
     )
     if args.operation=="commission": service.commission_local(proof)
     elif args.operation=="recommission": service.recommission_local(proof)
@@ -10307,7 +10954,9 @@ from tuntun_edge.transport.commissioning_repository import (
     CommissioningRepository,OwnerOnlyArtifactStore,
 )
 from tuntun_edge.transport.reachy_local_ceremony import ReachyLocalCeremony
-from tuntun_edge.transport.host_inventory import ApprovedHostInventoryResolver
+from tuntun_edge.transport.host_inventory import (
+    ApprovedHostInventoryResolver,ApprovedHostReceiptSigner,
+)
 
 
 def build_local_commissioning_dependencies():
@@ -10323,18 +10972,19 @@ def build_local_commissioning_dependencies():
         OwnerOnlyArtifactStore(Path("/var/lib/tuntun/reachy/certificates"),max_bytes=16384),
     )
     inventory_resolver=ApprovedHostInventoryResolver.from_fixed_owner_files()
+    receipt_signer=ApprovedHostReceiptSigner.from_fixed_owner_file()
     service=ReachyCommissioningService(
         repository=repository,generator=generator,
         issuer=ceremony.core_issuer(),request_factory=ceremony.request_factory(),
-        approved_host_inventory=inventory_resolver,
+        inventory_resolver=inventory_resolver,receipt_signer=receipt_signer,
     )
     return (
         service,ceremony.host_key_verifier(),ceremony.physical_code_verifier(),
-        ceremony.dhcp_verifier(),
+        ceremony.dhcp_verifier(),inventory_resolver,
     )
 ```
 
-`ReachyCommissioningService.commission_local` obtains the strict opaque reference from `approved_host_inventory.current_reference()`, incorporates that reference and the current record commitment into `LocalPhysicalProof`, resolves the exact record against the ceremony's numeric endpoint and generation, and only then calls the generator. `recommission_local` repeats resolution and never inherits a prior record. The API/CLI cannot supply a model, year, platform, architecture, record path, or alternate reference.
+The fixed production builder/CLI obtains the strict opaque reference and record commitment from the same `ApprovedHostInventoryResolver`, incorporates them into `LocalPhysicalProof`, and `ReachyCommissioningService.commission_local` re-resolves the exact signed record against the ceremony's numeric endpoint and generation before calling the generator. `recommission_local` repeats resolution and never inherits a prior record. The API/CLI cannot supply a model, year, platform, architecture, record path, or alternate reference.
 
 `ReachyLocalCeremony` is the concrete pinned local transport implemented in `transport/reachy_local_ceremony.py` in this task (and therefore added to this task's file list and staging command). It opens every fixed input owner-only without following symlinks, verifies the delivered Reachy host key before its first request, consumes the physically displayed one-time code once, and carries only CSR/public agreement/signing material. Before publishing operator state, its local-console probe reads the actual non-root POSIX account and `/venvs/apps_venv/bin/python3` facts without environment override, installs a fresh owner SSH key, disables password authentication, proves the default password is rejected, and reopens a pinned-host key-only session whose remote `id -un`, interpreter tuple, and exact bounded installer/managed-app privilege checks match the local observation. It also canonicalizes and hashes the complete `packaging.tags.sys_tags()` result and a closed required-runtime inventory (Reachy SDK, its declared dependency constraints, exact `websockets==15.0.1`, and every native/media import used by edge), proves the SDK metadata accepts that WebSocket version, and proves a scratch venv created by the accepted interpreter with `--system-site-packages` can install only the two pure Tuntun wheels offline with `--no-deps` and import the whole closure. `py3-none-any` must occur in the probed target tag set and be the tag on both Tuntun wheels. PyGObject and other vendor/native dependencies must resolve from the accepted onboard environment; the gate never assumes they have binary wheels. The scratch venv is removed before acceptance. A username is data only after strict POSIX validation and exact acceptance binding; neither `pollen` nor `reachy` is a code default. Its Reachy-side agent invokes `ReachyPrivateMaterialGenerator`; the Mac-side issuer generates/stages the household-CA server leaf/key and X25519 key locally. `from_owner_files` rejects environment overrides, DNS authority, non-RFC1918 endpoints, non-local invocation, missing DHCP receipts, or a config/key/receipt file not owned by the effective user with mode `0600`. The local approved host-inventory reference must resolve to exactly one current core host record; that record's evidence binds the active household target to Darwin arm64 and binds the mandatory Intel macOS/x86_64 distribution-support receipt, but neither platform fact nor any hardware/product description is authorization. No second "inner Mac" is assumed. Phase 1's recommended topology moves the approved core host's active LAN connection to the same trusted ASUS/mesh L2/VLAN as Reachy (for example an ASUS LAN port/switch) and leaves the direct BE800 LAN path disconnected while Tuntun is active. Commissioning verifies one route-bearing user-LAN interface, IP forwarding off, Internet Sharing off, no bridge, WSS bound only to the commissioned address, and negative reachability on every other local address. A dual-homed core host is rejected in Phase 1 rather than silently treated as two hosts; supporting it later requires a separately reviewed host-firewall/route gate proving the same no-forwarding/no-bridge and outer-interface negative reachability properties. Before accepting exact peer-MAC mode the ceremony also executes the same fixed-binary route qualification as Task 11 and requires the Mac address to resolve without a gateway through a `scope link` prefix on the commissioned Reachy interface; a routed BE800→ASUS/mesh next hop is not the core host's L2 identity and is rejected. The TLS key is stored as owner-only PKCS#8 PEM for the strict OpenSSL client context; the distinct frame signer and HMAC root remain raw owner-only artifacts. Production TLS and `EdgePairingKeyResolver` load only the exact current state IDs through `OwnerOnlyArtifactStore.require_path/read`, recompute public/root digests, and reject revoked state before use—there is no second generated-key directory or test-only key loader. The builder test must instantiate these concrete types from a temporary fixed-path root and perform commission → process restart/resume → recommission/revocation; a Protocol, mock, service locator, `NotImplementedError`, or import that is only supplied by tests does not satisfy Task 08.
 
@@ -10366,7 +11016,7 @@ Expected: PASS; every safety operation is attempted independently, a one-shot ta
 
 Run on the robot: `/venvs/apps_venv/bin/python3 -m pip install --require-hashes -r tools/reachy-hardware-probe/requirements.lock.txt && TUNTUN_ALLOW_REACHY_HARDWARE=1 /venvs/apps_venv/bin/python3 -m pytest -c tools/reachy-hardware-probe/pytest.ini -m reachy_hardware tests/hardware/test_reachy_capabilities_live.py -q`
 
-Expected: PASS with one sanitized JSON report, including measured RTC facts from an unplugged cold boot, exact locally observed/key-only-reopened SSH principal, and the accepted `/venvs/apps_venv/bin/python3` version/ABI plus target-tag-set and runtime-inventory digests, plus one atomically published owner-only `ReachyOperatorStateV1` for that exact accepted commissioning/report generation. The exact SDK metadata accepts `websockets==15.0.1`, `py3-none-any` occurs in the probed tag set, both project wheels carry only that tag, and a no-network scratch venv imports the full edge closure using accepted onboard native/vendor packages. Default/password login is disabled and rejected; the accepted non-root account has exactly the qualified installer/managed-app privileges. Deployment inventory proves one opaque owner-approved core-host inventory reference, the active Darwin arm64 household target facts, required Intel macOS/x86_64 distribution-support receipt, the distinct Reachy device address, the direct same-L2 and single-homed commissioned core/Reachy path, and absence of forwarding/Internet Sharing/bridging/secondary WSS reachability. The authorization record contains only opaque inventory references and digests, never hardware model/product strings or platform labels. A routed BE800→ASUS next hop, assumed username/interpreter, unsupported or drifted runtime, unavailable/incompatible dependency, guessed wheel platform, assumed model-name authority, or assumed second core host fails commissioning. If `stop_during_playback_tested=false` or `competing_controller_detectable=false`, stop WP13–14 implementation and publish no accepted operator projection. If `rtc_qualified=false`, signed-core bootstrap remains mandatory and direct strict-TLS boot is a failing test.
+Expected: PASS with one sanitized raw hardware JSON report containing only probe facts, then one distinct `AcceptedCapabilityReportV1` binding its canonical digest to the exact locally observed/key-only-reopened SSH principal, accepted `/venvs/apps_venv/bin/python3` version/ABI, tag/runtime digests, endpoint, generation, and signed opaque host receipt, plus one atomically published owner-only `ReachyOperatorStateV1` for that exact accepted generation. The exact SDK metadata accepts `websockets==15.0.1`, `py3-none-any` occurs in the probed tag set, both project wheels carry only that tag, and a no-network scratch venv imports the full edge closure using accepted onboard native/vendor packages. Default/password login is disabled and rejected; the accepted non-root account has exactly the qualified installer/managed-app privileges. Deployment inventory proves one opaque owner-approved core-host inventory reference, the active Darwin arm64 household target facts, required Intel macOS/x86_64 distribution-support receipt, the distinct Reachy device address, the direct same-L2 and single-homed commissioned core/Reachy path, and absence of forwarding/Internet Sharing/bridging/secondary WSS reachability. The authorization record contains only opaque inventory references and digests, never hardware model/product strings or platform labels. A routed BE800→ASUS next hop, assumed username/interpreter, unsupported or drifted runtime, unavailable/incompatible dependency, guessed wheel platform, assumed model-name authority, or assumed second core host fails commissioning. If `stop_during_playback_tested=false` or `competing_controller_detectable=false`, stop WP13–14 implementation and publish no accepted operator projection. If `rtc_qualified=false`, signed-core bootstrap remains mandatory and direct strict-TLS boot is a failing test.
 
 - [ ] **Step 5: Verify the isolated observed-SDK lock and commit the sanitized record**
 
@@ -16373,7 +17023,7 @@ git commit -m "feat(edge): gate acoustic stop and add physical fallback"
 
 **Interfaces:**
 - Consumes: transcript, truthful structured STT language metadata (`en|hi|hinglish|unknown`), an optional separately parsed explicit reply mode (`en|hi|hi_romanized|hinglish`), and an optional same-conversation prior decision no more than two turns old. Task 14 owns a minimal closed `LocalTurnProjection(role, context, tone, depth, learning_level)` seam and production supplies only its constant safe Guest projection. It imports no Identity package, profile port, consent ledger, subject identifier, or profile row. Production identity/profile projection is explicitly deferred to the Identity plan. The explicit structured request wins, then current-turn script plus STT evidence; arbitrary Latin-script Hindi is `hi_romanized` when STT says `hi`, and arbitrary Latin-script switching is `hinglish` when STT says `hinglish`. No Hindi/English word list is an authority. Ambiguous short turns may inherit the bounded prior, which decays after two turns.
-- Produces: `LanguageTracker.detect`, `PersonaBuilder.build`, `ContextBuilder.messages`, linear-only `PersonalizedTurnContextProvider.prepare`, and `SessionLanguageRegistry.clear`. The Task-07 `ContractConversationWorkflow` remains the sole terminal-effect dispatcher and still orders finish/cancel barrier before same-engine content clearing. Task 14 does not construct, call, or claim parity with a LangGraph builder; Task 16 owns graph parity and wiring after the linear behavior is accepted.
+- Produces: `LanguageTracker.detect`, `PersonaBuilder.build`, `ContextBuilder.messages`, linear-only `PersonalizedTurnContextProvider.prepare`, and `SessionLanguageRegistry.clear`. The Task-07 `ContractConversationWorkflow` remains the sole dispatcher and preserves barrier → `FINALIZING` lease → bounded same-engine clear → release. Task 14 does not construct, call, or claim parity with a LangGraph builder; Task 16 owns graph parity and wiring after the linear behavior is accepted.
 
 The security-architect, homemaker, K2, and N1 configurations are synthetic examples in `fixtures/synthetic/personas/family-role-config.json`, never literals or real household facts in production code/config. This projection integration is folded into the existing Task 14 estimate and changes no task or effort total.
 
@@ -17786,7 +18436,7 @@ git commit -m "test(persona): add corpus-bound bilingual and child-safety gate"
 
 **Interfaces:**
 - Consumes: public `ConversationWorkflow` through the Task 07 contract adapter, Foundation Task 9's `guest_hinglish_scenario()` via the Task 07/14 scenario surface, the exact Task 14 `PersonalizedTurnContextProvider`, `EphemeralTurnContext`, injected node callables, and private turn cancellation.
-- Produces: `GraphState`, `build_graph`, and private `LangGraphConversationEngine.run(TurnRequest) -> TurnOutcome`/`cancel`/`clear_ephemeral`; the composition root wraps either engine in the same Task-07 `ContractConversationWorkflow.run(TurnInput) -> TurnOutput`. The graph engine never calls coordinator finish or clears terminal content from `run`; it returns Task-01 terminal effects, and the shared adapter awaits finish/cancel before calling `clear_ephemeral` on that same graph engine. This is the executable graph parity/wiring deliberately deferred from Task 14.
+- Produces: `GraphState`, `build_graph`, and private `LangGraphConversationEngine.run(TurnRequest) -> TurnOutcome`/`cancel`/`clear_ephemeral`; the composition root wraps either engine in the same imported Task-07 `ContractConversationWorkflow`. The graph engine returns Task-01 effects and the shared adapter preserves barrier → `FINALIZING` lease → bounded same-engine clear → release, including quarantine on clear failure. This is the executable graph parity/wiring deliberately deferred from Task 14.
 
 - [ ] **Step 1: Write failing topology and checkpoint-content tests**
 
@@ -17818,6 +18468,7 @@ from uuid import uuid4
 import pytest
 
 from tuntun_core.workflows.conversation import LinearConversationEngine, TurnRequest
+from tuntun_core.workflows.contract_workflow import ContractConversationWorkflow
 from tuntun_core.workflows.langgraph_adapter import LangGraphConversationEngine
 from tuntun_testing.scenario import guest_hinglish_scenario
 
