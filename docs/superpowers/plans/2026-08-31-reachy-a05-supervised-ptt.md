@@ -32,11 +32,13 @@ stop/go gate. A simulator or media-only run is progress, not accepted A0.5.
 - Freeze 5-second session-ready, 2-second capture-open/close, 90-second capture, 30-second STT,
   45-second reasoning, 30-second TTS, 120-second aggregate provider, 90-second playback, and
   310-second complete-turn bounds. Core heartbeats every second and Edge cleans up after 5 seconds
-  without a valid Core frame. Stop observations finish/time out by T+2 seconds, truthful receipt send
-  finishes by T+2.5, and acknowledgement by T+3.5. At the same cleanup T0, Core enqueues `abort` on
-  the reserved priority lane and concurrently starts provider cancellation; provider-transport close
-  is 0.5 seconds and provider join 1 second. SSH connect is 5 seconds, server-alive 2 seconds/count 2,
-  and stdin/TERM/KILL waits 1 second each.
+  without a valid Core frame. On a valid stream, stop observations finish/time out by T+2 seconds,
+  truthful receipt send finishes by T+2.5, and acknowledgement by T+3.5. Admission remains closed
+  while transport close and owned-task teardown finish by T+4.0. A poisoned stream follows only Task
+  2's terminal emergency rule and never waits for an acknowledgement. At the same cleanup T0, Core
+  enqueues `abort` on the reserved priority lane and concurrently starts provider cancellation;
+  provider-transport close is 0.5 seconds and provider join 1 second. SSH connect is 5 seconds,
+  server-alive 2 seconds/count 2, and stdin/TERM/KILL waits 1 second each.
 - The mode matrix is exactly fake/simulated, fake/ssh, and—only after Checkpoint A0—live-cloud/
   simulated and live-cloud/ssh. No fallback changes mode or transport.
 - Core remains Python `==3.12.*`; Edge and Contracts remain `>=3.11,<3.13` compatible.
@@ -305,8 +307,9 @@ receipt_received --Core safety_ack--> acknowledged
 Edge stop/cancel/error or Core abort/error from every pre-receipt nonterminal state enters cleanup;
 in `receipt_received` it is idempotent and state-preserving. Heartbeat keeps any post-open/pre-receipt
 state unchanged and is late-discarded after receipt until ack. Every omitted transition rejects. Capture and
-playback end each require media; terminal capture end also requires submit. Acknowledgement accepted
-must equal all six receipt booleans; a false acknowledgement closes transport with
+playback end each require media; terminal capture end also requires submit. A positive
+acknowledgement requires all six receipt booleans to be true. A false acknowledgement is a valid
+conservative rejection regardless of the receipt booleans and closes transport with
 `cleanup_incomplete`.
 
 ```python
@@ -369,11 +372,15 @@ Commit: `feat(poc): add bounded Reachy PTT framing`
 
 **Files:**
 - Modify: `apps/edge/pyproject.toml`
+- Create: `apps/edge/src/tuntun_edge/poc/__init__.py`
 - Create: `apps/edge/src/tuntun_edge/poc/ports.py`
 - Create: `apps/edge/src/tuntun_edge/poc/reachy_ptt.py`
+- Create: `apps/edge/src/tuntun_edge/cli/__init__.py`
 - Create: `apps/edge/src/tuntun_edge/cli/main.py`
 - Create: `apps/edge/src/tuntun_edge/cli/ptt.py`
 - Create: `tests/unit/edge/test_reachy_ptt.py`
+- Modify: `packages/contracts/src/tuntun_contracts/poc/framing.py`
+- Modify: `tests/unit/poc/test_framing.py`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `tests/ci/test_workflow_policy.py`
 - Modify: `uv.lock`
@@ -381,9 +388,140 @@ Commit: `feat(poc): add bounded Reachy PTT framing`
 **Interfaces:**
 - Consumes: Task 1 frames/duplex guard, fixed `PttInputMode`, and injected async
   `ReachyLocalMediaPort`, `EdgeTransportPort`, optional `EdgeCaptureInputPort`, optional independent
-  `EdgeStopInputPort`, `MutableAudioBuffer`, and `MonotonicClock`; no real SDK choice is made before
-  Task 0.
-- Produces: `async ReachyPttSession.run() -> PttSessionOutcome`, `async ReachyPttSession.stop(source: PttStopSource) -> PttSafetyReceipt`, and console script `tuntun-edge ptt`.
+  `EdgeStopInputPort`, two distinct `MutableAudioBuffer` instances, a cancellation-cooperative task
+  spawner, and `MonotonicClock(now, sleep_until)`; no real SDK choice is made before Task 0. The raw
+  byte transport owns bounded receive, full-frame send, and close. The media port accepts the exact
+  transport format when capture opens and yields only already-converted PCM; the supervisor still
+  validates and rechunks it. Every injected async operation must propagate cancellation promptly.
+- Produces: `async ReachyPttSession.run() -> PttSessionOutcome`, async
+  `ReachyPttSession.stop(source: PttStopSource) -> PttSafetyReceipt`, and console script
+  `tuntun-edge ptt`.
+
+The Task 2 ports have this exact minimum surface; implementations may add no control, gesture, or
+motion-command method:
+
+```python
+class MonotonicClock(Protocol):
+    def now(self) -> float: ...
+    async def sleep_until(self, deadline: float) -> None: ...
+
+class EdgeTransportPort(Protocol):
+    async def receive(self, max_bytes: int) -> bytes: ...  # b"" is EOF; never oversized
+    async def send(self, frame: bytes) -> None: ...  # full drain or raise
+    async def close(self) -> None: ...
+
+class EdgeCaptureInputPort(Protocol):
+    async def wait_for_start(self) -> None: ...
+    async def wait_for_submit(self) -> None: ...
+
+class EdgeStopInputPort(Protocol):
+    async def wait_for_stop(self) -> None: ...
+
+class ReachyLocalMediaPort(Protocol):
+    async def open_capture(self, *, output_format: AudioFormat, max_frame_bytes: int) -> None: ...
+    async def read_capture(self) -> bytes | None: ...
+    async def close_capture(self) -> bool: ...
+    async def open_playback(self, *, input_format: AudioFormat) -> None: ...
+    async def write_playback(self, pcm: bytes) -> None: ...
+    async def close_playback(self) -> bool: ...
+    async def stop_recording(self) -> bool: ...
+    async def stop_playback(self) -> bool: ...
+    async def stop_motion(self) -> bool: ...
+    async def disable_audio_reactive(self) -> bool: ...
+
+class MutableAudioBuffer(Protocol):
+    def append(self, data: bytes) -> None: ...
+    def take(self, max_bytes: int) -> bytes: ...
+    def clear(self) -> bool: ...
+    def is_empty(self) -> bool: ...
+
+class CleanupTaskSpawner(Protocol):
+    def start(
+        self, operation: Coroutine[Any, Any, bool], *, name: str
+    ) -> asyncio.Task[bool]: ...
+```
+
+`CleanupTaskSpawner` is injected only for the four independent boolean cleanup observations; it
+accepts one coroutine and a content-free name and returns an owned `asyncio.Task[bool]`. The session
+uses the runtime's task creation for its coordinator and ordinary children.
+
+**Frozen Task 2 lifecycle and failure rulings:**
+- Construction is keyword-only and fixes one mode, turn, port set, two non-aliased buffers, and all
+  production deadlines. `run()` is one-shot; concurrent or repeated calls fail before effects.
+  At `run()` T0, Edge clears and verifies both owned buffers before creating a runtime child or
+  touching the guard, transport, or media ports; stale bytes can never resume into a new turn. A
+  clear/verification failure runs bounded local-only cleanup and ends `cleanup_incomplete`.
+  `stop()` before `run()` clears buffers and runs the same local stop observations only: it creates
+  no reader/writer, performs no transport or guard call, makes no error/receipt/ack attempt, caches
+  the receipt, marks the session terminal, and permanently rejects a later run. During or after a
+  run, every caller adopts the same shielded cleanup task and receives the cached receipt. Caller
+  cancellation while acquiring the lifecycle lock, latching cleanup, handling any post-startup
+  exit, or rolling back partial startup is remembered and re-raised only after bounded cleanup and
+  owned-task joins finish.
+- The 5-second handshake and 310-second turn deadlines start at `run()` T0. Once open, the heartbeat
+  deadline is five seconds after the last guard-accepted Core frame. Reaching a deadline exactly is
+  expired; heartbeats extend no other deadline. All tests use the injected absolute `sleep_until`.
+  A sleeper exception, self-cancellation, or successful return before its requested deadline is an internal clock fault
+  and closes `cleanup_incomplete`, never a timeout or a heartbeat busy-loop. Every `now()` sample
+  must be finite and nondecreasing; a raise, nonfinite value, or reversal synchronously closes media
+  gates/buffers/admission and latches `cleanup_incomplete`. Core and local cleanup triggers retain
+  their sampled acceptance timestamp while waiting for locks, so T0+310 wins at equality without
+  stealing a valid predeadline trigger. After a clock fault, only local stop observations, owned-task
+  joins, and transport teardown remain admissible. Their existing absolute bounds switch to an
+  event-loop monotonic fallback anchored to the loop timestamp paired with the last advancing valid
+  clock sample; a mid-wait fault cancels and joins the injected sleeper before switching, and never
+  restarts or extends the remaining cleanup budget.
+- Normal drafts are FIFO through a 64-item backpressured queue. A single writer lock linearizes
+  cleanup latch, normal-admission closure, dequeue recheck, sequence allocation, and the active-send
+  marker. A dequeued draft is dropped if cleanup won before allocation; once allocated it is the
+  active send. The terminal lane holds at most two drafts, deduplicates repeated cleanup, and wakes
+  blocked producers with a content-free failure while dropping every queued normal draft. Reader
+  and writer also share one guard lock and call `clock.now()` inside it immediately before each
+  `PttDuplexGuard.accept`.
+- Each send uses `min(send_started + 0.5, active absolute cleanup deadline)`. Guard/encode rejection
+  before bytes are attempted does not consume the writer's next sequence. Only a positively
+  completed full send advances it. Any send exception, timeout, cancellation, or ambiguous/partial
+  completion permanently makes the transport unwritable; no later sequence is emitted. Admission
+  rechecks the clock-fault generation after joining send deadline/fault owners and immediately before
+  reporting success, so a fault in that completion window leaves the sequence unchanged. Admission
+  remains closed while transport close and every final join finish by the separate T0+4.0 teardown
+  deadline, with no await after it.
+- Clean EOF and a receive exception preserve `peer_closed` as the first semantic reason on a
+  still-valid stream. Because the terminal reader cannot receive an acknowledgement afterward, the
+  universal missing-ack rule makes the final public outcome `cleanup_incomplete`. A non-bytes or
+  oversized receive result breaches the local transport-port contract and is semantically
+  `cleanup_incomplete`. Neither class poisons the decoder/guard; both use the ordinary guarded
+  error/receipt path. EOF with buffered truncated framing remains protocol poison.
+- False receipt evidence overrides every earlier outcome with `cleanup_incomplete`. On an otherwise
+  valid stream, receipt-send failure, a missing acknowledgement, or any negative acknowledgement
+  also yields `cleanup_incomplete`. The acknowledgement truth table is: complete/true preserves the
+  first semantic outcome; complete/false and incomplete/false are acknowledged
+  `cleanup_incomplete`; incomplete/true is a protocol violation but the already-false receipt still
+  wins as `cleanup_incomplete`.
+- Decoder or guard poison never creates a new decoder/guard and never reads an acknowledgement.
+  The guard is aborted and never finished or reused. Local cleanup remains authoritative. A
+  monotonic `receipt_attempted` latch is set before a normal receipt send or before an emergency pair
+  starts; poison after that latch closes without a second receipt. Emergency output is suppressed
+  whenever any send was active when poison latched. An unsent guarded terminal cleanup draft is
+  atomically removed and failed before an eligible emergency pair is admitted, so it cannot strand
+  the bypass lane. Otherwise, while local stop observations run,
+  the idle writer immediately attempts
+  `error(protocol_rejected)` from the existing Edge sequence. A failed, partial, or timed-out error
+  closes transport and suppresses the receipt. After truthful observations finish, the writer may
+  send the one receipt, and both emergency sends share the single T0+2.5 deadline. Neither frame
+  enters the poisoned guard; no ack is read; the session closes `cleanup_incomplete`.
+- The cleanup coordinator is installed before runtime effects. If its creation fails, gates/buffers
+  close and bounded local cleanup runs inline while no runtime child starts. If one injected cleanup
+  operation spawn fails, the other observations still start and a reliable built-in fallback starts
+  that operation or records it false. Partial-startup rollback owner allocation has one fresh adopted
+  attempt, then a cancellation-shieldable direct owner, and only then the same bounded inline
+  rollback; it never recurses or skips physical cleanup.
+  Every owned child must terminate by T0+4.0 and nothing is
+  awaited afterward. Task 7 must explicitly qualify real adapters for this cancellation contract;
+  deliberately cancellation-suppressing ports cannot be bounded or certified orphan-free.
+- Only the `ptt` execution path reserves stdout for the future binary channel: it emits zero stdout,
+  has no mode or motion override, imports no Reachy SDK, and until Task 7 fails closed with one exact
+  content-free stderr code and a nonzero exit. Ordinary Typer help remains outside binary mode.
 
 - [ ] **Step 1: Write failing mode/handshake/capture tests with injected fakes.** In
   `reachy_local`, require capture and stop input ports and forbid wire PTT controls. In
@@ -391,16 +529,23 @@ Commit: `feat(poc): add bounded Reachy PTT framing`
   submit while media is still arming, and keep any proved local stop independently optional. Reject
   both/no capture owners, mode echo drift, and configuration override. Assert Edge opens capture
   before `capture_start`, closes it before `capture_end`, sends only converted/sample-aligned PCM of
-  at most 200 ms, and exposes no gesture/motion command.
+  at most 200 ms, and exposes no gesture/motion command. A native capture read is accepted only when
+  it is an exact `bytes` value of 1 through 65,536 even bytes; larger input is rejected before any
+  buffer copy or wire effect, and accepted input is losslessly rechunked to the transport ceiling.
+  `capture_start`, every PCM draft, and `capture_end` carry their absolute capture/turn deadline;
+  capture close is bounded by both submit+2 seconds and the original 90-second capture wall.
+  First correct the Task 1 acknowledgement
+  truth table under RED/GREEN tests: false is a valid conservative terminal acknowledgement for a
+  complete or incomplete receipt, while true remains illegal for an incomplete receipt.
 - [ ] **Step 2: Run the focused test and confirm RED because the edge PTT module is absent.**
 - [ ] **Step 3: Implement the smallest single-turn supervisor and Edge dependency on Contracts.**
   Install one shared exactly-once cleanup task before creating capture/playback tasks. Concurrently
   own transport, mode-specific input, media, one-second heartbeat watchdog, 310-second absolute turn
   watchdog, one bounded outbound writer/sequence allocator, and every child task. Only that writer
   assigns sequences/writes complete frames; its reserved cleanup lane preempts and drops queued
-  media while normal drafts are FIFO/backpressured. Session ready is 5 seconds; capture open/close is
-  2 seconds;
-  capture/playback are 90 seconds. Lazy-load a real SDK only in Task 7.
+  normal drafts while normal admission remains FIFO/backpressured. Session ready is 5 seconds;
+  capture open/close is 2 seconds; capture/playback are 90 seconds. Lazy-load a real SDK only in
+  Task 7.
 - [ ] **Step 4: Write failing cleanup tests for every state, race, and component failure.** Assert
   capture/output gates close and buffers drop synchronously. Simultaneous local stop, submit, Core
   abort, EOF, malformed input, and watchdog all adopt the same cleanup task. Recording, playback,
@@ -411,11 +556,13 @@ Commit: `feat(poc): add bounded Reachy PTT framing`
   sequences, noninterleaved frames, cleanup priority, and no receipt starvation. Receipt fields
   without positive observation stay false.
 - [ ] **Step 5: Implement bounded cancellation-resistant cleanup.** Stop operations finish or time
-  out by T+2 seconds; encode/send the resulting truthful receipt by T+2.5; finish ack wait by T+3.5;
-  and bound all adopted task joins. Missing/
+  out by T+2 seconds; on a valid stream encode/send the resulting truthful receipt by T+2.5 and
+  finish ack wait by T+3.5; keep admission closed and bound transport close plus all adopted task
+  joins by the separate T+4.0 teardown deadline. Missing/
   negative ack or any false field is `cleanup_incomplete`; it never delays local shutdown or prints
   exception payloads. Heartbeat loss after 5 seconds, Edge watchdog, EOF, and unwritable transport
-  still run the same local path.
+  still run the same local path. Protocol poison follows only the frozen terminal emergency rule;
+  it never attempts to parse the acknowledgement.
 - [ ] **Step 6: Add Core-abort, half-open link, repeated cleanup, acknowledgement timeout, late
   playback, turn substitution, and no-orphan tests.** Prove no capture/playback admission reopens,
   one receipt at most is attempted, all owned tasks terminate within their bounds, and content-free

@@ -1,4 +1,5 @@
 import re
+import tomllib
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
@@ -77,7 +78,8 @@ CONTRACT_STEPS = [
         "shell": ARCHITECTURE_CHECK_SHELL,
         "run": (
             "/usr/bin/env -u PYTHONPATH .venv-contracts-edge-py311/bin/python -m pytest "
-            "tests/contract/test_v1_types_and_ports.py tests/unit/poc/test_framing.py -q"
+            "tests/contract/test_v1_types_and_ports.py tests/unit/poc/test_framing.py "
+            "tests/unit/edge/test_reachy_ptt.py -q"
         ),
     },
     {
@@ -117,6 +119,19 @@ CHECK_STEPS = [
     },
     {"shell": ARCHITECTURE_CHECK_SHELL, "run": MAKE_CHECK_COMMAND},
 ]
+
+
+def test_edge_package_exposes_only_frozen_runtime_dependencies_and_script() -> None:
+    edge_project = tomllib.loads(Path("apps/edge/pyproject.toml").read_text(encoding="utf-8"))
+
+    assert edge_project["project"]["dependencies"] == [
+        "tuntun-contracts==0.1.0.dev0",
+        "typer>=0.16,<1",
+    ]
+    assert edge_project["project"]["scripts"] == {"tuntun-edge": "tuntun_edge.cli.main:app"}
+    assert edge_project["tool"]["uv"]["sources"] == {"tuntun-contracts": {"workspace": True}}
+
+
 WORKFLOW_ROOT = Path(".github/workflows")
 FOUNDATION_PLAN = Path("docs/superpowers/plans/2026-08-27-tuntun-phase1-foundation-execution.md")
 FOUNDATION_ACCEPTANCE_ROWS = (
