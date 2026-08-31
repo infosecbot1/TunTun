@@ -591,32 +591,25 @@ def _owned_record_type(field_names: tuple[str, ...]) -> type[object]:
     with _OWNED_RECORD_TYPES_CONDITION:
         existing = _OWNED_RECORD_TYPES.get(field_names)
         if existing is not None:
-            if field_names in _OWNED_RECORD_SHAPE_RESERVATIONS:
-                _OWNED_RECORD_SHAPE_RESERVATIONS.remove(field_names)
-                _OWNED_RECORD_TYPES_CONDITION.notify_all()
             return existing
         if field_names not in _OWNED_RECORD_SHAPE_RESERVATIONS:
             raise RuntimeError("synchronous data record shape was not reserved")
-        try:
-            owned_type = cast(
-                type[object],
-                make_dataclass(
-                    "_SynchronousDataRecord",
-                    [(name, object) for name in field_names],
-                    bases=(_SealedOwnedRecordBase,),
-                    frozen=True,
-                    slots=True,
-                ),
-            )
-            type.__setattr__(owned_type, _OWNED_RECORD_FIELDS_ATTRIBUTE, field_names)
-            # Seal last: all subsequent ordinary class setattr/delattr operations,
-            # including special-method replacement, fail before changing behavior.
-            type.__setattr__(owned_type, _OWNED_RECORD_SEAL_ATTRIBUTE, _OWNED_RECORD_SEAL)
-            _OWNED_RECORD_TYPES[field_names] = owned_type
-            return owned_type
-        finally:
-            _OWNED_RECORD_SHAPE_RESERVATIONS.remove(field_names)
-            _OWNED_RECORD_TYPES_CONDITION.notify_all()
+        owned_type = cast(
+            type[object],
+            make_dataclass(
+                "_SynchronousDataRecord",
+                [(name, object) for name in field_names],
+                bases=(_SealedOwnedRecordBase,),
+                frozen=True,
+                slots=True,
+            ),
+        )
+        type.__setattr__(owned_type, _OWNED_RECORD_FIELDS_ATTRIBUTE, field_names)
+        # Seal last: all subsequent ordinary class setattr/delattr operations,
+        # including special-method replacement, fail before changing behavior.
+        type.__setattr__(owned_type, _OWNED_RECORD_SEAL_ATTRIBUTE, _OWNED_RECORD_SEAL)
+        _OWNED_RECORD_TYPES[field_names] = owned_type
+        return owned_type
 
 
 def _reserve_owned_record_shape(field_names: tuple[str, ...]) -> bool:
@@ -644,6 +637,22 @@ def _release_owned_record_shape_reservation(
         if field_names in _OWNED_RECORD_SHAPE_RESERVATIONS:
             _OWNED_RECORD_SHAPE_RESERVATIONS.remove(field_names)
             _OWNED_RECORD_TYPES_CONDITION.notify_all()
+
+
+def _reserved_reference_record_type(field_names: tuple[str, ...]) -> type[object]:
+    reserved = _reserve_owned_record_shape(field_names)
+    try:
+        return _reference_record_type(field_names)
+    finally:
+        _release_owned_record_shape_reservation(field_names, reserved)
+
+
+def _reserved_owned_record_type(field_names: tuple[str, ...]) -> type[object]:
+    reserved = _reserve_owned_record_shape(field_names)
+    try:
+        return _owned_record_type(field_names)
+    finally:
+        _release_owned_record_shape_reservation(field_names, reserved)
 
 
 def _function_closed_values(value: object) -> tuple[object, ...]:
@@ -796,7 +805,7 @@ def _has_exact_generated_record_shape(
     actual_namespace: dict[str, object],
     inspection: _ResultInspection,
 ) -> bool:
-    reference = _reference_record_type(field_names)
+    reference = _reserved_reference_record_type(field_names)
     reference_namespace = dict(vars(reference))
     valid = True
     owner_aliases = _validated_slots_owner_aliases(
@@ -1217,17 +1226,13 @@ def _inspect_frozen_record(value: object, inspection: _ResultInspection) -> obje
     if not _bounded_record_field_names(field_names):
         inspection.reject(value)
         return value
-    reserved = _reserve_owned_record_shape(field_names)
-    try:
-        return _inspect_reserved_frozen_record(
-            value,
-            record_type,
-            field_names,
-            record_namespace,
-            inspection,
-        )
-    finally:
-        _release_owned_record_shape_reservation(field_names, reserved)
+    return _inspect_reserved_frozen_record(
+        value,
+        record_type,
+        field_names,
+        record_namespace,
+        inspection,
+    )
 
 
 def _inspect_reserved_frozen_record(
@@ -1276,7 +1281,7 @@ def _inspect_reserved_frozen_record(
     # Return a closed module-owned generated shape. The caller's structurally
     # matching class remains mutable after validation and therefore cannot be
     # retained by the owned result graph without reopening a TOCTOU hook.
-    snapshot = object.__new__(_owned_record_type(field_names))
+    snapshot = object.__new__(_reserved_owned_record_type(field_names))
     for field_name, field_value in snapshot_fields:
         object.__setattr__(snapshot, field_name, field_value)
     inspection.snapshots[id(value)] = snapshot

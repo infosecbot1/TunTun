@@ -4189,6 +4189,198 @@ async def test_module_owned_record_type_is_sealed_and_resnapshots_idempotently(
         await factory.aclose()
 
 
+def test_nested_same_shape_record_snapshot_does_not_wait_on_its_own_reservation() -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        nested_shape_reservation_probe: object
+
+    source = Record(Record("leaf"))
+    snapshots: list[object] = []
+    failures: list[BaseException] = []
+
+    def snapshot() -> None:
+        try:
+            envelope = repository_facade_module._reject_worker_result(source)
+            snapshots.append(envelope.snapshot)
+        except BaseException as error:
+            failures.append(error)
+
+    worker = Thread(target=snapshot, daemon=True)
+    worker.start()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive(), "nested same-shape snapshot deadlocked on its own reservation"
+    if failures:
+        raise failures[0]
+    assert len(snapshots) == 1
+    owned_outer = snapshots[0]
+    owned_inner = object.__getattribute__(owned_outer, "nested_shape_reservation_probe")
+    assert type(owned_outer) is not Record
+    assert type(owned_inner) is type(owned_outer)
+    assert object.__getattribute__(owned_inner, "nested_shape_reservation_probe") == "leaf"
+    assert (
+        "nested_shape_reservation_probe",
+    ) not in repository_facade_module._OWNED_RECORD_SHAPE_RESERVATIONS
+
+
+def test_oppositely_nested_record_shapes_do_not_deadlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class LeftRecord:
+        left_reservation_probe: object
+
+    @dataclass(frozen=True, slots=True)
+    class RightRecord:
+        right_reservation_probe: object
+
+    sources = (
+        LeftRecord(RightRecord("left-leaf")),
+        RightRecord(LeftRecord("right-leaf")),
+    )
+    outer_validations = Barrier(2)
+    validation_lock = Lock()
+    validated_threads: set[int] = set()
+    snapshots: list[object] = []
+    failures: list[BaseException] = []
+    original_shape_check = repository_facade_module._has_exact_generated_record_shape
+
+    def synchronize_outer_shape_validation(
+        record_type: type[object],
+        field_names: tuple[str, ...],
+        namespace: dict[str, object],
+        inspection: object,
+    ) -> bool:
+        result = original_shape_check(
+            record_type,
+            field_names,
+            namespace,
+            inspection,  # type: ignore[arg-type]
+        )
+        identity = get_ident()
+        with validation_lock:
+            first_validation = identity not in validated_threads
+            validated_threads.add(identity)
+        if first_validation:
+            outer_validations.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_has_exact_generated_record_shape",
+        synchronize_outer_shape_validation,
+    )
+
+    def snapshot(source: object) -> None:
+        try:
+            envelope = repository_facade_module._reject_worker_result(source)
+            snapshots.append(envelope.snapshot)
+        except BaseException as error:
+            failures.append(error)
+
+    workers = [Thread(target=snapshot, args=(source,), daemon=True) for source in sources]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert not any(worker.is_alive() for worker in workers), (
+        "oppositely nested record shapes deadlocked while reserving capacity"
+    )
+    if failures:
+        raise failures[0]
+    assert len(snapshots) == 2
+    assert (
+        not {
+            ("left_reservation_probe",),
+            ("right_reservation_probe",),
+        }
+        & repository_facade_module._OWNED_RECORD_SHAPE_RESERVATIONS
+    )
+
+
+def test_record_shape_generation_failure_wakes_waiter_and_releases_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        generation_failure_reservation_probe: object
+
+    shape = ("generation_failure_reservation_probe",)
+    repository_facade_module._reference_record_type(shape)
+    generation_started = Event()
+    generation_release = Event()
+    waiter_attempted_reservation = Event()
+    generation_lock = Lock()
+    generation_owner: list[int] = []
+    generation_calls = 0
+    snapshots: list[object] = []
+    failures: list[BaseException] = []
+    original_make_dataclass = repository_facade_module.make_dataclass
+    original_reserve = repository_facade_module._reserve_owned_record_shape
+
+    def fail_first_owned_generation(*args: object, **kwargs: object) -> type[object]:
+        nonlocal generation_calls
+        if kwargs.get("bases") == (repository_facade_module._SealedOwnedRecordBase,):
+            with generation_lock:
+                generation_calls += 1
+                call_number = generation_calls
+            if call_number == 1:
+                generation_owner.append(get_ident())
+                generation_started.set()
+                assert generation_release.wait(timeout=5)
+                raise RuntimeError("synthetic owned record generation failure")
+        return original_make_dataclass(*args, **kwargs)  # type: ignore[arg-type]
+
+    def observe_waiter(field_names: tuple[str, ...]) -> bool:
+        if (
+            field_names == shape
+            and generation_started.is_set()
+            and generation_owner
+            and get_ident() != generation_owner[0]
+        ):
+            waiter_attempted_reservation.set()
+        return original_reserve(field_names)
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "make_dataclass",
+        fail_first_owned_generation,
+    )
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_reserve_owned_record_shape",
+        observe_waiter,
+    )
+
+    def snapshot(source: object) -> None:
+        try:
+            envelope = repository_facade_module._reject_worker_result(source)
+            snapshots.append(envelope.snapshot)
+        except BaseException as error:
+            failures.append(error)
+
+    first = Thread(target=snapshot, args=(Record("first"),), daemon=True)
+    second = Thread(target=snapshot, args=(Record("second"),), daemon=True)
+    first.start()
+    assert generation_started.wait(timeout=5)
+    second.start()
+    assert waiter_attempted_reservation.wait(timeout=5)
+    generation_release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0].__cause__, RuntimeError)
+    assert str(failures[0].__cause__) == "synthetic owned record generation failure"
+    assert len(snapshots) == 1
+    assert type(snapshots[0]) is not Record
+    assert generation_calls == 2
+    assert shape not in repository_facade_module._OWNED_RECORD_SHAPE_RESERVATIONS
+
+
 @pytest.mark.asyncio
 async def test_owned_record_classifier_does_not_compare_hostile_namespace_keys(
     migrated_database: object,
