@@ -10,9 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.materialize_conversation_plan import materialize_document, parse_plan_text
 from scripts.validate_conversation_plan import approved_skip_marker_names, validate_plan_document
 
-PLAN_PATH = Path(
-    "docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md"
-)
+PLAN_PATH = Path("docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md")
 
 
 def test_only_exact_hardware_or_live_cloud_markers_authorize_a_skip() -> None:
@@ -151,15 +149,13 @@ def test_task_02_materializes_global_skip_to_failure_hook() -> None:
     source = files["tests/conftest.py"].decode()
     tree = ast.parse(source)
     names = {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
     assert "pytest_runtest_makereport" in names
     assert "reachy_hardware" in source
     assert "live_cloud" in source
-    assert "report.outcome = \"failed\"" in source
+    assert 'report.outcome = "failed"' in source
 
 
 def test_materialized_hook_fails_runtime_and_extra_marker_skips(

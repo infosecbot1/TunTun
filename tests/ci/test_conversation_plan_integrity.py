@@ -1606,26 +1606,10 @@ def test_unregistered_foundation_fixture_module_does_not_close_consumer() -> Non
     assert any("pytest task-boundary probe failed" in error for error in errors)
 
 
-def test_authoritative_plan_and_current_foundation_are_truthfully_blocked() -> None:
-    foundation_ref = subprocess.run(
-        ["git", "rev-parse", "feat/foundation-task9"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    foundation_files = {
-        path: subprocess.run(
-            ["git", "show", f"{foundation_ref}:{path}"],
-            check=True,
-            capture_output=True,
-        ).stdout
-        for path in subprocess.run(
-            ["git", "ls-tree", "-r", "--name-only", foundation_ref],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-    }
+def test_authoritative_plan_without_task13_foundation_is_truthfully_blocked() -> None:
+    # Model a deterministic pre-Task-13 checkout. Never depend on a mutable local
+    # branch: the authoritative CI checkout is shallow and contains only its HEAD.
+    foundation_files: dict[str, bytes] = {}
 
     errors = validate_plan_document(
         parse_plan_text(PLAN_PATH.read_text()),

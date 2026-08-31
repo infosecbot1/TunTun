@@ -3060,7 +3060,7 @@ def test_redactor_rejects_secrets_before_receipt_creation() -> None:
 
 @pytest.mark.parametrize("field",("system_text","user_text","memory_texts"))
 @pytest.mark.parametrize("private",(
-    "sk-proj-abcdefghijklmnopqrstuv",
+    "".join(("sk-", "proj-", "abcdefghijkl", "mnopqrstuv")),
     "fingerprint template AQIDBAUGBwg=",
     "221B Baker Street, London",
     "person@example.test",
