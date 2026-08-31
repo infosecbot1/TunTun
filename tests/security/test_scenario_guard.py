@@ -1338,17 +1338,30 @@ with Path(os.environ["TUNTUN_UV_LOG"]).open("a", encoding="utf-8") as handle:
     )
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
     records = tuple(json.loads(line) for line in log.read_text(encoding="utf-8").splitlines())
-    assert [record["tool"] for record in records] == ["uv", "uv", "uv", "python"]
+    assert [record["tool"] for record in records] == [
+        "uv",
+        "uv",
+        "uv",
+        "uv",
+        "python",
+    ]
     caches = {record["cache"] for record in records}
     assert len(caches) == 1
     cache = next(iter(caches))
     assert cache != str(ambient_cache)
     assert cache.startswith(str(temp_root / "tuntun-core-wheel."))
     assert cache.endswith("/uv-cache")
-    pip_install = records[2]["argv"]
+    contracts_build = records[0]["argv"]
+    assert contracts_build[:3] == ["build", "--package", "tuntun-contracts"]
+    assert "--wheel" in contracts_build
+    core_build = records[1]["argv"]
+    assert core_build[:3] == ["build", "--package", "tuntun-core"]
+    assert "--wheel" not in core_build
+    pip_install = records[3]["argv"]
     assert pip_install[:2] == ["pip", "install"]
     assert pip_install[pip_install.index("--resolution") + 1] == "highest"
-    assert records[3]["pythonpath"] is None
+    assert pip_install[pip_install.index("--find-links") + 1].endswith("/dist")
+    assert records[4]["pythonpath"] is None
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "current dependency ranges" in makefile
     assert "dependency_intent=" not in makefile
