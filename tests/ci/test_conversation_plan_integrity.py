@@ -5558,6 +5558,40 @@ def test_exact_external_lane_grammar_is_centralized(
 
 
 @pytest.mark.parametrize(
+    "command",
+    (
+        "TUNTUN_ALLOW_REACHY_HARDWARE=1 /venvs/apps_venv/bin/python3 -m pytest "
+        "-c tools/reachy-hardware-probe/pytest.ini -m reachy_hardware "
+        "tests/hardware/test_reachy_capabilities_live.py -q",
+        "TUNTUN_ALLOW_REACHY_HARDWARE=1 /venvs/apps_venv/bin/python3 -m pytest "
+        "-c tools/reachy-hardware-probe/pytest.ini -m reachy_hardware "
+        "tests/hardware/test_reachy_transport.py -q",
+        "TUNTUN_ALLOW_REACHY_HARDWARE=1 /venvs/apps_venv/bin/python3 -m pytest "
+        "-c tools/reachy-hardware-probe/pytest.ini -m reachy_hardware "
+        "tests/hardware/test_reachy_assistant_qualification.py -q",
+        "TUNTUN_ALLOW_REACHY_HARDWARE=1 /venvs/apps_venv/bin/python3 -m pytest "
+        "-c tools/reachy-hardware-probe/pytest.ini -m reachy_hardware "
+        "tests/hardware/test_stop_latency.py tests/hardware/test_physical_guest_turn.py -q",
+        "TUNTUN_ALLOW_REACHY_HARDWARE=1 /venvs/apps_venv/bin/python3 "
+        "tests/hardware/bench_wakeword.py --frames 360000 --max-one-core-percent 25",
+        "TUNTUN_ALLOW_LIVE_CLOUD=1 python -m pytest -m live_cloud "
+        "tests/integration/providers/test_live.py -q",
+    ),
+)
+def test_existing_external_commands_remain_in_the_closed_grammar(command: str) -> None:
+    invocations = validator._command_invocations(command)
+
+    assert len(invocations) == 1
+    assert validator._external_lane(invocations[0]) is not None
+    assert validator._green_command_is_fail_closed(command)
+
+
+@pytest.mark.parametrize("prefix", ("tests/hardware/", "tests/integration/providers/"))
+def test_external_target_grammar_rejects_empty_selection(prefix: str) -> None:
+    assert not validator._external_targets_are_canonical((), prefix=prefix)
+
+
+@pytest.mark.parametrize(
     "invocation",
     (
         ("TUNTUN_ALLOW_REACHY_HARDWARE=0", "python", "scripts/check.py"),
@@ -5594,6 +5628,32 @@ def test_allow_variables_do_not_turn_critical_python_into_external_lane(
     ),
 )
 def test_malformed_duplicate_or_mixed_external_authorization_is_rejected(command: str) -> None:
+    assert not validator._green_command_is_fail_closed(command)
+
+
+@pytest.mark.parametrize(
+    ("lane", "target"),
+    (
+        ("reachy", "tests/hardware/test_*.py"),
+        ("reachy", "tests/hardware/test_${TARGET}.py"),
+        ("reachy", "tests/hardware/test_$(hostname).py"),
+        ("reachy", "tests/hardware/test_`hostname`.py"),
+        ("live_cloud", "tests/integration/providers/test_*.py"),
+        ("live_cloud", "tests/integration/providers/test_${TARGET}.py"),
+        ("live_cloud", "tests/integration/providers/test_$(hostname).py"),
+        ("live_cloud", "tests/integration/providers/test_`hostname`.py"),
+    ),
+)
+def test_external_pytest_targets_reject_shell_interpretation(lane: str, target: str) -> None:
+    if lane == "reachy":
+        command = (
+            "TUNTUN_ALLOW_REACHY_HARDWARE=1 /venvs/apps_venv/bin/python3 -m pytest "
+            "-c tools/reachy-hardware-probe/pytest.ini -m reachy_hardware "
+            f"{target} -q"
+        )
+    else:
+        command = f"TUNTUN_ALLOW_LIVE_CLOUD=1 python -m pytest -m live_cloud {target} -q"
+
     assert not validator._green_command_is_fail_closed(command)
 
 
@@ -5909,6 +5969,199 @@ def test_task15_validator_rejects_dead_required_io_callsites(
     errors = _task15_portability_errors(source.replace(active, spoof, 1))
 
     assert any(expected in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("active", "spoof", "expected"),
+    (
+        (
+            "_write_all(descriptor, canonical_schema_bytes())",
+            "if False:\n"
+            "                _write_all(descriptor, canonical_schema_bytes())\n"
+            "            os.writev(descriptor, [canonical_schema_bytes()])",
+            "write-all",
+        ),
+        (
+            "raw = _read_all_bounded(descriptor, max_bytes)",
+            "if False:\n"
+            "            raw = _read_all_bounded(descriptor, max_bytes)\n"
+            "        raw = path.read_bytes()",
+            "bounded read-all",
+        ),
+        (
+            "_write_all(target_descriptor, chunk)",
+            "if False:\n"
+            "                _write_all(target_descriptor, chunk)\n"
+            "            os.writev(target_descriptor, [chunk])",
+            "write-all",
+        ),
+    ),
+)
+def test_task15_validator_rejects_dead_required_io_with_alternate_live_io(
+    active: str, spoof: str, expected: str
+) -> None:
+    source = PLAN_PATH.read_text(encoding="utf-8")
+    assert active in source
+
+    errors = _task15_portability_errors(source.replace(active, spoof, 1))
+
+    assert any(expected in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("path", "duplicate", "expected"),
+    (
+        (
+            "evals/generate_bilingual_report_schema.py",
+            "\n\ndef write_schema(path: Path = SCHEMA_PATH) -> None:\n"
+            "    os.writev(1, [canonical_schema_bytes()])\n",
+            "write-all",
+        ),
+        (
+            "evals/control_json.py",
+            "\n\ndef _write_all(descriptor, payload):\n    return None\n",
+            "write-all",
+        ),
+        (
+            "evals/control_json.py",
+            "\n\ndef _copy_content_addressed(source, target_descriptor, expected_sha256, "
+            "*, max_bytes):\n    return 0\n",
+            "write-all",
+        ),
+        (
+            "evals/control_json.py",
+            "\n\ndef parse_control_json(path, *, max_bytes, require_canonical):\n"
+            "    return path.read_bytes()\n",
+            "bounded read-all",
+        ),
+    ),
+)
+def test_task15_validator_rejects_duplicate_protected_definitions(
+    path: str, duplicate: str, expected: str
+) -> None:
+    plan = PLAN_PATH.read_text(encoding="utf-8")
+    snippet = _task15_snippet_source(path)
+    assert plan.count(snippet) == 1
+
+    errors = _task15_portability_errors(plan.replace(snippet, snippet + duplicate, 1))
+
+    assert any(expected in error for error in errors), errors
+
+
+def test_task15_validator_rejects_imported_write_all_rebinding() -> None:
+    plan = PLAN_PATH.read_text(encoding="utf-8")
+    snippet = _task15_snippet_source("evals/generate_bilingual_report_schema.py")
+    import_line = "from evals.control_json import _write_all\n"
+    assert snippet.count(import_line) == 1
+    mutated = snippet.replace(
+        import_line,
+        import_line + "_write_all = lambda descriptor, payload: os.writev(descriptor, [payload])\n",
+        1,
+    )
+
+    errors = _task15_portability_errors(plan.replace(snippet, mutated, 1))
+
+    assert any("write-all" in error for error in errors), errors
+
+
+def test_task15_validator_rejects_dynamic_module_write_all_rebinding() -> None:
+    plan = PLAN_PATH.read_text(encoding="utf-8")
+    snippet = _task15_snippet_source("evals/generate_bilingual_report_schema.py")
+    import_line = "from evals.control_json import _write_all\n"
+    assert snippet.count(import_line) == 1
+    mutated = snippet.replace(
+        import_line,
+        import_line + 'globals().__setitem__("_write_all", os.writev)\n',
+        1,
+    )
+
+    errors = _task15_portability_errors(plan.replace(snippet, mutated, 1))
+
+    assert any("module AST" in error for error in errors), errors
+
+
+def test_task15_validator_rejects_function_scope_global_write_all_rebinding() -> None:
+    plan = PLAN_PATH.read_text(encoding="utf-8")
+    snippet = _task15_snippet_source("evals/generate_bilingual_report_schema.py")
+    main_start = "def main(argv=None) -> int:\n    parser ="
+    assert snippet.count(main_start) == 1
+    mutated = snippet.replace(
+        main_start,
+        "def main(argv=None) -> int:\n"
+        "    global _write_all\n"
+        "    _write_all = os.writev\n"
+        "    parser =",
+        1,
+    )
+
+    errors = _task15_portability_errors(plan.replace(snippet, mutated, 1))
+
+    assert any("module AST" in error for error in errors), errors
+
+
+def test_task15_module_ast_contract_is_python312_and_ignores_formatting() -> None:
+    assert sys.version_info[:2] == (3, 12)
+    assert 'requires-python = "==3.12.*"' in Path("pyproject.toml").read_text(encoding="utf-8")
+    plan = PLAN_PATH.read_text(encoding="utf-8")
+    snippet = _task15_snippet_source("evals/generate_bilingual_report_schema.py")
+    reformatted = snippet + "\n\n# AST review intentionally ignores comments and whitespace.\n"
+
+    errors = _task15_portability_errors(plan.replace(snippet, reformatted, 1))
+
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    ("path", "name"),
+    (
+        ("evals/generate_bilingual_report_schema.py", "canonical_schema_bytes"),
+        ("evals/generate_bilingual_report_schema.py", "write_schema"),
+        ("evals/control_json.py", "_read_all_bounded"),
+        ("evals/control_json.py", "_write_all"),
+        ("evals/control_json.py", "_verified_source"),
+        ("evals/control_json.py", "_same_file"),
+        ("evals/control_json.py", "_copy_content_addressed"),
+        ("evals/control_json.py", "parse_control_json"),
+    ),
+)
+def test_task15_validator_rejects_module_scope_protected_rebinding(path: str, name: str) -> None:
+    plan = PLAN_PATH.read_text(encoding="utf-8")
+    snippet = _task15_snippet_source(path)
+    rebound = snippet + f"\n\n{name} = lambda *args, **kwargs: None\n"
+
+    errors = _task15_portability_errors(plan.replace(snippet, rebound, 1))
+
+    assert any("reviewed AST" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    (
+        (
+            "schema = BilingualScoreReportV1.model_json_schema()",
+            "schema = {}",
+        ),
+        (
+            'if max_bytes < 1:\n        raise ValueError("read bound must be positive")',
+            'if max_bytes < 1:\n        return b""',
+        ),
+        (
+            'os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)',
+            "os.O_RDONLY | os.O_CLOEXEC",
+        ),
+        (
+            "before.st_mtime_ns,\n    ) == (",
+            "before.st_size,\n    ) == (",
+        ),
+    ),
+)
+def test_task15_validator_locks_each_reviewed_io_helper_ast(old: str, new: str) -> None:
+    source = PLAN_PATH.read_text(encoding="utf-8")
+    assert source.count(old) == 1
+
+    errors = _task15_portability_errors(source.replace(old, new, 1))
+
+    assert any("reviewed AST" in error for error in errors), errors
 
 
 def test_task15_validator_rejects_early_return_before_write_all_loop() -> None:

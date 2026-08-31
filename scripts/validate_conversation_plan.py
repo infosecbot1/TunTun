@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import hashlib
 import ipaddress
 import json
 import re
@@ -15,7 +16,7 @@ import sys
 import tempfile
 from collections import Counter
 from collections.abc import Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 import yaml
@@ -1846,19 +1847,14 @@ def _external_assignment(
 
 
 def _external_targets_are_canonical(targets: Sequence[str], *, prefix: str) -> bool:
-    for target in targets:
-        path_text, separator, node_id = target.partition("::")
-        path = PurePosixPath(path_text)
-        if (
-            path.is_absolute()
-            or not path.parts
-            or ".." in path.parts
-            or path.as_posix() != path_text
-            or not path_text.startswith(prefix)
-            or (separator and not node_id)
-        ):
-            return False
-    return True
+    patterns = {
+        "tests/hardware/": r"tests/hardware/test_[a-z0-9_]+\.py",
+        "tests/integration/providers/": (r"tests/integration/providers/test_[a-z0-9_]+\.py"),
+    }
+    pattern = patterns.get(prefix)
+    if pattern is None or not targets:
+        return False
+    return all(re.fullmatch(pattern, target, flags=re.ASCII) is not None for target in targets)
 
 
 def _external_lane(invocation: tuple[str, ...]) -> str | None:
@@ -2412,71 +2408,146 @@ def _validate_task15_portability_contract(task: Task, errors: list[str]) -> None
     except SyntaxError:
         control_tree = ast.Module(body=[], type_ignores=[])
 
-    def named_function(tree: ast.Module, name: str) -> ast.FunctionDef | None:
-        return next(
-            (node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name),
-            None,
-        )
+    def module_ast_sha256(tree: ast.Module) -> str:
+        canonical = ast.dump(tree, include_attributes=False).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
-    def call_matches(node: ast.AST, name: str, arguments: tuple[str, ...]) -> bool:
+    # The workspace runtime and its full plan-integrity CI lane are exactly CPython 3.12.
+    # ``ast.dump`` is intentionally minor-version-bound; the isolated Python 3.11 job runs
+    # only the packaged contracts and never this validator.
+    module_ast_runtime_is_reviewed = sys.version_info[:2] == (3, 12)
+    generator_module_is_reviewed = module_ast_runtime_is_reviewed and module_ast_sha256(
+        generator_tree
+    ) == ("6196730f1de7489d97e7b484091fe45328e61b5182cae0e5f93b46d22d3e0dfc")
+    control_module_is_reviewed = module_ast_runtime_is_reviewed and module_ast_sha256(
+        control_tree
+    ) == ("2cc0cc8fb5716f50148e7f8ed589e4866a5a8c7a2afb887fa3cb31d56499eeb4")
+
+    def module_binding_count(tree: ast.Module, name: str) -> int:
+        count = 0
+
+        def visit(node: ast.AST) -> None:
+            nonlocal count
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.name == name:
+                    count += 1
+                return
+            if isinstance(node, ast.Lambda):
+                return
+            if isinstance(node, ast.Import):
+                count += sum(
+                    (alias.asname or alias.name.partition(".")[0]) == name for alias in node.names
+                )
+                return
+            if isinstance(node, ast.ImportFrom):
+                count += sum((alias.asname or alias.name) == name for alias in node.names)
+                return
+            if isinstance(node, ast.ExceptHandler) and node.name == name:
+                count += 1
+            if (
+                isinstance(node, ast.Name)
+                and node.id == name
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+            ):
+                count += 1
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+
+        visit(tree)
+        return count
+
+    def reviewed_function(tree: ast.Module, name: str, source: str) -> bool:
+        candidates = [
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
+        ]
+        expected = ast.parse(source).body
         return (
-            isinstance(node, ast.Call)
-            and _decorator_name(node.func) == name
-            and not node.keywords
-            and len(node.args) == len(arguments)
-            and all(
-                isinstance(argument, ast.Name) and argument.id == expected
-                for argument, expected in zip(node.args, arguments, strict=True)
-            )
+            len(candidates) == 1
+            and module_binding_count(tree, name) == 1
+            and len(expected) == 1
+            and ast.dump(candidates[0], include_attributes=False)
+            == ast.dump(expected[0], include_attributes=False)
         )
 
-    generator_function = named_function(generator_tree, "write_schema")
-    generator_write_all = generator_function is not None and any(
-        isinstance(node, ast.Call)
-        and _decorator_name(node.func) == "_write_all"
-        and len(node.args) == 2
-        and isinstance(node.args[0], ast.Name)
-        and node.args[0].id == "descriptor"
-        and isinstance(node.args[1], ast.Call)
-        and _decorator_name(node.args[1].func) == "canonical_schema_bytes"
-        and not node.args[1].args
-        and not node.args[1].keywords
-        for node in ast.walk(generator_function)
+    generator_import_is_reviewed = (
+        module_binding_count(generator_tree, "_write_all") == 1
+        and sum(
+            1
+            for statement in generator_tree.body
+            if isinstance(statement, ast.ImportFrom)
+            and statement.level == 0
+            and statement.module == "evals.control_json"
+            for alias in statement.names
+            if alias.name == "_write_all" and alias.asname is None
+        )
+        == 1
     )
-    generator_direct_write = generator_function is not None and any(
-        isinstance(node, ast.Call) and _decorator_name(node.func) == "os.write"
-        for node in ast.walk(generator_function)
+    generator_canonical_is_reviewed = reviewed_function(
+        generator_tree,
+        "canonical_schema_bytes",
+        """\
+def canonical_schema_bytes() -> bytes:
+    schema = BilingualScoreReportV1.model_json_schema()
+    schema["$id"] = SCHEMA_ID
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    return (
+        json.dumps(
+            schema,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\\n"
     )
-    parse_function = named_function(control_tree, "parse_control_json")
-    parse_read_all = parse_function is not None and any(
-        isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id == "raw"
-        and call_matches(node.value, "_read_all_bounded", ("descriptor", "max_bytes"))
-        for node in ast.walk(parse_function)
+""",
     )
-    parse_direct_read = parse_function is not None and any(
-        isinstance(node, ast.Call) and _decorator_name(node.func) == "os.read"
-        for node in ast.walk(parse_function)
+    generator_write_all = reviewed_function(
+        generator_tree,
+        "write_schema",
+        """\
+def write_schema(path: Path = SCHEMA_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
     )
-    copy_function = named_function(control_tree, "_copy_content_addressed")
-    copy_write_all = copy_function is not None and any(
-        call_matches(node, "_write_all", ("target_descriptor", "chunk"))
-        for loop in ast.walk(copy_function)
-        if isinstance(loop, ast.While)
-        for node in ast.walk(loop)
+    try:
+        try:
+            os.chmod(temporary, 0o600)
+            _write_all(descriptor, canonical_schema_bytes())
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+""",
     )
-    copy_direct_write = copy_function is not None and any(
-        isinstance(node, ast.Call) and _decorator_name(node.func) == "os.write"
-        for node in ast.walk(copy_function)
+    read_all_is_reviewed = reviewed_function(
+        control_tree,
+        "_read_all_bounded",
+        """\
+def _read_all_bounded(descriptor: int, max_bytes: int) -> bytes:
+    if max_bytes < 1:
+        raise ValueError("read bound must be positive")
+    chunks = bytearray()
+    while len(chunks) <= max_bytes:
+        remaining = max_bytes + 1 - len(chunks)
+        if remaining <= 0:
+            break
+        chunk = os.read(descriptor, min(1_048_576, remaining))
+        if not chunk:
+            break
+        chunks.extend(chunk)
+    return bytes(chunks)
+""",
     )
-    write_all_function = named_function(control_tree, "_write_all")
-    write_all_nodes = tuple(ast.walk(write_all_function)) if write_all_function is not None else ()
-    write_all_calls = {
-        _decorator_name(node.func) for node in write_all_nodes if isinstance(node, ast.Call)
-    }
-    expected_write_all = ast.parse(
+    write_all_is_structural = reviewed_function(
+        control_tree,
+        "_write_all",
         """\
 def _write_all(descriptor: int, payload: bytes | bytearray | memoryview) -> None:
     remaining = memoryview(payload)
@@ -2485,13 +2556,140 @@ def _write_all(descriptor: int, payload: bytes | bytearray | memoryview) -> None
         if written <= 0:
             raise OSError("zero-length artifact write")
         remaining = remaining[written:]
-"""
-    ).body[0]
-    write_all_is_structural = (
-        write_all_function is not None
-        and "os.write" in write_all_calls
-        and ast.dump(write_all_function, include_attributes=False)
-        == ast.dump(expected_write_all, include_attributes=False)
+""",
+    )
+    same_file_is_reviewed = reviewed_function(
+        control_tree,
+        "_same_file",
+        """\
+def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
+    return (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    )
+""",
+    )
+    verified_source_is_reviewed = reviewed_function(
+        control_tree,
+        "_verified_source",
+        """\
+def _verified_source(path: Path) -> tuple[int, os.stat_result]:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        named = os.lstat(path)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(named.st_mode)
+            or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise PermissionError("evaluator artifact must be a stable regular file")
+        return descriptor, metadata
+    except BaseException:
+        os.close(descriptor)
+        raise
+""",
+    )
+    copy_write_all = reviewed_function(
+        control_tree,
+        "_copy_content_addressed",
+        """\
+def _copy_content_addressed(
+    source: Path,
+    target_descriptor: int,
+    expected_sha256: str,
+    *,
+    max_bytes: int,
+) -> int:
+    descriptor, before = _verified_source(source)
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        if not 1 <= before.st_size <= max_bytes:
+            raise PermissionError("evaluator artifact size invalid")
+        while True:
+            chunk = os.read(descriptor, min(1_048_576, max_bytes + 1 - copied))
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > max_bytes:
+                raise PermissionError("evaluator artifact size invalid")
+            digest.update(chunk)
+            _write_all(target_descriptor, chunk)
+        after = os.fstat(descriptor)
+        named = os.lstat(source)
+    finally:
+        os.close(descriptor)
+    if (
+        copied != before.st_size
+        or not _same_file(before, after)
+        or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
+        or digest.hexdigest() != expected_sha256
+    ):
+        raise PermissionError("evaluator artifact digest mismatch")
+    return copied
+""",
+    )
+    parse_read_all = reviewed_function(
+        control_tree,
+        "parse_control_json",
+        """\
+def parse_control_json(path: Path, *, max_bytes: int, require_canonical: bool):
+    descriptor, before = _verified_source(path)
+    try:
+        if not 1 <= before.st_size <= max_bytes:
+            raise ValueError("eval control JSON size invalid")
+        raw = _read_all_bounded(descriptor, max_bytes)
+        after = os.fstat(descriptor)
+        named = os.lstat(path)
+    finally:
+        os.close(descriptor)
+    if (
+        not 1 <= len(raw) <= max_bytes
+        or b"\\x00" in raw
+        or not _same_file(before, after)
+        or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
+    ):
+        raise ValueError("eval control JSON size invalid")
+    value = json.loads(
+        raw,
+        parse_constant=lambda _value: (_ for _ in ()).throw(
+            ValueError("nonfinite eval control JSON")
+        ),
+    )
+    canonical = (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        + "\\n"
+    ).encode()
+    if require_canonical and raw != canonical:
+        raise ValueError("noncanonical eval control JSON")
+    return value
+""",
+    )
+    protected_io_is_reviewed = all(
+        (
+            generator_module_is_reviewed,
+            control_module_is_reviewed,
+            generator_import_is_reviewed,
+            generator_canonical_is_reviewed,
+            generator_write_all,
+            read_all_is_reviewed,
+            write_all_is_structural,
+            same_file_is_reviewed,
+            verified_source_is_reviewed,
+            copy_write_all,
+            parse_read_all,
+        )
     )
     if any(term in control + language for term in ("memfd_create", "/proc/self/fd")):
         errors.append("Task 15 private artifact loader must be Darwin-safe")
@@ -2523,7 +2721,19 @@ def _write_all(descriptor: int, payload: bytes | bytearray | memoryview) -> None
         errors.append(
             "Task 15 private artifact lifecycle must verify owner-only regular temporary files"
         )
-    if "def _read_all_bounded(" not in control or not parse_read_all or parse_direct_read:
+    if not protected_io_is_reviewed:
+        errors.append(
+            "Task 15 protected evaluator I/O bindings and definitions must match reviewed AST"
+        )
+    if not generator_module_is_reviewed or not control_module_is_reviewed:
+        errors.append("Task 15 evaluator module AST must match the reviewed execution surface")
+    if (
+        "def _read_all_bounded(" not in control
+        or not read_all_is_reviewed
+        or not verified_source_is_reviewed
+        or not same_file_is_reviewed
+        or not parse_read_all
+    ):
         errors.append("Task 15 control JSON requires bounded read-all semantics")
     if (
         not all(
@@ -2536,10 +2746,12 @@ def _write_all(descriptor: int, payload: bytes | bytearray | memoryview) -> None
             )
         )
         or "from evals.control_json import _write_all" not in generator
+        or not generator_import_is_reviewed
+        or not generator_canonical_is_reviewed
         or not generator_write_all
-        or generator_direct_write
+        or not verified_source_is_reviewed
+        or not same_file_is_reviewed
         or not copy_write_all
-        or copy_direct_write
         or not write_all_is_structural
     ):
         errors.append("Task 15 model, tree, and schema writes require write-all semantics")
