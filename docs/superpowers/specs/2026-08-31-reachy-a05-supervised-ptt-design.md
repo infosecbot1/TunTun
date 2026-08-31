@@ -160,7 +160,25 @@ The first closed control set is:
 and all six local cleanup facts: new capture rejected, recording stopped, playback stopped, motion
 stopped, audio-reactive behavior disabled, and owned buffers cleared. A false field remains truthful
 failure evidence. `safety_ack` reports whether Core accepted the receipt as complete; it acknowledges
-receipt delivery even when the diagnostic outcome is failure.
+receipt delivery even when the diagnostic outcome is failure. A positive acknowledgement is legal
+only when all six receipt facts are true. A negative acknowledgement is always conservative,
+closes the turn as `cleanup_incomplete`, and is valid even when the receipt itself reports six true
+facts.
+
+A malformed frame or a duplex violation permanently poisons and aborts the affected decoder/guard;
+it is never finished, reused, replaced, or resynchronized, and no further inbound acknowledgement
+is parsed. Local cleanup still runs from the same monotonic T0. A monotonic receipt-attempt latch is
+set before an ordinary receipt send or before an emergency pair starts, so at most one receipt can
+ever be attempted. Poison after that latch, or poison while any send is active, closes the transport
+without emergency output. Before an eligible emergency pair, the writer atomically removes and
+fails any unsent guarded terminal cleanup draft so that draft cannot strand the bypass lane.
+Otherwise the idle sole sequence-owning writer immediately attempts
+`error(protocol_rejected)` while local observations run. Only a positive full send advances its Edge
+sequence; any exception, timeout, cancellation, or ambiguous/partial send permanently closes the
+transport and suppresses the receipt. When observations finish, the writer may follow with one
+truthful `safety_receipt`. The two canonical current-turn frames share the single T0+2.5 deadline
+and deliberately bypass only the poisoned guard. The stream is never treated as acknowledged and
+the result is `cleanup_incomplete`. This is the only post-poison wire exception.
 
 Both media start controls must carry `TRANSPORT_AUDIO_FORMAT` exactly. Cleanup controls and the
 receipt/ack handshake remain admissible after media byte/sample/rate/wall limits have expired; an
@@ -245,25 +263,44 @@ decoder's owned bytes, and permanently poisons that decoder.
 Only one turn may be active. Every media/control item is bound to its turn ID and sequence. The
 supervisor is constructed with exactly one input mode and cannot change it during a turn.
 
+At `run()` T0, before creating a runtime child or touching the guard, transport, or media ports,
+Edge clears and verifies its two distinct owned media buffers. Stale capture or playback bytes can
+never resume into a new turn. A clear or verification failure runs bounded local-only cleanup and
+ends `cleanup_incomplete`.
+
 1. The supervisor completes the mode handshake. In terminal mode Core sends start/submit as above;
    in proved local mode Edge reads local capture and stop inputs. Edge opens capture in a mutable
    owned buffer.
-2. Edge converts the probed native format into the bounded transport format before sending.
+2. Edge accepts each native capture read only as an exact `bytes` value of 1 through 65,536 even
+   bytes, rejects a larger read before a buffer copy or wire effect, and losslessly rechunks accepted
+   audio while converting the probed native format into the bounded transport format.
+   `capture_start`, every PCM draft, and `capture_end` carry their absolute capture/turn deadline;
+   capture close is bounded by both submit+2 seconds and the original 90-second capture wall.
 3. Release or submit causes Edge to close input before sending `capture_end`; Core invokes no STT
    until that control arrives.
 4. Core invokes STT, LLM, and TTS sequentially with one cancellation scope.
 5. Edge plays only frames for the still-current turn and rejects late output.
-6. Normal completion and every failure run the receipt/ack cleanup handshake, clear owned mutable
-   buffers, join owned tasks, and close the turn.
+6. Normal completion and every non-protocol failure run the receipt/ack cleanup handshake, clear
+   owned mutable buffers, join owned tasks, and close the turn. Protocol poison uses only the
+   terminal best-effort emergency path defined above; it never resumes inbound parsing.
+
+Clean EOF and transport receive exceptions preserve `peer_closed` as their first semantic reason.
+The terminal reader cannot then receive an acknowledgement, so the universal missing-ack rule
+makes the final public outcome `cleanup_incomplete`. A non-bytes or oversized receive result is a
+local transport-adapter contract failure whose semantic and final outcome is `cleanup_incomplete`.
+Those cases retain the ordinary guarded error/receipt path and never poison the decoder or guard;
+EOF with buffered truncated framing still poisons.
 
 Edge cleanup is authoritative once requested. Stop/abort has permanent precedence: after cleanup is
 latched, correctly framed current-turn in-flight input/media controls are bounded, consumed, and
 discarded without reopening an admission gate. Repeated current-turn cleanup requests are
 idempotent. Edge synchronously closes capture and playback gates and
 drops owned buffers first, then attempts recording, playback, motion, and audio-reactive stops
-independently under one absolute deadline so one hung component cannot suppress siblings. It emits a
-truthful `safety_receipt` and waits boundedly for `safety_ack`. Core continuously reads controls while
-provider work runs; `stop|cancel` cancels the active provider/playback task immediately. Core-origin
+independently under one absolute deadline so one hung component cannot suppress siblings. On a
+still-valid stream it emits a truthful `safety_receipt` and waits boundedly for `safety_ack`; a
+poisoned stream follows only the terminal emergency rule and reads no acknowledgement. Core
+continuously reads controls while provider work runs; `stop|cancel` cancels the active
+provider/playback task immediately. Core-origin
 failure, timeout, or Ctrl-C closes admission and sends `abort` immediately on the reserved priority
 lane while provider cancellation runs concurrently from the same monotonic cleanup T0. It drops late
 results, acknowledges the safety receipt, joins owned tasks within their separate bound, and only
@@ -273,14 +310,31 @@ The diagnostic freezes these outer bounds: 5 seconds for session ready; 2 second
 after start and capture close after submit; 90 seconds capture; 30 seconds STT, 45 seconds reasoning,
 30 seconds TTS, 120 seconds total post-capture provider work; 90 seconds playback; and 310 seconds for
 the complete turn. Core sends `heartbeat` every second; Edge invokes local cleanup after 5 seconds
-without any valid Core frame, and heartbeats extend neither media nor turn limits. Cleanup is one
+without any valid Core frame, and heartbeats extend neither media nor turn limits. An injected
+absolute sleeper that raises, self-cancels, or returns before the requested deadline is an internal clock fault
+ending `cleanup_incomplete`, never a timeout or heartbeat busy-loop. Every `now()` sample is finite
+and nondecreasing; a raise, nonfinite value, or reversal synchronously closes media gates, owned
+buffers, and admission as `cleanup_incomplete`. Core and local cleanup triggers retain their sampled
+acceptance timestamp across lock waits, so the exact T0+310 turn deadline wins while a valid
+predeadline trigger keeps its original outcome. After such a fault, ordinary media and wire effects
+remain forbidden, while local stop observations, owned-task joins, and transport teardown retain
+their original bounds through an event-loop monotonic fallback anchored to the last advancing valid
+clock sample. A fault during an injected sleep cancels and joins that sleeper before switching; it
+never grants a fresh cleanup interval. Cleanup is one
 exactly-once shared task: stop observations finish or time out by T+2 seconds under simultaneous
-local stop, EOF, watchdog, and Core abort; the truthful receipt is encoded/sent by T+2.5 and
-acknowledgement finishes by T+3.5. Core enqueues `abort` at T0 while concurrently closing provider
-transports within 0.5 seconds and joining them within 1 second; provider teardown never delays the
-3.5-second abort/receipt/ack path. SSH connect is 5 seconds, server-alive is
+local stop, EOF, watchdog, and Core abort. On a still-valid stream the truthful receipt is
+encoded/sent by T+2.5 and acknowledgement finishes by T+3.5. On a poisoned stream the emergency
+error starts immediately at T0 while observations run; if it completes, the truthful receipt follows
+and both sends share T+2.5, with no acknowledgement read. Core enqueues `abort` at T0 while
+concurrently closing provider transports within 0.5 seconds and joining them within 1 second;
+provider teardown never delays the 3.5-second abort/receipt/ack path. Admission stays closed while
+transport close and owned-task joins finish by the separate T+4.0 teardown deadline. SSH connect is
+5 seconds, server-alive is
 2 seconds with count 2, stdin-close grace is 1 second, TERM grace is 1 second, and KILL observation
 is 1 second. Timing failure yields content-free failed evidence and no unbounded join or retry.
+Caller cancellation while acquiring the lifecycle lock, adopting cleanup, handling any
+post-startup exit, or rolling back a partially created runtime is remembered; the same bounded
+cleanup/rollback ownership finishes before cancellation is re-raised.
 
 Python, the SDK, operating system, and provider may retain copies outside Tuntun's owned buffers;
 buffer clearing is therefore best-effort cleanup, not cryptographic erasure.

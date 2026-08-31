@@ -2,6 +2,16 @@
 name = "tuntun-edge"
 version = "0.1.0.dev0"
 requires-python = ">=3.11,<3.13"
+dependencies = [
+  "tuntun-contracts==0.1.0.dev0",
+  "typer>=0.16,<1",
+]
+
+[project.scripts]
+tuntun-edge = "tuntun_edge.cli.main:app"
+
+[tool.uv.sources]
+tuntun-contracts = { workspace = true }
 
 [build-system]
 requires = ["hatchling>=1.27,<2"]

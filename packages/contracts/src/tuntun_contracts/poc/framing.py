@@ -858,7 +858,7 @@ class PttDuplexGuard:
         if control.kind is ControlKind.SAFETY_ACK and self._state is _DuplexState.RECEIPT_RECEIVED:
             if not isinstance(control.payload, AckPayload) or self._receipt_complete is None:
                 self._fail(FrameErrorCode.INVALID_CONTROL)
-            if control.payload.accepted is not self._receipt_complete:
+            if control.payload.accepted and not self._receipt_complete:
                 self._fail(FrameErrorCode.INVALID_ORDER)
             if not control.payload.accepted:
                 self._outcome = PttSessionOutcome.CLEANUP_INCOMPLETE

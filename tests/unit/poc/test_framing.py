@@ -1446,7 +1446,7 @@ def test_false_receipt_and_matching_false_ack_close_as_cleanup_incomplete() -> N
     assert guard.finish() is PttSessionOutcome.CLEANUP_INCOMPLETE
 
 
-def test_ack_must_match_receipt_completeness() -> None:
+def test_negative_ack_conservatively_rejects_a_complete_receipt() -> None:
     guard = opened_guard(PttInputMode.REACHY_LOCAL)
     accept(
         guard,
@@ -1461,11 +1461,40 @@ def test_ack_must_match_receipt_completeness() -> None:
         0.03,
     )
 
+    accept(
+        guard,
+        StreamDirection.CORE_TO_EDGE,
+        control_frame(2, PttControl.safety_ack(TURN_ID, accepted=False)),
+        0.04,
+    )
+
+    assert guard.state == "acknowledged"
+    assert guard.finish() is PttSessionOutcome.CLEANUP_INCOMPLETE
+
+
+def test_positive_ack_rejects_an_incomplete_receipt() -> None:
+    guard = opened_guard(PttInputMode.REACHY_LOCAL)
+    accept(
+        guard,
+        StreamDirection.CORE_TO_EDGE,
+        control_frame(1, PttControl.abort(TURN_ID, PttErrorReason.PROVIDER_FAILED)),
+        0.02,
+    )
+    accept(
+        guard,
+        StreamDirection.EDGE_TO_CORE,
+        control_frame(
+            1,
+            PttControl.safety_receipt(TURN_ID, complete_receipt(complete=False)),
+        ),
+        0.03,
+    )
+
     with pytest.raises(FrameProtocolError) as caught:
         accept(
             guard,
             StreamDirection.CORE_TO_EDGE,
-            control_frame(2, PttControl.safety_ack(TURN_ID, accepted=False)),
+            control_frame(2, PttControl.safety_ack(TURN_ID, accepted=True)),
             0.04,
         )
 
