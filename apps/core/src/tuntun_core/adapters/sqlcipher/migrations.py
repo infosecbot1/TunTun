@@ -123,7 +123,9 @@ class _ReservedDestination:
     path: Path
     parent: OwnedDirectory
     main_identity: tuple[int, int]
-    sidecar_identities: dict[str, tuple[int, int]] = field(default_factory=dict)
+    main_descriptor: int | None
+    sidecar_identities: dict[str, FileIdentity] = field(default_factory=dict)
+    sidecar_descriptors: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def create(cls, path: Path) -> _ReservedDestination:
@@ -134,6 +136,7 @@ class _ReservedDestination:
         primary: BaseException | None = None
         created = False
         created_identity: tuple[int, int] | None = None
+        retained_fd: int | None = None
         try:
             parent.revalidate()
             fd = os.open(absolute.name, _CREATE_FLAGS, 0o600, dir_fd=parent.fd)
@@ -146,21 +149,42 @@ class _ReservedDestination:
                 raise PermissionError("unsafe database path")
             os.fsync(fd)
             os.fsync(parent.fd)
-            _close_fd(fd)
+            retained_fd = os.dup(fd)
+            retained = os.fstat(retained_fd)
+            _require_private_regular(retained, parent_device=parent.device)
+            if _identity(retained) != created_identity:
+                raise PermissionError("unsafe database path")
+            closing_fd = fd
             fd = None
-            result = cls(absolute, parent, _identity(named))
+            _close_fd(closing_fd)
+            retained = os.fstat(retained_fd)
+            _require_private_regular(retained, parent_device=parent.device)
+            named = _stat_at(parent, absolute.name)
+            if _identity(retained) != created_identity or _identity(named) != created_identity:
+                raise PermissionError("unsafe database path")
+            result = cls(absolute, parent, _identity(named), retained_fd)
+            retained_fd = None
             parent = cast(OwnedDirectory, None)
             return result
         except BaseException as error:
             primary = error
             if created:
                 try:
+                    pinned_fd = retained_fd if retained_fd is not None else fd
+                    if pinned_fd is None:
+                        raise PermissionError("unsafe database path")
+                    opened = os.fstat(pinned_fd)
                     named = os.stat(
                         absolute.name,
                         dir_fd=parent.fd,
                         follow_symlinks=False,
                     )
-                    if created_identity is not None and _identity(named) == created_identity:
+                    if (
+                        created_identity is not None
+                        and opened.st_nlink == 1
+                        and _identity(opened) == created_identity
+                        and _identity(named) == created_identity
+                    ):
                         os.unlink(absolute.name, dir_fd=parent.fd)
                         os.fsync(parent.fd)
                 except FileNotFoundError:
@@ -171,6 +195,8 @@ class _ReservedDestination:
         finally:
             if fd is not None:
                 _close_fd(fd, primary)
+            if retained_fd is not None:
+                _close_fd(retained_fd, primary)
             if parent is not None:
                 try:
                     parent.close()
@@ -184,45 +210,88 @@ class _ReservedDestination:
         main, sidecars = connection.storage_identities()
         if (main.device, main.inode) != self.main_identity:
             raise PermissionError("unsafe database path")
-        self.sidecar_identities = {
-            suffix: (identity.device, identity.inode) for suffix, identity in sidecars
-        }
+        identities = dict(sidecars)
+        if self.sidecar_descriptors:
+            if identities != self.sidecar_identities:
+                raise PermissionError("unsafe database path")
+            for suffix, identity in identities.items():
+                opened = os.fstat(self.sidecar_descriptors[suffix])
+                _require_private_regular(opened, parent_device=self.parent.device)
+                if FileIdentity.from_stat(opened) != identity:
+                    raise PermissionError("unsafe database path")
+            return
+
+        descriptors: dict[str, int] = {}
+        try:
+            for suffix, identity in identities.items():
+                name = self.path.name + suffix
+                descriptor = os.open(name, _OPEN_FLAGS, dir_fd=self.parent.fd)
+                descriptors[suffix] = descriptor
+                opened = os.fstat(descriptor)
+                _require_private_regular(opened, parent_device=self.parent.device)
+                named = _stat_at(self.parent, name)
+                if (
+                    FileIdentity.from_stat(opened) != identity
+                    or FileIdentity.from_stat(named) != identity
+                ):
+                    raise PermissionError("unsafe database path")
+        except BaseException as error:
+            for descriptor in descriptors.values():
+                _close_fd(descriptor, error)
+            raise
+        self.sidecar_identities = identities
+        self.sidecar_descriptors = descriptors
 
     def revalidate(self) -> None:
         self.parent.revalidate()
-        if _identity(_stat_at(self.parent, self.path.name)) != self.main_identity:
+        if self.main_descriptor is None:
+            raise PermissionError("unsafe database path")
+        opened = os.fstat(self.main_descriptor)
+        _require_private_regular(opened, parent_device=self.parent.device)
+        if (
+            _identity(opened) != self.main_identity
+            or _identity(_stat_at(self.parent, self.path.name)) != self.main_identity
+        ):
             raise PermissionError("unsafe database path")
 
     def fsync(self) -> None:
         self.revalidate()
-        fd = os.open(self.path.name, _OPEN_FLAGS, dir_fd=self.parent.fd)
-        primary: BaseException | None = None
-        try:
-            opened = os.fstat(fd)
-            _require_private_regular(opened, parent_device=self.parent.device)
-            if _identity(opened) != self.main_identity:
-                raise PermissionError("unsafe database path")
-            os.fsync(fd)
-            os.fsync(self.parent.fd)
-        except BaseException as error:
-            primary = error
-            raise
-        finally:
-            _close_fd(fd, primary)
+        assert self.main_descriptor is not None
+        opened = os.fstat(self.main_descriptor)
+        _require_private_regular(opened, parent_device=self.parent.device)
+        if _identity(opened) != self.main_identity:
+            raise PermissionError("unsafe database path")
+        os.fsync(self.main_descriptor)
+        os.fsync(self.parent.fd)
 
     def remove(self, primary: BaseException) -> None:
-        identities = {
-            self.path.name: self.main_identity,
-            **{
-                self.path.name + suffix: identity
-                for suffix, identity in self.sidecar_identities.items()
-            },
-        }
         changed = False
-        for name, expected in identities.items():
+        try:
+            if self.main_descriptor is None:
+                raise PermissionError("unsafe database path")
+            opened = os.fstat(self.main_descriptor)
+            _require_private_regular(opened, parent_device=self.parent.device)
+            named = _stat_at(self.parent, self.path.name)
+            if _identity(opened) != self.main_identity or _identity(named) != self.main_identity:
+                raise PermissionError("unsafe database path")
+            os.unlink(self.path.name, dir_fd=self.parent.fd)
+            changed = True
+        except FileNotFoundError:
+            pass
+        except BaseException:
+            primary.add_note(_CLEANUP_NOTE)
+
+        for suffix, expected in self.sidecar_identities.items():
+            name = self.path.name + suffix
             try:
-                named = os.stat(name, dir_fd=self.parent.fd, follow_symlinks=False)
-                if _identity(named) != expected:
+                descriptor = self.sidecar_descriptors[suffix]
+                opened = os.fstat(descriptor)
+                _require_private_regular(opened, parent_device=self.parent.device)
+                named = _stat_at(self.parent, name)
+                if (
+                    FileIdentity.from_stat(opened) != expected
+                    or FileIdentity.from_stat(named) != expected
+                ):
                     raise PermissionError("unsafe database path")
                 os.unlink(name, dir_fd=self.parent.fd)
                 changed = True
@@ -237,6 +306,19 @@ class _ReservedDestination:
                 primary.add_note(_CLEANUP_NOTE)
 
     def close(self, primary: BaseException | None = None) -> BaseException | None:
+        descriptors = (() if self.main_descriptor is None else (self.main_descriptor,)) + tuple(
+            self.sidecar_descriptors.values()
+        )
+        self.main_descriptor = None
+        self.sidecar_descriptors.clear()
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                if primary is None:
+                    primary = error
+                else:
+                    primary.add_note(_CLEANUP_NOTE)
         try:
             self.parent.close()
         except BaseException as error:

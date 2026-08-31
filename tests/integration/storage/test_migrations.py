@@ -702,9 +702,15 @@ def test_destination_reservation_close_report_removes_its_exclusive_file(
     db.close()
     real_close = os.close
     injected = False
+    injected_fd: int | None = None
+    injected_close_attempts = 0
 
     def reporting_close(fd: int) -> None:
-        nonlocal injected
+        nonlocal injected, injected_close_attempts, injected_fd
+        if fd == injected_fd:
+            injected_close_attempts += 1
+            real_close(fd)
+            return
         opened = os.fstat(fd)
         target = destination.stat() if destination.exists() else None
         if (
@@ -713,6 +719,8 @@ def test_destination_reservation_close_report_removes_its_exclusive_file(
             and (opened.st_dev, opened.st_ino) == (target.st_dev, target.st_ino)
         ):
             injected = True
+            injected_fd = fd
+            injected_close_attempts = 1
             real_close(fd)
             raise OSError("injected reservation close report")
         real_close(fd)
@@ -724,11 +732,118 @@ def test_destination_reservation_close_report_removes_its_exclusive_file(
     with pytest.raises(OSError, match="injected reservation close report"):
         encrypted_backup(source, destination, KEY)
     assert injected
+    assert injected_close_attempts == 1
     assert not destination.exists()
     assert not Path(f"{destination}-wal").exists()
     assert not Path(f"{destination}-shm").exists()
     assert connection_module._registry_snapshot(source) is None
     assert connection_module._registry_snapshot(destination) is None
+
+
+def test_destination_reservation_pins_inode_across_creation_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = _private_path(tmp_path, "reservation-handoff.db")
+    real_close = os.close
+    real_dup = os.dup
+    real_identity = migration_module._identity
+    original_identity: tuple[int, int] | None = None
+    replacement_identity: tuple[int, int] | None = None
+    retained_descriptor: int | None = None
+    swapped = False
+
+    def original_generation_is_pinned() -> bool:
+        if retained_descriptor is None:
+            return False
+        try:
+            os.fstat(retained_descriptor)
+        except OSError:
+            return False
+        return True
+
+    def simulate_recycled_inode(value: os.stat_result) -> tuple[int, int]:
+        actual = real_identity(value)
+        if (
+            replacement_identity is not None
+            and actual == replacement_identity
+            and not original_generation_is_pinned()
+        ):
+            assert original_identity is not None
+            return original_identity
+        return actual
+
+    def retain_generation(fd: int) -> int:
+        nonlocal retained_descriptor
+        retained_descriptor = real_dup(fd)
+        return retained_descriptor
+
+    def replace_during_creation_close(fd: int) -> None:
+        nonlocal original_identity, replacement_identity, swapped
+        opened = os.fstat(fd)
+        target = destination.stat() if destination.exists() else None
+        is_target = target is not None and real_identity(opened) == real_identity(target)
+        real_close(fd)
+        if is_target and not swapped:
+            original_identity = real_identity(opened)
+            destination.unlink()
+            destination.write_bytes(b"replacement-must-survive")
+            destination.chmod(0o600)
+            replacement_identity = real_identity(destination.stat())
+            swapped = True
+
+    monkeypatch.setattr(migration_module, "_identity", simulate_recycled_inode)
+    monkeypatch.setattr(migration_module.os, "dup", retain_generation)
+    monkeypatch.setattr(migration_module.os, "close", replace_during_creation_close)
+    reservation: migration_module._ReservedDestination | None = None
+    try:
+        with pytest.raises(PermissionError, match="unsafe database path"):
+            reservation = migration_module._ReservedDestination.create(destination)
+    finally:
+        if reservation is not None:
+            reservation.close()
+
+    assert swapped
+    assert destination.read_bytes() == b"replacement-must-survive"
+    destination.unlink()
+
+
+def test_destination_reservation_consumes_pinned_close_after_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = _private_path(tmp_path, "reservation-pinned-close.db")
+    reservation = migration_module._ReservedDestination.create(destination)
+    connection = open_sqlcipher(destination, KEY)
+    reservation.bind(connection)
+    connection.close()
+    assert reservation.main_descriptor is not None
+    descriptors = (
+        reservation.main_descriptor,
+        *reservation.sidecar_descriptors.values(),
+    )
+    primary = RuntimeError("primary backup failure")
+    reservation.remove(primary)
+    target = reservation.main_descriptor
+    real_close = os.close
+    target_close_attempts = 0
+
+    def close_then_report(fd: int) -> None:
+        nonlocal target_close_attempts
+        if fd == target:
+            target_close_attempts += 1
+            real_close(fd)
+            raise OSError("injected pinned descriptor close report")
+        real_close(fd)
+
+    monkeypatch.setattr(migration_module.os, "close", close_then_report)
+    assert reservation.close(primary) is primary
+
+    assert target_close_attempts == 1
+    assert migration_module._CLEANUP_NOTE in getattr(primary, "__notes__", ())
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
 
 
 def test_failed_backup_removes_only_its_partial_destination(
@@ -960,18 +1075,71 @@ def test_cleanup_fsync_failure_preserves_primary_backup_error(
     assert connection_module._registry_snapshot(destination) is None
 
 
-def test_backup_cleanup_never_unlinks_a_replaced_sidecar(tmp_path: Path) -> None:
+def test_backup_cleanup_never_unlinks_a_replaced_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     destination = _private_path(tmp_path, "replacement-backup.db")
     reservation = migration_module._ReservedDestination.create(destination)
     connection = open_sqlcipher(destination, KEY)
+    real_open = os.open
+    pinned_sidecar_descriptors: list[int] = []
+    sidecar_open_allowed = True
+
+    def track_sidecar_open(
+        path: str | bytes,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if path in {destination.name + "-wal", destination.name + "-shm"}:
+            assert sidecar_open_allowed, "repeat bind reopened a pinned sidecar"
+        if dir_fd is None:
+            descriptor = real_open(path, flags, mode)
+        else:
+            descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path in {destination.name + "-wal", destination.name + "-shm"}:
+            pinned_sidecar_descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(migration_module.os, "open", track_sidecar_open)
     reservation.bind(connection)
     _, sidecars = connection.storage_identities()
     assert {suffix for suffix, _ in sidecars} == {"-wal", "-shm"}
+    sidecar_open_allowed = False
+    reservation.bind(connection)
     connection.close()
 
     replacement = Path(f"{destination}-wal")
     replacement.write_bytes(b"replacement-must-survive")
     replacement.chmod(0o600)
+    replacement_identity = migration_module._identity(replacement.stat())
+    original_identity = {
+        suffix: (identity.device, identity.inode) for suffix, identity in sidecars
+    }["-wal"]
+    real_identity = migration_module._identity
+
+    def original_sidecar_generation_is_pinned() -> bool:
+        for descriptor in pinned_sidecar_descriptors:
+            try:
+                opened = os.fstat(descriptor)
+            except OSError:
+                continue
+            if real_identity(opened) == original_identity:
+                return True
+        return False
+
+    def simulate_recycled_sidecar_inode(value: os.stat_result) -> tuple[int, int]:
+        actual = real_identity(value)
+        if actual == replacement_identity and not original_sidecar_generation_is_pinned():
+            return original_identity
+        return actual
+
+    # Linux can recycle the just-deleted WAL inode immediately. Model that on
+    # every platform so cleanup must identify the pinned file generation, not
+    # trust a stale device/inode pair alone.
+    monkeypatch.setattr(migration_module, "_identity", simulate_recycled_sidecar_inode)
     primary = RuntimeError("primary backup failure")
     reservation.remove(primary)
     reservation.close(primary)
@@ -979,6 +1147,9 @@ def test_backup_cleanup_never_unlinks_a_replaced_sidecar(tmp_path: Path) -> None
     assert not destination.exists()
     assert replacement.read_bytes() == b"replacement-must-survive"
     assert migration_module._CLEANUP_NOTE in getattr(primary, "__notes__", ())
+    for descriptor in pinned_sidecar_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
     replacement.unlink()
 
 
