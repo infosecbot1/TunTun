@@ -58,20 +58,36 @@ CONTRACT_STEPS = [
     },
     {
         "shell": ARCHITECTURE_CHECK_SHELL,
-        "run": "uv venv --python 3.11 .venv-contracts-py311",
+        "run": "uv build --package tuntun-edge --wheel --out-dir dist-py311",
+    },
+    {
+        "shell": ARCHITECTURE_CHECK_SHELL,
+        "run": "uv venv --python 3.11 .venv-contracts-edge-py311",
     },
     {
         "shell": ARCHITECTURE_CHECK_SHELL,
         "run": (
-            "uv pip install --python .venv-contracts-py311/bin/python "
-            'dist-py311/*.whl "pytest>=8.4,<9"'
+            "/usr/bin/env -u PYTHONPATH uv pip install "
+            "--python .venv-contracts-edge-py311/bin/python "
+            'dist-py311/*.whl "pytest>=8.4,<9" "pytest-asyncio>=1.1,<2" '
+            '"hypothesis>=6.138,<7"'
         ),
     },
     {
         "shell": ARCHITECTURE_CHECK_SHELL,
         "run": (
-            ".venv-contracts-py311/bin/python -m pytest "
-            "tests/contract/test_v1_types_and_ports.py -q"
+            "/usr/bin/env -u PYTHONPATH .venv-contracts-edge-py311/bin/python -m pytest "
+            "tests/contract/test_v1_types_and_ports.py tests/unit/poc/test_framing.py -q"
+        ),
+    },
+    {
+        "shell": ARCHITECTURE_CHECK_SHELL,
+        "run": (
+            "/usr/bin/env -u PYTHONPATH .venv-contracts-edge-py311/bin/python -c "
+            '"import importlib.util, tuntun_contracts, tuntun_edge; '
+            "forbidden=('tuntun_core','tuntun_testing',"
+            "'reachy_mini'); found=[name for name in forbidden if "
+            'importlib.util.find_spec(name) is not None]; assert not found, found"'
         ),
     },
 ]
@@ -307,8 +323,8 @@ def _assert_workflow_policy(path: Path) -> None:
     _assert_permissions(workflow, required=True)
     _assert_no_secret_channel(workflow)
     jobs = workflow["jobs"]
-    assert set(jobs) == {"contracts-python311", "check"}
-    contract_job = jobs["contracts-python311"]
+    assert set(jobs) == {"contracts-edge-python311", "check"}
+    contract_job = jobs["contracts-edge-python311"]
     check_job = jobs["check"]
     assert contract_job == {
         "runs-on": "ubuntu-24.04",
