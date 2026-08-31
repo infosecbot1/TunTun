@@ -11582,8 +11582,7 @@ contracts-python311:
         dist-py311/*.whl "pytest>=8.4,<9"
     - run: >-
         .venv-contracts-py311/bin/python -m pytest
-        tests/contract/test_v1_types_and_ports.py
-        tests/contract/test_dependency_direction.py -q
+        tests/contract/test_v1_types_and_ports.py -q
 ```
 
 Use the imports shown by each complete module. Every validator has an explicit input and return type, every Python 3.11 alias uses `TypeAlias` plus the targeted Ruff compatibility suppression, and no file has an unused import. Export the public DTO, enum, alias, and protocol names from `tuntun_contracts/__init__.py` without importing any application package; do not root-export Task 5 constants or helper functions.
@@ -11592,7 +11591,7 @@ The contract semantics are also frozen: `IdentityFusionPort` returns identity on
 
 Every authority-bearing Task 5 DTO is internally total before it reaches an adapter. Authentication requests, challenges, grants, and contexts bind the same non-Guest subject as their `ActionBinding`; Guest carries neither subject nor grant, identity carries a subject without a grant, and grant-backed sources carry both. Provider, STT, and TTS requests bind their outer request/turn/provider/model/purpose and private commitment to the exact route, and TTS requires `segment_index < segment_count`. `PolicyDecision` carries a non-null elevated assurance exactly for `step_up`; camera action/purpose values are an exact pair. Evidence, grants, and admin sessions enforce their nondecreasing/strict expiry order. Successful provider usage is positive, memory versions are positive with unique provenance receipts, rejection cannot smuggle edited content, and timer payloads exist exactly for `create`.
 
-Action resource authority is explicit rather than inferred from a string prefix. `ACTION_RESOURCE_TYPE_BY_NAME` covers every discriminator, including the non-prefix release resources `security_finding`, `soak_run`, `family_stage`, and `release_candidate`. Typed UUID targets are equal to the generic resource ID for timers, memory proposals/records, profiles, consent, identity, search profiles, passkeys, backups, and latency runs. `ValidatedActionProposal` re-correlates proposal, idempotency, action, resource, and commitment fields across its draft and binding. The dependency-direction gate parses absolute and relative Python imports with `ast`, so comments/string literals do not create false positives and alternate import syntax cannot evade the boundary. The contracts wheel has a dedicated Python 3.11 build/install/focused-test CI job in addition to the workspace Python 3.12 matrix.
+Action resource authority is explicit rather than inferred from a string prefix. `ACTION_RESOURCE_TYPE_BY_NAME` covers every discriminator, including the non-prefix release resources `security_finding`, `soak_run`, `family_stage`, and `release_candidate`. Typed UUID targets are equal to the generic resource ID for timers, memory proposals/records, profiles, consent, identity, search profiles, passkeys, backups, and latency runs. `ValidatedActionProposal` re-correlates proposal, idempotency, action, resource, and commitment fields across its draft and binding. The dependency-direction gate parses absolute and relative Python imports with `ast`, so comments/string literals do not create false positives and alternate import syntax cannot evade the boundary. It runs inside the exact Python 3.12 workspace matrix because it parses the Python-3.12-only core sources; the dedicated Python 3.11 build/install/focused-test job exercises only the independently compatible contracts wheel.
 
 `web_search` and `child_durable_memory_v1` are Phase 1 contract amendments consumed by the controlled-web and identity/memory supplements. `web_search` is durable owner/adult self-consent; `child_durable_memory_v1` is durable K2/N1 consent granted or revoked only by that child's current primary guardian with the exact guardian generation. Neither widens the baseline `RouteAuthorization` speech/reasoning/TTS purpose union. Every consent draft carries the expected latest receipt ID, guardian generation when applicable, and policy/disclosure versions; revoke requires a non-null expected receipt. Its purpose-separated parameter commitment covers exactly subject, purpose, expected receipt state, guardian generation, and both versions, while the `ActionBinding` separately fixes household, authenticated actor, action, resource, session, and turn. The mutation service reconstructs that payload and compares its HMAC before any receipt access. Guest disclosure/session-consent contracts remain exactly `cloud_stt|cloud_reasoning|cloud_tts`; K2/N1 search and owner/adult child-memory consent are policy-denied even if a caller forges a prepared consent action. This amendment changes no task number or effort estimate.
 
@@ -11632,7 +11631,7 @@ MYPYPATH=packages/contracts/src:. uv run mypy --explicit-package-bases --python-
 git diff --check
 ```
 
-Expected: PASS with `106 passed` from the focused pytest command against the reviewed Task 4 generator suite; required enum values match exactly, every asserted port operation is async, the modeled Task 14/15 ledger signature is statically assignable to `AuditPort[_PlannedAsyncUnitOfWorkProtocol]`, `registered_contract_models()` is the immutable sorted 93-model singleton, and root exports contain exactly 136 unique names spanning 10 enums, 5 aliases, and 18 runtime-checkable protocols without exposing Task 5 constants/helpers. Both generated artifacts contain exactly that complete post-DTO public model registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output. Ruff format/check and strict mypy under Python 3.11 semantics report no errors on all 14 Task 5 Python paths. The standalone CI job builds the wheel, installs it into Python 3.11, and reruns the focused contract/dependency tests outside the Python 3.12 workspace environment.
+Expected: PASS with `106 passed` from the focused pytest command against the reviewed Task 4 generator suite; required enum values match exactly, every asserted port operation is async, the modeled Task 14/15 ledger signature is statically assignable to `AuditPort[_PlannedAsyncUnitOfWorkProtocol]`, `registered_contract_models()` is the immutable sorted 93-model singleton, and root exports contain exactly 136 unique names spanning 10 enums, 5 aliases, and 18 runtime-checkable protocols without exposing Task 5 constants/helpers. Both generated artifacts contain exactly that complete post-DTO public model registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output. Ruff format/check and strict mypy under Python 3.11 semantics report no errors on all 14 Task 5 Python paths. The standalone CI job builds the wheel, installs it into Python 3.11, and reruns the focused contracts-wheel tests outside the Python 3.12 workspace environment; the dependency-direction source parser remains in the full Python 3.12 matrix.
 
 - [ ] **Step 5: Commit exact Task 5 paths**
 
@@ -22211,8 +22210,7 @@ jobs:
           dist-py311/*.whl "pytest>=8.4,<9"
       - run: >-
           .venv-contracts-py311/bin/python -m pytest
-          tests/contract/test_v1_types_and_ports.py
-          tests/contract/test_dependency_direction.py -q
+          tests/contract/test_v1_types_and_ports.py -q
   check:
     strategy:
       fail-fast: false
@@ -27831,8 +27829,11 @@ Task 10.
 **Estimated effort:** 2 person-days.
 
 **Files:**
+- Modify: `docs/superpowers/plans/2026-08-27-tuntun-phase1-foundation-execution.md`
+- Modify: `Makefile`
 - Modify: `apps/core/pyproject.toml`
 - Modify: `uv.lock`
+- Create: `apps/core/src/tuntun_core/resources/model-manifest.yaml`
 - Create: `apps/core/src/tuntun_core/services/models/fs.py`
 - Create: `apps/core/src/tuntun_core/services/models/network.py`
 - Create: `apps/core/src/tuntun_core/services/models/registry.py`
@@ -27849,6 +27850,7 @@ Task 10.
 **Interfaces:**
 - Consumes: owner-invoked immutable HTTPS URL on an exact host allowlist, declared bounded byte size/SHA-256, a bounded duplicate-free manifest, and owner-only no-follow model directory descriptors.
 - Produces: `ModelRegistry.load(manifest: Path) -> ModelRegistry`; `activate(model_id: str) -> ActivatedModel` containing only a verified exact nonempty tuple of stable read-only file descriptors; immutable private `_ManifestBoundFile(path, size, sha256, device, inode)` expectations; frozen `VerifiedModelFile`/`ActivatedModel`; derived read-only property `ActivatedModel.all_files_verified: bool`; `ActivatedModel.load_with(adapter, receipt_verifier) -> RuntimeModelReceipt`; and `ModelInstaller.install(model_id: str) -> ActivatedModel`. Public `fd`, `size`, `sha256`, and `files` are getter-only views. `all_files_verified` and runtime receipt comparison use the sealed private manifest tuple and recheck descriptor access/type/mode/device/inode/size/hash; they never derive trust from a caller-replaceable public field. No download occurs in a constructor, registry load, activation, verification, list, or service startup. Runtime adapters consume only a bounded `PreadOnlyModelReader` over a duplicate of each verified `O_RDONLY` descriptor, never receive write/path authority, and never reopen registry paths or depend on a shared descriptor offset.
+- Darwin filesystems may reject renaming a write-disabled directory even when source and destination share one parent. The installer therefore keeps the already-complete owner-only stage at `0700` through the exclusive no-replace directory rename, creates and durably binds an owner-only descriptor-relative `.recovery-pending-{REVISION}` marker, then seals the retained revision descriptor to exact `0500`, fsyncs it, and fsyncs the parent in the accepted publication order. A new marker is exact owner-owned `0600`; recovery also accepts an interrupted prepared marker at exact `0400`. Both forms must be zero-length, single-link regular inodes with descriptor/name identity equality, and every newly created or reopened marker descriptor plus its parent is fsynced and revalidated before recovery proceeds. Public activation holds the target model's per-model lock shared across model open and exact verification, while installation/recovery holds that lock exclusively; different model IDs remain independent. After repeated exact artifact inventory/hash verification plus revision and parent fsync, the installer validates the retained marker, changes `0600` to exact `0400` when necessary, fsyncs the marker inode, fsyncs its parent, revalidates the same name/inode/mode, records its device/inode identity, and retains that exact descriptor through publication. The marker name remains the authoritative on-disk deny state through every fallible precommit operation. The platform helper supports only Darwin `renameatx_np(RENAME_EXCL)` and Linux `renameat2(RENAME_NOREPLACE)`; every other platform returns `ENOTSUP` even if its libc exports a similarly named symbol. Immediately before the native syscall, the helper requires both the retained descriptor and source name to remain the exact recorded regular, owner-owned, `0400`, single-link, zero-length inode. A zero syscall result is the irreversible commit point, and the first state transition after it sets the transaction-owned witness before any postcommit validation, descriptor close, wrapper return, or other fallible work. There is deliberately no fallible parent fsync after the commit point. If a wrapper delegates the real rename and then raises, the outer transaction therefore classifies the transition as committed without a namespace probe. If a nonconforming wrapper fails to forward the witness, an exact marker-absent/proof-equals-retained-inode fallback may set the same outer witness on either normal return or exception. False-witness exception re-resolution is explicitly tri-state: exact retained proof is `COMMITTED`, the exact retained pending name is `DEFINITELY_PRECOMMIT`, and every secondary interruption, replacement, or identity/namespace ambiguity is `INCONCLUSIVE`. Only `DEFINITELY_PRECOMMIT` permits a `0700` rollback; `COMMITTED` and `INCONCLUSIVE` preserve the sealed revision and current durable marker/proof namespace for a safe retry. Every repository-owned raw-FD, directory, reader, verified-file, and private activated-model acquisition helper takes a caller-visible owner slot, populates it before its Python return boundary, and returns only inert `None`/boolean status. This includes the manifest reader, `_walk`/`open`/`open_or_create`/`child`, cleanup-tree children, lock/download/proof/artifact opens, `_download`, `_open_existing_revision`, `_duplicate`, reader/file/model factories, and activation/recovery helpers. Under the exclusive per-model lock, a descriptor-relative no-follow stat first requires an existing recovery name to be the exact regular, owner-owned, `0400`/`0600`, single-link, zero-length marker, while fresh creation requires absence; a symlink or FIFO is rejected before any open and therefore cannot redirect or block. A `_PublicationMarkerOwnerSlot` is created in transaction scope and passed into acquisition. C-backed `io.FileIO` constructs directly into that slot using `x+b` for fresh `O_RDWR|O_CREAT|O_EXCL` or `rb` for recovery `O_RDONLY`, with C `functools.partial(os.open, mode=0600, dir_fd=model.fd)` and close-on-exec/non-inheritable ownership. FileIO's opener flags need not carry `O_NOFOLLOW` or `O_NONBLOCK` because hostile existing names are statically rejected before the open while cooperating writers honor the lock; noncooperative same-EUID/root swaps inside that name-based interval remain outside the repository's filesystem trust boundary. Once stored, exact descriptor access, owner, regular type, mode, links, size, name identity, inode fsync, parent fsync, and final identity are revalidated before use. Raw descriptor integers are transient `fileno()` borrows. `_FileDescriptorOwner.close()` consumes its integer and enters the terminal `os.close` attempt on one CPython traced source line; a real-close-then-error retry cannot close a recycled descriptor, and cleanup failures add a note without replacing the primary. This is a tested `sys.settrace` line/return guarantee, not a claim of opcode- or signal-level atomicity. External `socket.create_connection()` and multiprocessing `Pipe()`/`Process()` remain external Python factories: the production caller protects the first observable caller line and all later socket/pipe/process ownership, and socket/Connection finalizers release any return-before-assignment temporary after traceback release, but this is deliberately narrower than the repository-owned raw-FD slot guarantee. Generator/contextmanager interruption is likewise proven to release the timer/connection deterministically after the retained traceback and manager are released; it is not claimed as immediate teardown while an arbitrary traceback remains retained. A later retry accepts and re-durabilizes a prepared `0400` marker, removes any stale proof collision, re-verifies the artifacts, and converges. Activation retains and revalidates the exact stable `0400` proof `O_RDONLY` before and after artifact verification; marker-present, missing, symlinked, special, writable, nonempty, multiply linked, identity-swapped, or content-mismatched states deny. Registry activation and every installer path populate one transaction-visible `_ActivatedModelOwnerSlot`; private activation/reuse helpers return only inert `None`/boolean status, and the outer owner closes an unreturned result exactly once on any catchable cleanup or control-flow failure. A proof-backed revision recognized as committed on entry is never unsealed by a later activation failure. `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, and cancellation-like non-`Exception` control flow propagate unchanged after cleanup; ordinary verification `Exception` values may retain the documented generic public error. Public validation and the pre-detach return line remain inside the transaction cleanup guard. The unavoidable post-detach final return event of public `activate()`/`install()` is the documented caller resource-lease boundary: the slot is cleared on the same traced source line as the return, the caller must close the returned model, and no `__del__` claim is made. There is no ordinary rename fallback, path reopen, process-local uncertainty cache, or unverified byte that can become active.
 
 - [ ] **Step 1: Write red model-governance tests**
 
@@ -27897,7 +27899,7 @@ def test_manifest_runtime_checks_reject_even_without_json_schema(
 @pytest.mark.parametrize("mutation",(
     "manifest_symlink","model_root_symlink","model_id_symlink",
     "revision_symlink","artifact_symlink","artifact_fifo","artifact_device",
-    "wrong_owner","group_writable_root","world_writable_revision",
+    "unexpected_artifact","wrong_owner","group_writable_root","world_writable_revision",
 ))
 def test_every_named_filesystem_object_is_nofollow_regular_owner_only(
     governed_model_case,mutation,
@@ -27962,10 +27964,20 @@ def test_installer_retains_only_same_inode_read_only_verified_descriptor(
     with pytest.raises(OSError): os.write(handle.fd,b"mutation")
     receipt=activated.load_with(runtime_adapter,runtime_receipt_verifier)
     assert receipt.loaded_sha256==governed_model_case.expected_sha256
-    source=inspect.getsource(ModelInstaller._download)
-    assert "return read_fd" in source
-    assert "return write_fd" not in source and "return fd" not in source
     assert runtime_adapter.path_opens==[]
+
+
+@pytest.mark.parametrize(("resource_factory","scenario"),INTERNAL_OWNER_TRACE_MATRIX)
+def test_every_internal_resource_factory_survives_retained_return_traceback(
+    governed_model_case,resource_factory,scenario,
+) -> None:
+    # The reusable oracle injects the same KeyboardInterrupt at each internal
+    # helper return, retains then clears its traceback, runs gc, and requires
+    # EBADF for every captured FD. Helpers populate caller-visible slots and
+    # return only None/bool; no source-text assertion substitutes for behavior.
+    assert_retained_traceback_closes_owner(
+        governed_model_case,resource_factory,scenario,
+    )
 
 
 def test_activated_manifest_expectations_and_file_tuple_cannot_be_rebased(
@@ -28060,6 +28072,50 @@ def test_two_installers_publish_one_complete_immutable_revision(concurrent_model
     assert all(result.all_files_verified for result in results)
     assert concurrent_model_case.no_stage_directory_remains()
 
+def test_publication_supports_filesystems_that_cannot_rename_read_only_directories(
+    governed_model_case,
+) -> None:
+    governed_model_case.require_write_enabled_publish_source()
+    activated=governed_model_case.install()
+    assert activated.all_files_verified
+    assert governed_model_case.final_revision_mode==0o500
+
+def test_crash_after_publish_before_seal_is_unusable_then_recovered(
+    governed_model_case,
+) -> None:
+    governed_model_case.crash_install_at("after_publish_before_seal")
+    assert governed_model_case.final_revision_mode==0o700
+    assert not governed_model_case.final_revision_is_complete_and_verified()
+    governed_model_case.restart_and_reconcile()
+    assert governed_model_case.final_revision_mode==0o500
+    assert governed_model_case.final_revision_is_complete_and_verified()
+
+@pytest.mark.parametrize("mutation",(
+    "unexpected_file","missing_artifact","artifact_symlink","artifact_fifo",
+    "writable_artifact","wrong_size","hash_mismatch",
+))
+def test_unsealed_revision_tampering_is_never_sealed_or_loaded(
+    governed_model_case,mutation,
+) -> None:
+    governed_model_case.crash_install_at("after_publish_before_seal")
+    governed_model_case.mutate_unsealed_revision(mutation)
+    with pytest.raises((PermissionError,ValueError)):
+        governed_model_case.restart_and_reconcile()
+    assert governed_model_case.final_revision_mode==0o700
+    assert not governed_model_case.final_revision_is_complete_and_verified()
+    assert governed_model_case.open_descriptor_count==0
+
+@pytest.mark.parametrize("fault",("mutate_artifact","raise_error"))
+def test_recovery_fault_between_seal_and_verification_restores_unsealed_state(
+    governed_model_case,fault,
+) -> None:
+    governed_model_case.crash_install_at("after_publish_before_seal")
+    with pytest.raises((PermissionError,RuntimeError,ValueError)):
+        governed_model_case.restart_with_post_seal_recovery_fault(fault)
+    assert governed_model_case.final_revision_mode==0o700
+    assert not governed_model_case.final_revision_is_complete_and_verified()
+    assert governed_model_case.open_descriptor_count==0
+
 
 @pytest.mark.parametrize("fault",(
     "after_each_file","before_stage_fsync","after_stage_fsync",
@@ -28119,9 +28175,13 @@ def concurrent_model_case(governed_model_case):
     return governed_model_case.concurrent_view()
 ```
 
-`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`: `manifest`, `model_id`, `expected_bytes`, `expected_sha256`, `network.inject()/followed_redirects`, `mutate_manifest`, `apply_filesystem_mutation`, `registry_or_activate`, `inject_os_write_result`, `inject_repeated_os_write_result`, `install`, `as_installed_model`, `concurrent_view`, `race_activation`, `crash_install_at`, `restart_and_reconcile`, `rehash_exact_descriptor`, and every asserted state/identity/count query. Each mutation/race/fault string in the test has one explicit dispatch-table entry; unknown names raise `AssertionError`. Filesystem mutations use real symlinks/FIFOs/modes/inode replacements, write faults monkeypatch only `os.write`, and network faults drive the injected transport/child-resolver seam. State queries inspect the real staged/final filesystem and live descriptors rather than booleans set by the case.
+`tests/security/model_governance_cases.py` owns the concrete local-only factory used above. `GovernedModelCase.create` writes one valid single-file manifest and a prior immutable revision, binds a scripted byte transport/DNS resolver to the production seams, and records descriptor identities/counts without opening a network socket. Its public surface is exactly the attributes/methods referenced by `test_model_governance.py`; each mutation/race/fault string has one closed dispatch entry and filesystem mutations use real missing entries, symlinks, FIFOs, modes, sizes, hashes, and inode replacements. Cleanup matrices inject raw-descriptor, wrapper, directory, unlock, and lock-FD failures and prove primary preservation, one ownership-release attempt, closed artifact descriptors, and zero FD delta. The publication durability fixture proves the same marker inode is fsynced at `0600`, parent-synced while authoritative, prepared and fsynced at `0400`, parent-synced again, and atomically promoted to the proof name without a postcommit fsync. The fresh/recovery precommit matrix independently injects prepared-marker fchmod, marker fsync, parent fsync, final validation, and atomic-rename failure while also failing `0700` rollback; every case leaves the exact `0400` marker authoritative, denies a fresh interpreter, leaks no descriptor, and converges on retry. Fresh/recovery close-to-rename swaps prove a replacement marker cannot become proof; a mode/size/link mutation matrix proves the exact retained and named source properties are rechecked before any native call or witness transition; every case denies a fresh interpreter. A real no-replace proof collision likewise retains the marker and recovers after stale-proof removal. Success-then-error and non-forwarding atomic-wrapper probes prove the transaction witness or exact retained-FD fallback classifies the transition as committed. Conforming-helper return and non-forwarding post-rename `KeyboardInterrupt` probes prove committed control flow still propagates, while one-shot and repeated interruptions around fallback witness assignment prove tri-state re-resolution preserves exact proof-backed or inconclusive sealed state before any rollback. A deliberately Python-defined `__index__` transfer first fails under `sys.settrace` after detaching and before returning the FD, proving that design merely moves the close window. Separate fresh/recovery RED cases then interrupt both the raw-descriptor helper return and FileIO factory return: raw FDs remain leaked even after traceback collection, while retained exception tracebacks keep an unassigned owner live. The green design removes both live-return factories, guards that the owner is C-backed `io.FileIO` with no Python transfer callback, and traces the slot-populating acquisition return while retaining the propagated exception; outer transaction cleanup has already closed the descriptor. Fresh/recovery trace interruptions immediately before `owner.close()` and immediately after C close returns likewise prove committed disk state is not rolled back and the marker FD is closed. The FileIO opener flag matrix proves actual descriptor-relative `x+b` `O_RDWR|O_CREAT|O_EXCL` for fresh creation and `rb` `O_RDONLY` for recovery, plus close-on-exec/non-inheritable ownership. Hostile existing symlink/FIFO marker names are rejected by no-follow stat before the opener is called, so recovery cannot follow or block on them. A real-close-then-error test recycles the original's exact FD number and proves idempotent owner cleanup leaves the replacement open. Constructor and revision-close faults likewise preserve committed state and exact ownership. A mocked FreeBSD libc exporting `renameat2` still receives `ENOTSUP` without a native call. Existing `0600` and prepared `0400` marker durability/identity matrices reject fsync, parent-fsync, swap, and disappearance faults before sealing/recovery. Exact proof mutations cover missing, symlinked, FIFO, writable, nonempty, multiply linked, and verification-window identity-swap states. The committed-reuse matrix injects `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, and `asyncio.CancelledError` through installer and public registry activation, requires exact primary identity, unchanged `0500`/proof state, and zero FD delta. Retained-traceback `sys.settrace` return probes at `_activate_from_open_model` and `_reuse_or_recover_revision` prove private helpers return only inert status while the transaction-visible activation slot owns and closes every artifact FD on interruption. Same-model activation remains excluded by the shared/exclusive per-model lock until the atomic transaction has an outcome, while a paused 900-second download for one model does not block another installed model. Every retry verifies real disk state and stable descriptors rather than test-only booleans.
+
+The systemic owner-transfer matrix first runs red against exact rejected HEAD `119f8b94f97b297329b642c074f8d507919a9f0b`: all 18 originally reviewed directory/install/lock/download/proof/activation/duplicate paths retain live FDs after the same `KeyboardInterrupt` traceback is cleared and GC runs. The green 37-node focused trace matrix covers those paths plus manifest acquisition, verified-file and reader factories, cleanup-tree children, socket raw/wrapped first-caller lines, resolver pipe/process/start, descriptor/directory/reader/file/model close state, both public pre-detach lease lines, both private success tails, and stale-proof cleanup before first use. Every internal factory return captures the populated owner slot, preserves exact exception identity, clears the traceback, runs GC, and requires `EBADF`; close tests interrupt any ownership-erased/live-resource line or the safe return and then retry. Public validation and the one-line detach/return now remain inside the existing cleanup guard, while only the post-detach return event is the documented caller lease boundary; private success-tail close/status work likewise remains inside its acquisition guard. A real-close-then-error test forces reuse of the exact FD number and proves no retry closes the replacement. A distinct `FileExistsError` pre-retention regression proves the special publication-race handler also closes the current file/descriptor slots. A committed-reuse terminal-close `OSError` regression preserves exact primary identity and proves any wrapper retry observes only inert owner state. Separate retained-context tests cover stream generator-yield/contextmanager-enter teardown after the retained manager and traceback are released. The network tests additionally prove no raw socket integer remains open after traceback release, resolver children stop, both timer and connection cleanup actions are attempted, and the narrower external-factory/finalizer boundary stated above.
 
 `InstalledModel` exposes only `registry`, `model_id`, `expected_bytes`, `expected_sha256`, and `replace_every_named_path_with_attacker_bytes()`. `ScriptedRuntimeAdapter.load_verified_reader` consumes the bounded reader to EOF, records bytes and open duplicate count, returns an exact per-file receipt, and never accepts a path; `finish_model` returns an unpublished signed candidate; the verifier publishes only after checking the exact domain/generation/expiry/model/revision/ordered file tuple. `mutate_receipt`, `fail_at`, and `abort_model` are closed dispatch methods for the test strings and maintain the asserted `path_opens`, `open_duplicate_fd_count`, `abort_calls`, `published_runtime_count`, and `last_loaded_bytes`. The concurrent view uses two real `ModelInstaller` instances plus a barrier only before lock acquisition, measures lock ownership around the production lock, and derives publication/stage results from disk. This helper contains no pass-through fake of `ModelRegistry`, `ModelInstaller`, descriptor hashing, publication, or receipt comparison.
+
+Symlink-swap fixtures temporarily make the sealed revision owner-writable for legacy Darwin rename semantics, restore the renamed directory to `0500` before exposing the symlink, and deterministically emulate that strict source-permission rule on every runner.
 
 - [ ] **Step 2: Run the red model tests**
 
@@ -28133,7 +28193,7 @@ Expected: FAIL during collection with `ModuleNotFoundError: No module named 'tun
 
 ```python
 # apps/core/src/tuntun_core/services/models/fs.py
-import ctypes,fcntl,hashlib,os,stat,sys,time
+import contextlib,ctypes,errno,fcntl,hashlib,os,stat,sys,time
 from pathlib import Path
 import yaml
 from yaml.events import AliasEvent,CollectionEndEvent,CollectionStartEvent
@@ -28142,6 +28202,7 @@ from yaml.nodes import MappingNode
 MAX_MANIFEST_BYTES=1_048_576
 MAX_MANIFEST_EVENTS=16_384
 MAX_MANIFEST_DEPTH=32
+_DESCRIPTOR_CLEANUP_NOTE="additional descriptor cleanup failure"
 
 def _regular_owner(st,*,mode_mask=0o022):
     return stat.S_ISREG(st.st_mode) and st.st_uid==os.geteuid() and not st.st_mode&mode_mask
@@ -28174,9 +28235,13 @@ def parse_yaml_no_duplicates_aliases_tags(data,*,max_events,max_depth):
     return yaml.load(data,Loader=StrictSafeLoader)
 
 def read_bounded_strict_yaml(path:Path):
-    """One no-follow descriptor, no aliases/tags, duplicate keys, or path swap."""
-    fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
+    """One caller-visible owner, no aliases/tags, duplicate keys, or path swap."""
+    descriptor_owner=_FileDescriptorOwner(); primary_error=None
     try:
+        descriptor_owner.open_at(
+            path,path,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW|os.O_NONBLOCK,0,
+        )
+        fd=descriptor_owner.fileno()
         before=os.fstat(fd)
         if not _regular_owner(before) or before.st_size>MAX_MANIFEST_BYTES:
             raise ValueError("invalid model manifest")
@@ -28193,51 +28258,74 @@ def read_bounded_strict_yaml(path:Path):
             b"".join(chunks),max_events=MAX_MANIFEST_EVENTS,
             max_depth=MAX_MANIFEST_DEPTH,
         )
-    except (OSError,UnicodeError) as error:
-        raise ValueError("invalid model manifest") from error
-    finally: os.close(fd)
+    except BaseException as error:
+        primary_error=error; raise
+    finally:
+        if primary_error is None: descriptor_owner.close()
+        else: close_preserving_primary(
+            descriptor_owner,_FileDescriptorOwner.close,primary_error,
+        )
+
+class _FileDescriptorOwner:
+    """One idempotent raw-FD owner; all integer access is borrowed."""
+    def __init__(self): self.fd=-1
+    def open_at(self,directory,path,flags,mode):
+        if self.fd>=0: raise ValueError("descriptor owner already populated")
+        self.fd=(
+            os.open(path,flags,mode,dir_fd=directory)
+            if isinstance(directory,int) else os.open(path,flags,mode)
+        )
+    def duplicate(self,descriptor):
+        if self.fd>=0: raise ValueError("descriptor owner already populated")
+        self.fd=os.dup(descriptor)
+    def fileno(self):
+        if self.fd<0: raise OSError(errno.EBADF,os.strerror(errno.EBADF))
+        return self.fd
+    def close(self):
+        descriptor=self.fd
+        if descriptor>=0:
+            # One trace line consumes ownership and attempts terminal close.
+            os.close(descriptor if setattr(self,"fd",-1) is None else descriptor)
+
+class _FileDescriptorOwnerSlot:
+    def __init__(self): self.owner:_FileDescriptorOwner|None=None
+
+class _OwnedDirectoryOwnerSlot:
+    def __init__(self): self.owner:OwnedDirectory|None=None
 
 class OwnedDirectory:
-    """Stable O_DIRECTORY|O_NOFOLLOW dirfd with exact final owner/mode."""
-    def __init__(self,fd,mode):
-        self.fd=fd; st=os.fstat(fd); self.identity=(st.st_dev,st.st_ino)
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.geteuid() or stat.S_IMODE(st.st_mode)!=mode:
-            os.close(fd); raise PermissionError("unsafe model filesystem")
-    @staticmethod
-    def _parent(path):
-        absolute=path.absolute(); parts=absolute.parts
-        fd=os.open(parts[0],os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
-        for part in parts[1:-1]:
-            next_fd=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=fd)
-            st=os.fstat(next_fd)
-            if not stat.S_ISDIR(st.st_mode) or st.st_mode&0o022 or st.st_uid not in {0,os.geteuid()}:
-                os.close(next_fd); os.close(fd); raise PermissionError("unsafe model filesystem")
-            os.close(fd); fd=next_fd
-        return fd,parts[-1]
+    """Stable directory object that owns an FD-owner object, never a raw integer."""
+    def __init__(self,descriptor_owner):
+        self._descriptor_owner=descriptor_owner
+        st=os.fstat(descriptor_owner.fileno()); self.identity=(st.st_dev,st.st_ino)
+    @property
+    def fd(self): return self._descriptor_owner.fileno()
     @classmethod
-    def open(cls,path:Path,mode=0o700):
-        parent,name=cls._parent(path)
-        try: fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=parent)
-        finally: os.close(parent)
-        return cls(fd,mode)
+    def _walk(cls,path:Path,owner_slot:_OwnedDirectoryOwnerSlot,*,create:bool)->None:
+        # Pre-publish descriptor owners before each os.open. Validate, then move
+        # the owner object into owner_slot; every helper return is inert None.
+        ...
     @classmethod
-    def open_or_create(cls,path:Path,mode=0o700):
-        parent,name=cls._parent(path)
-        try:
-            try: os.mkdir(name,mode,dir_fd=parent)
-            except FileExistsError: pass
-            fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=parent)
-        finally: os.close(parent)
-        return cls(fd,mode)
-    def child(self,name,*,create=False,exist_ok=False,mode=0o700):
+    def open(cls,path:Path,owner_slot:_OwnedDirectoryOwnerSlot)->None:
+        cls._walk(path,owner_slot,create=False)
+    @classmethod
+    def open_or_create(cls,path:Path,owner_slot:_OwnedDirectoryOwnerSlot)->None:
+        cls._walk(path,owner_slot,create=True)
+    def child(self,name,owner_slot:_OwnedDirectoryOwnerSlot,*,create=False,exist_ok=False,mode=None)->None:
         if not name or name in {".",".."} or "/" in name or "\x00" in name:
             raise PermissionError("unsafe model filesystem")
-        if create:
-            try: os.mkdir(name,mode,dir_fd=self.fd)
-            except FileExistsError:
-                if not exist_ok: raise PermissionError("unsafe model filesystem")
-        fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=self.fd)
-        return OwnedDirectory(fd,mode)
+        descriptor_slot=_FileDescriptorOwnerSlot()
+        descriptor_slot.owner=_FileDescriptorOwner()
+        try:
+            descriptor_slot.owner.open_at(
+                self.fd,name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,0,
+            )
+            owner_slot.owner=OwnedDirectory(descriptor_slot.owner)
+            descriptor_slot.owner=None
+        except BaseException as error:
+            # Close either populated slot without replacing error identity.
+            ...
+            raise
     def has_child(self,name):
         try: st=os.stat(name,dir_fd=self.fd,follow_symlinks=False)
         except FileNotFoundError: return False
@@ -28245,80 +28333,211 @@ class OwnedDirectory:
         return True
     def fsync(self): os.fsync(self.fd)
     def chmod(self,mode): os.fchmod(self.fd,mode)
-    def close(self): os.close(self.fd)
+    def close(self): self._descriptor_owner.close()
     def remove_private_stage(self,name,identity):
-        remove_exact_private_tree_at(self.fd,name,identity)
+        stage_slot=_OwnedDirectoryOwnerSlot(); primary_error=None
+        try:
+            self.child(name,stage_slot)
+            if stage_slot.owner is None: raise RuntimeError("stage acquisition missing")
+            _remove_tree_contents(stage_slot.owner)
+        except BaseException as error:
+            primary_error=error; raise
+        finally:
+            if stage_slot.owner is not None:
+                if primary_error is None: stage_slot.owner.close()
+                else: close_preserving_primary(
+                    stage_slot.owner,OwnedDirectory.close,primary_error,
+                )
+        os.rmdir(name,dir_fd=self.fd)
     def remove_private_stages(self,prefix):
+        # Each child acquisition uses an outer slot protected by try/finally.
         for name in os.listdir(self.fd):
-            if not name.startswith(prefix): continue
-            st=os.stat(name,dir_fd=self.fd,follow_symlinks=False)
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid!=os.geteuid():
-                raise PermissionError("unsafe model filesystem")
-            remove_exact_private_tree_at(
-                self.fd,name,(st.st_dev,st.st_ino),
-            )
-    def lock(self,name,timeout_seconds):
-        return nofollow_flock(self.fd,name,timeout_seconds,mode=0o600)
-
-class _HeldLock:
-    def __init__(self,fd): self.fd=fd
-    def __enter__(self): return self
-    def __exit__(self,*_):
-        fcntl.flock(self.fd,fcntl.LOCK_UN); os.close(self.fd)
-
-def nofollow_flock(directory_fd,name,timeout_seconds,mode):
-    fd=os.open(name,os.O_RDWR|os.O_CREAT|os.O_CLOEXEC|os.O_NOFOLLOW,mode,dir_fd=directory_fd)
-    try:
-        st=os.fstat(fd)
-        if not _regular_owner(st,mode_mask=0o077) or stat.S_IMODE(st.st_mode)!=mode or st.st_nlink!=1:
-            raise PermissionError("unsafe model filesystem")
+            if name.startswith(prefix): ...
+    @contextlib.contextmanager
+    def lock(self,name,owner_slot:_FileDescriptorOwnerSlot,*,timeout_seconds,shared=False):
         deadline=time.monotonic()+timeout_seconds
         while True:
-            try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB); break
-            except BlockingIOError:
-                if time.monotonic()>=deadline: raise TimeoutError("model install lock timeout")
-                time.sleep(0.05)
-        owner=f"pid={os.getpid()} start={time.monotonic_ns()}\n".encode()
-        os.ftruncate(fd,0); os.write(fd,owner); os.fsync(fd)
-        return _HeldLock(fd)
-    except Exception: os.close(fd); raise
+            try:
+                open_regular_at(
+                    self,name,os.O_RDWR|os.O_CREAT,owner_slot,
+                    mode=0o600,expected_mode=0o600,
+                )
+                break
+            except FileNotFoundError:
+                if time.monotonic()>=deadline:
+                    raise TimeoutError("model install lock deadline") from None
+                time.sleep(0.01)
+        descriptor_owner=owner_slot.owner
+        if descriptor_owner is None: raise RuntimeError("lock acquisition missing")
+        descriptor=descriptor_owner.fileno(); primary_error=None; locked=False
+        try:
+            operation=fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+            while True:
+                try:
+                    fcntl.flock(descriptor,operation|fcntl.LOCK_NB)
+                    locked=True; break
+                except BlockingIOError:
+                    if time.monotonic()>=deadline:
+                        raise TimeoutError("model install lock deadline") from None
+                    time.sleep(0.01)
+            try: yield
+            except BaseException as error:
+                primary_error=error; raise
+        except BaseException as error:
+            if primary_error is None: primary_error=error
+            raise
+        finally:
+            release_error=None
+            if locked:
+                if primary_error is None:
+                    try: fcntl.flock(descriptor,fcntl.LOCK_UN)
+                    except BaseException as error:
+                        primary_error=error; release_error=error
+                else:
+                    close_preserving_primary(
+                        descriptor,
+                        lambda value: fcntl.flock(value,fcntl.LOCK_UN),
+                        primary_error,
+                    )
+            if primary_error is None: descriptor_owner.close()
+            else:
+                close_preserving_primary(
+                    descriptor_owner,_FileDescriptorOwner.close,primary_error,
+                )
+            if release_error is not None: raise release_error
 
-def remove_exact_private_tree_at(parent_fd,name,identity):
-    fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=parent_fd)
+def _remove_tree_contents(directory):
+    # Recursive directory children are acquired into _OwnedDirectoryOwnerSlot
+    # inside a try/finally; no recursion helper returns a live owner.
+    ...
+
+def close_preserving_primary(resource,closer,primary_error):
+    try: closer(resource)
+    except BaseException: primary_error.add_note("additional descriptor cleanup failure")
+
+def _safe_component(value):
+    return value not in {"",".",".."} and "/" not in value and "\x00" not in value
+
+def recovery_pending_name(revision):
+    name=f".recovery-pending-{revision}"
+    if not _safe_component(name): raise PermissionError("unsafe model filesystem path")
+    return name
+
+def model_install_lock_name(model_id):
+    name=f".model-install-{model_id}.lock"
+    if not _safe_component(name): raise PermissionError("unsafe model filesystem path")
+    return name
+
+def publication_commit_name(revision):
+    name=f".publication-verified-{revision}"
+    if not _safe_component(name): raise PermissionError("unsafe model filesystem path")
+    return name
+
+def entry_exists_at(directory:OwnedDirectory,name:str):
+    try: os.stat(name,dir_fd=directory.fd,follow_symlinks=False)
+    except FileNotFoundError: return False
+    except OSError as error: raise PermissionError("unsafe model filesystem path") from error
+    return True
+
+def open_regular_at(
+    directory:OwnedDirectory,name:str,flags:int,owner_slot:_FileDescriptorOwnerSlot,*,mode:int=0o600,
+    expected_mode:int|None=None,
+)->None:
+    if owner_slot.owner is not None: raise ValueError("descriptor slot populated")
+    owner_slot.owner=_FileDescriptorOwner(); owner=owner_slot.owner
     try:
+        owner.open_at(
+            directory.fd,name,flags|os.O_CLOEXEC|os.O_NOFOLLOW|os.O_NONBLOCK,mode,
+        )
+        fd=owner.fileno()
         st=os.fstat(fd)
-        if (st.st_dev,st.st_ino)!=identity or st.st_uid!=os.geteuid():
-            raise PermissionError("unsafe model filesystem")
-        os.fchmod(fd,0o700)
-        for child in os.listdir(fd):
-            child_st=os.stat(child,dir_fd=fd,follow_symlinks=False)
-            if stat.S_ISDIR(child_st.st_mode):
-                remove_exact_private_tree_at(fd,child,(child_st.st_dev,child_st.st_ino))
-            elif stat.S_ISREG(child_st.st_mode) and child_st.st_uid==os.geteuid() and child_st.st_nlink==1:
-                os.unlink(child,dir_fd=fd)
-            else: raise PermissionError("unsafe model filesystem")
-    finally: os.close(fd)
-    os.rmdir(name,dir_fd=parent_fd)
+        if (
+            not _regular_owner(st,mode_mask=0o077) or st.st_nlink!=1
+            or (expected_mode is not None and stat.S_IMODE(st.st_mode)!=expected_mode)
+        ): raise PermissionError("unsafe model filesystem")
+        current=fcntl.fcntl(fd,fcntl.F_GETFL)
+        if current&os.O_NONBLOCK:
+            fcntl.fcntl(fd,fcntl.F_SETFL,current&~os.O_NONBLOCK)
+        named=os.stat(name,dir_fd=directory.fd,follow_symlinks=False)
+        if (st.st_dev,st.st_ino)!=(named.st_dev,named.st_ino):
+            raise PermissionError("unsafe model filesystem identity")
+    except BaseException as error:
+        close_preserving_primary(owner,_FileDescriptorOwner.close,error)
+        owner_slot.owner=None; raise
 
-def open_regular_at(directory:OwnedDirectory,name:str,flags:int,mode:int=0o400):
-    fd=os.open(name,flags|os.O_CLOEXEC|os.O_NOFOLLOW,mode,dir_fd=directory.fd)
-    st=os.fstat(fd)
-    if not _regular_owner(st,mode_mask=0o077) or stat.S_IMODE(st.st_mode)!=mode or st.st_nlink!=1:
-        os.close(fd); raise PermissionError("unsafe model filesystem")
-    return fd
+def require_publication_commit(
+    model,revision,descriptor,*,expected_mode,require_read_only,
+):
+    identity=os.fstat(descriptor)
+    named=os.stat(
+        publication_commit_name(revision),
+        dir_fd=model.fd,follow_symlinks=False,
+    )
+    if (
+        not stat.S_ISREG(identity.st_mode) or identity.st_uid!=os.geteuid()
+        or stat.S_IMODE(identity.st_mode)!=expected_mode
+        or identity.st_nlink!=1 or identity.st_size!=0
+        or (identity.st_dev,identity.st_ino)!=(named.st_dev,named.st_ino)
+        or (
+            require_read_only
+            and fcntl.fcntl(descriptor,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY
+        )
+    ): raise PermissionError("unsafe model publication commit")
 
-def atomic_publish_dir_noreplace(parent:OwnedDirectory,source:str,destination:str):
+def open_publication_commit(model,revision,owner_slot:_FileDescriptorOwnerSlot)->None:
+    open_regular_at(
+        model,publication_commit_name(revision),os.O_RDONLY,owner_slot,
+        mode=0o400,expected_mode=0o400,
+    )
+    owner=owner_slot.owner
+    if owner is None: raise RuntimeError("publication proof acquisition missing")
+    try:
+        require_publication_commit(
+            model,revision,owner.fileno(),
+            expected_mode=0o400,require_read_only=True,
+        )
+    except BaseException as error:
+        close_preserving_primary(owner,_FileDescriptorOwner.close,error)
+        owner_slot.owner=None; raise
+
+class AtomicPublishWitness:
+    def __init__(self): self.committed=False
+
+def atomic_publish_dir_noreplace(
+    parent:OwnedDirectory,source:str,destination:str,*,
+    expected_source_fd=None,expected_source_identity=None,witness=None,
+):
     # Platform adapter uses renameat2(RENAME_NOREPLACE) on Linux or
     # renameatx_np(RENAME_EXCL) on macOS. ENOTSUP is fail-closed; there is no
     # existence-check + rename fallback.
+    if witness is not None and witness.committed:
+        raise ValueError("atomic publication witness already committed")
+    if (expected_source_fd is None)!=(expected_source_identity is None):
+        raise ValueError("atomic publication source identity is incomplete")
     libc=ctypes.CDLL(None,use_errno=True)
     if sys.platform=="darwin":
-        result=libc.renameatx_np(parent.fd,source.encode(),parent.fd,destination.encode(),0x00000004)
-    elif sys.platform.startswith("linux") and hasattr(libc,"renameat2"):
-        result=libc.renameat2(parent.fd,source.encode(),parent.fd,destination.encode(),0x1)
-    else: raise OSError("exclusive directory publication unsupported")
+        if not hasattr(libc,"renameatx_np"): raise OSError(errno.ENOTSUP,"exclusive directory publication unsupported")
+        native_rename=libc.renameatx_np; flags=0x00000004
+    elif sys.platform.startswith("linux"):
+        if not hasattr(libc,"renameat2"): raise OSError(errno.ENOTSUP,"exclusive directory publication unsupported")
+        native_rename=libc.renameat2; flags=0x1
+    else: raise OSError(errno.ENOTSUP,"exclusive directory publication unsupported")
+    if expected_source_fd is not None:
+        retained=os.fstat(expected_source_fd)
+        named=os.stat(source,dir_fd=parent.fd,follow_symlinks=False)
+        if any(
+            not stat.S_ISREG(candidate.st_mode)
+            or candidate.st_uid!=_effective_user_id()
+            or stat.S_IMODE(candidate.st_mode)!=0o400
+            or candidate.st_nlink!=1
+            or candidate.st_size!=0
+            or (candidate.st_dev,candidate.st_ino)!=expected_source_identity
+            for candidate in (retained,named)
+        ): raise PermissionError("atomic publication source changed")
+    result=native_rename(parent.fd,source.encode(),parent.fd,destination.encode(),flags)
     if result!=0:
         error=ctypes.get_errno(); raise OSError(error,os.strerror(error))
+    if witness is not None: witness.committed=True
 
 def hash_exact_fd(fd:int,expected_size:int,expected_sha256:str):
     digest=hashlib.sha256(); total=0
@@ -28333,15 +28552,21 @@ def hash_exact_fd(fd:int,expected_size:int,expected_sha256:str):
     return total,digest.hexdigest()
 ```
 
-`parse_yaml_no_duplicates_aliases_tags` first walks the bounded PyYAML event iterator, rejecting every alias, explicit/non-core tag, depth above 32, or event 16,385 before construction; its mapping constructor rejects a repeated scalar key before assignment. `open_componentwise_owned_dir`, `mkdir_and_open_componentwise`, and `open_owned_child_dir` use only no-follow descriptor-relative operations, compare pre/open identities, require the effective owner and exact leaf mode, and reject symlinks, non-directories, hard-linked artifact files, or replaced components. `nofollow_flock` creates/opens the lock with `O_NOFOLLOW|O_CREAT`, validates its descriptor before `flock`, records PID/start identity, uses a bounded timeout, and fails closed. Cleanup recursively enumerates only the exact private stage descriptor and verifies its recorded `(dev,ino)` before unlinking. Every helper has direct race/fault tests; no helper resolves or later reopens a security-qualified pathname.
+`parse_yaml_no_duplicates_aliases_tags` first walks the bounded PyYAML event iterator, rejecting every alias, explicit/non-core tag, depth above 32, or event 16,385 before construction; its mapping constructor rejects a repeated scalar key before assignment. `open_componentwise_owned_dir`, `mkdir_and_open_componentwise`, and `open_owned_child_dir` use only no-follow descriptor-relative operations, compare pre/open identities, require the effective owner and exact leaf mode, and reject symlinks, non-directories, hard-linked artifact files, or replaced components. `OwnedDirectory.lock` creates/opens the validated per-model lock with `O_NOFOLLOW|O_CREAT`, uses bounded shared activation or exclusive installation acquisition, and writes no PID/start metadata. Unlock and descriptor close are each attempted at most once; a protected-body or acquisition exception remains primary with a content-minimal cleanup note, while a cleanup exception from a successful body is reported. Cleanup recursively enumerates only the exact private stage descriptor and verifies its recorded `(dev,ino)` before unlinking. Every helper has direct race/fault tests; no helper resolves or later reopens a security-qualified pathname.
 
 ```python
 # apps/core/src/tuntun_core/services/models/registry.py
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from pathlib import Path
 from urllib.parse import urlsplit
-import fcntl,os,re,stat
-from .fs import OwnedDirectory,hash_exact_fd,open_regular_at,read_bounded_strict_yaml
+import contextlib,fcntl,os,re,stat,threading
+from .fs import (
+    OwnedDirectory,_FileDescriptorOwner,_FileDescriptorOwnerSlot,
+    _OwnedDirectoryOwnerSlot,close_preserving_primary,entry_exists_at,hash_exact_fd,
+    model_install_lock_name,open_publication_commit,open_regular_at,
+    read_bounded_strict_yaml,recovery_pending_name,
+    require_publication_commit,
+)
 
 SAFE_SUFFIXES={".onnx",".json",".txt",".tflite",".safetensors"}
 MODEL_ID=re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
@@ -28396,23 +28621,34 @@ class ModelEntry:
             or any(not value for value in scalar_values[2:])
         ): raise ValueError("invalid model manifest")
 
-@dataclass(frozen=True,slots=True)
 class PreadOnlyModelReader:
-    __fd:int
-    size:int
+    def __init__(self,descriptor_owner,size,expected_sha256):
+        self.__descriptor_owner=descriptor_owner; self.size=size; self.__closed=False
+    @classmethod
+    def from_descriptor_owner(cls,descriptor_slot,owner_slot,size,expected_sha256)->None:
+        if owner_slot.owner is not None: raise ValueError("reader owner slot populated")
+        descriptor_owner=descriptor_slot.owner
+        if descriptor_owner is None: raise ValueError("reader descriptor owner missing")
+        owner_slot.owner=cls(descriptor_owner,size,expected_sha256)
+        descriptor_slot.owner=None
     def read_at(self,offset:int,length:int) -> bytes:
         if (
             type(offset) is not int or type(length) is not int
             or not 0<=offset<=self.size or not 1<=length<=1_048_576
         ): raise ValueError("invalid model reader range")
-        return os.pread(self.__fd,min(length,self.size-offset),offset)
+        return os.pread(self.__descriptor_owner.fileno(),min(length,self.size-offset),offset)
     def chunks(self,chunk_size:int=1_048_576):
         offset=0
         while offset<self.size:
             chunk=self.read_at(offset,chunk_size)
             if not chunk: raise RuntimeError("model descriptor truncated")
             offset+=len(chunk); yield chunk
-    def close(self): os.close(self.__fd)
+    def close(self):
+        if not self.__closed:
+            self.__descriptor_owner.close(); self.__closed=True
+
+class _PreadOnlyModelReaderOwnerSlot:
+    def __init__(self): self.owner:PreadOnlyModelReader|None=None
 
 @dataclass(frozen=True,slots=True)
 class _ManifestBoundFile:
@@ -28420,13 +28656,18 @@ class _ManifestBoundFile:
 
 @dataclass(frozen=True,slots=True)
 class VerifiedModelFile:
-    __fd:int; __expected:_ManifestBoundFile
+    __descriptor_owner:_FileDescriptorOwner; __expected:_ManifestBoundFile
+    __lock:threading.Lock=field(default_factory=threading.Lock,compare=False,repr=False)
     @classmethod
-    def from_manifest(cls,item:ModelFile,fd:int) -> "VerifiedModelFile":
-        metadata=os.fstat(fd)
-        return cls(fd,_ManifestBoundFile(
+    def from_manifest(cls,item,descriptor_slot,owner_slot)->None:
+        if owner_slot.owner is not None: raise ValueError("verified owner slot populated")
+        descriptor_owner=descriptor_slot.owner
+        if descriptor_owner is None: raise ValueError("verified descriptor owner missing")
+        metadata=os.fstat(descriptor_owner.fileno())
+        owner_slot.owner=cls(descriptor_owner,_ManifestBoundFile(
             item.path,item.size,item.sha256,metadata.st_dev,metadata.st_ino,
         ))
+        descriptor_slot.owner=None
     @property
     def path(self) -> str: return self.__expected.path
     @property
@@ -28434,54 +28675,91 @@ class VerifiedModelFile:
     @property
     def sha256(self) -> str: return self.__expected.sha256
     @property
-    def fd(self) -> int: return self.__fd
+    def fd(self) -> int:
+        with self.__lock:
+            try: return self.__descriptor_owner.fileno()
+            except OSError as error:
+                raise ModelVerificationError("verified model file is closed") from error
+    def _duplicate(self,owner_slot:_FileDescriptorOwnerSlot)->None:
+        if owner_slot.owner is not None:
+            raise ValueError("duplicate descriptor owner slot already populated")
+        with self.__lock:
+            try: descriptor=self.__descriptor_owner.fileno()
+            except OSError as error:
+                raise ModelVerificationError("verified model file is closed") from error
+            owner_slot.owner=_FileDescriptorOwner()
+            owner_slot.owner.duplicate(descriptor)
     def verified(self) -> bool:
+        duplicate_slot=_FileDescriptorOwnerSlot()
         try:
-            metadata=os.fstat(self.__fd)
+            self._duplicate(duplicate_slot)
+            duplicate_owner=duplicate_slot.owner
+            if duplicate_owner is None: raise RuntimeError("duplicate acquisition missing")
+            duplicate=duplicate_owner.fileno()
+            metadata=os.fstat(duplicate)
             if (
-                fcntl.fcntl(self.__fd,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY
+                fcntl.fcntl(duplicate,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY
                 or not stat.S_ISREG(metadata.st_mode)
                 or stat.S_IMODE(metadata.st_mode)!=0o400
                 or (metadata.st_dev,metadata.st_ino)!=(self.__expected.device,self.__expected.inode)
                 or metadata.st_size!=self.__expected.size
             ): return False
-            hash_exact_fd(self.__fd,self.__expected.size,self.__expected.sha256)
-        except (OSError,RuntimeError): return False
+            hash_exact_fd(duplicate,self.__expected.size,self.__expected.sha256)
+        except (OSError,PermissionError,ValueError): return False
+        finally:
+            if duplicate_slot.owner is not None: duplicate_slot.owner.close()
         return True
     def load_with(self,adapter):
         # Adapter receives a bounded reader over this dup; the reader hashes the
         # exact bytes it supplies, requires EOF/size/digest, and returns a signed
         # per-file loader receipt. It has no pathname API.
-        duplicate=os.dup(self.__fd); reader=None
+        duplicate_slot=_FileDescriptorOwnerSlot()
+        reader_slot=_PreadOnlyModelReaderOwnerSlot()
         try:
-            duplicate_metadata=os.fstat(duplicate)
+            self._duplicate(duplicate_slot)
+            duplicate_owner=duplicate_slot.owner
+            if duplicate_owner is None: raise RuntimeError("duplicate acquisition missing")
+            duplicate_metadata=os.fstat(duplicate_owner.fileno())
             if (
                 (duplicate_metadata.st_dev,duplicate_metadata.st_ino)!=
                 (self.__expected.device,self.__expected.inode)
             ): raise ModelVerificationError("runtime model descriptor mismatch")
-            hash_exact_fd(duplicate,self.__expected.size,self.__expected.sha256)
-            reader=PreadOnlyModelReader(duplicate,self.__expected.size); duplicate=-1
+            hash_exact_fd(duplicate_owner.fileno(),self.__expected.size,self.__expected.sha256)
+            PreadOnlyModelReader.from_descriptor_owner(
+                duplicate_slot,reader_slot,self.__expected.size,self.__expected.sha256,
+            )
+            reader=reader_slot.owner
+            if reader is None: raise RuntimeError("reader acquisition missing")
             return adapter.load_verified_reader(
                 reader,self.__expected.path,self.__expected.size,self.__expected.sha256,
             )
         finally:
-            if duplicate>=0: os.close(duplicate)
-            elif reader is not None: reader.close()
+            if duplicate_slot.owner is not None: duplicate_slot.owner.close()
+            if reader_slot.owner is not None: reader_slot.owner.close()
+    def close(self):
+        with self.__lock: self.__descriptor_owner.close()
+
+class _VerifiedModelFileOwnerSlot:
+    def __init__(self): self.owner:VerifiedModelFile|None=None
 
 @dataclass(frozen=True,slots=True)
 class ActivatedModel:
     model_id:str; revision:str
     __files:tuple[VerifiedModelFile,...]
     __manifest_files:tuple[tuple[str,int,str],...]
+    __lock:threading.Lock=field(default_factory=threading.Lock,compare=False,repr=False)
+    __closed:list[bool]=field(default_factory=lambda:[False],compare=False,repr=False)
     @classmethod
     def from_manifest(
-        cls,entry:ModelEntry,files:tuple[VerifiedModelFile,...],
-    ) -> "ActivatedModel":
+        cls,entry:ModelEntry,files:tuple[VerifiedModelFile,...],owner_slot,
+    ) -> None:
+        if owner_slot.owner is not None:
+            raise ValueError("activated model owner slot already populated")
         expected=tuple((item.path,item.size,item.sha256) for item in entry.files)
         observed=tuple((item.path,item.size,item.sha256) for item in files)
         if not files or observed!=expected:
             raise ModelVerificationError("activated model is not manifest-bound")
-        return cls(entry.model_id,entry.revision,files,expected)
+        owner_slot.owner=cls(entry.model_id,entry.revision,files,expected)
     @property
     def files(self) -> tuple[VerifiedModelFile,...]: return self.__files
     @property
@@ -28512,7 +28790,15 @@ class ActivatedModel:
                 raise RuntimeError("runtime model abort failed; disable capability") from abort_error
             raise
     def close(self):
-        for file in self.__files: os.close(file.fd)
+        with self.__lock:
+            if self.__closed[0]: return
+            for file in self.__files:
+                with contextlib.suppress(OSError): file.close()
+            self.__closed[0]=True
+
+class _ActivatedModelOwnerSlot:
+    """Transaction-visible ownership for one unreturned activated model."""
+    def __init__(self): self.owner:ActivatedModel|None=None
 
 class ModelRegistry:
     def __init__(self,entries,model_root): self._entries,self._root=entries,model_root
@@ -28539,21 +28825,90 @@ class ModelRegistry:
         try: return self._entries[model_id]
         except KeyError as error: raise LookupError("model is not registered") from error
     def activate(self,model_id):
-        entry=self.entry(model_id); handles=[]
+        entry=self.entry(model_id)
+        activated_slot=_ActivatedModelOwnerSlot()
+        root_slot=_OwnedDirectoryOwnerSlot(); model_slot=_OwnedDirectoryOwnerSlot()
+        lock_slot=_FileDescriptorOwnerSlot()
         try:
-            root=OwnedDirectory.open(self._root)
-            model=root.child(entry.model_id); revision=model.child(entry.revision,mode=0o500)
+            OwnedDirectory.open(self._root,root_slot); root=root_slot.owner
+            if root is None: raise RuntimeError("model root acquisition missing")
+            with root.lock(
+                model_install_lock_name(entry.model_id),lock_slot,
+                timeout_seconds=30,shared=True,
+            ):
+                root.child(entry.model_id,model_slot); model=model_slot.owner
+                if model is None: raise RuntimeError("model acquisition missing")
+                self._activate_from_open_model(model,entry,activated_slot)
+                model.close()
+            root.close()
+            activated=activated_slot.owner
+            if activated is None:
+                raise RuntimeError("model is not installed and verified")
+            # Single traced source line: the documented public caller-lease boundary.
+            return activated if setattr(activated_slot,"owner",None) is None else activated
+        except BaseException as error:
+            if activated_slot.owner is not None:
+                close_preserving_primary(activated_slot.owner,ActivatedModel.close,error)
+            for slot,closer in (
+                (model_slot,OwnedDirectory.close),(lock_slot,_FileDescriptorOwner.close),
+                (root_slot,OwnedDirectory.close),
+            ):
+                if slot.owner is not None: close_preserving_primary(slot.owner,closer,error)
+            if not isinstance(error,Exception): raise
+            raise RuntimeError("model is not installed and verified") from error
+
+    @staticmethod
+    def _activate_from_open_model(model,entry,activated_slot):
+        # Installer calls this retained-dirfd verifier while already holding the
+        # exclusive per-model lock; it never recursively acquires the public lock.
+        if activated_slot.owner is not None:
+            raise ValueError("activated model owner slot already populated")
+        handles=[]
+        revision_slot=_OwnedDirectoryOwnerSlot(); commit_slot=_FileDescriptorOwnerSlot()
+        descriptor_slot=_FileDescriptorOwnerSlot(); handle_slot=_VerifiedModelFileOwnerSlot()
+        try:
+            pending_name=recovery_pending_name(entry.revision)
+            if entry_exists_at(model,pending_name):
+                raise PermissionError("model revision recovery is pending")
+            open_publication_commit(model,entry.revision,commit_slot)
+            model.child(entry.revision,revision_slot,mode=0o500)
+            revision=revision_slot.owner
+            if revision is None: raise RuntimeError("revision acquisition missing")
+            expected_names=tuple(sorted(item.path for item in entry.files))
+            if tuple(sorted(os.listdir(revision.fd)))!=expected_names:
+                raise PermissionError("unsafe model filesystem revision")
             for item in entry.files:
-                fd=open_regular_at(revision,item.path,os.O_RDONLY)
-                hash_exact_fd(fd,item.size,item.sha256)
-                handles.append(VerifiedModelFile.from_manifest(item,fd))
-            return ActivatedModel.from_manifest(entry,tuple(handles))
-        except Exception:
-            for handle in handles: os.close(handle.fd)
-            raise RuntimeError("model is not installed and verified")
-        finally:
-            for directory in (locals().get("revision"),locals().get("model"),locals().get("root")):
-                if directory is not None: directory.close()
+                descriptor_slot=_FileDescriptorOwnerSlot()
+                handle_slot=_VerifiedModelFileOwnerSlot()
+                open_regular_at(revision,item.path,os.O_RDONLY,descriptor_slot)
+                descriptor_owner=descriptor_slot.owner
+                if descriptor_owner is None: raise RuntimeError("artifact acquisition missing")
+                hash_exact_fd(descriptor_owner.fileno(),item.size,item.sha256)
+                VerifiedModelFile.from_manifest(item,descriptor_slot,handle_slot)
+                handle=handle_slot.owner
+                if handle is None: raise RuntimeError("file-owner acquisition missing")
+                handles.append(handle); handle_slot.owner=None
+            if tuple(sorted(os.listdir(revision.fd)))!=expected_names:
+                raise PermissionError("unsafe model filesystem revision")
+            if entry_exists_at(model,pending_name):
+                raise PermissionError("model revision recovery is pending")
+            require_publication_commit(
+                model,entry.revision,commit_slot.owner.fileno(),
+                expected_mode=0o400,require_read_only=True,
+            )
+            ActivatedModel.from_manifest(entry,tuple(handles),activated_slot)
+            handles.clear()
+            if activated_slot.owner is None or revision_slot.owner is None or commit_slot.owner is None:
+                raise RuntimeError("model activation did not retain verified files")
+            revision_slot.owner.close()
+            commit_slot.owner.close()
+        except BaseException as error:
+            if activated_slot.owner is None:
+                for handle in handles:
+                    close_preserving_primary(handle,VerifiedModelFile.close,error)
+            # Close populated handle/descriptor/revision/commit slots and handles.
+            ...
+            raise
 ```
 
 ```python
@@ -28562,13 +28917,30 @@ from contextlib import contextmanager
 import http.client,ipaddress,multiprocessing,socket,ssl,threading,time
 from urllib.parse import urlsplit
 
+def _cleanup_preserving_primary(resource,closer,primary_error):
+    try: closer(resource)
+    except BaseException: primary_error.add_note("additional network resource cleanup failure")
+
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self,hostname,pinned_ip,timeout):
-        super().__init__(hostname,443,timeout=timeout,context=ssl.create_default_context())
-        self._pinned_ip=pinned_ip
+    def __init__(self,hostname,pinned_ip,timeout,deadline):
+        self._ssl_context=ssl.create_default_context()
+        super().__init__(hostname,443,timeout=timeout,context=self._ssl_context)
+        self._pinned_ip=pinned_ip; self._deadline=deadline
     def connect(self):
-        raw=socket.create_connection((self._pinned_ip,443),self.timeout)
-        self.sock=self._context.wrap_socket(raw,server_hostname=self.host)
+        raw=wrapped=None
+        try:
+            raw=socket.create_connection((self._pinned_ip,443),self.timeout)
+            self.sock=raw
+            wrapped=self._ssl_context.wrap_socket(raw,server_hostname=self.host)
+            self.sock=wrapped
+            if time.monotonic()>=self._deadline:
+                self.close()
+                raise TimeoutError("model download total deadline")
+        except BaseException as error:
+            # Both first-caller-line owners are closed without replacing error.
+            if wrapped is not None: _cleanup_preserving_primary(wrapped,type(wrapped).close,error)
+            if raw is not None and raw is not wrapped: _cleanup_preserving_primary(raw,type(raw).close,error)
+            self.sock=None; raise
 
 def _resolver_child(send,hostname):
     try:
@@ -28586,32 +28958,39 @@ def resolve_public_addresses_bounded(hostname,deadline):
     remaining=deadline-time.monotonic()
     if remaining<=0: raise TimeoutError("model download total deadline")
     context=multiprocessing.get_context("spawn")
-    receive,send=context.Pipe(duplex=False)
-    process=context.Process(target=_resolver_child,args=(send,hostname),daemon=True)
-    process.start(); send.close()
+    receive=send=process=None; primary_error=None
     try:
+        receive,send=context.Pipe(duplex=False)
+        process=context.Process(target=_resolver_child,args=(send,hostname),daemon=True)
+        process.start(); send.close()
+        remaining=deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError("model download total deadline")
         if not receive.poll(remaining):
-            process.terminate(); process.join(1)
-            if process.is_alive(): process.kill(); process.join()
             raise TimeoutError("model DNS deadline")
-        status,payload=receive.recv(); process.join(1)
-        if process.is_alive(): process.kill(); process.join(); raise RuntimeError("model resolver did not exit")
-        if status!="ok" or not isinstance(payload,list) or any(not isinstance(value,str) for value in payload):
+        status,payload=receive.recv()
+        if status!="ok" or not isinstance(payload,list) or not payload or any(not isinstance(value,str) for value in payload):
             raise OSError("model DNS resolution failed")
-        return payload
+        addresses=tuple(payload)
+        parsed_addresses=tuple(ipaddress.ip_address(value) for value in addresses)
+        if any(not address.is_global or address.is_multicast for address in parsed_addresses):
+            raise PermissionError("model host did not resolve only to public addresses")
+        return addresses
+    except BaseException as error:
+        primary_error=error; raise
     finally:
-        receive.close()
-        if process.is_alive(): process.kill(); process.join()
+        # Attempt receive, send, started-process stop, and process close even if
+        # an earlier cleanup fails; preserve the first active exception.
+        ...
 
-class _DeadlineBoundResponse:
-    def __init__(self,response,sock,deadline,per_read_timeout):
-        self._response,self._socket,self._deadline=response,sock,deadline
+class DeadlineBoundResponse:
+    def __init__(self,response,connection,deadline,per_read_timeout):
+        self._response,self._connection,self._deadline=response,connection,deadline
         self._per_read_timeout=per_read_timeout
         self.status,self.headers=response.status,response.headers
     def read(self,size):
         remaining=self._deadline-time.monotonic()
         if remaining<=0: raise TimeoutError("model download total deadline")
-        self._socket.settimeout(min(self._per_read_timeout,remaining))
+        self._connection.sock.settimeout(min(self._per_read_timeout,remaining))
         try: chunk=self._response.read1(size)
         except socket.timeout as error:
             raise TimeoutError("model download deadline") from error
@@ -28637,173 +29016,945 @@ class PinnedHttpsTransport:
         # remain the exact allowlisted DNS name. There is no resolver TOCTOU.
         remaining=deadline-time.monotonic()
         if remaining<=0: raise TimeoutError("model download total deadline")
-        connection=_PinnedHTTPSConnection(hostname,addresses[0],min(per_read_timeout,remaining))
+        connection=_PinnedHTTPSConnection(
+            hostname,addresses[0],min(per_read_timeout,remaining),deadline,
+        )
         deadline_timer=threading.Timer(remaining,connection.close)
-        deadline_timer.daemon=True; deadline_timer.start()
+        deadline_timer.daemon=True; primary_error=None
         try:
+            deadline_timer.start()
             target=parsed.path or "/"
             connection.request(
                 "GET",target,
                 headers={"Host":hostname,"Accept-Encoding":"identity","Connection":"close"},
             )
-            yield _DeadlineBoundResponse(
-                connection.getresponse(),connection.sock,deadline,per_read_timeout,
+            yield DeadlineBoundResponse(
+                connection.getresponse(),connection,deadline,per_read_timeout,
             )
         except OSError as error:
             if time.monotonic()>=deadline:
-                raise TimeoutError("model download total deadline") from error
+                primary_error=TimeoutError("model download total deadline")
+                raise primary_error from error
+            primary_error=error
             raise
+        except BaseException as error:
+            primary_error=error; raise
         finally:
-            deadline_timer.cancel(); connection.close()
+            # Always attempt both cleanup actions; raise the first cleanup error
+            # only when no body error is already active.
+            ...
 ```
 
 ```python
 # apps/core/src/tuntun_core/services/models/installer.py
-import fcntl,hashlib,os,secrets,stat,time
+from __future__ import annotations
+
+import contextlib
+import errno
+import fcntl
+import functools
+import hashlib
+import io
+import os
+import secrets
+import stat
+import time
+from collections.abc import Callable, Iterator
+from enum import Enum, auto
+from typing import Any
 from urllib.parse import urlsplit
+
 from .fs import (
-    OwnedDirectory,atomic_publish_dir_noreplace,hash_exact_fd,open_regular_at,
+    AtomicPublishWitness,
+    OwnedDirectory,
+    _FileDescriptorOwner,
+    _FileDescriptorOwnerSlot,
+    _OwnedDirectoryOwnerSlot,
+    atomic_publish_dir_noreplace,
+    close_preserving_primary,
+    entry_exists_at,
+    hash_exact_fd,
+    model_install_lock_name,
+    open_regular_at,
+    publication_commit_name,
+    recovery_pending_name,
+    require_publication_commit,
 )
 from .network import PinnedHttpsTransport
-from .registry import ActivatedModel,VerifiedModelFile
+from .registry import (
+    ActivatedModel,
+    ModelEntry,
+    ModelFile,
+    ModelRegistry,
+    VerifiedModelFile,
+    _ActivatedModelOwnerSlot,
+    _VerifiedModelFileOwnerSlot,
+)
+
+WriteOnce = Callable[[int, bytes | memoryview], int]
+FaultHook = Callable[[str], None]
+_RECOVERY_ROLLBACK_NOTE = "additional recovery rollback failure"
+_PUBLICATION_RESOLUTION_NOTE = "additional publication commit resolution failure"
+
+
+def _write_once(descriptor: int, data: bytes | memoryview) -> int:
+    return os.write(descriptor, data)
+
+
+def _no_fault(_point: str) -> None:
+    return None
+
+
+class _PublicationMarkerOwner(io.FileIO):
+    """C-backed, idempotent ownership for the retained publication marker FD."""
+
+
+class _PublicationMarkerOwnerSlot:
+    """Transaction-visible marker ownership populated before acquisition returns."""
+
+    __slots__ = ("owner",)
+
+    def __init__(self) -> None:
+        self.owner: _PublicationMarkerOwner | None = None
+
+
+class _PublicationResolution(Enum):
+    COMMITTED = auto()
+    DEFINITELY_PRECOMMIT = auto()
+    INCONCLUSIVE = auto()
+
+
+@contextlib.contextmanager
+def _close_owned_directory(directory: OwnedDirectory) -> Iterator[None]:
+    """Close one directory without replacing an active body failure."""
+    try:
+        yield
+    except BaseException as error:
+        close_preserving_primary(directory, OwnedDirectory.close, error)
+        raise
+    else:
+        directory.close()
+
 
 class ModelInstaller:
-    def __init__(self,registry,allowed_hosts,transport=None):
-        self.registry=registry; self.allowed_hosts=frozenset(allowed_hosts)
-        self.transport=transport or PinnedHttpsTransport()
-    MAX_TOTAL_DOWNLOAD_SECONDS=900.0
-    def _download(self,stage,item,deadline):
-        parsed=urlsplit(item.url)
-        if parsed.hostname not in self.allowed_hosts:
-            raise PermissionError("model URL is not allowlisted HTTPS")
-        write_fd=open_regular_at(
-            stage,item.path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,mode=0o600,
-        )
-        read_fd=None
+    MAX_TOTAL_DOWNLOAD_SECONDS = 900.0
+
+    def __init__(
+        self,
+        registry: ModelRegistry,
+        allowed_hosts: frozenset[str] | set[str],
+        transport: Any | None = None,
+        *,
+        write_once: WriteOnce | None = None,
+        fault_hook: FaultHook | None = None,
+    ) -> None:
+        self.registry = registry
+        self.allowed_hosts = frozenset(allowed_hosts)
+        self.transport = transport or PinnedHttpsTransport()
+        self._write_once = write_once or _write_once
+        self._fault_hook = fault_hook or _no_fault
+
+    def _download(
+        self,stage:OwnedDirectory,item:ModelFile,deadline:float,
+        owner_slot:_FileDescriptorOwnerSlot,
+    )->None:
         try:
-            # Open the only retained descriptor before qualification, while the
-            # private owner-only stage and exclusive writer still name the new
-            # inode. The runtime never receives write authority.
-            read_fd=open_regular_at(stage,item.path,os.O_RDONLY,mode=0o600)
-            written_identity=os.fstat(write_fd); read_identity=os.fstat(read_fd)
+            hostname = urlsplit(item.url).hostname
+        except ValueError as error:
+            raise PermissionError("model URL is not allowlisted HTTPS") from error
+        if hostname not in self.allowed_hosts:
+            raise PermissionError("model URL is not allowlisted HTTPS")
+        write_slot=_FileDescriptorOwnerSlot()
+        try:
+            open_regular_at(
+                stage,
+                item.path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                write_slot,
+                mode=0o600,
+                expected_mode=0o600,
+            )
+            open_regular_at(
+                stage,item.path,os.O_RDONLY,owner_slot,
+                mode=0o600,expected_mode=0o600,
+            )
+            write_owner=write_slot.owner; read_owner=owner_slot.owner
+            if write_owner is None or read_owner is None:
+                raise RuntimeError("download descriptor acquisition missing")
+            write_fd=write_owner.fileno(); read_fd=read_owner.fileno()
+            written_identity = os.fstat(write_fd)
+            read_identity = os.fstat(read_fd)
             if (
                 not stat.S_ISREG(written_identity.st_mode)
-                or written_identity.st_uid!=os.geteuid()
-                or written_identity.st_nlink!=1
-                or (written_identity.st_dev,written_identity.st_ino)!=
-                   (read_identity.st_dev,read_identity.st_ino)
-                or fcntl.fcntl(read_fd,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY
+                or written_identity.st_uid != os.geteuid()
+                or written_identity.st_nlink != 1
+                or (written_identity.st_dev, written_identity.st_ino)
+                != (read_identity.st_dev, read_identity.st_ino)
+                or fcntl.fcntl(read_fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY
             ):
                 raise PermissionError("model staged descriptor identity invalid")
-            digest=hashlib.sha256(); total=0
-            with self.transport.stream_exact(item.url,self.allowed_hosts,deadline) as response:
-                # No redirect is followed. Any 3xx, changed URL, non-200, or
-                # declared oversized length is rejected before response bytes.
-                if response.status!=200:
+            digest = hashlib.sha256()
+            total = 0
+            with self.transport.stream_exact(item.url, self.allowed_hosts, deadline) as response:
+                if response.status != 200:
                     raise PermissionError("model redirect or response rejected")
-                length=response.headers.get("content-length")
-                encoding=response.headers.get("content-encoding")
-                if encoding not in {None,"identity"}:
+                length = response.headers.get("content-length")
+                encoding = response.headers.get("content-encoding")
+                if encoding not in {None, "identity"}:
                     raise ValueError("model response encoding rejected")
-                if length is not None and (not length.isascii() or not length.isdecimal() or int(length)!=item.size):
+                if length is not None and (
+                    not isinstance(length, str)
+                    or not length.isascii()
+                    or not length.isdecimal()
+                    or int(length) != item.size
+                ):
                     raise ValueError("model size/hash mismatch")
-                while chunk:=response.read(65_536):
-                    total+=len(chunk)
-                    if total>item.size: raise ValueError("model size/hash mismatch")
-                    view=memoryview(chunk)
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("model download total deadline")
+                    chunk = response.read(65_536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > item.size:
+                        raise ValueError("model size/hash mismatch")
+                    view = memoryview(chunk)
                     while view:
-                        written=os.write(write_fd,view)
-                        if written<=0: raise OSError("model artifact write made no progress")
-                        view=view[written:]
+                        written = self._write_once(write_fd, view)
+                        if written <= 0:
+                            raise OSError("model artifact write made no progress")
+                        view = view[written:]
                     digest.update(chunk)
-            if total!=item.size or digest.hexdigest()!=item.sha256:
+            if total != item.size or digest.hexdigest() != item.sha256:
                 raise ValueError("model size/hash mismatch")
-            os.fchmod(write_fd,0o400); os.fsync(write_fd)
-            final_write=os.fstat(write_fd); final_read=os.fstat(read_fd)
+            os.fchmod(write_fd, 0o400)
+            os.fsync(write_fd)
+            final_write = os.fstat(write_fd)
+            final_read = os.fstat(read_fd)
             if (
                 not stat.S_ISREG(final_write.st_mode)
                 or not stat.S_ISREG(final_read.st_mode)
-                or final_write.st_uid!=os.geteuid()
-                or final_read.st_uid!=os.geteuid()
-                or stat.S_IMODE(final_read.st_mode)!=0o400
-                or final_write.st_size!=item.size or final_read.st_size!=item.size
-                or final_write.st_nlink!=1 or final_read.st_nlink!=1
-                or (final_write.st_dev,final_write.st_ino)!=
-                   (written_identity.st_dev,written_identity.st_ino)
-                or (final_read.st_dev,final_read.st_ino)!=
-                   (written_identity.st_dev,written_identity.st_ino)
+                or final_write.st_uid != os.geteuid()
+                or final_read.st_uid != os.geteuid()
+                or stat.S_IMODE(final_read.st_mode) != 0o400
+                or final_write.st_size != item.size
+                or final_read.st_size != item.size
+                or final_write.st_nlink != 1
+                or final_read.st_nlink != 1
+                or (final_write.st_dev, final_write.st_ino)
+                != (written_identity.st_dev, written_identity.st_ino)
+                or (final_read.st_dev, final_read.st_ino)
+                != (written_identity.st_dev, written_identity.st_ino)
             ):
                 raise ValueError("model size/hash mismatch")
-            hash_exact_fd(read_fd,item.size,item.sha256)
-            os.close(write_fd); write_fd=None
-            return read_fd
-        except Exception:
-            if read_fd is not None: os.close(read_fd)
-            if write_fd is not None: os.close(write_fd)
+            hash_exact_fd(read_fd, item.size, item.sha256)
+            write_owner.close()
+        except BaseException as error:
+            if owner_slot.owner is not None:
+                close_preserving_primary(owner_slot.owner,_FileDescriptorOwner.close,error)
+            if write_slot.owner is not None:
+                close_preserving_primary(write_slot.owner,_FileDescriptorOwner.close,error)
             raise
 
-    def install(self,model_id):
-        entry=self.registry.entry(model_id)
-        root=OwnedDirectory.open_or_create(self.registry._root)
+    @staticmethod
+    def _open_existing_revision(model,revision,owner_slot:_OwnedDirectoryOwnerSlot)->bool:
         try:
-            with root.lock(".model-install.lock",timeout_seconds=30):
-                model=root.child(entry.model_id,create=True,exist_ok=True)
+            model.child(revision,owner_slot)
+        except FileNotFoundError:
+            return False
+        except OSError as error:
+            raise PermissionError("unsafe model filesystem revision") from error
+        return True
+
+    @staticmethod
+    def _require_recovery_marker_name_before_open(
+        model: OwnedDirectory,
+        revision: str,
+        *,
+        create: bool,
+    ) -> None:
+        name = recovery_pending_name(revision)
+        try:
+            identity = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if create:
+                return
+            raise
+        if create:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), name)
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or identity.st_uid != os.geteuid()
+            or stat.S_IMODE(identity.st_mode) not in {0o400, 0o600}
+            or identity.st_nlink != 1
+            or identity.st_size != 0
+        ):
+            raise PermissionError("unsafe model recovery marker")
+
+    @staticmethod
+    def _acquire_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        owner_slot: _PublicationMarkerOwnerSlot,
+        *,
+        create: bool,
+    ) -> None:
+        if owner_slot.owner is not None:
+            raise ValueError("publication marker owner slot already populated")
+        ModelInstaller._require_recovery_marker_name_before_open(
+            model,
+            revision,
+            create=create,
+        )
+        owner_slot.owner = _PublicationMarkerOwner(
+            recovery_pending_name(revision),
+            "x+b" if create else "rb",
+            opener=functools.partial(os.open, mode=0o600, dir_fd=model.fd),
+        )
+        descriptor = owner_slot.owner.fileno()
+        observed_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        allowed_modes = {0o600} if create else {0o400, 0o600}
+        expected_access = os.O_RDWR if create else os.O_RDONLY
+        if (
+            observed_mode not in allowed_modes
+            or fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != expected_access
+            or os.get_inheritable(descriptor)
+        ):
+            raise PermissionError("unsafe model recovery marker")
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=observed_mode,
+        )
+        os.fsync(descriptor)
+        model.fsync()
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=observed_mode,
+        )
+
+    @staticmethod
+    def _require_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        descriptor: int,
+        *,
+        expected_mode: int,
+    ) -> None:
+        name = recovery_pending_name(revision)
+        identity = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or identity.st_uid != os.geteuid()
+            or stat.S_IMODE(identity.st_mode) != expected_mode
+            or identity.st_nlink != 1
+            or identity.st_size != 0
+            or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise PermissionError("unsafe model recovery marker")
+
+    @staticmethod
+    def _prepare_recovery_marker_as_publication(
+        model: OwnedDirectory,
+        revision: str,
+        descriptor: int,
+    ) -> None:
+        observed_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+        if observed_mode not in {0o400, 0o600}:
+            raise PermissionError("unsafe model recovery marker")
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=observed_mode,
+        )
+        if observed_mode == 0o600:
+            os.fchmod(descriptor, 0o400)
+        os.fsync(descriptor)
+        model.fsync()
+        ModelInstaller._require_recovery_marker(
+            model,
+            revision,
+            descriptor,
+            expected_mode=0o400,
+        )
+
+    @staticmethod
+    def _publish_prepared_recovery_marker(
+        model: OwnedDirectory,
+        revision: str,
+        descriptor: int,
+        expected_identity: tuple[int, int],
+        *,
+        witness: AtomicPublishWitness,
+    ) -> None:
+        pending_name = recovery_pending_name(revision)
+        commit_name = publication_commit_name(revision)
+        publication_error: BaseException | None = None
+        try:
+            atomic_publish_dir_noreplace(
+                model,
+                pending_name,
+                commit_name,
+                expected_source_fd=descriptor,
+                expected_source_identity=expected_identity,
+                witness=witness,
+            )
+        except BaseException as error:
+            if witness.committed:
+                if isinstance(error, Exception):
+                    return
+                raise
+            publication_error = error
+        if not witness.committed:
+            try:
+                if entry_exists_at(model, pending_name):
+                    raise PermissionError("model publication is still pending")
+                require_publication_commit(
+                    model,
+                    revision,
+                    descriptor,
+                    expected_mode=0o400,
+                    require_read_only=False,
+                )
+            except BaseException:
+                if publication_error is not None:
+                    raise publication_error from None
+                raise RuntimeError("model publication outcome missing") from None
+            witness.committed = True
+        if publication_error is not None and not isinstance(publication_error, Exception):
+            raise publication_error
+
+    @staticmethod
+    def _reresolve_publication_witness_after_exception(
+        model: OwnedDirectory,
+        revision: str,
+        marker_owner: _PublicationMarkerOwner,
+        witness: AtomicPublishWitness,
+        primary_error: BaseException,
+    ) -> _PublicationResolution:
+        if witness.committed:
+            return _PublicationResolution.COMMITTED
+        descriptor = marker_owner.fileno()
+        retained = os.fstat(descriptor)
+        pending_name = recovery_pending_name(revision)
+        try:
+            named = os.stat(pending_name, dir_fd=model.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            require_publication_commit(
+                model,
+                revision,
+                descriptor,
+                expected_mode=0o400,
+                require_read_only=False,
+            )
+            resolution = _PublicationResolution.COMMITTED
+        else:
+            if (retained.st_dev, retained.st_ino) == (named.st_dev, named.st_ino):
+                return _PublicationResolution.DEFINITELY_PRECOMMIT
+            resolution = _PublicationResolution.INCONCLUSIVE
+        if resolution is _PublicationResolution.COMMITTED:
+            try:
+                witness.committed = True
+            except BaseException:
+                primary_error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+        elif resolution is _PublicationResolution.INCONCLUSIVE:
+            primary_error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+        return resolution
+
+    @staticmethod
+    def _remove_publication_commit(model: OwnedDirectory, revision: str) -> None:
+        name = publication_commit_name(revision)
+        descriptor_slot=_FileDescriptorOwnerSlot()
+        try:
+            try:
+                open_regular_at(
+                    model,name,os.O_RDONLY,descriptor_slot,expected_mode=None,
+                )
+            except FileNotFoundError:
+                return
+            descriptor_owner=descriptor_slot.owner
+            if descriptor_owner is None: raise RuntimeError("proof acquisition missing")
+            descriptor=descriptor_owner.fileno()
+            identity = os.fstat(descriptor)
+            named = os.stat(name, dir_fd=model.fd, follow_symlinks=False)
+            if (
+                stat.S_IMODE(identity.st_mode) not in {0o400, 0o600}
+                or identity.st_size != 0
+                or (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise PermissionError("unsafe model publication commit")
+            os.unlink(name, dir_fd=model.fd)
+            model.fsync()
+            descriptor_owner.close()
+        except BaseException as error:
+            if descriptor_slot.owner is not None:
+                close_preserving_primary(
+                    descriptor_slot.owner,_FileDescriptorOwner.close,error,
+                )
+            raise
+
+    def _reuse_or_recover_revision(
+        self,
+        model: OwnedDirectory,
+        entry: ModelEntry,
+        activated_slot: _ActivatedModelOwnerSlot,
+    ) -> bool:
+        if activated_slot.owner is not None:
+            raise ValueError("activated model owner slot already populated")
+        pending_name = recovery_pending_name(entry.revision)
+        pending_exists = entry_exists_at(model, pending_name)
+        commit_exists = entry_exists_at(model, publication_commit_name(entry.revision))
+        handles: list[VerifiedModelFile] = []
+        revision_slot=_OwnedDirectoryOwnerSlot()
+        descriptor_slot=_FileDescriptorOwnerSlot()
+        handle_slot=_VerifiedModelFileOwnerSlot()
+        marker_owner_slot = _PublicationMarkerOwnerSlot()
+        sealed_for_recovery = False
+        committed_on_entry = False
+        post_seal_phase = False
+        publication_witness = AtomicPublishWitness()
+        try:
+            if not self._open_existing_revision(model,entry.revision,revision_slot):
+                if pending_exists or commit_exists:
+                    raise PermissionError("unsafe model recovery marker")
+                return False
+            revision=revision_slot.owner
+            if revision is None: raise RuntimeError("revision acquisition missing")
+            mode = stat.S_IMODE(os.fstat(revision.fd).st_mode)
+            sealed_for_recovery = mode == 0o500
+            if mode == 0o500 and not pending_exists and commit_exists:
+                committed_on_entry = True
                 try:
-                    model.remove_private_stages(f".stage-{entry.revision}-")
-                    model.fsync()
-                    if model.has_child(entry.revision):
-                        # Existing revisions are immutable: validate and reuse an
-                        # exact complete revision, or fail for owner repair.
-                        return self.registry.activate(model_id)
-                    stage_name=f".stage-{entry.revision}-{secrets.token_hex(8)}"
-                    stage=model.child(stage_name,create=True)
-                    stage_identity=stage.identity
-                    published=False
-                    handles=[]
-                    try:
-                        download_deadline=time.monotonic()+self.MAX_TOTAL_DOWNLOAD_SECONDS
-                        for item in entry.files:
-                            fd=self._download(stage,item,download_deadline)
-                            handles.append(VerifiedModelFile.from_manifest(item,fd))
-                        # Rehash the retained same-inode O_RDONLY descriptions
-                        # that are handed to the runtime; publication never
-                        # qualifies one pathname and later reopens it.
-                        for item,handle in zip(entry.files,handles,strict=True):
-                            hash_exact_fd(handle.fd,item.size,item.sha256)
-                        stage.chmod(0o500)
-                        stage.fsync()
-                        atomic_publish_dir_noreplace(model,stage_name,entry.revision)
-                        published=True
-                        model.fsync()
-                        return ActivatedModel.from_manifest(entry,tuple(handles))
-                    except Exception:
-                        for handle in handles: os.close(handle.fd)
-                        if not published:
-                            model.remove_private_stage(stage_name,stage_identity)
-                            model.fsync()
-                        # After an exclusive rename, the final name contains a
-                        # complete read-only revision. A parent-fsync failure is
-                        # reconciled on restart; it is never deleted or replaced.
+                    self.registry._activate_from_open_model(model, entry, activated_slot)
+                except BaseException as error:
+                    if not isinstance(error, Exception):
                         raise
-                    finally: stage.close()
-                finally: model.close()
-        finally: root.close()
-        raise RuntimeError("model install did not publish")
+                    raise RuntimeError("model is not installed and verified") from error
+            else:
+                if mode not in {0o500, 0o700}:
+                    raise PermissionError("unsafe model filesystem revision")
+
+                if pending_exists:
+                    self._acquire_recovery_marker(
+                        model,
+                        entry.revision,
+                        marker_owner_slot,
+                        create=False,
+                    )
+
+                expected_names = tuple(sorted(item.path for item in entry.files))
+                if tuple(sorted(os.listdir(revision.fd))) != expected_names:
+                    raise PermissionError("unsafe unsealed model revision")
+                for item in entry.files:
+                    descriptor_slot=_FileDescriptorOwnerSlot()
+                    handle_slot=_VerifiedModelFileOwnerSlot()
+                    open_regular_at(
+                        revision,
+                        item.path,
+                        os.O_RDONLY,
+                        descriptor_slot,
+                        mode=0o400,
+                        expected_mode=0o400,
+                    )
+                    descriptor_owner=descriptor_slot.owner
+                    if descriptor_owner is None: raise RuntimeError("artifact acquisition missing")
+                    hash_exact_fd(descriptor_owner.fileno(),item.size,item.sha256)
+                    VerifiedModelFile.from_manifest(item,descriptor_slot,handle_slot)
+                    handle=handle_slot.owner
+                    if handle is None: raise RuntimeError("file-owner acquisition missing")
+                    self._fault_hook("before_retain_recovery_file")
+                    handles.append(handle)
+                    handle_slot.owner=None
+
+                if marker_owner_slot.owner is None:
+                    self._acquire_recovery_marker(
+                        model,
+                        entry.revision,
+                        marker_owner_slot,
+                        create=True,
+                    )
+                marker_owner = marker_owner_slot.owner
+                if marker_owner is None:
+                    raise RuntimeError("model recovery marker acquisition missing")
+                marker_fd = marker_owner.fileno()
+                self._remove_publication_commit(model, entry.revision)
+                if mode == 0o700:
+                    revision.chmod(0o500)
+                    sealed_for_recovery = True
+                    revision.fsync()
+                else:
+                    sealed_for_recovery = True
+                post_seal_phase = True
+                self._fault_hook("after_recovery_seal_before_verify")
+                if tuple(sorted(os.listdir(revision.fd))) != expected_names:
+                    raise PermissionError("unsafe unsealed model revision")
+                for item, handle in zip(entry.files, handles, strict=True):
+                    hash_exact_fd(handle.fd, item.size, item.sha256)
+                revision.fsync()
+                model.fsync()
+                self._prepare_recovery_marker_as_publication(
+                    model,
+                    entry.revision,
+                    marker_fd,
+                )
+                prepared_marker = os.fstat(marker_fd)
+                prepared_marker_identity = (
+                    prepared_marker.st_dev,
+                    prepared_marker.st_ino,
+                )
+                self._publish_prepared_recovery_marker(
+                    model,
+                    entry.revision,
+                    marker_fd,
+                    prepared_marker_identity,
+                    witness=publication_witness,
+                )
+                self._fault_hook("before_publication_marker_close")
+                marker_owner.close()
+                self._fault_hook("after_publication_marker_close")
+                ActivatedModel.from_manifest(entry,tuple(handles),activated_slot)
+                handles.clear()
+            if activated_slot.owner is None:
+                if revision_slot.owner is not None: revision_slot.owner.close()
+                raise RuntimeError("model revision recovery did not activate")
+            if revision_slot.owner is None:
+                raise RuntimeError("model revision recovery lost directory ownership")
+            revision_slot.owner.close()
+            return True
+        except BaseException as error:
+            if sealed_for_recovery and not committed_on_entry and not publication_witness.committed:
+                resolution = _PublicationResolution.INCONCLUSIVE
+                if marker_owner_slot.owner is not None:
+                    try:
+                        resolution = self._reresolve_publication_witness_after_exception(
+                            model,
+                            entry.revision,
+                            marker_owner_slot.owner,
+                            publication_witness,
+                            error,
+                        )
+                    except BaseException:
+                        error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                else:
+                    error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                if resolution is _PublicationResolution.DEFINITELY_PRECOMMIT:
+                    try:
+                        revision.chmod(0o700)
+                        revision.fsync()
+                    except BaseException:
+                        error.add_note(_RECOVERY_ROLLBACK_NOTE)
+            if handle_slot.owner is not None and any(
+                handle_slot.owner is retained for retained in handles
+            ):
+                handle_slot.owner=None
+            if activated_slot.owner is None:
+                for handle in handles:
+                    close_preserving_primary(handle,VerifiedModelFile.close,error)
+            if handle_slot.owner is not None:
+                close_preserving_primary(handle_slot.owner,VerifiedModelFile.close,error)
+            if descriptor_slot.owner is not None:
+                close_preserving_primary(
+                    descriptor_slot.owner,_FileDescriptorOwner.close,error,
+                )
+            if marker_owner_slot.owner is not None:
+                close_preserving_primary(
+                    marker_owner_slot.owner,_PublicationMarkerOwner.close,error,
+                )
+            if revision_slot.owner is not None:
+                close_preserving_primary(revision_slot.owner,OwnedDirectory.close,error)
+            if (
+                isinstance(error,OSError)
+                and not post_seal_phase
+                and activated_slot.owner is None
+            ):
+                raise PermissionError("unsafe unsealed model revision") from error
+            raise
+
+    def install(self, model_id: str) -> ActivatedModel:
+        entry = self.registry.entry(model_id)
+        activated_slot = _ActivatedModelOwnerSlot()
+        root_slot=_OwnedDirectoryOwnerSlot(); model_slot=_OwnedDirectoryOwnerSlot()
+        stage_slot=_OwnedDirectoryOwnerSlot(); lock_slot=_FileDescriptorOwnerSlot()
+        resolve_publication = self._reresolve_publication_witness_after_exception
+        try:
+            OwnedDirectory.open_or_create(self.registry._root,root_slot)
+            root=root_slot.owner
+            if root is None: raise RuntimeError("model root acquisition missing")
+            with (
+                _close_owned_directory(root),
+                root.lock(
+                    model_install_lock_name(entry.model_id),
+                    lock_slot,
+                    timeout_seconds=30.0,
+                ),
+            ):
+                root.child(entry.model_id,model_slot,create=True,exist_ok=True)
+                model=model_slot.owner
+                if model is None: raise RuntimeError("model acquisition missing")
+                with _close_owned_directory(model):
+                    prefix = f".stage-{entry.revision}-"
+                    model.remove_private_stages(prefix)
+                    model.fsync()
+                    reused = self._reuse_or_recover_revision(
+                        model,
+                        entry,
+                        activated_slot,
+                    )
+                    if not reused:
+                        stage_name = f"{prefix}{secrets.token_hex(8)}"
+                        model.child(stage_name,stage_slot,create=True)
+                        stage=stage_slot.owner
+                        if stage is None: raise RuntimeError("stage acquisition missing")
+                        with _close_owned_directory(stage):
+                            stage_identity = stage.identity
+                            published = False
+                            sealed_for_publication = False
+                            publication_witness = AtomicPublishWitness()
+                            handles: list[VerifiedModelFile] = []
+                            descriptor_slot=_FileDescriptorOwnerSlot()
+                            handle_slot=_VerifiedModelFileOwnerSlot()
+                            marker_owner_slot = _PublicationMarkerOwnerSlot()
+                            try:
+                                deadline = time.monotonic() + self.MAX_TOTAL_DOWNLOAD_SECONDS
+                                for item in entry.files:
+                                    descriptor_slot=_FileDescriptorOwnerSlot()
+                                    handle_slot=_VerifiedModelFileOwnerSlot()
+                                    self._download(stage,item,deadline,descriptor_slot)
+                                    VerifiedModelFile.from_manifest(
+                                        item,descriptor_slot,handle_slot,
+                                    )
+                                    handle=handle_slot.owner
+                                    if handle is None: raise RuntimeError("file-owner missing")
+                                    self._fault_hook("before_retain_downloaded_file")
+                                    handles.append(handle)
+                                    handle_slot.owner=None
+                                    self._fault_hook("after_each_file")
+                                for item, handle in zip(
+                                    entry.files,
+                                    handles,
+                                    strict=True,
+                                ):
+                                    hash_exact_fd(
+                                        handle.fd,
+                                        item.size,
+                                        item.sha256,
+                                    )
+                                self._fault_hook("before_stage_fsync")
+                                stage.fsync()
+                                self._fault_hook("after_stage_fsync")
+                                self._fault_hook("before_publish")
+                                atomic_publish_dir_noreplace(
+                                    model,
+                                    stage_name,
+                                    entry.revision,
+                                )
+                                published = True
+                                self._fault_hook("after_publish_before_seal")
+                                self._acquire_recovery_marker(
+                                    model,
+                                    entry.revision,
+                                    marker_owner_slot,
+                                    create=True,
+                                )
+                                marker_owner = marker_owner_slot.owner
+                                if marker_owner is None:
+                                    raise RuntimeError("model recovery marker acquisition missing")
+                                marker_fd = marker_owner.fileno()
+                                stage.chmod(0o500)
+                                sealed_for_publication = True
+                                stage.fsync()
+                                self._fault_hook("after_publish_before_parent_fsync")
+                                model.fsync()
+                                expected_names = tuple(sorted(item.path for item in entry.files))
+                                if tuple(sorted(os.listdir(stage.fd))) != expected_names:
+                                    raise PermissionError("unsafe model filesystem revision")
+                                for item, handle in zip(
+                                    entry.files,
+                                    handles,
+                                    strict=True,
+                                ):
+                                    hash_exact_fd(
+                                        handle.fd,
+                                        item.size,
+                                        item.sha256,
+                                    )
+                                self._prepare_recovery_marker_as_publication(
+                                    model,
+                                    entry.revision,
+                                    marker_fd,
+                                )
+                                prepared_marker = os.fstat(marker_fd)
+                                prepared_marker_identity = (
+                                    prepared_marker.st_dev,
+                                    prepared_marker.st_ino,
+                                )
+                                self._publish_prepared_recovery_marker(
+                                    model,
+                                    entry.revision,
+                                    marker_fd,
+                                    prepared_marker_identity,
+                                    witness=publication_witness,
+                                )
+                                self._fault_hook("before_publication_marker_close")
+                                marker_owner.close()
+                                self._fault_hook("after_publication_marker_close")
+                                ActivatedModel.from_manifest(
+                                    entry,
+                                    tuple(handles),
+                                    activated_slot,
+                                )
+                                handles.clear()
+                            except FileExistsError as error:
+                                if handle_slot.owner is not None and any(
+                                    handle_slot.owner is retained for retained in handles
+                                ):
+                                    handle_slot.owner=None
+                                if handle_slot.owner is not None:
+                                    close_preserving_primary(
+                                        handle_slot.owner,VerifiedModelFile.close,error,
+                                    )
+                                if descriptor_slot.owner is not None:
+                                    close_preserving_primary(
+                                        descriptor_slot.owner,_FileDescriptorOwner.close,error,
+                                    )
+                                if published:
+                                    if sealed_for_publication and not publication_witness.committed:
+                                        resolution = _PublicationResolution.INCONCLUSIVE
+                                        if marker_owner_slot.owner is not None:
+                                            try:
+                                                resolution = resolve_publication(
+                                                    model,
+                                                    entry.revision,
+                                                    marker_owner_slot.owner,
+                                                    publication_witness,
+                                                    error,
+                                                )
+                                            except BaseException:
+                                                error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                                        else:
+                                            error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                                        if (
+                                            resolution
+                                            is _PublicationResolution.DEFINITELY_PRECOMMIT
+                                        ):
+                                            try:
+                                                stage.chmod(0o700)
+                                                stage.fsync()
+                                            except BaseException:
+                                                error.add_note(_RECOVERY_ROLLBACK_NOTE)
+                                    if activated_slot.owner is None:
+                                        for handle in handles:
+                                            close_preserving_primary(
+                                                handle,
+                                                VerifiedModelFile.close,
+                                                error,
+                                            )
+                                    if marker_owner_slot.owner is not None:
+                                        close_preserving_primary(
+                                            marker_owner_slot.owner,
+                                            _PublicationMarkerOwner.close,
+                                            error,
+                                        )
+                                    raise
+                                for handle in handles:
+                                    with contextlib.suppress(OSError):
+                                        handle.close()
+                                model.remove_private_stage(
+                                    stage_name,
+                                    stage_identity,
+                                )
+                                model.fsync()
+                                reused = self._reuse_or_recover_revision(
+                                    model,
+                                    entry,
+                                    activated_slot,
+                                )
+                                if not reused:
+                                    raise RuntimeError(
+                                        "model install publication disappeared"
+                                    ) from None
+                            except BaseException as error:
+                                if sealed_for_publication and not publication_witness.committed:
+                                    resolution = _PublicationResolution.INCONCLUSIVE
+                                    if marker_owner_slot.owner is not None:
+                                        try:
+                                            resolution = resolve_publication(
+                                                model,
+                                                entry.revision,
+                                                marker_owner_slot.owner,
+                                                publication_witness,
+                                                error,
+                                            )
+                                        except BaseException:
+                                            error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                                    else:
+                                        error.add_note(_PUBLICATION_RESOLUTION_NOTE)
+                                    if resolution is _PublicationResolution.DEFINITELY_PRECOMMIT:
+                                        try:
+                                            stage.chmod(0o700)
+                                            stage.fsync()
+                                        except BaseException:
+                                            error.add_note(_RECOVERY_ROLLBACK_NOTE)
+                                if activated_slot.owner is None:
+                                    for handle in handles:
+                                        close_preserving_primary(
+                                            handle,
+                                            VerifiedModelFile.close,
+                                            error,
+                                        )
+                                if marker_owner_slot.owner is not None:
+                                    close_preserving_primary(
+                                        marker_owner_slot.owner,
+                                        _PublicationMarkerOwner.close,
+                                        error,
+                                    )
+                                if not published:
+                                    try:
+                                        model.remove_private_stage(
+                                            stage_name,
+                                            stage_identity,
+                                        )
+                                        model.fsync()
+                                    except FileNotFoundError:
+                                        pass
+                                raise
+            activated = activated_slot.owner
+            if activated is None:
+                raise RuntimeError("model install did not activate")
+            # Single traced source line: the documented public caller-lease boundary.
+            return activated if setattr(activated_slot,"owner",None) is None else activated
+        except BaseException as error:
+            if activated_slot.owner is not None:
+                close_preserving_primary(
+                    activated_slot.owner,
+                    ActivatedModel.close,
+                    error,
+                )
+            # Close populated stage/model/lock/root slots in transaction scope.
+            ...
+            raise
 ```
 
-`models/manifest.schema.json` is JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry`/file fields, the same closed ID/revision/file/hash/size/URL bounds, and an array-size cap of 256 models and 64 files. Schema validation is defense in depth: `ModelRegistry.load` independently enforces every invariant, rejects booleans and every other wrong scalar type as `ValueError`, caps models before iteration and files before construction, detects duplicate IDs/files, checks total revision bytes, and uses strict YAML parsing. Only the checked-in bootstrap manifest may have `models: []`; release candidates with enabled local-model capabilities must contain their exact governed entries. `scripts/check_model_manifest.py` uses the same bounded strict read, then the schema and runtime loader; it never performs a second pathname read. Add a Typer `models` sub-app with `list`, `verify`, and explicit owner-presence `install MODEL_ID` commands; registering it must not instantiate the installer/client or perform network I/O. Startup accepts only an `ActivatedModel` whose retained handles are `O_RDONLY`; hashing and adapter reads use explicit-offset `pread`, so prior or concurrent descriptor offsets cannot truncate or redirect a load. The adapter receives only the bounded pread reader, and the runtime’s exact signed loader receipt is authoritative. `receipt_verifier` verifies the canonical signature, non-overlapping domain, exact current key generation, expiry, model/revision, and ordered `(path,size,sha256)` inventory; per-file receipts repeat that exact tuple. The adapter keeps any partly loaded runtime private until verification returns; every load, finish, or verification exception invokes mandatory `abort_model`, and abort failure disables/restarts the model capability rather than exposing the candidate. The installer has one 900-second monotonic deadline shared across bounded DNS resolution, connect, headers, and every artifact body; a deadline timer closes a slow-drip socket. Missing/rejected/unverified models produce a disabled capability.
+`models/manifest.schema.json` is JSON Schema draft 2020-12 with `additionalProperties:false` at every object, exact required `ModelEntry`/file fields, the same closed ID/revision/file/hash/size/URL bounds, and bounded model/file counts. Schema validation is defense in depth beside the runtime loader's independent closed checks. The installer uses one 900-second monotonic deadline and holds only the target model's exclusive lock, so unrelated installed models remain available. Fresh and recovered revisions create or reopen an exact durable `0600`/prepared-`0400` recovery marker before sealing. After repeated artifact verification, that retained marker is prepared to exact `0400`, fsynced with its parent, identity-revalidated, and kept open. Immediately before the Darwin/Linux exclusive rename, the native helper requires the source name and retained descriptor to remain the same recorded regular, owner-owned, `0400`, single-link, zero-length inode; unsupported platforms return `ENOTSUP`. A zero marker-to-proof syscall is the commit point, and its caller-owned transaction witness is set before any postcommit descriptor close or outer callback can fail. A non-forwarding wrapper is accepted only when marker absence plus the proof's exact identity against the retained descriptor establishes the same commit on return or exception. Ordinary postcommit `Exception` diagnostics remain non-fatal, but non-`Exception` control flow always propagates after either witness path proves the commit. False-witness exception re-resolution returns `COMMITTED`, `DEFINITELY_PRECOMMIT`, or `INCONCLUSIVE`; only exact retained pending state permits rollback, while exact retained proof and every secondary interruption or ambiguous namespace preserve the sealed `0500` revision for safe retry. Every proven post-helper, descriptor-close, constructor, or cleanup fault leaves the exact proof and `0500` revision committed. Marker acquisition first statically qualifies the descriptor-relative name without following it, then stores a C-backed FileIO directly in a transaction-owned slot using `x+b`/`rb` and C `functools.partial(os.open, mode=0600, dir_fd=...)`, and finally performs exact descriptor/name/property/access/CLOEXEC/durability revalidation. No Python function returns a live raw marker FD or owner. A helper-return interruption therefore reaches outer cleanup with the slot already populated, even while its traceback is retained. Before-close faults leave the FileIO owner available for cleanup, while post-entry return/error uses FileIO's own consumed-or-retained state and never retries a recycled integer. Recovery re-durabilizes prepared markers, removes stale proof collisions under lock, re-verifies all artifacts, and retries the same transition. Activation opens the exact stable `0400` proof `O_RDONLY` and revalidates descriptor/name identity after artifact verification; no process-local uncertainty state participates. Registry activation and fresh/recovery/reuse installation share transaction-visible ActivatedModel owner slots. Private helpers return only inert status, committed-on-entry state is never rolled back, and all catchable control-flow/cleanup failures close unreturned activations exactly once without replacing the primary. The final public return is explicitly the caller-owned resource-lease boundary; callers close returned models and the implementation does not depend on `__del__`. Cooperating same-EUID processes honor the model lock; hostile noncooperative same-EUID/root mutation inside either name-based primitive is outside this stated filesystem boundary. Missing, rejected, unverified, pending, proofless, or mismatched models produce a disabled capability.
 
 - [ ] **Step 4: Lock and run the green model gate**
 
-Run: `uv lock && uv run pytest tests/security/test_model_governance.py -q && uv run python scripts/check_model_manifest.py models/manifest.yaml && uv run tuntunctl models list`
+Run: `uv lock && PYTHONWARNINGS=error::ResourceWarning uv run pytest tests/security/test_model_governance.py -q && PYTHONWARNINGS=error::ResourceWarning uv run pytest tests/security/test_model_governance.py -q -k 'every_internal_resource_factory or install_first_caller_line or cleanup_tree_child_factory or every_descriptor_owner_close or pinned_https_connect_retained_traceback_closes_each_socket_owner or resolver_retained_traceback or public_lease_pre_detach or private_activation_success_tail or recovery_success_tail or stale_publication_cleanup' && uv run pytest tests/ci/test_workflow_policy.py -q && uv run ruff check . && uv run ruff format --check apps/core/src/tuntun_core/services/models tests/security/test_model_governance.py tests/security/model_governance_cases.py && uv run mypy apps/core/src apps/edge/src packages/contracts/src packages/testing/src && uv run python scripts/check_model_manifest.py models/manifest.yaml && uv run tuntunctl models list`
 
-Expected: PASS with the full manifest/filesystem/network/race/fault matrix, `model manifest: PASS`, and an empty JSON list from the CLI. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, and conflicting publication never expose a revision or runtime bytes; two installers serialize and converge on one complete immutable revision; runtime loads repeatedly see the full exact bytes hashed through stable read-only descriptors regardless of prior offsets; list/verify/startup make zero network requests.
+Expected: all 275 governance tests pass with fatal `ResourceWarning`, including the 37-node focused retained-trace matrix; all 45 workflow-policy tests pass; Ruff check/format and strict mypy over 36 source files pass; the manifest prints `model manifest: PASS`; and the CLI prints `[]`. The full manifest/filesystem/network/race/fault/ownership-transfer/lock-cleanup/rollback/marker-durability/atomic-positive-proof/cross-process-commit matrix remains green. Redirects, private-address resolution, resolver hangs, overrun/truncation, path/symlink/type swaps, invalid ownership/mode, partial download, cleanup failure, and conflicting publication never expose unverified runtime bytes. The stage directory remains `0700` through Darwin/Linux exclusive no-replace publication; every accepted `0600` or prepared `0400` marker is re-durably fsynced and identity-revalidated before recovery. Same-model activation blocks on the shared/exclusive lock through marker preparation and the atomic marker-to-proof commit, while different models remain available. Fresh/recovery prepared-marker fchmod, marker-fsync, parent-fsync, validation, source identity/mode/size/link mutation, rename, proof-collision, and compound rollback faults deny a fresh interpreter, close descriptors once, and converge. The platform gate proves mocked FreeBSD returns `ENOTSUP` without calling an exported `renameat2`. A real-rename-then-error diagnostic and a non-forwarding-witness wrapper both preserve the exact committed inode; conforming/non-forwarding control-flow interruptions propagate after commit, and repeated fallback-witness interruptions resolve to committed or inconclusive sealed state before rollback. Repository-owned raw-FD helpers populate outer slots and return inert status; retained-trace return/caller-line and close-state cases preserve exact `BaseException` identity, close every FD, and never retry a consumed integer against a recycled FD. The external socket/Pipe and released-contextmanager cases satisfy only their explicitly narrower finalizer boundary. Committed-reuse `KeyboardInterrupt`/`SystemExit`/`GeneratorExit`/cancellation matrices preserve exact primary identity and immutable state through installer and registry. Private activation and reuse return-event traces retain the exception traceback yet observe only inert status, with the transaction slot closing every unreturned artifact FD and zero FD delta. Missing, special, writable, nonempty, multiply linked, or identity-swapped proofs deny. Two installers for one model serialize and converge on one immutable revision, and runtime loads repeatedly consume the exact bytes through stable read-only descriptors.
+
+The two strict-source-permission portability cases raise the current full governance count to 277, superseding the earlier 275-case count in this step.
 
 - [ ] **Step 5: Commit exact Task 10 paths**
 
 ```bash
 git status --short
-git add apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/services/models/fs.py apps/core/src/tuntun_core/services/models/network.py apps/core/src/tuntun_core/services/models/registry.py apps/core/src/tuntun_core/services/models/installer.py apps/core/src/tuntun_core/cli/commands/models.py apps/core/src/tuntun_core/cli/main.py models/manifest.schema.json models/manifest.yaml scripts/check_model_manifest.py tests/security/test_model_governance.py tests/security/conftest.py tests/security/model_governance_cases.py
+git add Makefile apps/core/pyproject.toml uv.lock apps/core/src/tuntun_core/resources/model-manifest.yaml apps/core/src/tuntun_core/services/models/fs.py apps/core/src/tuntun_core/services/models/network.py apps/core/src/tuntun_core/services/models/registry.py apps/core/src/tuntun_core/services/models/installer.py apps/core/src/tuntun_core/cli/commands/models.py apps/core/src/tuntun_core/cli/main.py models/manifest.schema.json models/manifest.yaml scripts/check_model_manifest.py tests/security/test_model_governance.py tests/security/conftest.py tests/security/model_governance_cases.py docs/superpowers/plans/2026-08-27-tuntun-phase1-foundation-execution.md
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(models): add governed registry and explicit installer"

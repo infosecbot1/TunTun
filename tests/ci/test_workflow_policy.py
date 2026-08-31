@@ -71,8 +71,7 @@ CONTRACT_STEPS = [
         "shell": ARCHITECTURE_CHECK_SHELL,
         "run": (
             ".venv-contracts-py311/bin/python -m pytest "
-            "tests/contract/test_v1_types_and_ports.py "
-            "tests/contract/test_dependency_direction.py -q"
+            "tests/contract/test_v1_types_and_ports.py -q"
         ),
     },
 ]

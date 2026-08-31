@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tuntun.local/schemas/model-manifest-v1.json",
+  "title": "Tuntun governed model manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "models"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "models": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "$comment": "ModelRegistry additionally enforces unique model IDs.",
+      "items": {"$ref": "#/$defs/model"}
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256", "url"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9_.-]+\\.(onnx|json|txt|tflite|safetensors)$"
+        },
+        "size": {"type": "integer", "minimum": 1, "maximum": 4000000000},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "url": {
+          "type": "string",
+          "minLength": 9,
+          "maxLength": 4096,
+          "pattern": "^https://[^/?#:@]+(?::443)?(?:/[^?#]*)$"
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "license",
+        "provenance",
+        "redistribution",
+        "approved_purpose",
+        "runtime",
+        "architecture",
+        "input_contract",
+        "output_contract",
+        "benchmark_gate",
+        "review_date",
+        "files"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
+        },
+        "revision": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "license": {"$ref": "#/$defs/nonEmptyString"},
+        "provenance": {"$ref": "#/$defs/nonEmptyString"},
+        "redistribution": {"$ref": "#/$defs/nonEmptyString"},
+        "approved_purpose": {"$ref": "#/$defs/nonEmptyString"},
+        "runtime": {"$ref": "#/$defs/nonEmptyString"},
+        "architecture": {"$ref": "#/$defs/nonEmptyString"},
+        "input_contract": {"$ref": "#/$defs/nonEmptyString"},
+        "output_contract": {"$ref": "#/$defs/nonEmptyString"},
+        "benchmark_gate": {"$ref": "#/$defs/nonEmptyString"},
+        "review_date": {"$ref": "#/$defs/nonEmptyString"},
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "$comment": "ModelRegistry additionally enforces unique file paths and the 8000000000-byte aggregate revision bound.",
+          "items": {"$ref": "#/$defs/file"}
+        }
+      }
+    }
+  }
+}
