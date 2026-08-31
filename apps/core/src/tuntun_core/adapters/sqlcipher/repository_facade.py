@@ -9,7 +9,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from functools import lru_cache
-from threading import Lock
+from threading import Condition, Lock
 from types import (
     AsyncGeneratorType,
     CodeType,
@@ -47,11 +47,17 @@ class _RejectedDeferredResult(TypeError):
 
 
 class _OwnedResultEnvelope[ResultT]:
-    __slots__ = ("record_sources", "snapshot")
+    __slots__ = ("captured_sources", "record_sources", "snapshot")
 
-    def __init__(self, snapshot: ResultT, record_sources: tuple[object, ...]) -> None:
+    def __init__(
+        self,
+        snapshot: ResultT,
+        record_sources: tuple[object, ...],
+        captured_sources: tuple[object, ...],
+    ) -> None:
         self.snapshot = snapshot
         self.record_sources = record_sources
+        self.captured_sources = captured_sources
 
 
 class _ResultInspection:
@@ -68,6 +74,7 @@ class _ResultInspection:
         self.sources: dict[int, object] = {id(root): root}
         self.record_sources: list[object] = []
         self.record_source_ids: set[int] = set()
+        self.requires_terminal_handoff = False
         self.seen: set[int] = set()
         self.visiting: set[int] = set()
         self.rejected = False
@@ -85,9 +92,30 @@ class _ResultInspection:
     def retain_record_source(self, value: object) -> None:
         identity = id(value)
         self.retain(value)
+        self.requires_terminal_handoff = True
         if identity not in self.record_source_ids:
             self.record_source_ids.add(identity)
             self.record_sources.append(value)
+
+    def capture(self, value: object) -> None:
+        self.sources[id(value)] = value
+
+    def capture_mapping(self, source: dict[object, object]) -> None:
+        for key, value in source.items():
+            self.capture(key)
+            self.capture(value)
+
+    def capture_members(self, source: list[object] | set[object]) -> None:
+        for value in source:
+            self.capture(value)
+
+    def require_terminal_source_handoff(self) -> None:
+        self.requires_terminal_handoff = True
+
+    def captured_sources_for_handoff(self) -> tuple[object, ...]:
+        if not self.requires_terminal_handoff:
+            return ()
+        return tuple(self.sources.values())
 
     def raise_if_rejected(self) -> None:
         if self.rejected:
@@ -173,6 +201,8 @@ _OWNED_RECORD_SEAL_ATTRIBUTE = "__tuntun_owned_record_seal__"
 _OWNED_RECORD_FIELDS_ATTRIBUTE = "__tuntun_owned_record_fields__"
 _OWNED_RECORD_TYPES: dict[tuple[str, ...], type[object]] = {}
 _OWNED_RECORD_TYPES_LOCK = Lock()
+_OWNED_RECORD_TYPES_CONDITION = Condition(_OWNED_RECORD_TYPES_LOCK)
+_OWNED_RECORD_SHAPE_RESERVATIONS: set[tuple[str, ...]] = set()
 
 
 class _SealedOwnedRecordMeta(type):
@@ -311,6 +341,8 @@ def _metadata_fingerprint_body(
         return ("frozenset", tuple(sorted(cast(frozenset[str], frozen))))
     if value_type is dict:
         source = cast(dict[object, object], value).copy()
+        if inspection is not None:
+            inspection.capture_mapping(source)
         dictionary_items: list[tuple[str, object]] = []
         valid = True
         for key, item in source.items():
@@ -391,6 +423,9 @@ def _function_fingerprint_body(
     valid = True
     if type(raw_annotations) is dict:
         annotations = cast(dict[object, object], raw_annotations).copy()
+        if inspection is not None:
+            inspection.capture(raw_annotations)
+            inspection.capture_mapping(annotations)
     else:
         annotations = {}
         if inspection is not None:
@@ -398,6 +433,9 @@ def _function_fingerprint_body(
         valid = False
     if type(raw_function_state) is dict:
         function_state = cast(dict[object, object], raw_function_state).copy()
+        if inspection is not None:
+            inspection.capture(raw_function_state)
+            inspection.capture_mapping(function_state)
     else:
         function_state = {}
         if inspection is not None:
@@ -550,28 +588,62 @@ def _reference_record_type(field_names: tuple[str, ...]) -> type[object]:
 def _owned_record_type(field_names: tuple[str, ...]) -> type[object]:
     if not _bounded_record_field_names(field_names):
         raise ValueError("synchronous data record field shape exceeds its closed bound")
-    with _OWNED_RECORD_TYPES_LOCK:
+    with _OWNED_RECORD_TYPES_CONDITION:
         existing = _OWNED_RECORD_TYPES.get(field_names)
         if existing is not None:
+            if field_names in _OWNED_RECORD_SHAPE_RESERVATIONS:
+                _OWNED_RECORD_SHAPE_RESERVATIONS.remove(field_names)
+                _OWNED_RECORD_TYPES_CONDITION.notify_all()
             return existing
-        if len(_OWNED_RECORD_TYPES) >= _MAX_SYNCHRONOUS_RECORD_SHAPES:
+        if field_names not in _OWNED_RECORD_SHAPE_RESERVATIONS:
+            raise RuntimeError("synchronous data record shape was not reserved")
+        try:
+            owned_type = cast(
+                type[object],
+                make_dataclass(
+                    "_SynchronousDataRecord",
+                    [(name, object) for name in field_names],
+                    bases=(_SealedOwnedRecordBase,),
+                    frozen=True,
+                    slots=True,
+                ),
+            )
+            type.__setattr__(owned_type, _OWNED_RECORD_FIELDS_ATTRIBUTE, field_names)
+            # Seal last: all subsequent ordinary class setattr/delattr operations,
+            # including special-method replacement, fail before changing behavior.
+            type.__setattr__(owned_type, _OWNED_RECORD_SEAL_ATTRIBUTE, _OWNED_RECORD_SEAL)
+            _OWNED_RECORD_TYPES[field_names] = owned_type
+            return owned_type
+        finally:
+            _OWNED_RECORD_SHAPE_RESERVATIONS.remove(field_names)
+            _OWNED_RECORD_TYPES_CONDITION.notify_all()
+
+
+def _reserve_owned_record_shape(field_names: tuple[str, ...]) -> bool:
+    with _OWNED_RECORD_TYPES_CONDITION:
+        while field_names in _OWNED_RECORD_SHAPE_RESERVATIONS:
+            _OWNED_RECORD_TYPES_CONDITION.wait()
+        if _OWNED_RECORD_TYPES.get(field_names) is not None:
+            return False
+        if (
+            len(_OWNED_RECORD_TYPES) + len(_OWNED_RECORD_SHAPE_RESERVATIONS)
+            >= _MAX_SYNCHRONOUS_RECORD_SHAPES
+        ):
             raise ValueError("synchronous data record shape cache is exhausted")
-        owned_type = cast(
-            type[object],
-            make_dataclass(
-                "_SynchronousDataRecord",
-                [(name, object) for name in field_names],
-                bases=(_SealedOwnedRecordBase,),
-                frozen=True,
-                slots=True,
-            ),
-        )
-        type.__setattr__(owned_type, _OWNED_RECORD_FIELDS_ATTRIBUTE, field_names)
-        # Seal last: all subsequent ordinary class setattr/delattr operations,
-        # including special-method replacement, fail before changing behavior.
-        type.__setattr__(owned_type, _OWNED_RECORD_SEAL_ATTRIBUTE, _OWNED_RECORD_SEAL)
-        _OWNED_RECORD_TYPES[field_names] = owned_type
-        return owned_type
+        _OWNED_RECORD_SHAPE_RESERVATIONS.add(field_names)
+        return True
+
+
+def _release_owned_record_shape_reservation(
+    field_names: tuple[str, ...],
+    reserved: bool,
+) -> None:
+    if not reserved:
+        return
+    with _OWNED_RECORD_TYPES_CONDITION:
+        if field_names in _OWNED_RECORD_SHAPE_RESERVATIONS:
+            _OWNED_RECORD_SHAPE_RESERVATIONS.remove(field_names)
+            _OWNED_RECORD_TYPES_CONDITION.notify_all()
 
 
 def _function_closed_values(value: object) -> tuple[object, ...]:
@@ -623,6 +695,8 @@ def _snapshot_plain_type_namespace(
     valid = True
     namespace_proxy = type.__getattribute__(record_type, "__dict__")
     for key, value in namespace_proxy.items():
+        inspection.capture(key)
+        inspection.capture(value)
         if type(key) is not str:
             _inspect_data_value(key, inspection)
             inspection.reject(key)
@@ -685,6 +759,7 @@ def _validated_slots_owner_aliases(
             outer_item = actual_namespace.get(name, _UNSAFE_METADATA)
             if name == "__dataclass_fields__" and type(item) is dict and type(outer_item) is dict:
                 hidden_fields = cast(dict[object, object], item).copy()
+                inspection.capture_mapping(hidden_fields)
                 outer_fields = cast(dict[object, object], outer_item)
                 keys_are_closed = all(type(field_name) is str for field_name in hidden_fields)
                 fields_match = keys_are_closed and (hidden_fields.keys() == outer_fields.keys())
@@ -799,6 +874,8 @@ def _has_exact_generated_record_shape(
         valid = False
     else:
         annotations = cast(dict[object, object], raw_annotations).copy()
+        inspection.capture(raw_annotations)
+        inspection.capture_mapping(annotations)
     annotation_names = tuple(annotations)
     annotation_names_are_closed = True
     for annotation_name, annotation in annotations.items():
@@ -985,6 +1062,7 @@ def _inspect_enum_singleton_state(
         inspection.reject(state)
         return False
     source = cast(dict[object, object], state).copy()
+    inspection.capture_mapping(source)
     expected = {
         "_value_": member_value,
         "_name_": name,
@@ -1125,6 +1203,8 @@ def _inspect_frozen_record(value: object, inspection: _ResultInspection) -> obje
         inspection.reject(value)
         return value
     record_fields = cast(dict[object, object], raw_record_fields).copy()
+    inspection.capture(raw_record_fields)
+    inspection.capture_mapping(record_fields)
     record_namespace["__dataclass_fields__"] = record_fields
     raw_field_names = tuple(record_fields)
     if any(type(field_name) is not str for field_name in raw_field_names):
@@ -1137,6 +1217,26 @@ def _inspect_frozen_record(value: object, inspection: _ResultInspection) -> obje
     if not _bounded_record_field_names(field_names):
         inspection.reject(value)
         return value
+    reserved = _reserve_owned_record_shape(field_names)
+    try:
+        return _inspect_reserved_frozen_record(
+            value,
+            record_type,
+            field_names,
+            record_namespace,
+            inspection,
+        )
+    finally:
+        _release_owned_record_shape_reservation(field_names, reserved)
+
+
+def _inspect_reserved_frozen_record(
+    value: object,
+    record_type: type[object],
+    field_names: tuple[str, ...],
+    record_namespace: dict[str, object],
+    inspection: _ResultInspection,
+) -> object:
     raw_descriptors = tuple(record_namespace.get(field_name) for field_name in field_names)
     descriptors_valid = True
     for field_name, descriptor in zip(field_names, raw_descriptors, strict=True):
@@ -1301,6 +1401,8 @@ def _inspect_data_value(value: object, inspection: _ResultInspection) -> object:
         if type(value) is dict:
             source = cast(dict[object, object], value).copy()
             inspection.shallow_sources[identity] = source
+            inspection.require_terminal_source_handoff()
+            inspection.capture_mapping(source)
             snapshot: dict[object, object] = {}
             inspection.snapshots[identity] = snapshot
             dict_items = [
@@ -1321,6 +1423,8 @@ def _inspect_data_value(value: object, inspection: _ResultInspection) -> object:
         if type(value) is list:
             source_list = cast(list[object], value).copy()
             inspection.shallow_sources[identity] = source_list
+            inspection.require_terminal_source_handoff()
+            inspection.capture_members(source_list)
             snapshot_list: list[object] = []
             inspection.snapshots[identity] = snapshot_list
             snapshot_list.extend(_inspect_data_value(item, inspection) for item in source_list)
@@ -1333,6 +1437,8 @@ def _inspect_data_value(value: object, inspection: _ResultInspection) -> object:
         if type(value) is set:
             source_set = cast(set[object], value).copy()
             inspection.shallow_sources[identity] = source_set
+            inspection.require_terminal_source_handoff()
+            inspection.capture_members(source_set)
             snapshot_set: set[object] = set()
             inspection.snapshots[identity] = snapshot_set
             set_items = [_inspect_data_value(item, inspection) for item in source_set]
@@ -1380,28 +1486,32 @@ def _reject_awaitable[ResultT](
     inspection = _ResultInspection(result, message)
     try:
         result_type = type(result)
-        result_mro = cast(
-            tuple[type[object], ...],
-            type.__getattribute__(result_type, "__mro__"),
-        )
-        native_deferred = (
-            result_type is CoroutineType
-            or result_type is GeneratorType
-            or result_type is AsyncGeneratorType
-            or any(base is asyncio.Future or base is ConcurrentFuture for base in result_mro)
-        )
         declares_await = False
-        for base in result_mro:
-            namespace_proxy = type.__getattribute__(base, "__dict__")
-            for key, value in namespace_proxy.items():
-                if type(key) is not str:
-                    _inspect_data_value(key, inspection)
-                    _inspect_data_value(value, inspection)
-                    inspection.reject(key)
-                    inspection.reject(value)
-                    declares_await = True
-                elif key == "__await__":
-                    declares_await = True
+        native_deferred = False
+        # `type.__getattribute__` still honors data descriptors installed on a
+        # caller metaclass. Reject that class shape using only exact `type()`
+        # identity before reading its MRO or any class namespace.
+        if type(result_type) is not type:
+            inspection.reject(result)
+        else:
+            result_mro = cast(tuple[type[object], ...], tuple(type.mro(result_type)))
+            native_deferred = (
+                result_type is CoroutineType
+                or result_type is GeneratorType
+                or result_type is AsyncGeneratorType
+                or any(base is asyncio.Future or base is ConcurrentFuture for base in result_mro)
+            )
+            for base in result_mro:
+                namespace_proxy = type.__getattribute__(base, "__dict__")
+                for key, value in namespace_proxy.items():
+                    if type(key) is not str:
+                        _inspect_data_value(key, inspection)
+                        _inspect_data_value(value, inspection)
+                        inspection.reject(key)
+                        inspection.reject(value)
+                        declares_await = True
+                    elif key == "__await__":
+                        declares_await = True
     except BaseException as error:
         inspection.reject(result)
         rejection = _RejectedDeferredResult(tuple(inspection.retained), message)
@@ -1435,6 +1545,7 @@ def _reject_worker_result[ResultT](
     return _OwnedResultEnvelope(
         cast(ResultT, snapshot),
         tuple(inspection.record_sources),
+        inspection.captured_sources_for_handoff(),
     )
 
 
