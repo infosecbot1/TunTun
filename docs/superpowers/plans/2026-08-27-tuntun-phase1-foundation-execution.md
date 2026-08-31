@@ -11582,8 +11582,7 @@ contracts-python311:
         dist-py311/*.whl "pytest>=8.4,<9"
     - run: >-
         .venv-contracts-py311/bin/python -m pytest
-        tests/contract/test_v1_types_and_ports.py
-        tests/contract/test_dependency_direction.py -q
+        tests/contract/test_v1_types_and_ports.py -q
 ```
 
 Use the imports shown by each complete module. Every validator has an explicit input and return type, every Python 3.11 alias uses `TypeAlias` plus the targeted Ruff compatibility suppression, and no file has an unused import. Export the public DTO, enum, alias, and protocol names from `tuntun_contracts/__init__.py` without importing any application package; do not root-export Task 5 constants or helper functions.
@@ -11592,7 +11591,7 @@ The contract semantics are also frozen: `IdentityFusionPort` returns identity on
 
 Every authority-bearing Task 5 DTO is internally total before it reaches an adapter. Authentication requests, challenges, grants, and contexts bind the same non-Guest subject as their `ActionBinding`; Guest carries neither subject nor grant, identity carries a subject without a grant, and grant-backed sources carry both. Provider, STT, and TTS requests bind their outer request/turn/provider/model/purpose and private commitment to the exact route, and TTS requires `segment_index < segment_count`. `PolicyDecision` carries a non-null elevated assurance exactly for `step_up`; camera action/purpose values are an exact pair. Evidence, grants, and admin sessions enforce their nondecreasing/strict expiry order. Successful provider usage is positive, memory versions are positive with unique provenance receipts, rejection cannot smuggle edited content, and timer payloads exist exactly for `create`.
 
-Action resource authority is explicit rather than inferred from a string prefix. `ACTION_RESOURCE_TYPE_BY_NAME` covers every discriminator, including the non-prefix release resources `security_finding`, `soak_run`, `family_stage`, and `release_candidate`. Typed UUID targets are equal to the generic resource ID for timers, memory proposals/records, profiles, consent, identity, search profiles, passkeys, backups, and latency runs. `ValidatedActionProposal` re-correlates proposal, idempotency, action, resource, and commitment fields across its draft and binding. The dependency-direction gate parses absolute and relative Python imports with `ast`, so comments/string literals do not create false positives and alternate import syntax cannot evade the boundary. The contracts wheel has a dedicated Python 3.11 build/install/focused-test CI job in addition to the workspace Python 3.12 matrix.
+Action resource authority is explicit rather than inferred from a string prefix. `ACTION_RESOURCE_TYPE_BY_NAME` covers every discriminator, including the non-prefix release resources `security_finding`, `soak_run`, `family_stage`, and `release_candidate`. Typed UUID targets are equal to the generic resource ID for timers, memory proposals/records, profiles, consent, identity, search profiles, passkeys, backups, and latency runs. `ValidatedActionProposal` re-correlates proposal, idempotency, action, resource, and commitment fields across its draft and binding. The dependency-direction gate parses absolute and relative Python imports with `ast`, so comments/string literals do not create false positives and alternate import syntax cannot evade the boundary. It runs inside the exact Python 3.12 workspace matrix because it parses the Python-3.12-only core sources; the dedicated Python 3.11 build/install/focused-test job exercises only the independently compatible contracts wheel.
 
 `web_search` and `child_durable_memory_v1` are Phase 1 contract amendments consumed by the controlled-web and identity/memory supplements. `web_search` is durable owner/adult self-consent; `child_durable_memory_v1` is durable K2/N1 consent granted or revoked only by that child's current primary guardian with the exact guardian generation. Neither widens the baseline `RouteAuthorization` speech/reasoning/TTS purpose union. Every consent draft carries the expected latest receipt ID, guardian generation when applicable, and policy/disclosure versions; revoke requires a non-null expected receipt. Its purpose-separated parameter commitment covers exactly subject, purpose, expected receipt state, guardian generation, and both versions, while the `ActionBinding` separately fixes household, authenticated actor, action, resource, session, and turn. The mutation service reconstructs that payload and compares its HMAC before any receipt access. Guest disclosure/session-consent contracts remain exactly `cloud_stt|cloud_reasoning|cloud_tts`; K2/N1 search and owner/adult child-memory consent are policy-denied even if a caller forges a prepared consent action. This amendment changes no task number or effort estimate.
 
@@ -11632,7 +11631,7 @@ MYPYPATH=packages/contracts/src:. uv run mypy --explicit-package-bases --python-
 git diff --check
 ```
 
-Expected: PASS with `106 passed` from the focused pytest command against the reviewed Task 4 generator suite; required enum values match exactly, every asserted port operation is async, the modeled Task 14/15 ledger signature is statically assignable to `AuditPort[_PlannedAsyncUnitOfWorkProtocol]`, `registered_contract_models()` is the immutable sorted 93-model singleton, and root exports contain exactly 136 unique names spanning 10 enums, 5 aliases, and 18 runtime-checkable protocols without exposing Task 5 constants/helpers. Both generated artifacts contain exactly that complete post-DTO public model registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output. Ruff format/check and strict mypy under Python 3.11 semantics report no errors on all 14 Task 5 Python paths. The standalone CI job builds the wheel, installs it into Python 3.11, and reruns the focused contract/dependency tests outside the Python 3.12 workspace environment.
+Expected: PASS with `106 passed` from the focused pytest command against the reviewed Task 4 generator suite; required enum values match exactly, every asserted port operation is async, the modeled Task 14/15 ledger signature is statically assignable to `AuditPort[_PlannedAsyncUnitOfWorkProtocol]`, `registered_contract_models()` is the immutable sorted 93-model singleton, and root exports contain exactly 136 unique names spanning 10 enums, 5 aliases, and 18 runtime-checkable protocols without exposing Task 5 constants/helpers. Both generated artifacts contain exactly that complete post-DTO public model registry, and immediate check-mode rerenders are byte-identical with no missing, stale, or extra output. Ruff format/check and strict mypy under Python 3.11 semantics report no errors on all 14 Task 5 Python paths. The standalone CI job builds the wheel, installs it into Python 3.11, and reruns the focused contracts-wheel tests outside the Python 3.12 workspace environment; the dependency-direction source parser remains in the full Python 3.12 matrix.
 
 - [ ] **Step 5: Commit exact Task 5 paths**
 
@@ -22211,8 +22210,7 @@ jobs:
           dist-py311/*.whl "pytest>=8.4,<9"
       - run: >-
           .venv-contracts-py311/bin/python -m pytest
-          tests/contract/test_v1_types_and_ports.py
-          tests/contract/test_dependency_direction.py -q
+          tests/contract/test_v1_types_and_ports.py -q
   check:
     strategy:
       fail-fast: false

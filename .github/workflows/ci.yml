@@ -22,8 +22,7 @@ jobs:
       - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: >-
           .venv-contracts-py311/bin/python -m pytest
-          tests/contract/test_v1_types_and_ports.py
-          tests/contract/test_dependency_direction.py -q
+          tests/contract/test_v1_types_and_ports.py -q
   check:
     strategy:
       fail-fast: false
