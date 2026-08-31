@@ -190,7 +190,7 @@ class ErrorPayload(ContractModel):
     reason_code: PttErrorReason
 
 
-PttPayload: TypeAlias = (
+PttPayload: TypeAlias = (  # noqa: UP040 - package must remain importable on Python 3.11
     EmptyPayload | SessionPayload | StartPayload | SafetyPayload | AckPayload | ErrorPayload
 )
 
@@ -377,7 +377,9 @@ class PcmFrame:
         )
 
 
-WireFrame: TypeAlias = ControlFrame | PcmFrame
+WireFrame: TypeAlias = (  # noqa: UP040 - package must remain importable on Python 3.11
+    ControlFrame | PcmFrame
+)
 
 
 @dataclass(frozen=True, kw_only=True)
