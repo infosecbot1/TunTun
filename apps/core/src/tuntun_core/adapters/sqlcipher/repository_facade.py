@@ -612,15 +612,24 @@ def _owned_record_type(field_names: tuple[str, ...]) -> type[object]:
         return owned_type
 
 
-def _reserve_owned_record_shape(field_names: tuple[str, ...]) -> bool:
+def _reserve_owned_record_shape(
+    field_names: tuple[str, ...],
+    *,
+    serialize_reference: bool = False,
+) -> bool:
     with _OWNED_RECORD_TYPES_CONDITION:
         while field_names in _OWNED_RECORD_SHAPE_RESERVATIONS:
             _OWNED_RECORD_TYPES_CONDITION.wait()
-        if _OWNED_RECORD_TYPES.get(field_names) is not None:
+        owned_type_exists = _OWNED_RECORD_TYPES.get(field_names) is not None
+        if owned_type_exists and not serialize_reference:
             return False
+        novel_reservation_count = sum(
+            reserved_shape not in _OWNED_RECORD_TYPES
+            for reserved_shape in _OWNED_RECORD_SHAPE_RESERVATIONS
+        )
         if (
-            len(_OWNED_RECORD_TYPES) + len(_OWNED_RECORD_SHAPE_RESERVATIONS)
-            >= _MAX_SYNCHRONOUS_RECORD_SHAPES
+            not owned_type_exists
+            and len(_OWNED_RECORD_TYPES) + novel_reservation_count >= _MAX_SYNCHRONOUS_RECORD_SHAPES
         ):
             raise ValueError("synchronous data record shape cache is exhausted")
         _OWNED_RECORD_SHAPE_RESERVATIONS.add(field_names)
@@ -640,7 +649,7 @@ def _release_owned_record_shape_reservation(
 
 
 def _reserved_reference_record_type(field_names: tuple[str, ...]) -> type[object]:
-    reserved = _reserve_owned_record_shape(field_names)
+    reserved = _reserve_owned_record_shape(field_names, serialize_reference=True)
     try:
         return _reference_record_type(field_names)
     finally:

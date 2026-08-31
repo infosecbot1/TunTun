@@ -4299,15 +4299,21 @@ def test_oppositely_nested_record_shapes_do_not_deadlock(
     )
 
 
+@pytest.mark.parametrize("generation_kind", ("reference", "owned"))
 def test_record_shape_generation_failure_wakes_waiter_and_releases_reservation(
     monkeypatch: pytest.MonkeyPatch,
+    generation_kind: str,
 ) -> None:
     @dataclass(frozen=True, slots=True)
     class Record:
         generation_failure_reservation_probe: object
 
     shape = ("generation_failure_reservation_probe",)
-    repository_facade_module._reference_record_type(shape)
+    monkeypatch.setattr(repository_facade_module, "_OWNED_RECORD_TYPES", {})
+    monkeypatch.setattr(repository_facade_module, "_OWNED_RECORD_SHAPE_RESERVATIONS", set())
+    repository_facade_module._reference_record_type.cache_clear()
+    if generation_kind == "owned":
+        repository_facade_module._reference_record_type(shape)
     generation_started = Event()
     generation_release = Event()
     waiter_attempted_reservation = Event()
@@ -4319,9 +4325,18 @@ def test_record_shape_generation_failure_wakes_waiter_and_releases_reservation(
     original_make_dataclass = repository_facade_module.make_dataclass
     original_reserve = repository_facade_module._reserve_owned_record_shape
 
-    def fail_first_owned_generation(*args: object, **kwargs: object) -> type[object]:
+    def fail_first_target_generation(*args: object, **kwargs: object) -> type[object]:
         nonlocal generation_calls
-        if kwargs.get("bases") == (repository_facade_module._SealedOwnedRecordBase,):
+        fields = args[1] if len(args) > 1 else ()
+        bases = kwargs.get("bases")
+        target_generation = fields == [(shape[0], object)] and (
+            (generation_kind == "reference" and bases is None)
+            or (
+                generation_kind == "owned"
+                and bases == (repository_facade_module._SealedOwnedRecordBase,)
+            )
+        )
+        if target_generation:
             with generation_lock:
                 generation_calls += 1
                 call_number = generation_calls
@@ -4329,10 +4344,14 @@ def test_record_shape_generation_failure_wakes_waiter_and_releases_reservation(
                 generation_owner.append(get_ident())
                 generation_started.set()
                 assert generation_release.wait(timeout=5)
-                raise RuntimeError("synthetic owned record generation failure")
+                raise RuntimeError(f"synthetic {generation_kind} record generation failure")
         return original_make_dataclass(*args, **kwargs)  # type: ignore[arg-type]
 
-    def observe_waiter(field_names: tuple[str, ...]) -> bool:
+    def observe_waiter(
+        field_names: tuple[str, ...],
+        *,
+        serialize_reference: bool = False,
+    ) -> bool:
         if (
             field_names == shape
             and generation_started.is_set()
@@ -4340,12 +4359,15 @@ def test_record_shape_generation_failure_wakes_waiter_and_releases_reservation(
             and get_ident() != generation_owner[0]
         ):
             waiter_attempted_reservation.set()
-        return original_reserve(field_names)
+        return original_reserve(
+            field_names,
+            serialize_reference=serialize_reference,
+        )
 
     monkeypatch.setattr(
         repository_facade_module,
         "make_dataclass",
-        fail_first_owned_generation,
+        fail_first_target_generation,
     )
     monkeypatch.setattr(
         repository_facade_module,
@@ -4374,11 +4396,176 @@ def test_record_shape_generation_failure_wakes_waiter_and_releases_reservation(
     assert not second.is_alive()
     assert len(failures) == 1
     assert isinstance(failures[0].__cause__, RuntimeError)
-    assert str(failures[0].__cause__) == "synthetic owned record generation failure"
+    assert str(failures[0].__cause__) == (f"synthetic {generation_kind} record generation failure")
     assert len(snapshots) == 1
     assert type(snapshots[0]) is not Record
     assert generation_calls == 2
     assert shape not in repository_facade_module._OWNED_RECORD_SHAPE_RESERVATIONS
+
+
+def test_evicted_reference_shape_generation_is_serialized_for_owned_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class Record:
+        evicted_reference_reservation_probe: object
+
+    shape = ("evicted_reference_reservation_probe",)
+    seeded = repository_facade_module._reject_worker_result(Record("seed")).snapshot
+    owned_type = type(seeded)
+    for index in range(repository_facade_module._MAX_SYNCHRONOUS_RECORD_SHAPES):
+        repository_facade_module._reference_record_type((f"reference_eviction_probe_{index}",))
+
+    generation_started = Event()
+    generation_release = Event()
+    waiter_attempted_reservation = Event()
+    generation_lock = Lock()
+    generation_owner: list[int] = []
+    generation_calls = 0
+    snapshots: list[object] = []
+    failures: list[BaseException] = []
+    original_make_dataclass = repository_facade_module.make_dataclass
+    original_reserve = repository_facade_module._reserve_owned_record_shape
+
+    def observe_reference_generation(*args: object, **kwargs: object) -> type[object]:
+        nonlocal generation_calls
+        fields = args[1] if len(args) > 1 else ()
+        if kwargs.get("bases") is None and fields == [(shape[0], object)]:
+            with generation_lock:
+                generation_calls += 1
+                call_number = generation_calls
+            if call_number == 1:
+                generation_owner.append(get_ident())
+                generation_started.set()
+                assert generation_release.wait(timeout=5)
+        return original_make_dataclass(*args, **kwargs)  # type: ignore[arg-type]
+
+    def observe_waiter(
+        field_names: tuple[str, ...],
+        *,
+        serialize_reference: bool = False,
+    ) -> bool:
+        if (
+            field_names == shape
+            and generation_started.is_set()
+            and generation_owner
+            and get_ident() != generation_owner[0]
+        ):
+            waiter_attempted_reservation.set()
+        return original_reserve(
+            field_names,
+            serialize_reference=serialize_reference,
+        )
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "make_dataclass",
+        observe_reference_generation,
+    )
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_reserve_owned_record_shape",
+        observe_waiter,
+    )
+
+    def snapshot(value: object) -> None:
+        try:
+            envelope = repository_facade_module._reject_worker_result(value)
+            snapshots.append(envelope.snapshot)
+        except BaseException as error:
+            failures.append(error)
+
+    first = Thread(target=snapshot, args=(Record("first"),), daemon=True)
+    second = Thread(target=snapshot, args=(Record("second"),), daemon=True)
+    first.start()
+    assert generation_started.wait(timeout=5)
+    second.start()
+    assert waiter_attempted_reservation.wait(timeout=5)
+    generation_release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    if failures:
+        raise failures[0]
+    assert len(snapshots) == 2
+    assert all(type(snapshot) is owned_type for snapshot in snapshots)
+    assert generation_calls == 1
+    assert shape not in repository_facade_module._OWNED_RECORD_SHAPE_RESERVATIONS
+
+
+def test_existing_reference_lease_does_not_consume_a_new_shape_capacity_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass(frozen=True, slots=True)
+    class ExistingRecord:
+        existing_reference_capacity_probe: object
+
+    @dataclass(frozen=True, slots=True)
+    class NewRecord:
+        new_shape_capacity_probe: object
+
+    existing_shape = ("existing_reference_capacity_probe",)
+    monkeypatch.setattr(repository_facade_module, "_OWNED_RECORD_TYPES", {})
+    monkeypatch.setattr(repository_facade_module, "_OWNED_RECORD_SHAPE_RESERVATIONS", set())
+    monkeypatch.setattr(repository_facade_module, "_MAX_SYNCHRONOUS_RECORD_SHAPES", 2)
+    repository_facade_module._reference_record_type.cache_clear()
+    repository_facade_module._reject_worker_result(ExistingRecord("seed"))
+    repository_facade_module._reference_record_type.cache_clear()
+
+    generation_started = Event()
+    generation_release = Event()
+    existing_snapshots: list[object] = []
+    existing_failures: list[BaseException] = []
+    original_make_dataclass = repository_facade_module.make_dataclass
+
+    def block_existing_reference_generation(
+        *args: object,
+        **kwargs: object,
+    ) -> type[object]:
+        fields = args[1] if len(args) > 1 else ()
+        if kwargs.get("bases") is None and fields == [(existing_shape[0], object)]:
+            generation_started.set()
+            assert generation_release.wait(timeout=5)
+        return original_make_dataclass(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "make_dataclass",
+        block_existing_reference_generation,
+    )
+
+    def snapshot_existing() -> None:
+        try:
+            envelope = repository_facade_module._reject_worker_result(ExistingRecord("existing"))
+            existing_snapshots.append(envelope.snapshot)
+        except BaseException as error:
+            existing_failures.append(error)
+
+    existing_worker = Thread(target=snapshot_existing, daemon=True)
+    existing_worker.start()
+    assert generation_started.wait(timeout=5)
+    new_snapshot: object | None = None
+    new_failure: BaseException | None = None
+    try:
+        new_snapshot = repository_facade_module._reject_worker_result(NewRecord("new")).snapshot
+    except BaseException as error:
+        new_failure = error
+    finally:
+        generation_release.set()
+        existing_worker.join(timeout=5)
+
+    assert not existing_worker.is_alive()
+    if existing_failures:
+        raise existing_failures[0]
+    if new_failure is not None:
+        raise new_failure
+    assert len(existing_snapshots) == 1
+    assert new_snapshot is not None
+    assert type(new_snapshot) is not NewRecord
+    assert len(repository_facade_module._OWNED_RECORD_TYPES) == 2
+    assert not repository_facade_module._OWNED_RECORD_SHAPE_RESERVATIONS
 
 
 @pytest.mark.asyncio
