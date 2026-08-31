@@ -31589,7 +31589,13 @@ git commit -m "feat(storage): add reversible encrypted foundation schema"
 
 **Interfaces:**
 - Consumes: SQLAlchemy `Engine`; SQLite busy errors; one application-owned serialized database worker.
-- Produces: project-owned runtime-checkable structural `UnitOfWorkProtocol` and `AsyncUnitOfWorkProtocol` in `tuntun_core.services.transactions.protocols`; exact low-level adapter `UnitOfWork` signature from the locked map conforming structurally without services importing adapters; `AsyncUnitOfWorkFactory(repository_facades) -> AsyncUnitOfWork`; startup-only fixed `register_commit_signal(name, target.offer_nowait)` plus transaction-local `signal_after_commit(name)`; `AsyncRepositoryFacade`; and `AtomicMutationScope.open()/require_active_uow()`. Both unit-of-work layers use `BEGIN IMMEDIATE`, explicit commit/rollback, no implicit commit on context exit, and bounded busy retry of 3 attempts at 25/50/100 ms. The async facade runs enter, every repository operation, audit append, commit/rollback, and close on the same single worker/connection; it never moves a live transaction between threads. Entry is cancellation-terminal: cancellation before lock acquisition creates nothing; cancellation while or immediately after the worker executes `BEGIN IMMEDIATE` waits for that exact worker call, then rolls back/closes on the same worker before releasing the application lock and propagating cancellation. Each bounded context declares a typed structural protocol such as `IdentityUnitOfWork(AsyncUnitOfWorkProtocol)` listing its async repository properties (`profiles`, `consent_receipts`, and so on); the factory installs matching `AsyncRepositoryFacade` instances, so the plan's `await uow.profiles.insert(...)` notation is typed and every call internally delegates through that exact unit's `run_sync`.
+- Produces: project-owned runtime-checkable structural `UnitOfWorkProtocol` and `AsyncUnitOfWorkProtocol` in `tuntun_core.services.transactions.protocols`; exact low-level adapter `UnitOfWork` signature from the locked map conforming structurally without services importing adapters; `AsyncUnitOfWorkFactory(repository_facades) -> AsyncUnitOfWork`; startup-only fixed `register_commit_signal(name, target.offer_nowait)` plus transaction-local `signal_after_commit(name)`; `AsyncRepositoryFacade`; and `AtomicMutationScope.open()/require_active_uow()`. Both unit-of-work layers use `BEGIN IMMEDIATE`, explicit commit/rollback, no implicit commit on context exit, and an initial attempt plus 3 bounded busy retries at 25/50/100 ms. Busy classification prefers the SQLCipher/SQLite primary result code (`sqlite_errorcode & 0xFF` equals `SQLITE_BUSY` or `SQLITE_LOCKED`, including extended codes) and falls back only when the driver exposes no integer code to the exact known lock messages; text merely containing `locked` is never enough. The async facade runs enter, every repository operation, audit append, commit/rollback, and close on the same single worker/connection; it never moves a live transaction between threads. It binds the entering `asyncio.Task` before the cancellable application-lock wait and rejects every transaction-facing operation, bound-facade call, signal, commit, rollback, close, or normal exit from any other task. Entry is cancellation-terminal: cancellation before lock acquisition creates nothing; cancellation while or immediately after the worker executes `BEGIN IMMEDIATE` waits for that exact worker call, then rolls back/closes on the same worker before releasing the application lock and propagating cancellation. A positive synchronous-data boundary permits only exact scalar/container values, registered frozen contract DTOs, the exact frozen set of package-exported contract Enum classes, and recursively inspected frozen slot-record dataclasses with the plain `type` metaclass whose class members and functions exactly match the dataclass-generated shape; spoofed module names, custom metaclasses/dunders/closures, opaque custom objects, and live database/UoW/callable capabilities are rejected. On the lifecycle worker it first takes exact built-in shallow snapshots of mutable containers, then recursively validates and rebuilds every accepted container, registered DTO, and generated record into one owned graph with cycle detection and identity deduplication. Dicts and sets are constructed only after every candidate key, element, and value is accepted. The returned graph never shares a composite with the operation result, so a concurrent or later caller alias cannot insert an uninspected capability or mutate a nested accepted value after validation. On rejection or any post-operation snapshot/traversal failure it retains the exact result root plus every deduplicated rejected/live/finalizable object already discovered in a factory-owned bounded strong quarantine before the worker can drop its last reference; this remains safe when another alias concurrently removes a discovered nested value from a mutable built-in container. It poisons that unit, rolls back and closes on the lifecycle worker, releases task/factory ownership and the application writer lock, and only then makes the boundary `TypeError` observable. It never cancels, closes, awaits, calls, or otherwise runs arbitrary rejected coroutine/generator/async-generator/Future/Task/SQLAlchemy-result cleanup while transaction ownership is held; rejected custom hash/equality methods are likewise never invoked. The factory exposes quarantine count and overflow metrics, retains at most 64 distinct objects locally, fails closed to new transactions after an overflow, and transfers every local object to an explicit process-lifetime strong quarantine during orderly close without invoking cleanup. That process-lifetime retention is an honest residual for trusted-code invariant violations, not a normal resource-management mechanism. A failed connection close or ownership release never relinquishes exact connection, task/factory ownership, or the async application lock: the original body/entry/commit error remains primary with cleanup notes, callers retry `UnitOfWork.close()` or owner-task `AsyncUnitOfWork.aclose()` to terminal close, and abort the process if terminal close cannot be obtained. `AsyncUnitOfWorkFactory.aclose()` rejects both new and previously constructed-but-unentered units, waits for the live transaction to close, and only then shuts down its one lifecycle worker. Each bounded context declares a typed structural protocol such as `IdentityUnitOfWork(AsyncUnitOfWorkProtocol)` listing its async repository properties (`profiles`, `consent_receipts`, and so on); the factory installs matching `AsyncRepositoryFacade` instances, so the plan's `await uow.profiles.insert(...)` notation is typed and every call internally delegates through that exact unit's `run_sync`.
+
+The result boundary uses one terminal snapshot owned by `AsyncUnitOfWork`; `AsyncRepositoryFacade` does not pre-copy the same graph. Dispatch is an exact positive allowlist and never asks arbitrary objects for ABC, protocol, `__class__`, awaitable, hash, equality, or dataclass behavior. Awaitable classification rejects a result whose class does not have the exact plain `type` metaclass before reading its MRO or any class namespace, so caller metaclass `__mro__`/`__dict__` descriptors never execute. Every first-seen exact mutable container contributes one shallow copy that is both validated and memoized; every key/value/member in that copy and in caller record/function metadata copies is captured before recursive visitation. Registered DTO `__dict__` and `__pydantic_fields_set__` aliases therefore resolve to those same owned containers. Exact UUIDs are rebuilt after closed slot validation while preserving the exact validated `SafeUUID` value. A structurally accepted caller record is copied into the cached module-owned `_SynchronousDataRecord` shape with the same fields; its caller-defined class identity is intentionally not preserved because that class remains mutable after validation. The private exact-type result envelope carries the normalized value, deduplicated caller-record sources, and every captured source for any mutable/composite result. The async UOW retains those sources until SQL close, `_sync` clearing, ownership release, and application writer-lock release are all terminal; only then may their newly installed `__del__` methods run. A 64-record-source per-unit bound still fails closed before a sixty-fifth unique caller record can return, while a separate 4,096-identity captured-source bound prevents transaction-long accumulation across repeated successful calls; repeated source identities do not consume another slot. Record shape generation is capped at 64 exact identifier fields, 128 characters per field name, 4,096 field-name characters in total, and 128 process-owned shapes. A novel shape reserves capacity under the internal condition before either reference or owned `make_dataclass` generation, releases that reservation on every rejected/exceptional path, and publishes one identity-stable sealed type on success. Exact registered package Enum members, plus the three stdlib `SafeUUID` members reachable from UUIDs, are the only shared-identity exception and are treated as trusted singleton atoms: canonical identity/class/name/value and a closed exact instance state are validated before return. Malicious concurrent mutation of those project/stdlib singleton internals through object-level introspection after validation is the explicit trusted in-process Enum singleton residual and lies outside this boundary.
+
+Normalization must also preserve dict, set, and frozenset cardinality. If two distinct caller keys or elements normalize to the same owned value, the complete result fails closed and retains the original entries instead of silently changing meaning. Caller function/metadata fingerprint traversal uses its own strong identity/visiting guard: cyclic `__wrapped__`, closure, code, or metadata state rejects without recursive unwinding, and the repeated object plus every later unsafe/finalizable value in the closed shallow snapshot is retained. If any traversal or snapshot step raises unexpectedly, every source identity already recorded by inspection—including exact safe container keys on the discovered path, not merely objects that already reached an explicit rejection—is transferred into the terminal boundary rejection before worker frames unwind.
+
+Each module-owned `_SynchronousDataRecord` type and its internal base are sealed after generation: ordinary class `setattr`/`delattr` cannot add, replace, or delete `__hash__`, `__eq__`, `__repr__`, `__del__`, descriptors, or any other behavior after the type escapes. The process keeps one identity-stable owned type for each of at most 128 accepted field-name shapes and fails a novel shape closed once that bound is exhausted; an exact owned type returned earlier is positively recognized and recursively re-snapshotted into that same type on re-input. Direct use of `type.__setattr__`, mutation of the private sealing metaclass, or equivalent object-level introspection against these package internals remains outside the trusted application-code boundary, matching the narrowly documented Enum-singleton residual; ordinary access to `type(result)` alone does not bypass the seal.
 
 - [ ] **Step 1: Write red rollback and explicit-commit tests**
 
@@ -31872,152 +31878,144 @@ class AsyncUnitOfWorkProtocol(Protocol):
 
 The SQLCipher adapter does not inherit from or import this services module; its already exact public methods satisfy the protocol structurally. Add `assert isinstance(UnitOfWork(migrated_database.engine),UnitOfWorkProtocol)` to `test_transactions.py`, and add a source-direction assertion that `tuntun_core.services.transactions.protocols` contains no `tuntun_core.adapters` import.
 
+State-machine outline (normative; helper names may differ, but no implementation may weaken these ownership rules):
+
 ```python
 # apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py
-from types import TracebackType
-from collections.abc import Mapping
-from time import sleep
-from typing import Any, Callable
-from sqlalchemy import Engine
-from sqlalchemy.engine import Connection, CursorResult
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.sql import Executable
-
 class UnitOfWork:
-    def __init__(self, engine: Engine, sleeper: Callable[[float],None]=sleep) -> None: self.engine=engine; self.sleeper=sleeper; self.connection: Connection | None=None; self._finished=False
     def __enter__(self) -> "UnitOfWork":
-        self.connection=self.engine.connect()
-        for attempt,delay in enumerate((0.025,0.050,0.100),start=1):
-            try: self.connection.exec_driver_sql("BEGIN IMMEDIATE"); return self
-            except OperationalError as error:
-                if "locked" not in str(error).lower() or attempt == 3: self.connection.close(); raise
-                self.sleeper(delay)
-        raise AssertionError("unreachable")
-    def execute(self, statement: Executable, parameters: Mapping[str,object] | None=None) -> CursorResult[Any]:
-        if self.connection is None or self._finished: raise RuntimeError("unit of work is not active")
-        return self.connection.execute(statement, parameters or {})
-    def exec_driver_sql(self, statement: str, parameters: tuple[object,...] | Mapping[str,object]=()) -> CursorResult[Any]:
-        if self.connection is None or self._finished: raise RuntimeError("unit of work is not active")
-        return self.connection.exec_driver_sql(statement, parameters)
-    def commit(self) -> None:
-        if self.connection is None or self._finished: raise RuntimeError("unit of work is not active")
-        self.connection.commit(); self._finished=True
-    def rollback(self) -> None:
-        if self.connection is not None and not self._finished: self.connection.rollback(); self._finished=True
-    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None) -> bool:
+        self._reject_closed_or_reused_entry()
+        self.connection = self.engine.connect()
         try:
-            if not self._finished: self.rollback()
-        finally:
-            if self.connection is not None: self.connection.close()
+            delays = (0.025, 0.050, 0.100)
+            for attempt in range(4):  # initial attempt plus three retries
+                try:
+                    self.connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    self._begun = True
+                    return self
+                except OperationalError as error:
+                    # Prefer sqlite_errorcode & 0xFF in {SQLITE_BUSY, SQLITE_LOCKED};
+                    # use exact SQLCipher messages only when the code is unavailable.
+                    if not _is_busy_error(error) or attempt == 3:
+                        raise
+                    self.sleeper(delays[attempt])
+        except BaseException as primary:
+            self._close_preserving(primary)
+            raise
+
+    def close(self) -> None:
+        # Roll back if needed and retry the exact retained connection close.
+        # A failed close must not set _closed or discard self.connection.
+        self._raise_if_cleanup_failed(self._terminate(None))
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        primary = self._terminate(exc)
+        if primary is not None and primary is not exc:
+            raise primary
         return False
 ```
 
 ```python
 # apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from tuntun_core.adapters.sqlcipher.unit_of_work import UnitOfWork
-
 class AsyncUnitOfWork:
-    def __init__(self, engine, executor, transaction_lock, repository_facades, commit_signals, signal_failures):
-        self._engine,self._executor,self._transaction_lock,self._repository_facades=engine,executor,transaction_lock,repository_facades
-        self._commit_signals,self._signal_failures=commit_signals,signal_failures
-        self._signals_after_commit=set()
-        self._sync=None
-    async def _call(self,operation):
-        loop=asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor,operation)
-    async def _terminal_call(self,operation):
-        task=asyncio.create_task(self._call(operation))
-        cancellation=None
-        while not task.done():
-            try: await asyncio.shield(task)
-            except asyncio.CancelledError as error: cancellation=error
-        try: result=task.result()
-        except BaseException:
-            if cancellation is not None: raise cancellation
-            raise
-        if cancellation is not None: raise cancellation
-        return result
     async def __aenter__(self):
-        await self._transaction_lock.acquire()
+        self._require_factory_loop()  # first instruction; no foreign-loop mutation
+        self._task_owner = _required_current_task()  # before cancellable lock wait
         try:
-            self._sync=UnitOfWork(self._engine)
-            await self._terminal_call(self._sync.__enter__)
-            for name,facade_factory in self._repository_facades.items():
-                setattr(self,name,facade_factory.bind(self))
-            return self
-        except BaseException as error:
-            try:
-                if self._sync is not None and self._sync.connection is not None:
-                    await self._terminal_call(
-                        lambda:self._sync.__exit__(type(error),error,error.__traceback__)
-                    )
-            finally:
-                self._sync=None
-                self._transaction_lock.release()
+            await self._transaction_lock.acquire()
+        except BaseException:
+            self._mark_cancelled_entry_terminal()
             raise
-    async def run_sync(self,operation):
-        if self._sync is None: raise RuntimeError("async unit of work is not active")
-        return await self._call(lambda: operation(self._sync))
-    def signal_after_commit(self,name):
-        if self._sync is None or name not in self._commit_signals:
-            raise RuntimeError("unregistered post-commit signal")
-        self._signals_after_commit.add(name)
-    async def commit(self):
-        if self._sync is None: raise RuntimeError("async unit of work is not active")
-        await self._terminal_call(self._sync.commit)
-        signals=tuple(sorted(self._signals_after_commit)); self._signals_after_commit.clear()
-        for name in signals:
-            try: self._commit_signals[name].offer_nowait()
-            except BaseException: self._signal_failures[name]=self._signal_failures.get(name,0)+1
-    async def rollback(self):
-        self._signals_after_commit.clear()
-        if self._sync is not None: await self._terminal_call(self._sync.rollback)
-    async def __aexit__(self,exc_type,exc,tb):
+        self._owns_lock = True
         try:
-            if self._sync is not None:
-                await self._terminal_call(lambda: self._sync.__exit__(exc_type,exc,tb))
-        finally:
-            self._transaction_lock.release()
+            self._claim_factory_owner()
+            self._owner_claimed = True
+            self._sync = UnitOfWork(self._engine)
+            await self._terminal_call(self._sync.__enter__)
+            self._bind_only_synchronous_facades()
+            return self
+        except BaseException as primary:
+            await self._finish_exit_preserving(primary)
+            raise
+
+    async def run_sync(self, operation):
+        self._require_exact_task_owner()
+        # The operation runs on the lifecycle worker. A recursive positive-data
+        # allowlist returns a recursively owned snapshot, rejects opaque/deferred/
+        # live capabilities, and collects every violation before raising. The root
+        # and each discovered unsafe object are strongly quarantined; this UOW is
+        # poisoned, rolled back/closed, then releases writer ownership. No rejected
+        # cleanup is invoked.
+        return await self._terminal_call(lambda: _run_synchronous(operation, self._sync))
+
+    def signal_after_commit(self, name):
+        self._require_exact_task_owner()
+        self._require_registered_signal(name)
+        self._signals_after_commit.add(name)
+
+    async def commit(self):
+        self._require_exact_task_owner()
+        await self._terminal_call(self._sync.commit)
+        await self._deliver_fixed_signals_after_terminal_commit()
+
+    async def rollback(self):
+        self._require_exact_task_owner()
+        self._signals_after_commit.clear()
+        await self._terminal_call(self._sync.rollback)
+
+    async def aclose(self):
+        self._require_factory_loop()  # before ownership or shutdown state mutation
+        self._require_exact_task_owner_if_entered()
+        await self._terminal_call(self._sync.close)
+        # Release task/factory ownership and the application lock only after
+        # the exact sync connection reports terminal close. Retain all three
+        # when close or owner release fails so aclose() can be retried.
+        self._release_terminal_ownership_only_if_closed()
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self._require_exact_task_owner_if_entered()
+        await self._finish_exit_preserving(exc)
         return False
 
+
 class AsyncUnitOfWorkFactory:
-    def __init__(self,engine,repository_facades=None):
-        self._engine,self._repository_facades=engine,repository_facades or {}
-        self._commit_signals={}; self._signal_failures={}; self._opened=False
-        self._executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix="tuntun-sqlcipher")
-        self._transaction_lock=asyncio.Lock()
-    def register_commit_signal(self,name,target):
-        if self._opened or name in self._commit_signals or not hasattr(target,"offer_nowait"):
-            raise RuntimeError("post-commit signal registration closed")
-        self._commit_signals[name]=target
-    def failed_commit_signal_count(self,name): return self._signal_failures.get(name,0)
     def __call__(self):
-        self._opened=True
-        return AsyncUnitOfWork(
-            self._engine,self._executor,self._transaction_lock,
-            self._repository_facades,self._commit_signals,self._signal_failures,
-        )
+        self._bind_or_require_exact_running_loop()  # first lifecycle mutation
+        self._reject_shutdown_or_closing()
+        self._close_startup_registration()
+        return AsyncUnitOfWork(self._single_worker, self._transaction_lock, ...)
+
+    async def aclose(self):
+        self._bind_or_require_exact_running_loop()  # before shutdown state mutation
+        self._reject_shutdown_from_active_transaction_owner()
+        self._reject_new_and_preconstructed_entries()
+        await self._wait_for_transaction_lock_terminally()
+        self._single_worker.shutdown(wait=True, cancel_futures=False)
 ```
 
 `AsyncUnitOfWork.__aenter__` binds each registered facade to itself and exposes it under its typed repository property. `AsyncRepositoryFacade` contains no connection of its own: every method executes a synchronous repository operation as `await bound_uow.run_sync(lambda tx: sync_repository(tx).method(...))`. It rejects use before enter or after finish. Bounded-context protocols name every repository method and return type, and strict mypy verifies services against those protocols; there is no dynamic `Any`/string dispatch in application code.
 
 `AtomicMutationScope` is an async context manager backed by a task-local `ContextVar[AsyncUnitOfWorkProtocol | None]`. `open()` rejects nesting, enters exactly one factory unit, installs it only for the current task, commits only when the coordinator explicitly calls `uow.commit()`, and always clears the context after cancellation, rollback, or close. `require_active_uow()` returns `AsyncUnitOfWorkProtocol` and fails closed outside the scope. Child tasks receive no usable mutation authority: the stored scope token also binds the creating `asyncio.current_task()`, and a different task is rejected even if context variables were copied.
 
-The factory is a single application-lifecycle object and closes its worker only during orderly shutdown after all units of work finish. Before the first unit opens, composition may register a closed set of fixed internal post-commit signals whose targets expose only constant-time `offer_nowait()`. A transaction can mark a registered signal by name; rollback/context failure clears it, while successful terminal commit invokes it only after the database commit is terminal. Signal failure is counted and swallowed so it cannot rewrite a committed mutation; the durable outbox plus periodic/startup drain remains authoritative. Arbitrary callbacks and late registration are forbidden. The fair application-level async transaction lock is acquired before `BEGIN IMMEDIATE` and held through close, so operations from two live units can never interleave and a second writer waits instead of exhausting SQLite busy retries behind the first. Lock acquisition is cancellable; once acquired, `_terminal_call` absorbs any number of cancellation deliveries until the single-worker operation finishes, preserves the first cancellation, and entry failure/cancellation executes `UnitOfWork.__exit__` on that worker before clearing `_sync` and releasing the lock. A transaction may await those local serialized repository/audit operations only; it must never await provider, robot, browser, timer, filesystem, or other unbounded I/O while holding `BEGIN IMMEDIATE`. Enter, commit, rollback, and close are terminal before cancellation propagates.
+The factory is a single application-lifecycle object and closes its worker only during orderly shutdown after all units of work finish. Its first `__call__()` or `aclose()` atomically binds it to the identity of exactly one running event loop; every later lifecycle call must use that exact loop. A preconstructed unit checks the same affinity as the first instruction of enter and close, so a foreign-loop attempt has no registration, owner, lock, shutdown, worker, or SQL effect. Before the first unit opens, composition may register a closed set of fixed internal post-commit signals whose targets expose only constant-time `offer_nowait()`. A transaction can mark a registered signal by name; rollback/context failure clears it, while successful terminal commit invokes it only after the database commit is terminal. Signal failure is counted and swallowed so it cannot rewrite a committed mutation; the durable outbox plus periodic/startup drain remains authoritative. Arbitrary callbacks and late registration are forbidden. The fair application-level async transaction lock is acquired before `BEGIN IMMEDIATE` and held through close, so operations from two live units can never interleave and a second writer waits instead of exhausting SQLite busy retries behind the first. Lock acquisition is cancellable; once acquired, `_terminal_call` absorbs any number of cancellation deliveries until the single-worker operation finishes, preserves the first cancellation, and entry failure/cancellation executes `UnitOfWork.__exit__` on that worker before clearing `_sync` and releasing the lock. If close or owner release fails, `_sync` and the lock remain quarantined for an explicit owner-task retry. Passing the live object or a bound facade to a copied child task grants no authority and produces no worker, SQL, signal, commit, rollback, or close effect. A transaction may await those local serialized repository/audit operations only; it must never await provider, robot, browser, timer, filesystem, or other unbounded I/O while holding `BEGIN IMMEDIATE`. Enter, commit, rollback, and close of component-owned worker operations are terminal before cancellation propagates. Every successful composite result is an owned recursive snapshot: exact built-in mutable containers are shallow-snapshotted before traversal, all supported composites are rebuilt without caller hooks, repeated references point to the same rebuilt object, and cycles reject. Result classification rejects custom metaclasses before reading dataclass metadata. Exact `datetime.timezone`, `zoneinfo.ZoneInfo`, and Pydantic JSON parser `pydantic_core.TzInfo` timezone values are accepted; caller-defined timezone subclasses reject. A rejected Python deferred/live result is never cancelled, closed, awaited, finalized, or dereferenced by this component. Its exact root and every deduplicated unsafe object discovered during traversal are retained first, so later mutation through another alias cannot make rejection handling drop a discovered nested object's last reference; a traversal/snapshot exception is converted to the same retained boundary rejection. The UOW then loses all SQL/signal/commit/rollback authority, rollback/close and ownership release become terminal, and only then the primary `TypeError` returns with a quarantine note. Normal exit and `aclose()` are idempotent afterward. The bounded factory quarantine exposes a count and overflow state. On orderly factory close all locally retained objects move, without cleanup, into a process-lifetime strong quarantine; exceeding the local bound moves overflow there immediately and fails later entry closed. This residual can retain external resources until process exit, which is acceptable only as containment of a trusted-code invariant violation. Thus rejection handling never itself invokes blocking callbacks, cancellation handlers, generator finalizers, foreign-loop work, or last-reference destructors while the SQL transaction or application writer lock is held; independently running external work remains outside this component's control. A next writer remains available after an ordinary rejected unit.
+
+Focused coverage includes dict and set collisions between two unequal caller record classes that normalize to one owned shape, self-`__wrapped__` and metadata-dict fingerprint cycles with a concurrently removed finalizable payload, and an injected nested traversal failure before an unvisited shallow-copy tail after another alias clears the source. A successful operation-local mutable source that gains a finalizable member after its shallow snapshot remains owned through ordinary SQL close and writer unlock. Exact-metaclass-descriptor probes prove repository awaitable classification executes neither `__mro__` nor `__dict__` caller hooks. A full 128-shape cache with a cold reference cache rejects before either class generator runs, and captured-source retention deduplicates repeated identities before failing closed at its bound. Coverage also proves owned-record re-input preserves exact normalized type/equality/hash/representation while ordinary attempts to add or replace `__hash__`, `__eq__`, or `__del__` and to replace/delete existing methods fail, including during a later dict/set snapshot with the writer lock held. Every rejection case must return the boundary `TypeError` only after poison, rollback, close, ownership release, and writer-lock release; it must neither leak `RecursionError` nor run a caller finalizer under the active transaction.
+
+“Owned composite” above excludes only the validated exact package Enum and stdlib `SafeUUID` singleton atoms described in the interface contract. Generated record values return the closed module-owned `_SynchronousDataRecord` shape rather than the mutable caller class. DTO state containers and UUID values are rebuilt and memoized. All source objects remain strongly referenced for the inspection duration so integer-id reuse cannot forge an alias; for every successful mutable/composite result, its captured sources then remain in bounded UOW ownership until SQL close, `_sync` clearing, ownership release, and writer unlock are terminal.
+
+Shape-capacity reservations are short-lived around each reference or owned-class generator and are never held while recursively inspecting record fields. Nested identical shapes therefore reuse the one sealed type without self-waiting, opposite nesting orders cannot create a cross-shape lock cycle, and reference or owned generator failure releases/notifies before a waiter retries. Reference generation for an already-owned shape still takes the same per-shape lease, so independent LRU eviction cannot admit duplicate concurrent reference generators; that serialization-only lease is excluded from novel-shape capacity accounting because its owned slot already exists. Deterministic thread tests cover all six paths and require an empty reservation set afterward.
 
 - [ ] **Step 4: Run the green transaction gate**
 
 Run: `uv run pytest tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/test_mutation_scope.py -q && uv run ruff check apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/repository_facade.py apps/core/src/tuntun_core/services/transactions/mutation_scope.py tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/test_mutation_scope.py && uv run mypy apps/core/src/tuntun_core/adapters/sqlcipher apps/core/src/tuntun_core/services/transactions`
 
-Expected: PASS for all transaction and mutation-scope tests, including cancellation before lock acquisition, while the worker is entering, and immediately after `BEGIN IMMEDIATE`; every case observes `_sync is None`, a released application lock, closed worker connections, zero persisted rows, and a succeeding next writer; Ruff/mypy report zero errors.
+Expected: PASS for all transaction and mutation-scope tests. Cancellation before lock acquisition, while the worker is entering, and immediately after `BEGIN IMMEDIATE` observes `_sync is None`, a released application lock, closed worker connections, zero persisted rows, and a succeeding next writer. Injected close/owner-release failures instead retain exact ownership and the application lock until explicit retry succeeds without replacing the original body/entry error. Child-task and foreign-event-loop attempts have zero SQL/signal/commit/rollback/close/shutdown effects while the owner remains usable. The positive data boundary rejects opaque wrappers and recursively finds every coroutine/generator/async-generator, SQLAlchemy result/connection, UoW/callable, and asyncio/concurrent `Future`/`Task` result. Successful exact built-in containers, registered contract DTOs, and generated frozen records are returned as one owned recursively rebuilt graph that preserves repeated-reference identity; concurrent mutation after a source container's shallow snapshot cannot add an uninspected value or alter the returned result. Deterministic blocking-callback, cancellation-handler, generator-finalizer, last-reference, snapshot-failure, and concurrent container-mutation probes prove no rejected Python cleanup runs before the boundary returns or while the writer lock is held. Operation-local and post-commit-signal caller records remain retained across normal exit, explicit rollback/close, cancellation, body `BaseException`, and injected close/owner-release retry paths; a newly installed finalizer always observes `_sync is None` and the application writer lock released. Every rejection root plus each discovered unsafe object is strongly retained, the poisoned UOW rolls back/closes/releases ownership before returning the primary `TypeError`, normal exit/close is idempotent, and the next writer succeeds. Quarantine count/overflow and the 64-object local bound are observable; orderly shutdown transfers retained objects to the explicit process-lifetime quarantine without invoking cleanup. Real SQLCipher `SQLITE_BUSY`, primary and extended busy/locked codes, misleading non-busy codes/messages, and exact 25/50/100 ms delays are covered. Ruff/mypy report zero errors.
 
 - [ ] **Step 5: Commit exact Task 14 paths**
 
 ```bash
 git status --short
-git add apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/repository_facade.py apps/core/src/tuntun_core/services/transactions/protocols.py apps/core/src/tuntun_core/services/transactions/mutation_scope.py tests/integration/storage/conftest.py tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/conftest.py tests/unit/transactions/test_mutation_scope.py
+git add docs/superpowers/plans/2026-08-27-tuntun-phase1-foundation-execution.md apps/core/src/tuntun_core/adapters/sqlcipher/unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/async_unit_of_work.py apps/core/src/tuntun_core/adapters/sqlcipher/repository_facade.py apps/core/src/tuntun_core/services/transactions/protocols.py apps/core/src/tuntun_core/services/transactions/mutation_scope.py tests/integration/storage/conftest.py tests/integration/storage/test_transactions.py tests/integration/storage/test_async_transactions.py tests/unit/transactions/conftest.py tests/unit/transactions/test_mutation_scope.py
 git diff --cached --name-only
 git diff --cached
 git commit -m "feat(storage): add explicit encrypted unit of work"
