@@ -23,6 +23,7 @@ ResultT = TypeVar("ResultT")
 _ASYNC_CLEANUP_NOTE = "additional async unit-of-work cleanup failure"
 _FACTORY_QUARANTINE_LIMIT = 64
 _RESULT_SOURCE_RETENTION_LIMIT = 64
+_CAPTURED_RESULT_SOURCE_RETENTION_LIMIT = 4096
 _PROCESS_LIFETIME_REJECTED_VALUES: list[object] = []
 _PROCESS_LIFETIME_QUARANTINE_LOCK = Lock()
 
@@ -96,6 +97,8 @@ class AsyncUnitOfWork:
         self._poisoned = False
         self._result_sources_until_unlock: list[object] = []
         self._result_source_ids: set[int] = set()
+        self._captured_sources_until_unlock: list[object] = []
+        self._captured_source_ids: set[int] = set()
 
     async def _call(self, operation: Callable[[], ResultT]) -> ResultT:
         loop = asyncio.get_running_loop()
@@ -189,26 +192,49 @@ class AsyncUnitOfWork:
         self,
         envelope: _OwnedResultEnvelope[EnvelopeResultT],
     ) -> EnvelopeResultT:
-        additions: list[object] = []
-        addition_ids: set[int] = set()
+        record_additions: list[object] = []
+        record_addition_ids: set[int] = set()
         for value in envelope.record_sources:
             identity = id(value)
-            if identity not in self._result_source_ids and identity not in addition_ids:
-                addition_ids.add(identity)
-                additions.append(value)
-        if len(self._result_sources_until_unlock) + len(additions) > _RESULT_SOURCE_RETENTION_LIMIT:
+            if identity not in self._result_source_ids and identity not in record_addition_ids:
+                record_addition_ids.add(identity)
+                record_additions.append(value)
+        captured_additions: list[object] = []
+        captured_addition_ids: set[int] = set()
+        for value in envelope.captured_sources:
+            identity = id(value)
+            if identity not in self._captured_source_ids and identity not in captured_addition_ids:
+                captured_addition_ids.add(identity)
+                captured_additions.append(value)
+        if (
+            len(self._result_sources_until_unlock) + len(record_additions)
+            > _RESULT_SOURCE_RETENTION_LIMIT
+        ):
             raise _RejectedDeferredResult(
-                tuple(additions),
+                tuple(captured_additions),
                 "unit-of-work operations must return a synchronous data value; "
                 "record retention bound exceeded",
             )
-        self._result_source_ids.update(addition_ids)
-        self._result_sources_until_unlock.extend(additions)
+        if (
+            len(self._captured_sources_until_unlock) + len(captured_additions)
+            > _CAPTURED_RESULT_SOURCE_RETENTION_LIMIT
+        ):
+            raise _RejectedDeferredResult(
+                tuple(captured_additions),
+                "unit-of-work operations must return a synchronous data value; "
+                "captured source retention bound exceeded",
+            )
+        self._result_source_ids.update(record_addition_ids)
+        self._result_sources_until_unlock.extend(record_additions)
+        self._captured_source_ids.update(captured_addition_ids)
+        self._captured_sources_until_unlock.extend(captured_additions)
         return envelope.snapshot
 
     def _release_result_sources_after_unlock(self) -> None:
         self._result_source_ids.clear()
         self._result_sources_until_unlock.clear()
+        self._captured_source_ids.clear()
+        self._captured_sources_until_unlock.clear()
 
     def _release_terminal_ownership(self) -> None:
         sync = self._sync

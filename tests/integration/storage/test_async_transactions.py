@@ -22,6 +22,7 @@ from sqlalchemy import text
 from tuntun_contracts.base import Commitment, canonical_bytes
 from tuntun_contracts.events import EventType
 from tuntun_contracts.identity import IdentityDecision
+from tuntun_core.adapters.sqlcipher import async_unit_of_work as async_unit_of_work_module
 from tuntun_core.adapters.sqlcipher import repository_facade as repository_facade_module
 from tuntun_core.adapters.sqlcipher.async_unit_of_work import AsyncUnitOfWorkFactory
 from tuntun_core.adapters.sqlcipher.repository_facade import AsyncRepositoryFacade
@@ -116,7 +117,8 @@ def test_task_14_plan_does_not_overclaim_unowned_deferred_cleanup() -> None:
     assert "factory-owned bounded strong quarantine" in task_14
     assert "owned recursive snapshot" in task_14
     assert "module-owned `_SynchronousDataRecord`" in task_14
-    assert "64-source per-unit retention bound" in task_14
+    assert "64-record-source per-unit bound" in task_14
+    assert "4,096-identity captured-source bound" in task_14
     assert "trusted in-process Enum singleton residual" in task_14
     assert (
         "It never cancels, closes, awaits, calls, or otherwise runs arbitrary rejected" in task_14
@@ -2886,6 +2888,90 @@ async def test_run_sync_returns_owned_snapshot_before_alias_can_add_future(
 
 
 @pytest.mark.asyncio
+async def test_successful_mutable_source_is_retained_until_terminal_unlock(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    snapshot_complete = Event()
+    inspection_release = Event()
+    boundary_returned = Event()
+    source_ids: list[int] = []
+    published: dict[str, list[object]] = {}
+    entered_uow: list[object] = []
+    observations: list[tuple[bool, bool, bool]] = []
+
+    class FinalizableInsertedMember:
+        def __del__(self) -> None:
+            observations.append(
+                (
+                    boundary_returned.is_set(),
+                    factory._transaction_lock.locked(),
+                    entered_uow[0]._sync is None,  # type: ignore[attr-defined]
+                )
+            )
+
+    original_inspect = repository_facade_module._inspect_data_value
+
+    def inspect_with_handoff_window(value: object, inspection: object) -> object:
+        snapshot = original_inspect(value, inspection)  # type: ignore[arg-type]
+        if source_ids and id(value) == source_ids[0]:
+            snapshot_complete.set()
+            assert inspection_release.wait(timeout=5)
+        return snapshot
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_inspect_data_value",
+        inspect_with_handoff_window,
+    )
+
+    def make_operation_local_source(_transaction: object) -> object:
+        source: list[object] = []
+        source_ids.append(id(source))
+        published["source"] = source
+        return source
+
+    async def own_transaction() -> None:
+        async with factory() as uow:
+            entered_uow.append(uow)
+            try:
+                snapshot = await uow.run_sync(make_operation_local_source)
+            finally:
+                boundary_returned.set()
+
+            assert snapshot == []
+            assert observations == []
+            await uow.rollback()
+
+    operation = asyncio.create_task(own_transaction())
+    try:
+        assert await asyncio.to_thread(snapshot_complete.wait, 5)
+        source = published.pop("source")
+        member = FinalizableInsertedMember()
+        member_ref = weakref.ref(member)
+        source.append(member)
+        del member
+        del source
+        inspection_release.set()
+        await operation
+
+        gc.collect()
+        assert member_ref() is None
+        assert observations == [(True, False, True)]
+        assert not factory._transaction_lock.locked()
+    finally:
+        boundary_returned.set()
+        inspection_release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(BaseException):
+            await operation
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
 async def test_dict_mutation_after_discovery_is_terminally_quarantined(
     migrated_database: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -3102,6 +3188,92 @@ async def test_snapshot_failure_transfers_nested_source_removed_by_concurrent_al
 
         assert observations == []
         assert nested_ref() is not None
+    finally:
+        boundary_returned.set()
+        traversal_release.set()
+        if not operation.done():
+            operation.cancel()
+        with suppress(BaseException):
+            await operation
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_failure_transfers_unvisited_shallow_copy_tail(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    trigger_discovered = Event()
+    traversal_release = Event()
+    boundary_returned = Event()
+    published: dict[str, list[object]] = {}
+    tail_identities: list[int] = []
+    tail_references: list[weakref.ReferenceType[object]] = []
+    observations: list[tuple[bool, bool]] = []
+
+    class TriggerSnapshotFailure:
+        pass
+
+    class FinalizableUnvisitedTail:
+        def __del__(self) -> None:
+            observations.append((boundary_returned.is_set(), factory._transaction_lock.locked()))
+
+    def make_source(_transaction: object) -> object:
+        tail = FinalizableUnvisitedTail()
+        tail_identities.append(id(tail))
+        tail_references.append(weakref.ref(tail))
+        source: list[object] = [TriggerSnapshotFailure(), tail]
+        published["source"] = source
+        return source
+
+    original_exact_type_in = repository_facade_module._exact_type_in
+
+    def fail_before_tail_visitation(
+        value_type: type[object],
+        candidates: tuple[type[object], ...],
+    ) -> bool:
+        if value_type is TriggerSnapshotFailure:
+            trigger_discovered.set()
+            assert traversal_release.wait(timeout=5)
+            raise RuntimeError("synthetic failure before shallow-copy tail visitation")
+        return original_exact_type_in(value_type, candidates)
+
+    monkeypatch.setattr(
+        repository_facade_module,
+        "_exact_type_in",
+        fail_before_tail_visitation,
+    )
+
+    async def reject_source() -> None:
+        async with factory() as uow:
+            try:
+                with pytest.raises(TypeError, match="synchronous data value") as raised:
+                    await uow.run_sync(make_source)
+            finally:
+                boundary_returned.set()
+
+            retained = cast(tuple[object, ...], raised.value.values)  # type: ignore[attr-defined]
+            assert any(id(value) == tail_identities[0] for value in retained)
+            quarantined_ids = {id(value) for value in factory._quarantined_results}
+            assert tail_identities[0] in quarantined_ids
+            assert observations == []
+            assert tail_references[0]() is not None
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+
+    operation = asyncio.create_task(reject_source())
+    try:
+        assert await asyncio.to_thread(trigger_discovered.wait, 5)
+        source = published.pop("source")
+        source.clear()
+        del source
+        traversal_release.set()
+        await operation
+
+        assert observations == []
+        assert tail_references[0]() is not None
     finally:
         boundary_returned.set()
         traversal_release.set()
@@ -3623,6 +3795,46 @@ async def test_repository_awaitable_check_does_not_invoke_instance_getattribute(
         await factory.aclose()
 
     assert observations == []
+
+
+@pytest.mark.parametrize("descriptor_name", ("__mro__", "__dict__"))
+@pytest.mark.asyncio
+async def test_repository_awaitable_check_does_not_invoke_metaclass_descriptors(
+    migrated_database: object,
+    descriptor_name: str,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    hooks_armed = Event()
+    observations: list[str] = []
+
+    def descriptor_value(owner: type[object]) -> object:
+        if hooks_armed.is_set():
+            observations.append(descriptor_name)
+        if descriptor_name == "__mro__":
+            return (owner, object)
+        return {}
+
+    metaclass = type(
+        "DescriptorMetaclass",
+        (type,),
+        {descriptor_name: property(descriptor_value)},
+    )
+    repository_type = metaclass("Repository", (), {})
+    repository = repository_type()
+    hooks_armed.set()
+    try:
+        async with factory() as uow:
+            facade = AsyncRepositoryFacade(uow, lambda _transaction: repository)
+            with pytest.raises(TypeError, match="synchronous"):
+                await facade.run(lambda _repository: 1)
+
+            assert observations == []
+            assert uow._sync is None
+            assert not factory._transaction_lock.locked()
+    finally:
+        hooks_armed.clear()
+        await factory.aclose()
 
 
 @pytest.mark.asyncio
@@ -4529,7 +4741,36 @@ async def test_record_source_retention_dedupes_across_calls_and_fails_closed_at_
             assert uow._result_sources_until_unlock == []
             assert not factory._transaction_lock.locked()
 
-        assert factory.quarantined_result_count() == 1
+        assert factory.quarantined_result_count() == 2
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_captured_source_retention_dedupes_and_fails_closed_at_bound(
+    migrated_database: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        async_unit_of_work_module,
+        "_CAPTURED_RESULT_SOURCE_RETENTION_LIMIT",
+        2,
+    )
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+    shared = [1]
+    try:
+        async with factory() as uow:
+            for _ in range(3):
+                assert await uow.run_sync(lambda _transaction: shared) == [1]
+            assert len(uow._captured_sources_until_unlock) == 2
+
+            with pytest.raises(TypeError, match="captured source retention bound exceeded"):
+                await uow.run_sync(lambda _transaction: [2])
+
+            assert uow._sync is None
+            assert uow._captured_sources_until_unlock == []
+            assert not factory._transaction_lock.locked()
     finally:
         await factory.aclose()
 
@@ -4587,10 +4828,9 @@ async def test_owned_record_shape_cache_exhaustion_fails_before_class_generation
 ) -> None:
     @dataclass(frozen=True, slots=True)
     class Record:
-        marker: str
+        cold_capacity_probe_field: str
 
-    field_names = ("marker",)
-    repository_facade_module._reference_record_type(field_names)
+    repository_facade_module._reference_record_type.cache_clear()
     full_cache = {
         (f"cached_shape_{index}",): object
         for index in range(repository_facade_module._MAX_SYNCHRONOUS_RECORD_SHAPES)
