@@ -3,7 +3,7 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
-  contracts-python311:
+  contracts-edge-python311:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -14,15 +14,26 @@ jobs:
       - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: uv build --package tuntun-contracts --wheel --out-dir dist-py311
       - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
-        run: uv venv --python 3.11 .venv-contracts-py311
+        run: uv build --package tuntun-edge --wheel --out-dir dist-py311
+      - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: uv venv --python 3.11 .venv-contracts-edge-py311
       - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: >-
-          uv pip install --python .venv-contracts-py311/bin/python
-          dist-py311/*.whl "pytest>=8.4,<9"
+          /usr/bin/env -u PYTHONPATH uv pip install
+          --python .venv-contracts-edge-py311/bin/python
+          dist-py311/*.whl "pytest>=8.4,<9" "pytest-asyncio>=1.1,<2"
+          "hypothesis>=6.138,<7"
       - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: >-
-          .venv-contracts-py311/bin/python -m pytest
-          tests/contract/test_v1_types_and_ports.py -q
+          /usr/bin/env -u PYTHONPATH .venv-contracts-edge-py311/bin/python -m pytest
+          tests/contract/test_v1_types_and_ports.py tests/unit/poc/test_framing.py -q
+      - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: >-
+          /usr/bin/env -u PYTHONPATH .venv-contracts-edge-py311/bin/python -c
+          "import importlib.util, tuntun_contracts, tuntun_edge;
+          forbidden=('tuntun_core','tuntun_testing','reachy_mini');
+          found=[name for name in forbidden if importlib.util.find_spec(name) is not None];
+          assert not found, found"
   check:
     strategy:
       fail-fast: false
