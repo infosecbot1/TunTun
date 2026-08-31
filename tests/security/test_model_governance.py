@@ -402,6 +402,42 @@ def test_every_named_filesystem_object_is_nofollow_regular_owner_only(
         case.registry_or_activate()  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    "operation",
+    ("revision_symlink", "swap_revision_during_open"),
+)
+def test_revision_swap_fixture_is_portable_to_strict_source_permissions(
+    governed_model_case: object,
+    runtime_adapter: object,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    case = governed_model_case
+    revision = case._revision_path()  # type: ignore[attr-defined]
+    observed_source_modes: list[int] = []
+    original_rename = Path.rename
+
+    def require_writable_source(path: Path, target: Path) -> Path:
+        if path == revision:
+            source_mode = stat.S_IMODE(path.stat().st_mode)
+            observed_source_modes.append(source_mode)
+            if not source_mode & stat.S_IWUSR:
+                raise PermissionError(errno.EACCES, "strict source is not writable", path)
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", require_writable_source)
+    if operation == "revision_symlink":
+        case.apply_filesystem_mutation(operation)  # type: ignore[attr-defined]
+    else:
+        result = case.race_activation(operation, runtime_adapter)  # type: ignore[attr-defined]
+        assert result.failed_closed  # type: ignore[attr-defined]
+
+    assert observed_source_modes == [0o700]
+    backup_name = "revision-backup" if operation == "revision_symlink" else "race-revision"
+    backup = revision.parent / backup_name
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o500
+
+
 def test_activation_and_runtime_use_the_same_descriptor_not_a_reopened_path(
     installed_model: object,
     runtime_adapter: object,

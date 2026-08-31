@@ -603,6 +603,22 @@ class GovernedModelCase:
     def _artifact_path(self) -> Path:
         return self._revision_path() / "mini.onnx"
 
+    @staticmethod
+    def _replace_sealed_revision_with_symlink(revision: Path, backup: Path) -> None:
+        revision.chmod(0o700)
+        try:
+            revision.rename(backup)
+            backup.chmod(0o500)
+            revision.symlink_to(backup, target_is_directory=True)
+        finally:
+            for candidate in (backup, revision):
+                try:
+                    identity = candidate.lstat()
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISDIR(identity.st_mode):
+                    candidate.chmod(0o500)
+
     @property
     def recovery_marker_path(self) -> Path:
         return self.model_root / self.model_id / f".recovery-pending-{REVISION}"
@@ -697,8 +713,7 @@ class GovernedModelCase:
             model.symlink_to(backup, target_is_directory=True)
         elif mutation == "revision_symlink":
             backup = model / "revision-backup"
-            revision.rename(backup)
-            revision.symlink_to(backup, target_is_directory=True)
+            self._replace_sealed_revision_with_symlink(revision, backup)
         elif mutation in {"artifact_symlink", "artifact_fifo", "artifact_device"}:
             revision.chmod(0o700)
             artifact.unlink()
@@ -875,8 +890,7 @@ class GovernedModelCase:
             self.model_root.symlink_to(backup, target_is_directory=True)
         elif race == "swap_revision_during_open":
             backup = revision.parent / "race-revision"
-            revision.rename(backup)
-            revision.symlink_to(backup, target_is_directory=True)
+            self._replace_sealed_revision_with_symlink(revision, backup)
         else:
             revision.chmod(0o700)
             if race == "grow_file_during_hash":
