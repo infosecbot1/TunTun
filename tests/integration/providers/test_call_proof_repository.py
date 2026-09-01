@@ -218,3 +218,19 @@ async def test_finish_requires_and_atomically_closes_both_proof_halves(
     assert reservation[2] == call[2] == "finished"
     assert call[3] == "failed"
     assert case.provider_call_finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_finish_exact_retry_is_idempotent_but_changed_outcome_conflicts(
+    call_repository_fault_case,
+) -> None:
+    case = call_repository_fault_case(None)
+    call_id = await case.begin()
+    await case.mark_sent()
+    await case.finish(call_id, "failed")
+    terminal = await case.persisted_proof_rows()
+    await case.finish(call_id, "failed")
+    assert await case.persisted_proof_rows() == terminal
+    with pytest.raises(PermissionError, match="provider_call_finish_conflict"):
+        await case.finish(call_id, "ambiguous")
+    assert await case.persisted_proof_rows() == terminal

@@ -486,6 +486,11 @@ budget_reservations = Table(
         "primary_accounting_basis",
         name="uq_budget_ledger_accounting_basis",
     ),
+    UniqueConstraint(
+        "id",
+        "missing_evidence_policy",
+        name="uq_budget_ledger_missing_evidence_policy",
+    ),
 )
 Index("ix_budget_request", budget_reservations.c.request_id)
 Index(
@@ -647,6 +652,8 @@ cost_ledger = Table(
     Column("provider_usage_receipt_key_id", String(128), nullable=True),
     Column("provider_usage_receipt_hmac_b64", String(128), nullable=True),
     Column("accounting_basis", String(48), nullable=True),
+    Column("reservation_primary_accounting_basis", String(48), nullable=False),
+    Column("reservation_missing_evidence_policy", String(48), nullable=False),
     Column("conservative_estimate_used", Integer, nullable=False),
     Column("estimate_overrun", Integer, nullable=False),
     Column("hard_cap_exceeded", Integer, nullable=False),
@@ -681,9 +688,14 @@ cost_ledger = Table(
         name="fk_cost_ledger_exact_reservation",
     ),
     ForeignKeyConstraint(
-        ["reservation_id", "accounting_basis"],
+        ["reservation_id", "reservation_primary_accounting_basis"],
         ["budget_reservations.id", "budget_reservations.primary_accounting_basis"],
-        name="fk_cost_ledger_accounting_basis",
+        name="fk_cost_ledger_primary_accounting_basis",
+    ),
+    ForeignKeyConstraint(
+        ["reservation_id", "reservation_missing_evidence_policy"],
+        ["budget_reservations.id", "budget_reservations.missing_evidence_policy"],
+        name="fk_cost_ledger_missing_evidence_policy",
     ),
     _integer_storage_constraint("reserved_micros_sgd"),
     _integer_storage_constraint("charged_micros_sgd"),
@@ -710,8 +722,14 @@ cost_ledger = Table(
         "(provider_usage_receipt_json IS NOT NULL "
         "AND provider_usage_receipt_key_id IS NOT NULL "
         "AND provider_usage_receipt_hmac_b64 IS NOT NULL "
-        "AND accounting_basis IS NOT NULL AND conservative_estimate_used = 0 "
-        "AND json_valid(provider_usage_receipt_json))"
+        "AND accounting_basis IS NOT NULL "
+        "AND json_valid(provider_usage_receipt_json) AND ("
+        "(accounting_basis = reservation_primary_accounting_basis "
+        "AND conservative_estimate_used = 0) OR "
+        "(accounting_basis = 'conservative_full_reservation' "
+        "AND reservation_missing_evidence_policy = "
+        "'conservative_full_reservation' "
+        "AND conservative_estimate_used = 1)))"
     ),
     CheckConstraint("conservative_estimate_used IN (0,1)"),
     CheckConstraint(

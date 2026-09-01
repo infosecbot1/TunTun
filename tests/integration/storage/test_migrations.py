@@ -363,12 +363,14 @@ def _valid_call(
 LEDGER_SQL = """INSERT INTO cost_ledger
     (id,reservation_id,month_key,reserved_micros_sgd,charged_micros_sgd,
      usage_json,provider_usage_receipt_json,provider_usage_receipt_key_id,
-     provider_usage_receipt_hmac_b64,accounting_basis,conservative_estimate_used,
-     estimate_overrun,hard_cap_exceeded,pricing_version,price_source_sha256,
-     fx_version,fx_source_sha256,settled_at)
+     provider_usage_receipt_hmac_b64,accounting_basis,
+     reservation_primary_accounting_basis,reservation_missing_evidence_policy,
+     conservative_estimate_used,estimate_overrun,hard_cap_exceeded,
+     pricing_version,price_source_sha256,fx_version,fx_source_sha256,settled_at)
     VALUES (:id,:reservation_id,:month_key,:reserved,:charged,:usage,:receipt,
-     :receipt_key,:receipt_hmac,:basis,:conservative,:overrun,:hard_cap,
-     :pricing_version,:price_sha,:fx_version,:fx_sha,:settled_at)"""
+     :receipt_key,:receipt_hmac,:basis,:reservation_basis,:reservation_missing_policy,
+     :conservative,:overrun,:hard_cap,:pricing_version,:price_sha,:fx_version,
+     :fx_sha,:settled_at)"""
 
 PROVIDER_RESPONSE_SQL = """INSERT INTO provider_response_receipts
     (id,request_id,attempt_id,authorization_id,household_id,subject_id,session_id,
@@ -395,6 +397,8 @@ def _valid_ledger(
         "receipt_key": None,
         "receipt_hmac": None,
         "basis": None,
+        "reservation_basis": reservation["basis"],
+        "reservation_missing_policy": reservation["missing_policy"],
         "conservative": 1,
         "overrun": reservation["overrun"],
         "hard_cap": 0,
@@ -1648,6 +1652,8 @@ def test_cost_ledger_cannot_drift_from_its_settled_reservation(tmp_path: Path) -
         {"fx_sha": "d" * 64},
         {"settled_at": "2026-08-27T01:05:03.000004Z"},
         {"basis": "request_bound_exact"},
+        {"reservation_basis": "request_bound_exact"},
+        {"reservation_missing_policy": "conservative_full_reservation"},
     )
     for mutation in mutations:
         candidate = ledger | mutation
@@ -1672,6 +1678,108 @@ def test_cost_ledger_cannot_drift_from_its_settled_reservation(tmp_path: Path) -
             identifier="00000000-0000-0000-0000-000000000732",
         ),
     )
+    db.close()
+
+
+def test_cost_ledger_binds_reservation_policy_for_conservative_receipts(tmp_path: Path) -> None:
+    path = _private_path(tmp_path, "ledger-policy.db")
+    command.upgrade(_config(path), "head")
+    db = open_sqlcipher(path, KEY)
+    search_reservation = _settled_reservation(
+        "00000000-0000-0000-0000-000000000535",
+        "00000000-0000-0000-0000-000000000536",
+    ) | {
+        "category": "web_search",
+        "missing_policy": "conservative_full_reservation",
+        "usage": json.dumps(
+            {
+                "category": "web_search",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "web_search_calls": 1,
+            },
+            separators=(",", ":"),
+        ),
+    }
+    db.execute(RESERVATION_SQL, search_reservation)
+    conservative = _valid_ledger(
+        search_reservation,
+        identifier="00000000-0000-0000-0000-000000000733",
+    ) | {
+        "receipt": "{}",
+        "receipt_key": "provider-usage-v1",
+        "receipt_hmac": "A" * 43 + "=",
+        "basis": "conservative_full_reservation",
+        "conservative": 1,
+    }
+    db.execute(LEDGER_SQL, conservative)
+
+    freeze_reservation = _settled_reservation(
+        "00000000-0000-0000-0000-000000000537",
+        "00000000-0000-0000-0000-000000000538",
+    )
+    db.execute(RESERVATION_SQL, freeze_reservation)
+    exact_reservation = _settled_reservation(
+        "00000000-0000-0000-0000-000000000539",
+        "00000000-0000-0000-0000-000000000540",
+    )
+    db.execute(RESERVATION_SQL, exact_reservation)
+
+    invalid = (
+        _valid_ledger(
+            freeze_reservation,
+            identifier="00000000-0000-0000-0000-000000000734",
+        )
+        | {
+            "receipt": "{}",
+            "receipt_key": "provider-usage-v1",
+            "receipt_hmac": "A" * 43 + "=",
+            "basis": "conservative_full_reservation",
+            "conservative": 1,
+        },
+        _valid_ledger(
+            exact_reservation,
+            identifier="00000000-0000-0000-0000-000000000735",
+        )
+        | {
+            "receipt": "{}",
+            "receipt_key": "provider-usage-v1",
+            "receipt_hmac": "A" * 43 + "=",
+            "basis": "provider_reported_exact",
+            "conservative": 1,
+        },
+        _valid_ledger(
+            exact_reservation,
+            identifier="00000000-0000-0000-0000-000000000736",
+        )
+        | {
+            "receipt": "{}",
+            "receipt_key": "provider-usage-v1",
+            "receipt_hmac": "A" * 43 + "=",
+            "basis": None,
+            "conservative": 0,
+        },
+        _valid_ledger(
+            exact_reservation,
+            identifier="00000000-0000-0000-0000-000000000737",
+        )
+        | {"usage": "{}", "conservative": 0},
+        _valid_ledger(
+            exact_reservation,
+            identifier="00000000-0000-0000-0000-000000000738",
+        )
+        | {
+            "receipt": "{}",
+            "receipt_key": "provider-usage-v1",
+            "receipt_hmac": "A" * 43 + "=",
+            "basis": "provider_reported_exact",
+            "reservation_basis": "request_bound_exact",
+            "conservative": 0,
+        },
+    )
+    for candidate in invalid:
+        with pytest.raises(sqlcipher3.IntegrityError):
+            db.execute(LEDGER_SQL, candidate)
     db.close()
 
 
@@ -1869,10 +1977,11 @@ def test_budget_denials_usage_receipts_and_ledger_proofs_are_closed(tmp_path: Pa
     ledger_sql = """INSERT INTO cost_ledger
         (id,reservation_id,month_key,reserved_micros_sgd,charged_micros_sgd,
          usage_json,provider_usage_receipt_json,provider_usage_receipt_key_id,
-         provider_usage_receipt_hmac_b64,accounting_basis,conservative_estimate_used,
-         estimate_overrun,hard_cap_exceeded,pricing_version,price_source_sha256,
-         fx_version,fx_source_sha256,settled_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+         provider_usage_receipt_hmac_b64,accounting_basis,
+         reservation_primary_accounting_basis,reservation_missing_evidence_policy,
+         conservative_estimate_used,estimate_overrun,hard_cap_exceeded,
+         pricing_version,price_source_sha256,fx_version,fx_source_sha256,settled_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
     ledger_base = (
         "00000000-0000-0000-0000-000000000701",
         quoted["id"],
@@ -1884,6 +1993,8 @@ def test_budget_denials_usage_receipts_and_ledger_proofs_are_closed(tmp_path: Pa
         None,
         None,
         None,
+        quoted["basis"],
+        quoted["missing_policy"],
         1,
         0,
         0,
@@ -1905,10 +2016,12 @@ def test_budget_denials_usage_receipts_and_ledger_proofs_are_closed(tmp_path: Pa
                 None,
                 None,
                 "provider_reported_exact",
+                quoted_for_failed_ledger["basis"],
+                quoted_for_failed_ledger["missing_policy"],
                 0,
                 0,
                 0,
-                *ledger_base[13:],
+                *ledger_base[15:],
             ),
         )
     with pytest.raises(sqlcipher3.IntegrityError):
@@ -1925,10 +2038,12 @@ def test_budget_denials_usage_receipts_and_ledger_proofs_are_closed(tmp_path: Pa
                 "provider-usage-v1",
                 "A" * 43 + "=",
                 "provider_reported_exact",
+                quoted_for_failed_ledger["basis"],
+                quoted_for_failed_ledger["missing_policy"],
                 0,
                 0,
                 0,
-                *ledger_base[13:],
+                *ledger_base[15:],
             ),
         )
     for month_key, reserved in (("2026-09", 100), ("2026-08", 99)):
@@ -1946,10 +2061,12 @@ def test_budget_denials_usage_receipts_and_ledger_proofs_are_closed(tmp_path: Pa
                     None,
                     None,
                     None,
+                    quoted_for_failed_ledger["basis"],
+                    quoted_for_failed_ledger["missing_policy"],
                     1,
                     0,
                     0,
-                    *ledger_base[13:],
+                    *ledger_base[15:],
                 ),
             )
     db.close()
@@ -2019,6 +2136,8 @@ def test_authoritative_budget_quote_usage_and_overrun_columns_are_migrated(
         "provider_usage_receipt_key_id",
         "provider_usage_receipt_hmac_b64",
         "accounting_basis",
+        "reservation_primary_accounting_basis",
+        "reservation_missing_evidence_policy",
         "conservative_estimate_used",
         "estimate_overrun",
         "hard_cap_exceeded",
@@ -2051,6 +2170,8 @@ def test_authoritative_budget_quote_usage_and_overrun_columns_are_migrated(
             "month_key",
             "reserved_micros_sgd",
             "charged_micros_sgd",
+            "reservation_primary_accounting_basis",
+            "reservation_missing_evidence_policy",
             "conservative_estimate_used",
             "estimate_overrun",
             "hard_cap_exceeded",

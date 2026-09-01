@@ -649,6 +649,15 @@ def test_provider_usage_receipt_is_closed_and_bound_to_the_exact_call() -> None:
         ("llm", LlmUsageUnits(category="llm", input_tokens=0, output_tokens=0)),
         ("stt", SttUsageUnits(category="stt", audio_millis=0)),
         ("tts", TtsUsageUnits(category="tts", characters=0)),
+        (
+            "web_search",
+            WebSearchUsageUnits(
+                category="web_search",
+                input_tokens=0,
+                output_tokens=0,
+                web_search_calls=0,
+            ),
+        ),
     ):
         with pytest.raises(ValidationError, match="provider_usage_must_be_positive"):
             ProviderUsageReceiptV1.model_validate(
@@ -657,6 +666,24 @@ def test_provider_usage_receipt_is_closed_and_bound_to_the_exact_call() -> None:
                     "category": category,
                     "billable_usage": zero_usage,
                 }
+            )
+    for category, negative_usage in (
+        ("llm", {"category": "llm", "input_tokens": -1, "output_tokens": 0}),
+        ("stt", {"category": "stt", "audio_millis": -1}),
+        ("tts", {"category": "tts", "characters": -1}),
+        (
+            "web_search",
+            {
+                "category": "web_search",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "web_search_calls": -1,
+            },
+        ),
+    ):
+        with pytest.raises(ValidationError):
+            ProviderUsageReceiptV1.model_validate(
+                receipt.model_dump() | {"category": category, "billable_usage": negative_usage}
             )
 
 

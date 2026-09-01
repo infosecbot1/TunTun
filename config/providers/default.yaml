@@ -1,0 +1,16 @@
+budget:
+  timezone: Asia/Singapore
+  soft_limit_micros_sgd: 100000000
+  hard_limit_micros_sgd: 150000000
+  reservation_expiry_seconds: 900
+providers:
+  openai:
+    sdk_retries: 0
+    telemetry_enabled: false
+    dedicated_project_required: true
+    provider_hard_limit:
+      currency: USD
+      interval: provider_month
+      maximum_threshold_micros_usd: 100000000
+      enforcement_status: enforcing
+      runtime_admin_key_forbidden: true

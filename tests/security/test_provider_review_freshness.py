@@ -13,6 +13,7 @@ from tuntun_core.adapters.sqlcipher.unit_of_work import UnitOfWork
 from tuntun_core.services.providers.review import (
     ProviderReviewStore,
     RuntimeProviderIdentity,
+    commission_openai_provider_hard_limit,
 )
 
 from tests.fixtures.provider_routes import RouteDatabase
@@ -20,6 +21,106 @@ from tests.fixtures.provider_routes import RouteDatabase
 pytest_plugins = ("tests.fixtures.provider_routes",)
 
 NOW = datetime(2026, 8, 27, 1, 2, 3, 4, tzinfo=UTC)
+_COMMISSIONED_PROJECT_ID = "proj_tuntun_phase1"
+
+
+def _raw_project_spend_limit(**changes: object) -> bytes:
+    value: dict[str, object] = {
+        "object": "project.spend_limit",
+        "threshold_amount": 10_000,
+        "currency": "USD",
+        "interval": "month",
+        "enforcement": {"status": "enforcing"},
+    }
+    value.update(changes)
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def _commission(
+    raw: bytes,
+    *,
+    observed_project_id: str = _COMMISSIONED_PROJECT_ID,
+):
+    identity = RuntimeProviderIdentity(
+        project_id_commitment_sha256=hashlib.sha256(
+            _COMMISSIONED_PROJECT_ID.encode("ascii")
+        ).hexdigest(),
+        credential_kind="project_service_account",
+        admin_key_present=False,
+    )
+    return commission_openai_provider_hard_limit(
+        raw,
+        observed_project_id=observed_project_id,
+        runtime_identity=identity,
+    )
+
+
+def test_raw_exact_usd100_limit_is_normalized_without_project_identifier() -> None:
+    raw = _raw_project_spend_limit()
+    result = _commission(raw)
+    assert result.threshold_micros_usd == 100_000_000
+    assert result.interval == "provider_month"
+    assert result.enforcement_status == "enforcing"
+    assert result.dashboard_evidence_sha256 == hashlib.sha256(raw).hexdigest()
+    assert (
+        result.project_id_commitment_sha256
+        == hashlib.sha256(_COMMISSIONED_PROJECT_ID.encode("ascii")).hexdigest()
+    )
+    assert (
+        result.settings_commitment_sha256
+        == hashlib.sha256(canonical_mapping_bytes(result.committed_settings())).hexdigest()
+    )
+    assert _COMMISSIONED_PROJECT_ID not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        _raw_project_spend_limit(threshold_amount=10_001),
+        _raw_project_spend_limit(threshold_amount=0),
+        _raw_project_spend_limit(threshold_amount=-1),
+        _raw_project_spend_limit(threshold_amount=10_000.0),
+        _raw_project_spend_limit(threshold_amount=True),
+        _raw_project_spend_limit(threshold_amount="10000"),
+        _raw_project_spend_limit(threshold_amount=900_719_925_475),
+        _raw_project_spend_limit(object="project.budget"),
+        _raw_project_spend_limit(currency="SGD"),
+        _raw_project_spend_limit(interval="rolling_30d"),
+        _raw_project_spend_limit(enforcement={"status": "warning"}),
+        _raw_project_spend_limit(enforcement={"status": "enforcing", "extra": True}),
+        _raw_project_spend_limit(unexpected=True),
+        _raw_project_spend_limit(project_id="proj_secret"),
+        b'{"object":"project.spend_limit","threshold_amount":10000,'
+        b'"currency":"USD","interval":"month"}',
+        b'{"object":"project.spend_limit","threshold_amount":10000,'
+        b'"threshold_amount":1,"currency":"USD","interval":"month",'
+        b'"enforcement":{"status":"enforcing"}}',
+    ],
+)
+def test_raw_limit_malformed_inactive_high_or_unknown_shape_fails_closed(raw: bytes) -> None:
+    with pytest.raises(
+        PermissionError,
+        match="provider_hard_limit_commissioning_failed",
+    ) as captured:
+        _commission(raw)
+    assert captured.value.__cause__ is None
+
+
+def test_commissioning_binds_requested_project_and_runtime_credential() -> None:
+    raw = _raw_project_spend_limit()
+    with pytest.raises(PermissionError, match="commissioning_failed"):
+        _commission(raw, observed_project_id="proj_other")
+    committed = hashlib.sha256(_COMMISSIONED_PROJECT_ID.encode("ascii")).hexdigest()
+    for identity in (
+        RuntimeProviderIdentity(committed, "project_admin", False),
+        RuntimeProviderIdentity(committed, "project_service_account", True),
+    ):
+        with pytest.raises(PermissionError, match="commissioning_failed"):
+            commission_openai_provider_hard_limit(
+                raw,
+                observed_project_id=_COMMISSIONED_PROJECT_ID,
+                runtime_identity=identity,
+            )
 
 
 class RuntimeIdentities:

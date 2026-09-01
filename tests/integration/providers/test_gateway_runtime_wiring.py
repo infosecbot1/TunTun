@@ -1,18 +1,22 @@
-# tests/integration/providers/test_gateway_runtime_wiring.py
-from tuntun_core.services.providers.call_repository import ProviderCallRepository
-from tuntun_core.services.providers.redaction_repository import RedactionReceiptRepository
+from __future__ import annotations
+
+from tuntun_core.services.providers.review import SqlcipherCurrentProviderReviews
 
 pytest_plugins = ("tests.fixtures.provider_egress",)
 
 
-def test_task04_container_requires_explicit_budget_injection_before_gateway_activation(
-    core_container, budget_port_fake
-):
-    assert isinstance(core_container.provider_call_repository, ProviderCallRepository)
-    assert isinstance(core_container.redaction_receipt_repository, RedactionReceiptRepository)
-    assert (
-        core_container.provider_call_repository.uow_factory is core_container.sqlcipher_uow_factory
-    )
-    assert not hasattr(core_container, "provider_gateway")
-    gateway = core_container.build_provider_gateway(budget_port_fake)
-    assert gateway.calls is core_container.provider_call_repository
+def test_runtime_gateway_uses_exact_budget_evidence_services(
+    production_core_container,
+) -> None:
+    core_container = production_core_container
+    assert not hasattr(core_container, "build_provider_gateway")
+    assert core_container.provider_gateway.calls is core_container.provider_call_repository
+    assert core_container.provider_gateway._evidence is core_container.budget_evidence
+    assert core_container.provider_call_repository._evidence is core_container.budget_evidence
+    assert core_container.provider_gateway._budget is core_container.budget_guard
+
+
+def test_production_container_constructs_sqlcipher_provider_review_gate(
+    production_container,
+) -> None:
+    assert type(production_container.core.budget_guard._reviews) is SqlcipherCurrentProviderReviews

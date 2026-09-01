@@ -1,0 +1,7 @@
+pricing_version: openai-2026-08-27
+retrieved_at: "2026-08-27T00:00:00.000000Z"
+expires_at: "2026-11-20T00:00:00.000000Z"
+records:
+  - {provider: openai, model: gpt-5.6-sol, category: llm, native_currency: USD, input_micro_usd_per_million: 4000000, output_micro_usd_per_million: 20000000, audio_micro_usd_per_minute: 0, web_search_micro_usd_per_call: 0, primary_accounting_basis: provider_reported_exact, missing_evidence_policy: freeze_unknown_overage, source_url: "https://developers.openai.com/api/docs/models/gpt-5.6-sol", source_sha256: "c028e5b0700e60f80e0f5bdb59bc9653e3c3543d5436287d5337f7488d62dafa"}
+  - {provider: openai, model: gpt-transcribe, category: stt, native_currency: USD, input_micro_usd_per_million: 0, output_micro_usd_per_million: 0, audio_micro_usd_per_minute: 4500, web_search_micro_usd_per_call: 0, primary_accounting_basis: provider_reported_exact, missing_evidence_policy: freeze_unknown_overage, source_url: "https://developers.openai.com/api/docs/models/gpt-transcribe", source_sha256: "4682df2d8f9ccee74d7b983ae891ca1daa11b0ab7a413d200e5710c1166b1648"}
+  - {provider: openai, model: tts-1, category: tts, native_currency: USD, input_micro_usd_per_million: 15000000, output_micro_usd_per_million: 0, audio_micro_usd_per_minute: 0, web_search_micro_usd_per_call: 0, primary_accounting_basis: request_bound_exact, missing_evidence_policy: freeze_unknown_overage, source_url: "https://developers.openai.com/api/docs/models/tts-1", source_sha256: "0ec6885e9e7b8efeff2a66784f6d7e490a85a97ff85eeb26a7b375b9962bed89"}
