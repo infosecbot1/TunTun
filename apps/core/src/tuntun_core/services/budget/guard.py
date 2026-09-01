@@ -7,7 +7,12 @@ from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 import rfc8785
-from tuntun_contracts.base import ContractModel, canonical_bytes, parse_contract_json
+from tuntun_contracts.base import (
+    ContractModel,
+    ContractParseError,
+    canonical_bytes,
+    parse_contract_json,
+)
 from tuntun_contracts.budget import (
     MAX_CHARGE_MICROS_SGD,
     BudgetReconciliationRequest,
@@ -769,25 +774,38 @@ class BudgetGuard:
                 ).fetchall()
                 bound = []
                 for key, value_json in rows:
-                    binding = parse_contract_json(
-                        BudgetTurnBindingV1,
-                        value_json.encode("utf-8", errors="strict"),
-                        max_bytes=1_024,
-                        require_canonical=True,
-                    )
-                    reservation_id = UUID(key.removeprefix("budget.turn."))
+                    try:
+                        if type(key) is not str or type(value_json) is not str:
+                            raise ValueError("budget turn binding row shape invalid")
+                        binding = parse_contract_json(
+                            BudgetTurnBindingV1,
+                            value_json.encode("utf-8", errors="strict"),
+                            max_bytes=1_024,
+                            require_canonical=True,
+                        )
+                        reservation_id = UUID(key.removeprefix("budget.turn."))
+                    except (ContractParseError, UnicodeError, ValueError):
+                        raise PermissionError("reservation_turn_binding_corrupt") from None
                     row = db.exec_driver_sql(
                         "SELECT request_id,attempt_id,state FROM budget_reservations WHERE id=?",
                         (str(reservation_id),),
                     ).fetchone()
+                    if row is None:
+                        raise PermissionError("reservation_turn_binding_corrupt")
+                    try:
+                        if type(row[0]) is not str or type(row[1]) is not str:
+                            raise ValueError("budget reservation binding row shape invalid")
+                        request_id = UUID(row[0])
+                        attempt_id = UUID(row[1])
+                    except ValueError:
+                        raise PermissionError("reservation_turn_binding_corrupt") from None
                     if (
-                        row is None
-                        or UUID(row[0]) != binding.request_id
-                        or UUID(row[1]) != binding.attempt_id
+                        request_id != binding.request_id
+                        or attempt_id != binding.attempt_id
                         or binding.turn_id != request.turn_id
                     ):
                         raise PermissionError("reservation_turn_binding_corrupt")
-                    bound.append((reservation_id, UUID(row[1]), row[2]))
+                    bound.append((reservation_id, attempt_id, row[2]))
                 return tuple(bound)
 
             bound = await uow.run_sync(load_bound)

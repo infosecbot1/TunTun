@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import uuid4
 
 import pytest
@@ -48,6 +49,67 @@ async def _duplicate_reconcile_results(guard, request):
         )
     finally:
         guard._release_proven_unsent = original_release
+
+
+async def _turn_binding_json(case) -> str:
+    async with case.factory() as uow:
+
+        def load(transaction):
+            row = transaction.exec_driver_sql(
+                "SELECT value_json FROM runtime_settings WHERE key=?",
+                (f"budget.turn.{case.route.budget_reservation_id}",),
+            ).fetchone()
+            if row is None:
+                raise AssertionError("budget turn binding missing")
+            return str(row[0])
+
+        value_json = await uow.run_sync(load)
+        await uow.rollback()
+    return value_json
+
+
+async def _replace_turn_binding(case, *, key: str | None = None, value_json: str | None = None):
+    original_key = f"budget.turn.{case.route.budget_reservation_id}"
+    current_value_json = await _turn_binding_json(case)
+    async with case.factory() as uow:
+
+        def replace(transaction) -> None:
+            changed = transaction.exec_driver_sql(
+                "UPDATE runtime_settings SET key=?,value_json=?,version=version+1 WHERE key=?",
+                (
+                    original_key if key is None else key,
+                    current_value_json if value_json is None else value_json,
+                    original_key,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise AssertionError("budget turn binding update failed")
+
+        await uow.run_sync(replace)
+        await uow.commit()
+
+
+async def _replace_reservation_uuid_storage(case, column: str, value: object) -> None:
+    if column not in {"request_id", "attempt_id"}:
+        raise AssertionError("unexpected reservation UUID column")
+    async with case.factory() as uow:
+
+        def replace(transaction) -> None:
+            changed = transaction.exec_driver_sql(
+                f"UPDATE budget_reservations SET {column}=? WHERE id=?",
+                (value, str(case.route.budget_reservation_id)),
+            )
+            if changed.rowcount != 1:
+                raise AssertionError("budget reservation UUID update failed")
+
+        await uow.run_sync(replace)
+        await uow.commit()
+
+
+def _assert_binding_corrupt(error: PermissionError) -> None:
+    assert str(error) == "reservation_turn_binding_corrupt"
+    assert error.__cause__ is None
+    assert error.__suppress_context__ is True
 
 
 @pytest.mark.asyncio
@@ -151,6 +213,62 @@ async def test_reconcile_turn_rejects_forged_proof_before_state_classification(
             BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=(proof,))
         )
 
+    assert await case.proof_rows() == before
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turn_rejects_noncanonical_durable_binding_without_mutation(
+    production_provider_gateway_case,
+) -> None:
+    case = await production_provider_gateway_case(valid_usage=True)
+    before = await case.proof_rows()
+    canonical = await _turn_binding_json(case)
+    noncanonical = json.dumps(json.loads(canonical), separators=(", ", ": "))
+    assert noncanonical != canonical
+    await _replace_turn_binding(case, value_json=noncanonical)
+
+    with pytest.raises(PermissionError) as exc_info:
+        await case.budget_guard.reconcile_turn(
+            BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=())
+        )
+
+    _assert_binding_corrupt(exc_info.value)
+    assert await case.proof_rows() == before
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turn_rejects_invalid_durable_binding_key_without_mutation(
+    production_provider_gateway_case,
+) -> None:
+    case = await production_provider_gateway_case(valid_usage=True)
+    before = await case.proof_rows()
+    await _replace_turn_binding(case, key="budget.turn.not-a-uuid")
+
+    with pytest.raises(PermissionError) as exc_info:
+        await case.budget_guard.reconcile_turn(
+            BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=())
+        )
+
+    _assert_binding_corrupt(exc_info.value)
+    assert await case.proof_rows() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("column", ("request_id", "attempt_id"))
+async def test_reconcile_turn_rejects_non_text_reservation_binding_uuid_without_mutation(
+    production_provider_gateway_case,
+    column,
+) -> None:
+    case = await production_provider_gateway_case(valid_usage=True)
+    before = await case.proof_rows()
+    await _replace_reservation_uuid_storage(case, column, b"\x00not-a-uuid")
+
+    with pytest.raises(PermissionError) as exc_info:
+        await case.budget_guard.reconcile_turn(
+            BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=())
+        )
+
+    _assert_binding_corrupt(exc_info.value)
     assert await case.proof_rows() == before
 
 
