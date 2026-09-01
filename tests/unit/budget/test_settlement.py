@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -8,10 +9,45 @@ from tuntun_contracts.budget import (
     BudgetReconciliationRequest,
     BudgetSettlementRequest,
     LlmUsageUnits,
+    TransportProof,
 )
 from tuntun_core.services.providers.gateway import ProviderUsageUnknownError
 
 pytest_plugins = ("tests.fixtures.provider_egress",)
+
+
+def _transport_proof(case, disposition: str, **overrides) -> TransportProof:
+    return TransportProof(
+        reservation_id=overrides.get("reservation_id", case.route.budget_reservation_id),
+        attempt_id=overrides.get("attempt_id", case.route.attempt_id),
+        disposition=disposition,
+        observed_at=case.clock.now(),
+        evidence_code=overrides.get("evidence_code", "synthetic_turn_reconciliation"),
+    )
+
+
+async def _duplicate_reconcile_results(guard, request):
+    original_release = guard._release_proven_unsent
+    release_arrivals = 0
+    release_both = asyncio.Event()
+
+    async def gated_release(reservation_id, attempt_id):
+        nonlocal release_arrivals
+        release_arrivals += 1
+        if release_arrivals == 2:
+            release_both.set()
+        await asyncio.wait_for(release_both.wait(), timeout=1)
+        return await original_release(reservation_id, attempt_id)
+
+    guard._release_proven_unsent = gated_release
+    try:
+        return await asyncio.gather(
+            guard.reconcile_turn(request),
+            guard.reconcile_turn(request),
+            return_exceptions=True,
+        )
+    finally:
+        guard._release_proven_unsent = original_release
 
 
 @pytest.mark.asyncio
@@ -38,6 +74,133 @@ async def test_proven_unsent_shapes_cannot_settle_and_reconcile_releases_without
         assert call[:2] == ("cancelled", "finished")
     else:
         assert call is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claimed", (False, True))
+async def test_unknown_proof_releases_durable_proven_unsent_attempts_without_ledger(
+    production_provider_gateway_case,
+    claimed,
+) -> None:
+    case = await production_provider_gateway_case(valid_usage=True)
+    if claimed:
+        await case.begin_claim()
+    proof = _transport_proof(case, "unknown")
+
+    settlements = await case.budget_guard.reconcile_turn(
+        BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=(proof,))
+    )
+
+    assert settlements == ()
+    reservation, call, ledger_count = await case.proof_rows()
+    assert reservation[:2] == ("released", "finished")
+    assert ledger_count == 0
+    if claimed:
+        assert call[:2] == ("cancelled", "finished")
+    else:
+        assert call is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sent_phase", ("marked_sent", "network_invocation_starting"))
+async def test_stale_never_sent_proof_for_durable_sent_attempt_settles_once(
+    production_provider_gateway_case,
+    sent_phase,
+) -> None:
+    case = await production_provider_gateway_case()
+    if sent_phase == "marked_sent":
+        await case.mark_sent()
+    else:
+        await case.mark_network_invocation_starting()
+    proof = _transport_proof(case, "never_sent")
+
+    settlements = await case.budget_guard.reconcile_turn(
+        BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=(proof,))
+    )
+
+    assert len(settlements) == 1
+    settlement = settlements[0]
+    assert settlement.charged_micros_sgd == case.exact_snapshot_price
+    assert settlement.conservative_estimate_used is True
+    assert settlement.estimate_overrun is False
+    assert settlement.cloud_egress_frozen is False
+    reservation, call, ledger_count = await case.proof_rows()
+    assert reservation[:2] == ("settled", "finished")
+    assert call == ("ambiguous", "finished", 1)
+    assert ledger_count == 1
+
+    assert (
+        await case.budget_guard.reconcile_turn(
+            BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=(proof,))
+        )
+        == ()
+    )
+    assert await case.ledger_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turn_rejects_forged_proof_before_state_classification(
+    production_provider_gateway_case,
+) -> None:
+    case = await production_provider_gateway_case(valid_usage=True)
+    proof = _transport_proof(case, "unknown", reservation_id=uuid4())
+    before = await case.proof_rows()
+
+    with pytest.raises(PermissionError, match="reservation_turn_mismatch"):
+        await case.budget_guard.reconcile_turn(
+            BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=(proof,))
+        )
+
+    assert await case.proof_rows() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claimed", (False, True))
+async def test_duplicate_reconcile_releases_proven_unsent_once_without_errors(
+    production_provider_gateway_case,
+    claimed,
+) -> None:
+    case = await production_provider_gateway_case(valid_usage=True)
+    if claimed:
+        await case.begin_claim()
+    request = BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=())
+
+    results = await _duplicate_reconcile_results(case.budget_guard, request)
+
+    errors = [result for result in results if isinstance(result, BaseException)]
+    assert errors == []
+    assert results == [(), ()]
+    reservation, call, ledger_count = await case.proof_rows()
+    assert reservation[:2] == ("released", "finished")
+    assert ledger_count == 0
+    if claimed:
+        assert call[:2] == ("cancelled", "finished")
+    else:
+        assert call is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sent_phase", ("marked_sent", "network_invocation_starting"))
+async def test_duplicate_reconcile_settles_sent_attempt_once_without_errors(
+    production_provider_gateway_case,
+    sent_phase,
+) -> None:
+    case = await production_provider_gateway_case()
+    if sent_phase == "marked_sent":
+        await case.mark_sent()
+    else:
+        await case.mark_network_invocation_starting()
+    request = BudgetReconciliationRequest(turn_id=case.route.turn_id, proofs=())
+
+    results = await _duplicate_reconcile_results(case.budget_guard, request)
+
+    errors = [result for result in results if isinstance(result, BaseException)]
+    assert errors == []
+    assert sum(len(result) for result in results) == 1
+    reservation, call, ledger_count = await case.proof_rows()
+    assert reservation[:2] == ("settled", "finished")
+    assert call == ("ambiguous", "finished", 1)
+    assert ledger_count == 1
 
 
 def test_settlement_contract_has_no_caller_actual_amount() -> None:

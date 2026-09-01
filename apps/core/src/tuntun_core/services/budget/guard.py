@@ -705,6 +705,20 @@ class BudgetGuard:
             )
             await uow.commit()
 
+    async def _reservation_is_terminal(self, reservation_id: UUID, attempt_id: UUID) -> bool:
+        async with self._uow_factory() as uow:
+
+            def load_state(db: Any) -> str | None:
+                state = db.exec_driver_sql(
+                    "SELECT state FROM budget_reservations WHERE id=? AND attempt_id=?",
+                    (str(reservation_id), str(attempt_id)),
+                ).scalar_one_or_none()
+                return None if state is None else str(state)
+
+            state = await uow.run_sync(load_state)
+            await uow.rollback()
+        return state in {"settled", "released", "denied"}
+
     async def release_unsent(
         self,
         reservation_id: UUID,
@@ -766,24 +780,14 @@ class BudgetGuard:
         for reservation_id, attempt_id, state in bound:
             if state in {"settled", "released", "denied"}:
                 continue
-            proof = supplied.get((reservation_id, attempt_id))
-            if proof is not None and proof.disposition == "never_sent":
-                await self.release_unsent(reservation_id, attempt_id, proof)
-            elif proof is not None:
-                settlements.append(
-                    await self.settle(
-                        BudgetSettlementRequest(
-                            reservation_id=reservation_id,
-                            attempt_id=attempt_id,
-                        )
-                    )
-                )
-            else:
+            try:
+                await self._release_proven_unsent(reservation_id, attempt_id)
+            except PermissionError as error:
+                if str(error) != "sent_reservation_requires_settlement":
+                    raise
+                if await self._reservation_is_terminal(reservation_id, attempt_id):
+                    continue
                 try:
-                    await self._release_proven_unsent(reservation_id, attempt_id)
-                except PermissionError as error:
-                    if str(error) != "sent_reservation_requires_settlement":
-                        raise
                     settlements.append(
                         await self.settle(
                             BudgetSettlementRequest(
@@ -792,4 +796,9 @@ class BudgetGuard:
                             )
                         )
                     )
+                except PermissionError as settle_error:
+                    if str(settle_error) != "reservation_not_settleable" or not (
+                        await self._reservation_is_terminal(reservation_id, attempt_id)
+                    ):
+                        raise
         return tuple(settlements)
