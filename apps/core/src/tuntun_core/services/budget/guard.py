@@ -35,6 +35,8 @@ BudgetOutcome = Literal[
     "deny_unknown_price",
     "deny_cloud_egress_frozen",
 ]
+DEFAULT_RESERVATION_EXPIRY_SECONDS = 900
+MAX_RESERVATION_EXPIRY_SECONDS = 900
 
 
 class _ReservationNotSettleable(PermissionError):
@@ -72,7 +74,13 @@ class BudgetGuard:
         evidence: Any,
         hard_limit: int,
         soft_limit: int = 100_000_000,
+        reservation_expiry_seconds: int = DEFAULT_RESERVATION_EXPIRY_SECONDS,
     ) -> None:
+        if (
+            type(reservation_expiry_seconds) is not int
+            or not 1 <= reservation_expiry_seconds <= MAX_RESERVATION_EXPIRY_SECONDS
+        ):
+            raise ValueError("reservation_expiry_seconds must be between 1 and 900")
         self._uow_factory = uow_factory
         self._clock = clock
         self._catalog = catalog
@@ -81,6 +89,7 @@ class BudgetGuard:
         self._evidence = evidence
         self._hard_limit = hard_limit
         self._soft_limit = soft_limit
+        self._reservation_expiry = timedelta(seconds=reservation_expiry_seconds)
 
     async def reserve(self, request: BudgetReservationRequest) -> BudgetReservation:
         now = self._clock.now()
@@ -94,7 +103,7 @@ class BudgetGuard:
         if purpose is None:
             raise PermissionError("budget_category_not_activated")
         reservation_id = uuid4()
-        expires_at = now + timedelta(minutes=15)
+        expires_at = now + self._reservation_expiry
         try:
             quote = self._pricing.quote(request.provider, request.model, request.usage_ceiling)
             snapshot = self._evidence.issue_pricing_snapshot(request, quote)

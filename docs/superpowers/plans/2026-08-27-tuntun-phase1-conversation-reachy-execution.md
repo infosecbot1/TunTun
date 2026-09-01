@@ -9879,6 +9879,7 @@ def singapore_month_key(value: datetime) -> str:
 
 ```yaml
 # config/providers/default.yaml
+schema_version: tuntun.provider-defaults.v1
 budget:
   timezone: Asia/Singapore
   soft_limit_micros_sgd: 100000000

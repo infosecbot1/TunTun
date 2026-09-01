@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID, uuid4
@@ -35,6 +36,7 @@ from tuntun_core.services.budget.guard import BudgetGuard
 from tuntun_core.services.budget.month import singapore_month_key
 from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
 from tuntun_core.services.providers.call_repository import ProviderCallRepository
+from tuntun_core.services.providers.defaults import load_provider_defaults
 from tuntun_core.services.providers.gateway import ProviderGateway, ProviderUsageObservation
 from tuntun_core.services.providers.reasoning_wire import (
     build_openai_reasoning_wire_request,
@@ -55,6 +57,7 @@ pytest_plugins = ("tests.fixtures.provider_routes", "tests.fixtures.budget")
 
 _ROOT = b"k" * 32
 _KEY_ID = "route-hmac-v1"
+_PROVIDER_DEFAULTS_PATH = Path(__file__).parents[2] / "config/providers/default.yaml"
 _PURPOSES = frozenset({"cloud_stt", "cloud_reasoning", "cloud_tts"})
 _RECEIPT_MUTATIONS = frozenset(
     {
@@ -1731,6 +1734,7 @@ async def production_core_container(
         price_catalog=catalog,
         provider_reviews=provider_reviews,
         budget_evidence=budget_evidence,
+        provider_defaults=load_provider_defaults(_PROVIDER_DEFAULTS_PATH),
     )
 
 
@@ -1767,6 +1771,7 @@ async def production_container(
         price_catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
+        provider_defaults_path=_PROVIDER_DEFAULTS_PATH,
     )
     try:
         yield _ProductionContainerCase(container, context, reachy)

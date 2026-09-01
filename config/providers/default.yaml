@@ -1,3 +1,4 @@
+schema_version: tuntun.provider-defaults.v1
 budget:
   timezone: Asia/Singapore
   soft_limit_micros_sgd: 100000000

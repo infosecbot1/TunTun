@@ -16,6 +16,10 @@ from tuntun_core.services.budget.evidence import BudgetEvidenceService
 from tuntun_core.services.budget.guard import BudgetGuard
 from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
 from tuntun_core.services.providers.call_repository import ProviderCallRepository
+from tuntun_core.services.providers.defaults import (
+    ProviderDefaultsDocumentV1,
+    load_provider_defaults,
+)
 from tuntun_core.services.providers.gateway import ProviderGateway
 from tuntun_core.services.providers.redaction_repository import (
     RedactionReceiptRepository,
@@ -61,11 +65,12 @@ class CoreContainer:
         price_catalog: PriceCatalog,
         provider_reviews: CurrentProviderReviews,
         budget_evidence: BudgetEvidenceService,
-        hard_limit: int = 150_000_000,
-        soft_limit: int = 100_000_000,
+        provider_defaults: ProviderDefaultsDocumentV1,
     ) -> None:
         if type(budget_evidence) is not BudgetEvidenceService:
             raise TypeError("production budget evidence service required")
+        if type(provider_defaults) is not ProviderDefaultsDocumentV1:
+            raise TypeError("validated provider defaults document required")
         self.sqlcipher_uow_factory = sqlcipher_uow_factory
         self.clock = clock
         self.route_authorizer = route_authorizer
@@ -80,8 +85,9 @@ class CoreContainer:
             price_catalog,
             provider_reviews,
             budget_evidence,
-            hard_limit=hard_limit,
-            soft_limit=soft_limit,
+            hard_limit=provider_defaults.budget.hard_limit_micros_sgd,
+            soft_limit=provider_defaults.budget.soft_limit_micros_sgd,
+            reservation_expiry_seconds=provider_defaults.budget.reservation_expiry_seconds,
         )
         self.provider_call_repository = ProviderCallRepository(
             sqlcipher_uow_factory,
@@ -144,11 +150,11 @@ class ProductionContainer:
         price_catalog: PriceCatalog,
         runtime_provider_identities: RuntimeProviderIdentityReader,
         budget_evidence: BudgetEvidenceService,
-        hard_limit: int = 150_000_000,
-        soft_limit: int = 100_000_000,
+        provider_defaults_path: Path,
     ) -> ProductionContainer:
         if not configured_state_root.is_absolute():
             raise ValueError("production_state_root_requires_absolute_path")
+        provider_defaults = load_provider_defaults(provider_defaults_path)
         lease = CoreProcessLease.acquire(
             configured_state_root / "core-process.lock",
         )
@@ -163,8 +169,7 @@ class ProductionContainer:
                 price_catalog=price_catalog,
                 provider_reviews=provider_reviews,
                 budget_evidence=budget_evidence,
-                hard_limit=hard_limit,
-                soft_limit=soft_limit,
+                provider_defaults=provider_defaults,
             )
             reconciler = ExpiredBudgetReconciler(
                 sqlcipher_uow_factory,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -19,6 +20,62 @@ from tuntun_core.services.providers.review import (
 )
 
 pytest_plugins = ("tests.fixtures.provider_egress",)
+
+
+@pytest.mark.asyncio
+async def test_budget_guard_uses_configured_reservation_expiry_seconds(
+    async_uow_factory,
+    clock,
+    catalog,
+    provider_reviews,
+    budget_evidence,
+) -> None:
+    guard = BudgetGuard(
+        async_uow_factory,
+        clock,
+        catalog,
+        provider_reviews,
+        budget_evidence,
+        hard_limit=150_000_000,
+        reservation_expiry_seconds=45,
+    )
+
+    reservation = await guard.reserve(
+        BudgetReservationRequest(
+            household_id=uuid4(),
+            turn_id=uuid4(),
+            request_id=uuid4(),
+            attempt_id=uuid4(),
+            provider="openai",
+            model="gpt-5.6-sol",
+            category="llm",
+            usage_ceiling=LlmUsageUnits(category="llm", input_tokens=1, output_tokens=0),
+            month_key="2026-08",
+        )
+    )
+
+    assert reservation.expires_at == clock.now() + timedelta(seconds=45)
+
+
+@pytest.mark.parametrize("expiry_seconds", (0, 901, -1, True))
+def test_budget_guard_rejects_unsafe_reservation_expiry_seconds(
+    async_uow_factory,
+    clock,
+    catalog,
+    provider_reviews,
+    budget_evidence,
+    expiry_seconds,
+) -> None:
+    with pytest.raises(ValueError, match="reservation_expiry_seconds"):
+        BudgetGuard(
+            async_uow_factory,
+            clock,
+            catalog,
+            provider_reviews,
+            budget_evidence,
+            hard_limit=150_000_000,
+            reservation_expiry_seconds=expiry_seconds,
+        )
 
 
 @pytest.mark.asyncio
