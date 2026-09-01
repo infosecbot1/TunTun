@@ -240,16 +240,42 @@ class BudgetReconciliationSupervisor:
         self.reconciler = reconciler
         self.startup_recovery = startup_recovery
         self._stop = asyncio.Event()
+        self._start_task: asyncio.Task[None] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._ready = False
         self._failure_code: str | None = "not_started"
         self.worker_stopped = asyncio.Event()
+
+    async def _cancel_and_observe_start(
+        self,
+        skip_task: asyncio.Task[Any] | None = None,
+    ) -> BaseException | None:
+        start_task = self._start_task
+        if start_task is None or start_task is skip_task or start_task is asyncio.current_task():
+            return None
+        start_task.cancel()
+        result = (await asyncio.gather(start_task, return_exceptions=True))[0]
+        if isinstance(result, asyncio.CancelledError):
+            return None
+        if isinstance(result, BaseException):
+            return result
+        return None
 
     async def _cancel_and_observe_worker(self) -> None:
         if self._worker is None:
             return
         self._worker.cancel()
         await asyncio.gather(self._worker, return_exceptions=True)
+
+    async def _observe_worker_stop(self) -> BaseException | None:
+        if self._worker is None:
+            return None
+        result = (await asyncio.gather(self._worker, return_exceptions=True))[0]
+        if isinstance(result, asyncio.CancelledError):
+            return None
+        if isinstance(result, BaseException):
+            return result
+        return None
 
     async def _cleanup_failed_start(self) -> None:
         self._ready = False
@@ -266,19 +292,23 @@ class BudgetReconciliationSupervisor:
             self._cleanup_failed_start(),
             name="budget-reconciliation-start-cleanup",
         )
-        cancelled = False
         while not cleanup.done():
             try:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError:
-                cancelled = True
+                continue
         cleanup.result()
-        if cancelled:
-            raise asyncio.CancelledError
 
     async def start(self) -> None:
         if self._worker is not None:
             raise RuntimeError("budget_reconciliation_already_started")
+        if self._start_task is not None and not self._start_task.done():
+            raise RuntimeError("budget_reconciliation_start_in_progress")
+        owner = asyncio.current_task()
+        if owner is None:
+            raise RuntimeError("budget_reconciliation_start_owner_missing")
+        start_task = cast(asyncio.Task[None], owner)
+        self._start_task = start_task
         try:
             try:
                 await self.startup_recovery.recover_before_ready()
@@ -298,6 +328,9 @@ class BudgetReconciliationSupervisor:
             except BaseException as error:
                 self._failure_code = f"startup:{type(error).__name__}"
                 raise RuntimeError("budget_reconciliation_unhealthy") from error
+            if self._stop.is_set():
+                self._failure_code = "startup:stop_requested"
+                raise RuntimeError("budget_reconciliation_unhealthy")
             self._failure_code = None
             try:
                 self._worker = cast(
@@ -330,6 +363,9 @@ class BudgetReconciliationSupervisor:
         except BaseException:
             await self._cleanup_failed_start_uninterrupted()
             raise
+        finally:
+            if self._start_task is start_task:
+                self._start_task = None
 
     def _observe_worker_done(self, task: asyncio.Task[None]) -> None:
         self._ready = False
@@ -372,15 +408,18 @@ class BudgetReconciliationSupervisor:
         ):
             raise RuntimeError("budget_reconciliation_unhealthy")
 
-    async def stop(self) -> None:
-        self._ready = False
-        self.startup_recovery.withdraw_readiness()
-        self._stop.set()
+    async def _stop_cleanup(
+        self,
+        caller_task: asyncio.Task[Any] | None,
+    ) -> BaseException | None:
         primary: BaseException | None = None
         try:
-            if self._worker is not None:
-                with suppress(asyncio.CancelledError):
-                    await self._worker
+            start_error = await self._cancel_and_observe_start(skip_task=caller_task)
+            if start_error is not None:
+                primary = start_error
+            worker_error = await self._observe_worker_stop()
+            if worker_error is not None and primary is None:
+                primary = worker_error
         except BaseException as error:
             primary = error
         try:
@@ -390,5 +429,38 @@ class BudgetReconciliationSupervisor:
                 primary = error
         finally:
             self.startup_recovery.process_lease.release_after_shutdown()
+        return primary
+
+    async def _stop_cleanup_uninterrupted(
+        self,
+        caller_task: asyncio.Task[Any] | None,
+    ) -> BaseException | None:
+        cleanup = asyncio.create_task(
+            self._stop_cleanup(caller_task),
+            name="budget-reconciliation-stop-cleanup",
+        )
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        try:
+            primary = cleanup.result()
+        except BaseException as error:
+            primary = error
+        if cancelled:
+            raise asyncio.CancelledError
+        return primary
+
+    async def stop(self) -> None:
+        self._ready = False
+        self.startup_recovery.withdraw_readiness()
+        self._stop.set()
+        caller_task = asyncio.current_task()
+        if self._start_task is caller_task:
+            self._failure_code = "startup:stop_from_start_task"
+            raise RuntimeError("budget_reconciliation_stop_from_start_task")
+        primary = await self._stop_cleanup_uninterrupted(caller_task)
         if primary is not None:
             raise primary

@@ -39,6 +39,17 @@ def _assert_lease_released(lock_path: Path) -> None:
     lease.release_after_shutdown()
 
 
+def _lease_is_reacquirable(lock_path: Path) -> bool:
+    try:
+        lease = CoreProcessLease.acquire(lock_path)
+    except RuntimeError as error:
+        if str(error) != "core_process_lease_held":
+            raise
+        return False
+    lease.release_after_shutdown()
+    return True
+
+
 async def _session_row(factory: Any, session_id: object) -> tuple[str, bool]:
     async with factory() as uow:
 
@@ -95,7 +106,8 @@ class _LeaseReleasingReachySafety:
 
 
 class _CancellationObservingReachySafety:
-    def __init__(self) -> None:
+    def __init__(self, *, block_cancel_finish: bool = False) -> None:
+        self._block_cancel_finish = block_cancel_finish
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.cancelled = asyncio.Event()
@@ -108,6 +120,10 @@ class _CancellationObservingReachySafety:
             await self.release.wait()
         except asyncio.CancelledError:
             self.cancelled.set()
+            if self._block_cancel_finish:
+                while not self.release.is_set():
+                    with suppress(asyncio.CancelledError):
+                        await self.release.wait()
             raise
         finally:
             self.finished.set()
@@ -156,6 +172,69 @@ class _SupervisorReconciler:
             await self.fail_worker.wait()
             raise RuntimeError("synthetic_periodic_failure")
         await stop.wait()
+
+
+class _BlockingInitialDrainReconciler(_SupervisorReconciler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.initial_drain_started = asyncio.Event()
+        self.initial_drain_cancelled = asyncio.Event()
+        self.release_initial_drain = asyncio.Event()
+        self.initial_drain_finished = asyncio.Event()
+
+    async def drain_before_ready(self) -> None:
+        self.initial_drains += 1
+        self.initial_drain_started.set()
+        cancelled = False
+        while not self.release_initial_drain.is_set():
+            try:
+                await self.release_initial_drain.wait()
+            except asyncio.CancelledError:
+                self.initial_drain_cancelled.set()
+                cancelled = True
+        self.initial_drain_finished.set()
+        if cancelled:
+            raise asyncio.CancelledError
+
+
+class _BlockingWorkerReconciler(_SupervisorReconciler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_worker = asyncio.Event()
+        self.worker_cancelled = asyncio.Event()
+        self.worker_finished = asyncio.Event()
+
+    async def run_periodically(self, stop: asyncio.Event) -> None:
+        del stop
+        self.worker_started.set()
+        cancelled = False
+        while not self.release_worker.is_set():
+            try:
+                await self.release_worker.wait()
+            except asyncio.CancelledError:
+                self.worker_cancelled.set()
+                cancelled = True
+        self.worker_finished.set()
+        if cancelled:
+            raise asyncio.CancelledError
+
+
+class _ReentrantStopDrainReconciler(_SupervisorReconciler):
+    def __init__(self, lock_path: Path) -> None:
+        super().__init__()
+        self._lock_path = lock_path
+        self.supervisor: BudgetReconciliationSupervisor | None = None
+        self.stop_error: str | None = None
+        self.lease_reacquirable_during_start: bool | None = None
+
+    async def drain_before_ready(self) -> None:
+        self.initial_drains += 1
+        assert self.supervisor is not None
+        try:
+            await self.supervisor.stop()
+        except RuntimeError as error:
+            self.stop_error = str(error)
+        self.lease_reacquirable_during_start = _lease_is_reacquirable(self._lock_path)
 
 
 @pytest.mark.asyncio
@@ -469,6 +548,240 @@ async def test_initial_budget_drain_failure_releases_process_lease_and_blocks_re
             supervisor.require_ready()
         with pytest.raises(RuntimeError, match="startup_turn_recovery_unhealthy"):
             recovery.require_ready()
+        _assert_lease_released(lock_path)
+    finally:
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stop_joins_live_initial_drain_before_releasing_process_lease(
+    production_provider_gateway_case,
+    tmp_path: Path,
+) -> None:
+    case = await production_provider_gateway_case(seed_response_scope=True)
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reconciler = _BlockingInitialDrainReconciler()
+    recovery = StartupTurnRecovery(
+        _PassingReachySafety(),
+        reconciler,
+        case.factory,
+        case.clock,
+        lease,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    start_task = asyncio.create_task(supervisor.start())
+    stop_tasks: list[asyncio.Task[None]] = []
+    try:
+        await asyncio.wait_for(reconciler.initial_drain_started.wait(), timeout=0.1)
+        stop_tasks = [
+            asyncio.create_task(supervisor.stop()),
+            asyncio.create_task(supervisor.stop()),
+        ]
+        await asyncio.sleep(0)
+
+        assert not _lease_is_reacquirable(lock_path)
+        await asyncio.wait_for(reconciler.initial_drain_cancelled.wait(), timeout=0.1)
+        assert not any(task.done() for task in stop_tasks)
+        assert not _lease_is_reacquirable(lock_path)
+
+        reconciler.release_initial_drain.set()
+        await asyncio.wait_for(asyncio.gather(*stop_tasks), timeout=0.5)
+        assert start_task.done()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+        assert reconciler.initial_drain_finished.is_set()
+        _assert_lease_released(lock_path)
+    finally:
+        reconciler.release_initial_drain.set()
+        for task in stop_tasks:
+            if not task.done():
+                task.cancel()
+        with suppress(BaseException):
+            await asyncio.gather(*stop_tasks)
+        if not start_task.done():
+            start_task.cancel()
+        with suppress(BaseException):
+            await start_task
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stop_joins_live_startup_recovery_before_releasing_process_lease(
+    production_provider_gateway_case,
+    tmp_path: Path,
+) -> None:
+    case = await production_provider_gateway_case(seed_response_scope=True)
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reachy = _CancellationObservingReachySafety(block_cancel_finish=True)
+    reconciler = _SupervisorReconciler()
+    recovery = StartupTurnRecovery(
+        reachy,
+        reconciler,
+        case.factory,
+        case.clock,
+        lease,
+        attempt_timeout=0.5,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    start_task = asyncio.create_task(supervisor.start())
+    stop_task: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(reachy.started.wait(), timeout=0.1)
+        stop_task = asyncio.create_task(supervisor.stop())
+        await asyncio.wait_for(reachy.cancelled.wait(), timeout=0.1)
+
+        assert not _lease_is_reacquirable(lock_path)
+        assert not stop_task.done()
+
+        reachy.release.set()
+        await asyncio.wait_for(stop_task, timeout=0.5)
+        assert start_task.done()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+        assert reachy.finished.is_set()
+        _assert_lease_released(lock_path)
+    finally:
+        reachy.release.set()
+        if stop_task is not None and not stop_task.done():
+            stop_task.cancel()
+            with suppress(BaseException):
+                await stop_task
+        if not start_task.done():
+            start_task.cancel()
+        with suppress(BaseException):
+            await start_task
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stop_joins_live_initial_drain_before_releasing_process_lease(
+    production_provider_gateway_case,
+    tmp_path: Path,
+) -> None:
+    case = await production_provider_gateway_case(seed_response_scope=True)
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reconciler = _BlockingInitialDrainReconciler()
+    recovery = StartupTurnRecovery(
+        _PassingReachySafety(),
+        reconciler,
+        case.factory,
+        case.clock,
+        lease,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    start_task = asyncio.create_task(supervisor.start())
+    stop_task: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(reconciler.initial_drain_started.wait(), timeout=0.1)
+        stop_task = asyncio.create_task(supervisor.stop())
+        await asyncio.wait_for(reconciler.initial_drain_cancelled.wait(), timeout=0.1)
+
+        stop_task.cancel()
+        await asyncio.sleep(0)
+
+        assert not stop_task.done()
+        assert not start_task.done()
+        assert not _lease_is_reacquirable(lock_path)
+
+        reconciler.release_initial_drain.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stop_task, timeout=0.5)
+        assert start_task.done()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+        assert reconciler.initial_drain_finished.is_set()
+        _assert_lease_released(lock_path)
+    finally:
+        reconciler.release_initial_drain.set()
+        if stop_task is not None and not stop_task.done():
+            stop_task.cancel()
+            with suppress(BaseException):
+                await stop_task
+        if not start_task.done():
+            start_task.cancel()
+        with suppress(BaseException):
+            await start_task
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stop_waits_for_live_worker_before_releasing_process_lease(
+    production_provider_gateway_case,
+    tmp_path: Path,
+) -> None:
+    case = await production_provider_gateway_case(seed_response_scope=True)
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reconciler = _BlockingWorkerReconciler()
+    recovery = StartupTurnRecovery(
+        _PassingReachySafety(),
+        reconciler,
+        case.factory,
+        case.clock,
+        lease,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    stop_task: asyncio.Task[None] | None = None
+    try:
+        await supervisor.start()
+        await asyncio.wait_for(reconciler.worker_started.wait(), timeout=0.1)
+        stop_task = asyncio.create_task(supervisor.stop())
+        await asyncio.sleep(0)
+        assert not stop_task.done()
+
+        stop_task.cancel()
+        await asyncio.sleep(0)
+
+        assert not stop_task.done()
+        assert not reconciler.worker_finished.is_set()
+        assert not _lease_is_reacquirable(lock_path)
+
+        reconciler.release_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stop_task, timeout=0.5)
+        assert reconciler.worker_finished.is_set()
+        _assert_lease_released(lock_path)
+    finally:
+        reconciler.release_worker.set()
+        if stop_task is not None and not stop_task.done():
+            stop_task.cancel()
+            with suppress(BaseException):
+                await stop_task
+        with suppress(BaseException):
+            await supervisor.stop()
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_reentrant_stop_from_start_deflects_without_releasing_process_lease(
+    production_provider_gateway_case,
+    tmp_path: Path,
+) -> None:
+    case = await production_provider_gateway_case(seed_response_scope=True)
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reconciler = _ReentrantStopDrainReconciler(lock_path)
+    recovery = StartupTurnRecovery(
+        _PassingReachySafety(),
+        reconciler,
+        case.factory,
+        case.clock,
+        lease,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    reconciler.supervisor = supervisor
+    try:
+        with pytest.raises(RuntimeError, match="budget_reconciliation_unhealthy"):
+            await supervisor.start()
+
+        assert reconciler.stop_error == "budget_reconciliation_stop_from_start_task"
+        assert reconciler.lease_reacquirable_during_start is False
+        assert not reconciler.worker_started.is_set()
+        with pytest.raises(RuntimeError, match="budget_reconciliation_unhealthy"):
+            supervisor.require_ready()
         _assert_lease_released(lock_path)
     finally:
         lease.release_after_shutdown()
