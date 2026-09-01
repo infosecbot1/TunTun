@@ -4512,6 +4512,7 @@ git commit -m "feat(privacy): add purpose-bound provider sanitization"
 - Test: `tests/unit/budget/test_currency.py`
 - Test: `tests/unit/budget/test_month_boundary.py`
 - Modify: `tests/security/test_provider_review_freshness.py`
+- Modify: `tests/security/test_provider_boundary.py`
 - Test: `tests/integration/budget/test_hard_stop.py`
 - Test: `tests/unit/budget/test_settlement.py`
 - Test: `tests/integration/budget/test_expiry_reconciliation.py`
@@ -4528,6 +4529,9 @@ git commit -m "feat(privacy): add purpose-bound provider sanitization"
 - Produces provider-bound exact integer token/audio quotes, a purpose-HMAC-bound immutable price/FX snapshot, Singapore calendar-month keys, stale/missing/substituted catalog/FX/review/provider-limit denial, a once-per-month soft warning, atomic 50-caller hard stop, exact provider-response usage receipt verification, truthful un-clipped actual settlement, estimate-overrun/hard-cap cloud-egress freeze plus owner alert, `BudgetGuard` implementing the exact foundation port, one production-instantiated startup/periodic reconciler, and `StartupTurnRecovery` supervised as one ordered readiness dependency. The provider hard limit is defense in depth only: the local Singapore-month cap remains independently authoritative and does not infer remaining budget from the provider's potentially different cycle. One owner-only nonblocking `CoreProcessLease` is acquired before Reachy connection or recovery; a competing process fails before either recovery effect or traffic. On every process start, authenticated Reachy transport is established first; recovery then verifies global `stop_all(None)`, terminalizes every prior-process open attempt including unexpired rows through the same quote/usage terminalizer, and only then tombstones prior open sessions.
 - Extends rather than replaces Task 04's DLP boundary: the final gateway still requires and forwards the exact reasoning/TTS redaction receipt ID (and requires null for STT), and the final call repository retains the Task-04 `RedactionReceiptRepository` dependency and receipt-bound `begin`. A failed or cancelled pre-network claim is surfaced as typed `ProviderNotSent*` evidence; Task 06 first attempts Task 05's proof-based release of `not_claimed` or `claim_begun/started`, while an already-durable `marked_sent` proof is settled conservatively. Only Task 05 release may terminalize `claim_begun`.
 - Every Task-05 SQL timestamp write and lexical comparison uses the shared exact UTC storage formatter (`YYYY-MM-DDTHH:MM:SS.ffffffZ`); aware `datetime.isoformat()` is forbidden at the persistence boundary because its `+00:00` form violates the foundation checks.
+- Task 05 keeps web search fail-closed. The foundation budget union and pure pricing arithmetic remain future-capable, but the provider purpose contracts, route authorization, provider review, call repository, gateway, checked-in production catalog, and Task-06 attempt runner stay limited to `cloud_stt|cloud_reasoning|cloud_tts`. `BudgetGuard.reserve` rejects `web_search` before review, quote, or insert. A later dedicated search work package must add the minimized search DTO/adapter, adult-only policy and consent, purpose contracts, review route, accounting evidence, registration, and negative child/Guest reachability tests together before FB0 may advertise controlled search.
+- Provider review is checked by a concrete SQLCipher-backed gate inside the same writer transaction that inserts a reservation. Production composition accepts only the runtime identity reader and constructs that gate itself; a missing/stale/substituted review therefore cannot race into a reservation and tests prove denial leaves no row.
+- Provider-call terminalization is exact-idempotent and owned. Cancellation is deferred until the same terminal outcome and receipt (including a null receipt) is durably confirmed; a commit-then-cancel retry can never rewrite success as cancelled/ambiguous or create a second receipt.
 
 - [ ] **Step 1: Write exact-cap, proof, and contract tests**
 
@@ -4743,7 +4747,7 @@ replacement above, and extend it to the last union member plus hostile raw value
  def test_provider_response_exposes_only_the_persisted_usage_receipt_identity() -> None:
 ```
 
-The provider gateway is the only writer of `ProviderUsageReceiptV1`. Every provider/model/category price record freezes a primary accounting basis and a missing-evidence policy. At final SDK response/stream close, the gateway resolves those fields and the signed reservation ceiling server-side, HMAC-commits the strict response identifier plus the basis and canonical billable units under `provider.response-id.v1`, HMAC-commits the complete receipt under `provider.usage-receipt.v1`, and persists the full canonical DTO plus duplicated outer key ID/HMAC on the exact `provider_calls` row before returning the response. Responses and transcription use `provider_reported_exact` only when an owner-captured account/API fixture proves the required per-response fields. The active `tts-1` speech route instead uses `request_bound_exact`: its immutable NFC input-character count is verified against route consumption and the signed reservation, while the binary/event-stream response contributes only a strict request identifier. It never claims that `/audio/speech` returned usage. Controlled web search uses exact response token counts plus validated unique `web_search_call` events; only missing/zero tool evidence that remains provably inside the request's enforced one-call ceiling may use `conservative_full_reservation`. Duplicate identifiers, more than one distinct tool event, malformed counts, or any possible ceiling breach are unknown overage and freeze.
+The provider gateway is the only writer of `ProviderUsageReceiptV1`. Every provider/model/category price record freezes a primary accounting basis and a missing-evidence policy. At final SDK response/stream close, the gateway resolves those fields and the signed reservation ceiling server-side, HMAC-commits the strict response identifier plus the basis and canonical billable units under `provider.response-id.v1`, HMAC-commits the complete receipt under `provider.usage-receipt.v1`, and persists the full canonical DTO plus duplicated outer key ID/HMAC on the exact `provider_calls` row before returning the response. Responses and transcription use `provider_reported_exact` only when an owner-captured account/API fixture proves the required per-response fields. The active `tts-1` speech route instead uses `request_bound_exact`: its immutable NFC input-character count is verified against route consumption and the signed reservation, while the binary/event-stream response contributes only a strict request identifier. It never claims that `/audio/speech` returned usage. The web-search usage union and conservative accounting formula are dormant forward-compatible data types only: Task 05 registers no search purpose, production price, review route, call category, or gateway path. Tests prove those data shapes cannot create a reservation or network call.
 
 This remains a **gateway-attested accounting receipt**, not a claim that the provider cryptographically signed usage. `provider_reported_exact` means the gateway parsed the observed response; `request_bound_exact` means it verified an exact, provider-priced immutable request unit; and `conservative_full_reservation` means it deliberately charged the signed ceiling without claiming actual usage. The repository rechecks call/reservation/request/attempt/authorization/provider/model/category/basis equality and rejects missing, substituted, duplicated, or forged local receipt material. `BudgetSettlementRequest` carries only reservation/attempt identity; `BudgetGuard` resolves and verifies the receipt server-side. A crash before receipt persistence is conservative. Missing or ambiguous evidence is charged at the full reservation only when the immutable price policy proves that ceiling complete; otherwise a successful call with missing, malformed, out-of-range, or unverifiable evidence has unknown possible overage, remains unsettled, atomically freezes monthly cloud egress, emits `overage_known=false`, preserves evidence for repair, and fails closed.
 
@@ -4936,17 +4940,20 @@ class BudgetEvidenceService:
 
     @classmethod
     def _jsonable(cls,value):
-        if hasattr(value,"model_dump"):
-            return value.model_dump(mode="json")
         if isinstance(value,UUID): return str(value)
         if isinstance(value,datetime): return utc_storage(value)
+        if hasattr(value,"model_dump"):
+            return cls._jsonable(value.model_dump(mode="python"))
         if isinstance(value,dict):
             return {key:cls._jsonable(item) for key,item in value.items()}
+        if isinstance(value,(list,tuple)):
+            return [cls._jsonable(item) for item in value]
         return value
 
     def _commit(self,purpose:str,value) -> Commitment:
         return commit_private(
-            self._root,self._key_id,purpose,self._canonical(value),
+            self._root,self._key_id,purpose,
+            self._canonical(self._jsonable(value)),
         )
 
     def issue_pricing_snapshot(self,request,quote:PriceQuote) -> SignedPricingSnapshot:
@@ -5057,19 +5064,17 @@ class BudgetEvidenceService:
         )
 
     def canonical_receipt(self,receipt:ProviderUsageReceiptV1) -> str:
-        return self._canonical(receipt.model_dump(mode="json")).decode("utf-8")
+        return self._canonical(self._jsonable(receipt)).decode("utf-8")
 
     def canonical_usage(self,billable_usage:UsageUnits) -> str:
-        return self._canonical(
-            billable_usage.model_dump(mode="json"),
-        ).decode("utf-8")
+        return self._canonical(self._jsonable(billable_usage)).decode("utf-8")
 
     def require_attested_receipt(self,receipt:ProviderUsageReceiptV1) -> str:
         if type(receipt) is not ProviderUsageReceiptV1:
             raise BudgetEvidenceQuarantined(
                 "budget_usage_receipt_invalid_unknown_overage",
             )
-        unsigned=receipt.model_dump(mode="json",exclude={"receipt_commitment"})
+        unsigned=receipt.model_dump(mode="python",exclude={"receipt_commitment"})
         expected=self._commit("provider.usage-receipt.v1",unsigned)
         if (
             receipt.receipt_commitment.key_id!=self._key_id
@@ -5154,6 +5159,7 @@ from datetime import UTC, datetime
 import pytest
 from tuntun_core.services.budget.catalog import FxRecord, PriceCatalog, PriceRecord
 from tuntun_core.services.budget.evidence import BudgetEvidenceService
+from tuntun_core.services.providers.review import RuntimeProviderIdentity
 
 @pytest.fixture
 def catalog():
@@ -5168,9 +5174,19 @@ def catalog():
     ), fx=FxRecord(micros_sgd_per_usd=1_500_000,fx_version="bootstrap-2026-08-27",effective_at=start,expires_at=end,source="owner_policy",source_sha256="e"*64))
 
 class CurrentReviews:
-    def require_current(self, provider, model, purpose, now): return None
+    def require_current(self, uow, provider, model, purpose, now): return None
 @pytest.fixture
 def provider_reviews(): return CurrentReviews()
+
+class CurrentRuntimeProviderIdentities:
+    def require_current(self,provider):
+        assert provider=="openai"
+        return RuntimeProviderIdentity(
+            project_id_commitment_sha256="a"*64,
+            credential_kind="project_service_account",admin_key_present=False,
+        )
+@pytest.fixture
+def runtime_provider_identities(): return CurrentRuntimeProviderIdentities()
 
 @pytest.fixture
 def budget_evidence(clock):
@@ -5178,9 +5194,10 @@ def budget_evidence(clock):
 ```
 
 ```python
-# add only to budget/provider test modules that consume these fixtures;
-# never register SQL-backed fixtures from root tests/conftest.py
-pytest_plugins = ("tests.fixtures.budget",)
+# Every Task-05 module that consumes budget or SQL fixtures loads the provider-
+# egress plugin. It already loads provider_routes plus budget exactly once.
+# Never register SQL-backed fixtures from root tests/conftest.py.
+pytest_plugins = ("tests.fixtures.provider_egress",)
 ```
 
 At Task 05, extend `tests/fixtures/provider_egress.py` itself and change its plugin
@@ -5562,6 +5579,7 @@ class ProductionProviderGatewayCase:
 
     async def invoke(self):
         async def invoke_network():
+            self.events.append("network_invoked")
             return "ok"
         async def observe(_result):
             usage=self.reported_usage
@@ -5636,25 +5654,26 @@ class ProductionProviderGatewayCase:
 
     async def reservation_row(self):
         async with self.factory() as uow:
-            row=await uow.run_sync(lambda transaction:
-                transaction.exec_driver_sql(
+            def load(transaction):
+                return dict(transaction.exec_driver_sql(
                     "SELECT * FROM budget_reservations WHERE id=?",
                     (str(self.route.budget_reservation_id),),
-                ).mappings().one()
-            )
+                ).mappings().one())
+            row=await uow.run_sync(load)
             await uow.rollback()
-        return SimpleNamespace(**dict(row))
+        return SimpleNamespace(**row)
 
     async def ledger_row(self):
         async with self.factory() as uow:
-            row=await uow.run_sync(lambda transaction:
-                transaction.exec_driver_sql(
+            def load(transaction):
+                row=transaction.exec_driver_sql(
                     "SELECT * FROM cost_ledger WHERE reservation_id=?",
                     (str(self.route.budget_reservation_id),),
                 ).mappings().one_or_none()
-            )
+                return None if row is None else dict(row)
+            row=await uow.run_sync(load)
             await uow.rollback()
-        return None if row is None else SimpleNamespace(**dict(row))
+        return None if row is None else SimpleNamespace(**row)
 
     async def ledger_count(self) -> int:
         return (await self.proof_rows())[2]
@@ -5681,6 +5700,24 @@ class ProductionProviderGatewayCase:
             )
             await uow.commit()
 
+    async def tamper_pricing_evidence(self,fault) -> None:
+        column,value={
+            "snapshot":("price_snapshot_json",'{}'),
+            "hmac":(
+                "pricing_commitment_hmac_b64",
+                _other_commitment("pricing-hmac").value_b64,
+            ),
+            "policy":("primary_accounting_basis","request_bound_exact"),
+        }[fault]
+        async with self.factory() as uow:
+            await uow.run_sync(lambda transaction:
+                transaction.exec_driver_sql(
+                    f"UPDATE budget_reservations SET {column}=? WHERE id=?",
+                    (value,str(self.route.budget_reservation_id)),
+                )
+            )
+            await uow.commit()
+
     async def tamper_transport_phase_mismatch(self) -> None:
         await self.begin_claim()
         async with self.factory() as uow:
@@ -5693,13 +5730,13 @@ class ProductionProviderGatewayCase:
             )
             await uow.commit()
 
-    async def install_ledger_abort_trigger(self) -> str:
-        name=f"test_budget_ledger_abort_{self.route.attempt_id.hex}"
+    async def install_ledger_ignore_trigger(self) -> str:
+        name=f"test_budget_ledger_ignore_{self.route.attempt_id.hex}"
         async with self.factory() as uow:
             await uow.run_sync(lambda transaction:
                 transaction.exec_driver_sql(
                     f"CREATE TRIGGER {name} BEFORE INSERT ON cost_ledger "
-                    "BEGIN SELECT RAISE(ABORT,'injected ledger fault'); END",
+                    "BEGIN SELECT RAISE(IGNORE); END",
                 )
             )
             await uow.commit()
@@ -5719,14 +5756,14 @@ class ProductionProviderGatewayCase:
 
     async def provider_call_row(self):
         async with self.factory() as uow:
-            row=await uow.run_sync(lambda transaction:
-                transaction.exec_driver_sql(
+            def load(transaction):
+                return dict(transaction.exec_driver_sql(
                     "SELECT * FROM provider_calls WHERE attempt_id=?",
                     (str(self.route.attempt_id),),
-                ).mappings().one()
-            )
+                ).mappings().one())
+            row=await uow.run_sync(load)
             await uow.rollback()
-        return SimpleNamespace(**dict(row))
+        return SimpleNamespace(**row)
 
     def receipt(self,receipt_id):
         return self._receipts[receipt_id]
@@ -5750,32 +5787,31 @@ class ProductionProviderGatewayCase:
 
     async def proof_rows(self):
         async with self.factory() as uow:
-            reservation,call,ledger_count=await uow.run_sync(
-                lambda transaction:(
-                    transaction.exec_driver_sql(
+            def load(transaction):
+                reservation=transaction.exec_driver_sql(
                         "SELECT state,transport_phase,charged_micros_sgd "
                         "FROM budget_reservations WHERE id=?",
                         (str(self.route.budget_reservation_id),),
-                    ).fetchone(),
-                    transaction.exec_driver_sql(
+                    ).fetchone()
+                call=transaction.exec_driver_sql(
                         "SELECT outcome,transport_phase,"
                         "finished_at IS NOT NULL FROM provider_calls "
                         "WHERE attempt_id=?",
                         (str(self.route.attempt_id),),
-                    ).fetchone(),
-                    transaction.exec_driver_sql(
+                    ).fetchone()
+                ledger_count=transaction.exec_driver_sql(
                         "SELECT count(*) FROM cost_ledger "
                         "WHERE reservation_id=?",
                         (str(self.route.budget_reservation_id),),
-                    ).scalar_one(),
+                    ).scalar_one()
+                return (
+                    None if reservation is None else tuple(reservation),
+                    None if call is None else tuple(call),
+                    int(ledger_count),
                 )
-            )
+            reservation,call,ledger_count=await uow.run_sync(load)
             await uow.rollback()
-        return (
-            None if reservation is None else tuple(reservation),
-            None if call is None else tuple(call),
-            int(ledger_count),
-        )
+        return reservation,call,ledger_count
 
     async def tamper_receipt(self,fault) -> None:
         row=await self.provider_call_row()
@@ -5898,7 +5934,11 @@ async def production_core_container(
 
 
 class _ProductionReachySafety:
+    def __init__(self) -> None:
+        self.calls=[]
+
     async def stop_all(self,turn_id):
+        self.calls.append(turn_id)
         if turn_id is not None:
             raise AssertionError("global startup safety requires turn_id=None")
         return SafetyReceipt(
@@ -5909,20 +5949,20 @@ class _ProductionReachySafety:
         )
 
 
-class _LifecycleClock:
-    def __init__(self,delegate) -> None:
-        self._delegate=delegate
+class _ProductionContainerCase:
+    def __init__(self,container,context,reachy) -> None:
+        self.container=container
+        self.context=context
+        self.reachy=reachy
 
-    def now(self):
-        return self._delegate.now()
-
-    async def wait_or_stop(self,_delay,stop) -> None:
-        await stop.wait()
+    def __getattr__(self,name):
+        return getattr(self.container,name)
 
 
 @pytest_asyncio.fixture
 async def production_container(
-    async_uow_factory,clock,catalog,provider_reviews,budget_evidence,tmp_path,
+    async_uow_factory,clock,catalog,provider_reviews,runtime_provider_identities,
+    budget_evidence,tmp_path,
 ):
     context,_reservation,_guard=await _create_production_context(
         async_uow_factory,
@@ -5930,24 +5970,24 @@ async def production_container(
         catalog,
         provider_reviews,
         budget_evidence,
-        seed_response_scope=False,
+        seed_response_scope=True,
     )
     state_root=tmp_path/"production-state"
     state_root.mkdir(mode=0o700)
     state_root.chmod(0o700)
-    lifecycle_clock=_LifecycleClock(clock)
+    reachy=_ProductionReachySafety()
     container=ProductionContainer.build(
         configured_state_root=state_root,
-        reachy=_ProductionReachySafety(),
+        reachy=reachy,
         sqlcipher_uow_factory=async_uow_factory,
-        clock=lifecycle_clock,
+        clock=clock,
         route_authorizer=BoundAuthorizerFake(context),
         price_catalog=catalog,
-        provider_reviews=provider_reviews,
+        runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
     )
     try:
-        yield container
+        yield _ProductionContainerCase(container,context,reachy)
     finally:
         container.core_process_lease.release_after_shutdown()
 
@@ -6026,9 +6066,15 @@ import pytest
 from pydantic import ValidationError
 from tuntun_contracts.budget import (
     BudgetReservationRequest,LlmUsageUnits,SttUsageUnits,TransportProof,
+    WebSearchUsageUnits,
 )
 from tuntun_core.services.budget.guard import BudgetGuard
 from tuntun_core.services.providers.call_repository import ProviderCallRepository
+from tuntun_core.services.providers.review import (
+    RuntimeProviderIdentity,SqlcipherCurrentProviderReviews,
+)
+
+pytest_plugins=("tests.fixtures.provider_egress",)
 
 
 @pytest.mark.asyncio
@@ -6086,6 +6132,131 @@ def test_zero_negative_or_overflowed_usage_ceiling_is_rejected(usage) -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_real_provider_review_denies_without_reservation_insert(
+    async_uow_factory,clock,catalog,budget_evidence,
+) -> None:
+    class RuntimeIdentities:
+        def require_current(self,provider):
+            assert provider=="openai"
+            return RuntimeProviderIdentity(
+                project_id_commitment_sha256="a"*64,
+                credential_kind="project_service_account",
+                admin_key_present=False,
+            )
+    guard=BudgetGuard(
+        async_uow_factory,clock,catalog,
+        SqlcipherCurrentProviderReviews(RuntimeIdentities()),budget_evidence,
+        hard_limit=150_000_000,
+    )
+    request=BudgetReservationRequest(
+        household_id=uuid4(),turn_id=uuid4(),request_id=uuid4(),
+        attempt_id=uuid4(),provider="openai",model="gpt-5.6-sol",
+        category="llm",usage_ceiling=LlmUsageUnits(
+            category="llm",input_tokens=1,output_tokens=1,
+        ),month_key="2026-08",
+    )
+    with pytest.raises(PermissionError,match="provider_review_not_current"):
+        await guard.reserve(request)
+    async with async_uow_factory() as uow:
+        count=await uow.run_sync(lambda db:int(db.exec_driver_sql(
+            "SELECT count(*) FROM budget_reservations WHERE attempt_id=?",
+            (str(request.attempt_id),),
+        ).scalar_one()))
+        await uow.rollback()
+    assert count==0
+
+
+@pytest.mark.asyncio
+async def test_web_search_budget_shape_is_dormant_and_inserts_nothing(
+    async_uow_factory,clock,catalog,provider_reviews,budget_evidence,
+) -> None:
+    guard=BudgetGuard(
+        async_uow_factory,clock,catalog,provider_reviews,budget_evidence,
+        hard_limit=150_000_000,
+    )
+    request=BudgetReservationRequest(
+        household_id=uuid4(),turn_id=uuid4(),request_id=uuid4(),
+        attempt_id=uuid4(),provider="openai",model="gpt-5.6-sol",
+        category="web_search",usage_ceiling=WebSearchUsageUnits(
+            category="web_search",input_tokens=1,output_tokens=1,
+            web_search_calls=1,
+        ),month_key="2026-08",
+    )
+    with pytest.raises(PermissionError,match="budget_category_not_activated"):
+        await guard.reserve(request)
+    async with async_uow_factory() as uow:
+        count=await uow.run_sync(lambda db:int(db.exec_driver_sql(
+            "SELECT count(*) FROM budget_reservations WHERE attempt_id=?",
+            (str(request.attempt_id),),
+        ).scalar_one()))
+        await uow.rollback()
+    assert count==0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("target","error"),(
+    ("reservation","budget_reservation_insert_failed"),
+    ("turn_binding","budget_turn_binding_insert_failed"),
+))
+async def test_silent_ignored_budget_insert_rolls_back_reservation_and_binding(
+    async_uow_factory,clock,catalog,provider_reviews,budget_evidence,
+    target,error,
+) -> None:
+    guard=BudgetGuard(
+        async_uow_factory,clock,catalog,provider_reviews,budget_evidence,
+        hard_limit=150_000_000,
+    )
+    request=BudgetReservationRequest(
+        household_id=uuid4(),turn_id=uuid4(),request_id=uuid4(),
+        attempt_id=uuid4(),provider="openai",model="gpt-5.6-sol",
+        category="llm",usage_ceiling=LlmUsageUnits(
+            category="llm",input_tokens=1,output_tokens=1,
+        ),month_key="2026-08",
+    )
+    trigger_name=f"test_budget_{target}_ignore_{request.attempt_id.hex}"
+    if target=="reservation":
+        trigger_sql=(
+            f"CREATE TRIGGER {trigger_name} BEFORE INSERT ON budget_reservations "
+            f"WHEN NEW.attempt_id='{request.attempt_id}' "
+            "BEGIN SELECT RAISE(IGNORE); END"
+        )
+    else:
+        trigger_sql=(
+            f"CREATE TRIGGER {trigger_name} BEFORE INSERT ON runtime_settings "
+            "WHEN NEW.key LIKE 'budget.turn.%' "
+            "BEGIN SELECT RAISE(IGNORE); END"
+        )
+    async with async_uow_factory() as uow:
+        await uow.run_sync(lambda db:db.exec_driver_sql(trigger_sql))
+        await uow.commit()
+    try:
+        with pytest.raises(PermissionError,match=error):
+            await guard.reserve(request)
+    finally:
+        async with async_uow_factory() as uow:
+            await uow.run_sync(lambda db:db.exec_driver_sql(
+                f"DROP TRIGGER IF EXISTS {trigger_name}",
+            ))
+            await uow.commit()
+    async with async_uow_factory() as uow:
+        def counts(db):
+            reservations=db.exec_driver_sql(
+                "SELECT count(*) FROM budget_reservations WHERE attempt_id=?",
+                (str(request.attempt_id),),
+            ).scalar_one()
+            bindings=db.exec_driver_sql(
+                "SELECT count(*) FROM runtime_settings "
+                "WHERE key LIKE 'budget.turn.%' "
+                "AND json_extract(value_json,'$.attempt_id')=?",
+                (str(request.attempt_id),),
+            ).scalar_one()
+            return int(reservations),int(bindings)
+        persisted=await uow.run_sync(counts)
+        await uow.rollback()
+    assert persisted==(0,0)
+
+
+@pytest.mark.asyncio
 async def test_sent_attempt_cannot_be_released(
     async_uow_factory,clock,catalog,provider_reviews,budget_evidence,
     redaction_receipt_repository,route,consumption,
@@ -6135,6 +6306,8 @@ from tuntun_contracts.budget import (
 from tuntun_core.services.budget.pricing import Pricing
 from tuntun_core.services.budget.catalog import PriceCatalog
 
+pytest_plugins=("tests.fixtures.provider_egress",)
+
 def test_exact_native_and_fx_integer_formulas(catalog, clock) -> None:
     pricing = Pricing(catalog, clock)
     # GPT-5.6 Sol: US$4/M input + US$20/M output, then ceil(native micro-USD * 1.50).
@@ -6150,6 +6323,15 @@ def test_exact_native_and_fx_integer_formulas(catalog, clock) -> None:
     ))
     assert search.amount_micros_sgd==36_015_000
     assert search.web_search_micro_usd_per_call==10_000
+
+
+def test_checked_in_catalog_loads_only_exact_quoted_utc_timestamps() -> None:
+    loaded=PriceCatalog.load(
+        Path("config/providers/prices/openai-2026-08-27.yaml"),
+        Path("config/providers/fx/bootstrap-safety-factor-2026-08-27.yaml"),
+    )
+    assert len(loaded.prices)==3
+    assert all(row.category in {"llm","stt","tts"} for row in loaded.prices)
 
 
 @pytest.mark.parametrize("mutation",(
@@ -6289,6 +6471,8 @@ def test_singapore_month_boundary_is_not_utc_month_boundary() -> None:
 
 ```python
 # tests/security/test_provider_review_freshness.py
+# Merge these additions into the existing RouteDatabase/UnitOfWork test module;
+# retain NOW, _identity(), _insert_review(), and _require_current().
 from datetime import timedelta
 import hashlib
 import json
@@ -6393,20 +6577,7 @@ def test_commissioning_binds_requested_project_and_runtime_credential() -> None:
             )
 
 
-@pytest.fixture
-def runtime_provider_identity():
-    identity=RuntimeProviderIdentity(
-        project_id_commitment_sha256="a"*64,
-        credential_kind="project_service_account",admin_key_present=False,
-    )
-    class Reader:
-        def require_current(self,provider):
-            assert provider=="openai"
-            return identity
-    return Reader()
-
-
-def _openai_review(clock):
+def _openai_review(now=NOW):
     hard_limit={
         "project_id_commitment_sha256":"a"*64,
         "threshold_micros_usd":100_000_000,
@@ -6419,7 +6590,7 @@ def _openai_review(clock):
     _recommit_hard_limit(hard_limit)
     return {
         "schema_version":"tuntun.provider-review.v1","provider":"openai",
-        "accepted":True,"expires_at":utc_storage(clock.now()+timedelta(days=30)),
+        "accepted":True,"expires_at":utc_storage(now+timedelta(days=30)),
         "source_changed":False,"dashboard_changed":False,
         "purposes":["cloud_reasoning"],"models":["gpt-5.6-sol"],
         "endpoint":"https://api.openai.com/v1","workspace_id":None,
@@ -6445,12 +6616,12 @@ def _recommit_hard_limit(hard_limit):
     "dashboard_evidence_changed","settings_commitment_changed",
     "admin_key_present","admin_runtime_credential",
 ])
-def test_provider_review_failure_denies_before_reservation(
-    sync_uow_factory,clock,runtime_provider_identity,state,
+def test_provider_review_failure_is_rejected_by_current_store(
+    route_database:RouteDatabase,state,
 ) -> None:
     if state != "missing":
-        value=_openai_review(clock)
-        if state=="expired": value["expires_at"]=utc_storage(clock.now()-timedelta(seconds=1))
+        value=_openai_review()
+        if state=="expired": value["expires_at"]=utc_storage(NOW-timedelta(seconds=1))
         elif state=="terms_changed": value["source_changed"]=True
         elif state=="dashboard_changed": value["dashboard_changed"]=True
         elif state=="hard_limit_missing": value["provider_hard_limit"]=None
@@ -6466,36 +6637,18 @@ def test_provider_review_failure_denies_before_reservation(
         elif state=="settings_commitment_changed": value["provider_hard_limit"]["settings_commitment_sha256"]="e"*64
         elif state=="admin_key_present": value["provider_hard_limit"]["runtime_admin_key_present"]=True
         elif state=="admin_runtime_credential": value["provider_hard_limit"]["runtime_credential_kind"]="project_admin"
-        with sync_uow_factory() as uow:
-            uow.exec_driver_sql(
-                "INSERT INTO runtime_settings(key,value_json,version,updated_at) "
-                "VALUES(?,?,1,?)",
-                (
-                    "provider.review.openai",
-                    rfc8785.dumps(value).decode(),
-                    utc_storage(clock.now()),
-                ),
-            )
-            uow.commit()
-    with sync_uow_factory() as uow:
-        with pytest.raises(PermissionError, match="provider_review_not_current"):
-            ProviderReviewStore(uow,runtime_provider_identity).require_current(
-                "openai","gpt-5.6-sol","cloud_reasoning",clock.now(),
-            )
+        _insert_review(route_database,rfc8785.dumps(value).decode("utf-8"))
+    with pytest.raises(PermissionError, match="provider_review_not_current"):
+        _require_current(route_database,_identity())
 
 
 def test_exact_usd100_enforcing_dedicated_project_review_is_current(
-    sync_uow_factory,clock,runtime_provider_identity,
+    route_database:RouteDatabase,
 ) -> None:
-    value=_openai_review(clock)
-    with sync_uow_factory() as uow:
-        uow.exec_driver_sql(
-            "INSERT INTO runtime_settings(key,value_json,version,updated_at) VALUES(?,?,1,?)",
-            ("provider.review.openai",rfc8785.dumps(value).decode(),utc_storage(clock.now())),
-        ); uow.commit()
-        ProviderReviewStore(uow,runtime_provider_identity).require_current(
-            "openai","gpt-5.6-sol","cloud_reasoning",clock.now(),
-        )
+    _insert_review(
+        route_database,rfc8785.dumps(_openai_review()).decode("utf-8"),
+    )
+    _require_current(route_database,_identity())
 ```
 
 ```python
@@ -6539,10 +6692,37 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from tuntun_contracts.budget import BudgetSettlementRequest,LlmUsageUnits
+from tuntun_contracts.budget import (
+    BudgetReconciliationRequest,BudgetSettlementRequest,LlmUsageUnits,
+)
 from tuntun_core.services.providers.gateway import ProviderUsageUnknownError
 
 pytest_plugins=("tests.fixtures.provider_egress",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claimed",(False,True))
+async def test_proven_unsent_shapes_cannot_settle_and_reconcile_releases_without_ledger(
+    production_provider_gateway_case,claimed,
+) -> None:
+    case=await production_provider_gateway_case(valid_usage=True)
+    if claimed:
+        await case.begin_claim()
+    before=await case.proof_rows()
+    with pytest.raises(PermissionError,match="proven_unsent_requires_release"):
+        await case.settle()
+    assert await case.proof_rows()==before
+    settlements=await case.budget_guard.reconcile_turn(
+        BudgetReconciliationRequest(turn_id=case.route.turn_id,proofs=()),
+    )
+    assert settlements==()
+    reservation,call,ledger_count=await case.proof_rows()
+    assert reservation[:2]==("released","finished")
+    assert ledger_count==0
+    if claimed:
+        assert call[:2]==("cancelled","finished")
+    else:
+        assert call is None
 
 
 def test_settlement_contract_has_no_caller_actual_amount() -> None:
@@ -6598,6 +6778,24 @@ async def test_successful_exact_settlement_uses_verified_actual_below_reserve(
     result=await case.settle()
     assert result.conservative_estimate_used is False
     assert result.charged_micros_sgd<case.exact_snapshot_price
+
+
+@pytest.mark.asyncio
+async def test_silent_ignored_ledger_insert_rolls_back_terminalization(
+    production_provider_gateway_case,
+) -> None:
+    case=await production_provider_gateway_case(valid_usage=True)
+    await case.invoke()
+    before=await case.proof_rows()
+    trigger=await case.install_ledger_ignore_trigger()
+    try:
+        with pytest.raises(PermissionError,match="budget_ledger_insert_failed"):
+            await case.settle()
+    finally:
+        await case.drop_trigger(trigger)
+    assert await case.proof_rows()==before
+    await case.settle()
+    assert await case.ledger_count()==1
 
 
 @pytest.mark.asyncio
@@ -6690,6 +6888,7 @@ async def test_actual_charge_crossing_hard_cap_is_truthful_and_atomically_freeze
 
 ```python
 # tests/integration/budget/test_expiry_reconciliation.py
+import asyncio
 import pytest
 
 from tuntun_contracts.budget import (
@@ -6697,8 +6896,24 @@ from tuntun_contracts.budget import (
     LlmUsageUnits,
     TransportProof,
 )
+from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
 
 pytest_plugins=("tests.fixtures.provider_egress",)
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconciler_uses_clockport_without_wait_extension(
+    production_provider_gateway_case,
+) -> None:
+    case=await production_provider_gateway_case()
+    reconciler=ExpiredBudgetReconciler(
+        case.factory,case.clock,case.budget_guard,interval_seconds=.001,
+    )
+    stop=asyncio.Event()
+    worker=asyncio.create_task(reconciler.run_periodically(stop))
+    await asyncio.sleep(.005)
+    stop.set()
+    await asyncio.wait_for(worker,timeout=.1)
 
 
 @pytest.mark.asyncio
@@ -6835,14 +7050,22 @@ async def test_production_lifecycle_reconciles_before_readiness(
         await container.budget_lifecycle.start()
         container.budget_lifecycle.require_ready()
         async with container.core.sqlcipher_uow_factory() as uow:
-            open_count=await uow.run_sync(lambda transaction:
-                transaction.exec_driver_sql(
+            def recovered(transaction):
+                open_count=transaction.exec_driver_sql(
                     "SELECT count(*) FROM budget_reservations "
                     "WHERE state IN ('reserved','sent')",
                 ).scalar_one()
-            )
+                session=transaction.exec_driver_sql(
+                    "SELECT state,closed_at FROM sessions WHERE id=?",
+                    (str(container.context.route.session_id),),
+                ).fetchone()
+                return int(open_count),None if session is None else tuple(session)
+            open_count,session=await uow.run_sync(recovered)
             await uow.rollback()
         assert open_count==0
+        assert session is not None
+        assert session[0]=="cancelled" and session[1] is not None
+        assert container.reachy.calls==[None]
         assert container.readiness_dependencies.count(
             container.budget_lifecycle,
         )==1
@@ -6871,7 +7094,7 @@ def test_one_budget_port_has_exact_async_operations() -> None:
 
 - [ ] **Step 2: Run the tests and observe the red result**
 
-Run: `uv run pytest tests/unit/budget/test_boundaries.py tests/unit/budget/test_pricing.py tests/unit/budget/test_currency.py tests/unit/budget/test_month_boundary.py tests/security/test_provider_review_freshness.py tests/security/test_provider_boundary.py tests/integration/storage/test_migrations.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_gateway_runtime_wiring.py tests/integration/providers/test_usage_receipt_repository.py tests/contract/test_budget_port.py tests/contract/test_v1_types_and_ports.py -q`
+Run: `uv run pytest tests/unit/budget/test_boundaries.py tests/unit/budget/test_pricing.py tests/unit/budget/test_currency.py tests/unit/budget/test_month_boundary.py tests/unit/budget/test_settlement.py tests/integration/budget/test_hard_stop.py tests/integration/budget/test_expiry_reconciliation.py tests/security/test_provider_review_freshness.py tests/security/test_provider_boundary.py tests/integration/storage/test_migrations.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/integration/providers/test_usage_receipt_repository.py tests/contract/test_budget_port.py tests/contract/test_v1_types_and_ports.py -q`
 
 Expected: FAIL while loading `tests.fixtures.budget` with `ModuleNotFoundError: No module named 'tuntun_core.services.budget.catalog'`.
 
@@ -7010,6 +7233,26 @@ encrypted review record and the independently probed project-service-account rec
  class ProviderReviewV1(ContractModel):
 ```
 
+Append the concrete transaction-scoped gate after `ProviderReviewStore`; the
+production container constructs this adapter from the fixed runtime identity
+reader, while tests may inject only the same narrow protocol into `CoreContainer`.
+
+```python
+# apps/core/src/tuntun_core/services/providers/review.py (append)
+class SqlcipherCurrentProviderReviews:
+    def __init__(
+        self,runtime_identities:RuntimeProviderIdentityReader,
+    ) -> None:
+        self._runtime_identities=runtime_identities
+
+    def require_current(
+        self,uow:UnitOfWorkProtocol,provider:str,model:str,purpose:str,now:datetime,
+    ) -> object:
+        return ProviderReviewStore(
+            uow,self._runtime_identities,
+        ).require_current(provider,model,purpose,now)
+```
+
 ```python
 # apps/core/src/tuntun_core/services/storage_time.py
 from datetime import UTC, datetime
@@ -7019,6 +7262,20 @@ def utc_storage(value: datetime) -> str:
     if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         raise TypeError("stored timestamp must be timezone-aware")
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def parse_utc_storage(value:str) -> datetime:
+    if type(value) is not str:
+        raise TypeError("stored timestamp must be an exact UTC string")
+    try:
+        parsed=datetime.strptime(value,"%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=UTC,
+        )
+    except ValueError as error:
+        raise ValueError("stored timestamp must be canonical UTC") from error
+    if utc_storage(parsed)!=value:
+        raise ValueError("stored timestamp must be canonical UTC")
+    return parsed
 ```
 
 Import `utc_storage` in every Task-05 module below that binds a timestamp into SQL
@@ -7036,7 +7293,7 @@ from tuntun_contracts.base import ContractModel,canonical_bytes,parse_contract_j
 from tuntun_contracts.budget import (
     BudgetReconciliationRequest, BudgetReservation, BudgetReservationRequest,
     BudgetSettlement, BudgetSettlementRequest, TransportProof,
-    MAX_CHARGE_MICROS_SGD,TtsUsageUnits,UsageUnits,WebSearchUsageUnits,
+    MAX_CHARGE_MICROS_SGD,TtsUsageUnits,UsageUnits,
 )
 from tuntun_core.services.budget.month import singapore_month_key
 from tuntun_core.services.budget.evidence import (
@@ -7075,10 +7332,11 @@ class BudgetGuard:
     async def reserve(self, request: BudgetReservationRequest) -> BudgetReservation:
         now=self._clock.now()
         if request.month_key!=singapore_month_key(now): raise PermissionError("budget_month_mismatch")
-        self._reviews.require_current(request.provider,request.model,{
+        purpose={
             "stt":"cloud_stt","llm":"cloud_reasoning","tts":"cloud_tts",
-            "web_search":"web_search",
-        }[request.category],now)
+        }.get(request.category)
+        if purpose is None:
+            raise PermissionError("budget_category_not_activated")
         reservation_id=uuid4(); expires_at=now+timedelta(minutes=15)
         try:
             quote=self._pricing.quote(
@@ -7088,6 +7346,11 @@ class BudgetGuard:
         except (PermissionError,ValueError,OverflowError):
             quote=None; snapshot=None
         def reserve_locked(db):
+            # Review and reservation share this exact SQLCipher writer
+            # transaction; denial occurs before any budget row is inserted.
+            self._reviews.require_current(
+                db,request.provider,request.model,purpose,now,
+            )
             freeze_key=f"budget.cloud_egress_freeze.{request.month_key}"
             frozen=db.exec_driver_sql(
                 "SELECT 1 FROM runtime_settings WHERE key=?",(freeze_key,),
@@ -7121,7 +7384,7 @@ class BudgetGuard:
             persisted_snapshot=None if outcome in {
                 "deny_unknown_price","deny_cloud_egress_frozen",
             } else snapshot
-            db.exec_driver_sql(
+            reservation_insert=db.exec_driver_sql(
                 "INSERT INTO budget_reservations "
                 "(id,request_id,attempt_id,month_key,category,provider,model,outcome,"
                 "usage_ceiling_json,reserved_micros_sgd,charged_micros_sgd,"
@@ -7148,11 +7411,19 @@ class BudgetGuard:
                  state,utc_storage(now),utc_storage(expires_at),
                 ),
             )
+            if reservation_insert.rowcount!=1:
+                raise PermissionError("budget_reservation_insert_failed")
             mapping=canonical_bytes(BudgetTurnBindingV1(
                 household_id=request.household_id,turn_id=request.turn_id,
                 request_id=request.request_id,attempt_id=request.attempt_id,
             )).decode("utf-8")
-            db.exec_driver_sql("INSERT INTO runtime_settings(key,value_json,version,updated_at) VALUES(?,?,1,?)",(f"budget.turn.{reservation_id}",mapping,utc_storage(now)))
+            binding_insert=db.exec_driver_sql(
+                "INSERT INTO runtime_settings(key,value_json,version,updated_at) "
+                "VALUES(?,?,1,?)",
+                (f"budget.turn.{reservation_id}",mapping,utc_storage(now)),
+            )
+            if binding_insert.rowcount!=1:
+                raise PermissionError("budget_turn_binding_insert_failed")
             if outcome=="allow_soft_warning": db.exec_driver_sql("INSERT INTO runtime_settings(key,value_json,version,updated_at) VALUES(?,?,1,?)",(warning_key,'{"emitted":true}',utc_storage(now)))
             return BudgetReservation(
                 reservation_id=reservation_id,request_id=request.request_id,
@@ -7172,40 +7443,42 @@ class BudgetGuard:
         async with self._uow_factory() as uow:
             def require(db):
                 row=db.exec_driver_sql(
-                    "SELECT request_id,attempt_id,provider,model,category,"
-                    "usage_ceiling_json,primary_accounting_basis,missing_evidence_policy,"
-                    "state,transport_phase FROM budget_reservations WHERE id=?",
+                    "SELECT * FROM budget_reservations WHERE id=?",
                     (str(route.budget_reservation_id),),
-                ).fetchone()
+                ).mappings().one_or_none()
                 expected_category={
                     "cloud_stt":"stt","cloud_reasoning":"llm","cloud_tts":"tts",
-                    "web_search":"web_search",
-                    "experimental_web_search":"web_search",
                 }.get(route.purpose)
                 if row is None or expected_category is None:
                     raise PermissionError("budget_accounting_context_missing")
-                if tuple(row[:5])!=(
-                    str(route.request_id),str(route.attempt_id),route.provider,
-                    route.model,expected_category,
-                ) or (
+                if (
+                    row["request_id"]!=str(route.request_id)
+                    or row["attempt_id"]!=str(route.attempt_id)
+                    or row["provider"]!=route.provider
+                    or row["model"]!=route.model
+                    or row["category"]!=expected_category
+                    or row["state"]!="sent"
+                    or row["transport_phase"]!="marked_sent"
+                    or (
                     consumption.request_id!=route.request_id
                     or consumption.attempt_id!=route.attempt_id
                     or consumption.provider!=route.provider
                     or consumption.model!=route.model
                     or consumption.purpose!=route.purpose
-                ) or row[8:10]!=("sent","marked_sent"):
+                    )
+                ):
                     raise PermissionError("budget_accounting_context_binding_mismatch")
-                usage=parse_usage_units_json(row[5])
+                quote=self._evidence.require_pricing_snapshot(row)
+                usage=parse_usage_units_json(row["usage_ceiling_json"])
                 if isinstance(usage,TtsUsageUnits) and (
                     consumption.input_units!=usage.characters
                     or route.max_input_units!=usage.characters
                 ):
                     raise PermissionError("tts_request_character_binding_mismatch")
-                if isinstance(usage,WebSearchUsageUnits) and usage.web_search_calls!=1:
-                    raise PermissionError("web_search_call_ceiling_mismatch")
                 return BudgetAccountingContext(
                     category=expected_category,usage_ceiling=usage,
-                    primary_accounting_basis=row[6],missing_evidence_policy=row[7],
+                    primary_accounting_basis=quote.primary_accounting_basis,
+                    missing_evidence_policy=quote.missing_evidence_policy,
                 )
             result=await uow.run_sync(require)
             await uow.rollback()
@@ -7312,29 +7585,38 @@ class BudgetGuard:
             raise PermissionError("budget_transport_proof_quarantined")
         call=None if not calls else calls[0]
         receipt=None
-        force_conservative=call is None
         receipt_columns=(
             "provider_usage_json","provider_usage_receipt_key_id",
             "provider_usage_receipt_hmac_b64",
         )
         if call is None:
             if (
-                reservation["state"]!="reserved"
-                or reservation["transport_phase"]!="not_claimed"
+                reservation["state"]=="reserved"
+                and reservation["transport_phase"]=="not_claimed"
             ):
-                raise PermissionError("budget_transport_proof_quarantined")
+                raise PermissionError("proven_unsent_requires_release")
+            raise PermissionError("budget_transport_proof_quarantined")
         elif call["gateway_ordering_version"]!=1:
             raise PermissionError("budget_transport_proof_quarantined")
         elif call["outcome"]=="started":
-            force_conservative=True
             if (
+                reservation["state"]=="reserved"
+                and reservation["transport_phase"]=="claim_begun"
+                and call["transport_phase"]=="claim_begun"
+                and all(call[name] is None for name in receipt_columns)
+            ):
+                raise PermissionError("proven_unsent_requires_release")
+            if (
+                reservation["state"]!="sent"
+                or
                 call["transport_phase"]!=reservation["transport_phase"]
                 or call["transport_phase"] not in {
-                    "claim_begun","marked_sent","network_invocation_starting",
+                    "marked_sent","network_invocation_starting",
                 }
                 or any(call[name] is not None for name in receipt_columns)
             ):
                 raise PermissionError("budget_transport_proof_quarantined")
+            force_conservative=True
             closed=db.exec_driver_sql(
                 "UPDATE provider_calls SET outcome='ambiguous',transport_phase='finished',finished_at=? "
                 "WHERE id=? AND outcome='started' AND gateway_ordering_version=1 "
@@ -7426,7 +7708,7 @@ class BudgetGuard:
         )
         receipt_key=None if receipt is None else receipt.receipt_commitment.key_id
         receipt_hmac=None if receipt is None else receipt.receipt_commitment.value_b64
-        db.exec_driver_sql(
+        ledger_insert=db.exec_driver_sql(
             "INSERT INTO cost_ledger "
             "(id,reservation_id,month_key,reserved_micros_sgd,charged_micros_sgd,"
             "usage_json,provider_usage_receipt_json,provider_usage_receipt_key_id,"
@@ -7446,6 +7728,8 @@ class BudgetGuard:
              reservation["fx_version"],reservation["fx_source_sha256"],
              utc_storage(now)),
         )
+        if ledger_insert.rowcount!=1:
+            raise PermissionError("budget_ledger_insert_failed")
         if freeze_reason is not None:
             self._record_freeze(
                 db,month_key=reservation["month_key"],reason=freeze_reason,
@@ -7524,9 +7808,9 @@ class BudgetGuard:
         if cursor.rowcount!=1:
             raise PermissionError("sent_reservation_requires_settlement")
 
-    async def release_unsent(self, reservation_id: UUID, attempt_id: UUID, proof: TransportProof) -> None:
-        if proof.reservation_id!=reservation_id or proof.attempt_id!=attempt_id or proof.disposition!="never_sent":
-            raise PermissionError("proof_does_not_establish_unsent")
+    async def _release_proven_unsent(
+        self,reservation_id:UUID,attempt_id:UUID,
+    ) -> None:
         now=self._clock.now()
         async with self._uow_factory() as uow:
             await uow.run_sync(
@@ -7535,6 +7819,11 @@ class BudgetGuard:
                 ),
             )
             await uow.commit()
+
+    async def release_unsent(self, reservation_id: UUID, attempt_id: UUID, proof: TransportProof) -> None:
+        if proof.reservation_id!=reservation_id or proof.attempt_id!=attempt_id or proof.disposition!="never_sent":
+            raise PermissionError("proof_does_not_establish_unsent")
+        await self._release_proven_unsent(reservation_id,attempt_id)
 
     async def reconcile_turn(self, request: BudgetReconciliationRequest) -> tuple[BudgetSettlement, ...]:
         supplied={(proof.reservation_id,proof.attempt_id):proof for proof in request.proofs}
@@ -7578,14 +7867,27 @@ class BudgetGuard:
             proof=supplied.get((reservation_id,attempt_id))
             if proof is not None and proof.disposition=="never_sent":
                 await self.release_unsent(reservation_id,attempt_id,proof)
-            else:
+            elif proof is not None:
+                # A supplied sent/unknown observation may not be rewritten as
+                # unsent merely because its durable pair is contradictory.
                 settlements.append(await self.settle(BudgetSettlementRequest(
                     reservation_id=reservation_id,attempt_id=attempt_id,
                 )))
+            else:
+                try:
+                    await self._release_proven_unsent(
+                        reservation_id,attempt_id,
+                    )
+                except PermissionError as error:
+                    if str(error)!="sent_reservation_requires_settlement":
+                        raise
+                    settlements.append(await self.settle(BudgetSettlementRequest(
+                        reservation_id=reservation_id,attempt_id=attempt_id,
+                    )))
         return tuple(settlements)
 ```
 
-Task 05 replaces the Task-04 success seam with the following final gateway/repository contract. The observer is trusted application code inside the sole gateway. It returns strict response evidence, but neither it nor `AttemptRunner`, a route caller, or a settlement caller selects the accounting basis or price. `BudgetGuard.require_accounting_context` resolves the HMAC-verified reservation policy server-side after `mark_sent` and before network invocation. For TTS it also proves the immutable NFC character count equals both route and consumption units; for search it proves the reservation ceiling contains exactly one tool call. The gateway alone maps that context plus the observation to a closed accounting receipt.
+Task 05 replaces the Task-04 success seam with the following final gateway/repository contract. The observer is trusted application code inside the sole gateway. It returns strict response evidence, but neither it nor `AttemptRunner`, a route caller, or a settlement caller selects the accounting basis or price. `BudgetGuard.require_accounting_context` resolves the HMAC-verified reservation policy server-side after `mark_sent` and before network invocation. For TTS it also proves the immutable NFC character count equals both route and consumption units. Search accounting remains future-only and unreachable in Tasks 05–06. The gateway alone maps the active context plus the observation to a closed accounting receipt.
 
 ```python
 # apps/core/src/tuntun_core/services/providers/gateway.py (final Task-05 replacement)
@@ -7646,6 +7948,12 @@ class GatewayResult(Generic[T]):
 
 
 @dataclass(slots=True)
+class _TerminalState:
+    done:bool=False
+    outcome:str|None=None
+
+
+@dataclass(slots=True)
 class GatewayStreamLease(Generic[T]):
     response:T
     _finalize:Callable[[],Awaitable[UUID]]
@@ -7666,12 +7974,20 @@ class ProviderUsageUnknownError(RuntimeError): pass
 
 
 class ProviderGateway:
+    _SUPPORTED_PURPOSES=frozenset({
+        "cloud_stt","cloud_reasoning","cloud_tts",
+    })
+
     def __init__(self,authorizations,budget,calls,evidence,clock) -> None:
         self._authorizations,self._budget=authorizations,budget
         self._calls,self._evidence,self._clock=calls,evidence,clock
 
     @property
     def calls(self): return self._calls
+
+    @property
+    def supported_purposes(self) -> frozenset[str]:
+        return self._SUPPORTED_PURPOSES
 
     async def _claim(self,route,consumption,redaction_receipt_id):
         stage="consume"
@@ -7701,7 +8017,9 @@ class ProviderGateway:
                 route,consumption,
             )
         except BaseException:
-            await self._calls.finish(call_id,"failed",route,None)
+            await self._finish_durably(
+                _TerminalState(),call_id,"failed",route,None,
+            )
             raise
         return call_id,accounting
 
@@ -7730,8 +8048,42 @@ class ProviderGateway:
             return "conservative_full_reservation",accounting.usage_ceiling
         raise ValueError("provider accounting evidence unavailable")
 
+    async def _finish_durably(
+        self,terminal:_TerminalState,call_id,outcome,route,receipt,
+    ) -> None:
+        """Own one exact-idempotent finish and defer caller cancellation."""
+        if terminal.outcome is None:
+            terminal.outcome=outcome
+        elif terminal.outcome!=outcome:
+            raise RuntimeError("provider_call_terminal_outcome_conflict")
+        cancellation=None
+        for attempt in range(2):
+            operation=asyncio.create_task(
+                self._calls.finish(call_id,outcome,route,receipt),
+                name=f"provider-call-finish-{outcome}",
+            )
+            while not operation.done():
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError as error:
+                    if cancellation is None:
+                        cancellation=error
+            try:
+                operation.result()
+            except asyncio.CancelledError as error:
+                if cancellation is None:
+                    cancellation=error
+                if attempt==0:
+                    continue  # exact retry confirms commit-then-cancel
+                raise
+            terminal.done=True
+            if cancellation is not None:
+                raise cancellation
+            return
+        raise RuntimeError("provider_call_finish_unconfirmed")
+
     async def _finish_success(
-        self,call_id,route,accounting,observation,
+        self,terminal,call_id,route,accounting,observation,
     ) -> ProviderUsageReceiptV1:
         try:
             accounting_basis,billable_usage=self._resolve_billable(
@@ -7744,11 +8096,15 @@ class ProviderGateway:
                 provider_response_identifier=observation.provider_response_identifier,
             )
         except Exception as error:
-            await self._calls.finish(call_id,"succeeded",route,None)
+            await self._finish_durably(
+                terminal,call_id,"succeeded",route,None,
+            )
             raise ProviderUsageUnknownError(
                 "provider_usage_invalid_unknown_overage",
             ) from error
-        await self._calls.finish(call_id,"succeeded",route,receipt)
+        await self._finish_durably(
+            terminal,call_id,"succeeded",route,receipt,
+        )
         return receipt
 
     async def send(
@@ -7758,7 +8114,7 @@ class ProviderGateway:
     ) -> GatewayResult[T]:
         call_id,accounting=await self._claim(
             route,consumption,redaction_receipt_id,
-        ); terminal=False
+        ); terminal=_TerminalState()
         try:
             await self._calls.mark_network_invocation_starting(call_id)
             value=await invoke()
@@ -7766,28 +8122,32 @@ class ProviderGateway:
             except asyncio.CancelledError:
                 # The provider returned, so record truthful success-with-unknown-
                 # usage before preserving caller cancellation.
-                await self._calls.finish(call_id,"succeeded",route,None)
-                terminal=True
+                await self._finish_durably(
+                    terminal,call_id,"succeeded",route,None,
+                )
                 raise
             except BaseException as error:
-                await self._calls.finish(call_id,"succeeded",route,None)
-                terminal=True
+                await self._finish_durably(
+                    terminal,call_id,"succeeded",route,None,
+                )
                 raise ProviderUsageUnknownError(
                     "provider_usage_invalid_unknown_overage",
                 ) from error
-            try: receipt=await self._finish_success(
-                call_id,route,accounting,observation,
+            receipt=await self._finish_success(
+                terminal,call_id,route,accounting,observation,
             )
-            except ProviderUsageUnknownError:
-                terminal=True
-                raise
-            terminal=True
             return GatewayResult(value,receipt.receipt_id)
         except asyncio.CancelledError:
-            if not terminal: await self._calls.finish(call_id,"cancelled",route,None)
+            if terminal.outcome is None:
+                await self._finish_durably(
+                    terminal,call_id,"cancelled",route,None,
+                )
             raise
         except BaseException:
-            if not terminal: await self._calls.finish(call_id,"ambiguous",route,None)
+            if terminal.outcome is None:
+                await self._finish_durably(
+                    terminal,call_id,"ambiguous",route,None,
+                )
             raise
 
     @asynccontextmanager
@@ -7798,46 +8158,51 @@ class ProviderGateway:
     ):
         call_id,accounting=await self._claim(
             route,consumption,redaction_receipt_id,
-        ); terminal=False
+        ); terminal=_TerminalState()
         try:
             await self._calls.mark_network_invocation_starting(call_id)
             async with open_response() as response:
                 async def finalize() -> UUID:
                     nonlocal terminal
-                    if terminal:
+                    if terminal.outcome is not None:
                         raise RuntimeError("provider stream already terminal")
                     try: observation=await observe(response)
                     except asyncio.CancelledError:
-                        await self._calls.finish(call_id,"succeeded",route,None)
-                        terminal=True
+                        await self._finish_durably(
+                            terminal,call_id,"succeeded",route,None,
+                        )
                         raise
                     except BaseException as error:
-                        await self._calls.finish(call_id,"succeeded",route,None)
-                        terminal=True
+                        await self._finish_durably(
+                            terminal,call_id,"succeeded",route,None,
+                        )
                         raise ProviderUsageUnknownError(
                             "provider_usage_invalid_unknown_overage",
                         ) from error
-                    try: receipt=await self._finish_success(
-                        call_id,route,accounting,observation,
+                    receipt=await self._finish_success(
+                        terminal,call_id,route,accounting,observation,
                     )
-                    except ProviderUsageUnknownError:
-                        terminal=True
-                        raise
-                    terminal=True
                     return receipt.receipt_id
                 lease=GatewayStreamLease(response,finalize)
                 yield lease
-                if not terminal:
-                    await self._calls.finish(call_id,"ambiguous",route,None)
-                    terminal=True
+                if terminal.outcome is None:
+                    await self._finish_durably(
+                        terminal,call_id,"ambiguous",route,None,
+                    )
                     raise ProviderUsageUnknownError(
                         "provider_stream_closed_before_finalize_unknown_overage",
                     )
         except asyncio.CancelledError:
-            if not terminal: await self._calls.finish(call_id,"cancelled",route,None)
+            if terminal.outcome is None:
+                await self._finish_durably(
+                    terminal,call_id,"cancelled",route,None,
+                )
             raise
         except BaseException:
-            if not terminal: await self._calls.finish(call_id,"ambiguous",route,None)
+            if terminal.outcome is None:
+                await self._finish_durably(
+                    terminal,call_id,"ambiguous",route,None,
+                )
             raise
 ```
 
@@ -7870,32 +8235,26 @@ class ProviderCallRepository:
         def finish_pair(db):
             row=db.exec_driver_sql(
                 "SELECT budget_reservation_id,request_id,attempt_id,authorization_id,"
-                "provider,model,category,transport_phase,provider_usage_json,"
+                "provider,model,category,outcome,transport_phase,finished_at,"
+                "provider_usage_json,"
                 "provider_usage_receipt_key_id,provider_usage_receipt_hmac_b64 "
                 "FROM provider_calls "
-                "WHERE id=? AND outcome='started' AND gateway_ordering_version=1",
+                "WHERE id=? AND gateway_ordering_version=1",
                 (str(call_id),),
             ).fetchone()
             if row is None:
                 raise PermissionError("provider_call_not_finishable")
             (
                 reservation_id,request_id,attempt_id,authorization_id,
-                provider,model,category,phase,*preexisting_receipt,
+                provider,model,category,persisted_outcome,phase,finished_at,
+                *preexisting_receipt,
             )=row
-            if phase == "claim_begun":
-                raise PermissionError("provider_call_unsent_requires_release")
-            if phase not in {"marked_sent","network_invocation_starting"}:
-                raise PermissionError("provider_call_not_finishable")
-            if any(value is not None for value in preexisting_receipt):
-                raise PermissionError("provider_usage_receipt_preexisting")
             route_bound=(
                 str(route.budget_reservation_id),str(route.request_id),
                 str(route.attempt_id),str(route.authorization_id),
                 route.provider,route.model,
                 {
                     "cloud_stt":"stt","cloud_reasoning":"llm","cloud_tts":"tts",
-                    "web_search":"web_search",
-                    "experimental_web_search":"web_search",
                 }[route.purpose],
             )
             if route_bound!=tuple(row[:7]):
@@ -7914,6 +8273,29 @@ class ProviderCallRepository:
                 None if receipt is None else receipt.receipt_commitment.key_id,
                 None if receipt is None else receipt.receipt_commitment.value_b64,
             )
+            reservation_phase=db.exec_driver_sql(
+                "SELECT state,transport_phase FROM budget_reservations "
+                "WHERE id=? AND attempt_id=?",
+                (reservation_id,attempt_id),
+            ).fetchone()
+            if persisted_outcome!="started":
+                if (
+                    persisted_outcome!=outcome
+                    or phase!="finished"
+                    or finished_at is None
+                    or tuple(preexisting_receipt)!=values
+                    or reservation_phase is None
+                    or reservation_phase[0] not in {"sent","settled"}
+                    or reservation_phase[1]!="finished"
+                ):
+                    raise PermissionError("provider_call_finish_conflict")
+                return  # exact retry after commit-then-cancel
+            if phase == "claim_begun":
+                raise PermissionError("provider_call_unsent_requires_release")
+            if phase not in {"marked_sent","network_invocation_starting"}:
+                raise PermissionError("provider_call_not_finishable")
+            if any(value is not None for value in preexisting_receipt):
+                raise PermissionError("provider_usage_receipt_preexisting")
             call=db.exec_driver_sql(
                 "UPDATE provider_calls SET outcome=?,transport_phase='finished',finished_at=?,"
                 "provider_usage_json=?,provider_usage_receipt_key_id=?,"
@@ -7936,14 +8318,51 @@ class ProviderCallRepository:
             await uow.commit()
 ```
 
+Update the shared repository-fault fixture at the same time; its wrapper must pass
+the bound route required by the final repository signature rather than retaining
+Task 04's two-argument call.
+
+```python
+# tests/fixtures/provider_egress.py (Task-05 replacement in CallRepositoryFaultCase)
+class CallRepositoryFaultCase:
+    ...
+
+    async def finish(self, call_id: UUID, outcome: str) -> None:
+        assert self.context is not None
+        name = (
+            await self._trigger(self._fault)
+            if self._fault in {"after_call_finish", "reservation_finish_cas_lost"}
+            else None
+        )
+        try:
+            await self._harness.provider_call_repository.finish(
+                call_id,outcome,self.context.route,None,
+            )
+        finally:
+            await self._drop_trigger(name)
+        async with self._harness.factory() as uow:
+            self.provider_call_finished_at = await uow.run_sync(
+                lambda db: db.exec_driver_sql(
+                    "SELECT finished_at FROM provider_calls WHERE id=?",
+                    (str(call_id),),
+                ).scalar_one()
+            )
+            await uow.rollback()
+```
+
 ```python
 # tests/integration/providers/test_usage_receipt_repository.py
 import inspect
+from datetime import datetime,timedelta,timezone
+from uuid import uuid4
 
 import pytest
 from tuntun_contracts.budget import LlmUsageUnits
-from tuntun_core.services.budget.evidence import BudgetEvidenceService
+from tuntun_core.services.budget.evidence import (
+    BudgetEvidenceQuarantined,BudgetEvidenceService,
+)
 from tuntun_core.services.providers.gateway import ProviderUsageUnknownError
+from tuntun_testing.fake_clock import FakeClock
 
 pytest_plugins=("tests.fixtures.provider_egress",)
 
@@ -7969,6 +8388,21 @@ async def test_production_gateway_persists_exact_attested_receipt_before_return(
     settlement=await restarted.settle(case.settlement_request)
     assert settlement.charged_micros_sgd==case.exact_snapshot_price
     assert settlement.conservative_estimate_used is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault",("snapshot","hmac","policy"))
+async def test_pricing_evidence_tamper_blocks_before_network(
+    production_provider_gateway_case,fault,
+) -> None:
+    case=await production_provider_gateway_case(valid_usage=True)
+    await case.tamper_pricing_evidence(fault)
+    with pytest.raises(
+        BudgetEvidenceQuarantined,match="budget_pricing_snapshot_invalid",
+    ):
+        await case.invoke()
+    assert "network_invoked" not in case.events
+    assert await case.ledger_count()==0
 
 
 @pytest.mark.asyncio
@@ -8035,10 +8469,33 @@ def test_attestation_timestamp_is_internal() -> None:
     assert "observed_at" not in inspect.signature(
         BudgetEvidenceService.attest_provider_usage,
     ).parameters
+
+
+def test_non_utc_clock_attestation_verifies_and_serializes_as_canonical_utc(
+    route,
+) -> None:
+    evidence=BudgetEvidenceService(
+        b"e"*32,"budget-evidence-v1",
+        FakeClock(datetime(
+            2026,8,27,0,0,tzinfo=timezone(timedelta(hours=8)),
+        )),
+    )
+    receipt=evidence.attest_provider_usage(
+        call_id=uuid4(),route=route,category="llm",
+        accounting_basis="provider_reported_exact",
+        billable_usage=LlmUsageUnits(
+            category="llm",input_tokens=1,output_tokens=1,
+        ),
+        provider_response_identifier="resp_non_utc",
+    )
+    canonical=evidence.require_attested_receipt(receipt)
+    assert '"observed_at":"2026-08-26T16:00:00.000000Z"' in canonical
+    assert evidence.canonical_receipt(receipt)==canonical
 ```
 
 ```python
 # tests/unit/providers/test_gateway_ordering.py (Task-05 replacement)
+import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -8095,6 +8552,58 @@ async def test_receipt_commit_precedes_final_gateway_result(
     assert events==[
         "consume","claim","mark_sent","accounting","network_starting","network","observe",
         "attest",("succeeded","receipt"),"returned",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receipt_present",(False,True))
+async def test_commit_then_cancel_retries_only_the_exact_success_terminalization(
+    route,consumption,redaction_receipt_id,clock,receipt_present,
+) -> None:
+    class Authorizer:
+        async def consume(self,*_args): return None
+    class Budget:
+        async def mark_sent(self,*_args): return None
+        async def require_accounting_context(self,*_args):
+            return SimpleNamespace(
+                category="llm",
+                usage_ceiling=LlmUsageUnits(
+                    category="llm",input_tokens=2,output_tokens=2,
+                ),
+                primary_accounting_basis="provider_reported_exact",
+                missing_evidence_policy="freeze_unknown_overage",
+            )
+    class Calls:
+        def __init__(self): self.finishes=[]
+        async def begin(self,*_args): return uuid4()
+        async def mark_network_invocation_starting(self,*_args): return None
+        async def finish(self,_call_id,outcome,_route,receipt):
+            self.finishes.append((outcome,receipt is not None))
+            if len(self.finishes)==1:
+                # Simulate AsyncUnitOfWork committing, then preserving caller
+                # cancellation. The exact retry is the confirmation read.
+                raise asyncio.CancelledError
+            assert self.finishes[-1]==self.finishes[0]
+    class Evidence:
+        def attest_provider_usage(self,**_values):
+            return SimpleNamespace(receipt_id=uuid4())
+    calls=Calls()
+    gateway=ProviderGateway(Authorizer(),Budget(),calls,Evidence(),clock)
+    async def network(): return "ok"
+    async def observe(_result):
+        return ProviderUsageObservation(
+            (
+                LlmUsageUnits(category="llm",input_tokens=1,output_tokens=1)
+                if receipt_present else None
+            ),
+            "resp_1",
+        )
+    with pytest.raises(asyncio.CancelledError):
+        await gateway.send(
+            route,consumption,redaction_receipt_id,network,observe,
+        )
+    assert calls.finishes==[
+        ("succeeded",receipt_present),("succeeded",receipt_present),
     ]
 
 
@@ -8161,6 +8670,9 @@ async def test_unfinalized_stream_closes_once_as_unknown_overage(
 
 ```python
 # tests/integration/providers/test_gateway_runtime_wiring.py (Task-05 replacement)
+from tuntun_core.services.providers.review import SqlcipherCurrentProviderReviews
+
+
 def test_runtime_gateway_uses_exact_budget_evidence_services(
     production_core_container,
 ):
@@ -8170,6 +8682,14 @@ def test_runtime_gateway_uses_exact_budget_evidence_services(
     assert core_container.provider_gateway._evidence is core_container.budget_evidence
     assert core_container.provider_call_repository._evidence is core_container.budget_evidence
     assert core_container.provider_gateway._budget is core_container.budget_guard
+
+
+def test_production_container_constructs_sqlcipher_provider_review_gate(
+    production_container,
+) -> None:
+    assert type(production_container.core.budget_guard._reviews) is (
+        SqlcipherCurrentProviderReviews
+    )
 ```
 
 In `tests/integration/providers/test_call_proof_repository.py`, update post-Task-05
@@ -8177,11 +8697,31 @@ In `tests/integration/providers/test_call_proof_repository.py`, update post-Task
 `test_finish_rejects_proven_unsent_claim` unchanged in meaning. Its Task-05 form
 must still call `begin`, attempt `finish(call_id, "failed", route, None)` before
 `mark_sent`, assert `provider_call_unsent_requires_release`, and compare both SQL
-proof rows byte-for-byte before and after the rejection.
+proof rows byte-for-byte before and after the rejection. Add the exact retry test
+below so the gateway cancellation guarantee is exercised against the real SQL
+repository, not only its unit fake.
+
+```python
+# tests/integration/providers/test_call_proof_repository.py (append)
+@pytest.mark.asyncio
+async def test_finish_exact_retry_is_idempotent_but_changed_outcome_conflicts(
+    call_repository_fault_case,
+) -> None:
+    case=call_repository_fault_case(None)
+    call_id=await case.begin()
+    await case.mark_sent()
+    await case.finish(call_id,"failed")
+    terminal=await case.persisted_proof_rows()
+    await case.finish(call_id,"failed")
+    assert await case.persisted_proof_rows()==terminal
+    with pytest.raises(PermissionError,match="provider_call_finish_conflict"):
+        await case.finish(call_id,"ambiguous")
+    assert await case.persisted_proof_rows()==terminal
+```
 
 ```python
 # apps/core/src/tuntun_core/services/budget/reconciler.py
-from datetime import timedelta
+import asyncio
 from uuid import UUID
 
 from tuntun_contracts.budget import BudgetSettlementRequest
@@ -8196,11 +8736,20 @@ class ReconciliationEvidenceQuarantined(Exception):
 
 
 class ExpiredBudgetReconciler:
-    def __init__(self, uow_factory, clock, guard, batch_size=1000) -> None:
+    def __init__(
+        self,uow_factory,clock,guard,batch_size=1000,interval_seconds=60.0,
+    ) -> None:
+        if (
+            isinstance(interval_seconds,bool)
+            or not isinstance(interval_seconds,(int,float))
+            or not .001<=interval_seconds<=60.0
+        ):
+            raise ValueError("budget_reconciliation_interval_invalid")
         self._uow_factory = uow_factory
         self._clock = clock
         self._guard = guard
         self._batch_size = batch_size
+        self._interval_seconds=float(interval_seconds)
 
     async def _reconcile_batch(self,*,restart_cutoff=None) -> int:
         now = self._clock.now()
@@ -8289,7 +8838,12 @@ class ExpiredBudgetReconciler:
     async def run_periodically(self, stop) -> None:
         while not stop.is_set():
             await self.reconcile_batch()
-            await self._clock.wait_or_stop(timedelta(seconds=60), stop)
+            try:
+                await asyncio.wait_for(
+                    stop.wait(),timeout=self._interval_seconds,
+                )
+            except TimeoutError:
+                pass
 ```
 
 ```python
@@ -8303,6 +8857,16 @@ from pathlib import Path
 from tuntun_contracts.reachy import SafetyReceipt
 from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
 from tuntun_core.services.storage_time import utc_storage
+from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
+
+
+async def shutdown(coordinator:TurnCoordinator) -> None:
+    """Preserve the Task-02 full owned safety barrier."""
+    if type(coordinator) is not TurnCoordinator:
+        raise TypeError("coordinator must be an exact TurnCoordinator")
+    active=coordinator.active_turn_id()
+    if active is not None:
+        await coordinator.cancel(active,"shutdown")
 
 
 class CoreProcessLease:
@@ -8575,11 +9139,16 @@ from tuntun_core.services.providers.gateway import ProviderGateway
 from tuntun_core.services.providers.redaction_repository import (
     RedactionReceiptRepository,
 )
+from tuntun_core.services.providers.review import (
+    RuntimeProviderIdentityReader,SqlcipherCurrentProviderReviews,
+)
+from tuntun_core.services.transactions.protocols import UnitOfWorkProtocol
 
 
 class CurrentProviderReviews(Protocol):
     def require_current(
         self,
+        uow: UnitOfWorkProtocol,
         provider: str,
         model: str,
         purpose: str,
@@ -8691,7 +9260,7 @@ class ProductionContainer:
         clock: ClockPort,
         route_authorizer: RouteAuthorizerPort,
         price_catalog: PriceCatalog,
-        provider_reviews: CurrentProviderReviews,
+        runtime_provider_identities: RuntimeProviderIdentityReader,
         budget_evidence: BudgetEvidenceService,
         hard_limit: int = 150_000_000,
         soft_limit: int = 100_000_000,
@@ -8702,6 +9271,9 @@ class ProductionContainer:
             configured_state_root / "core-process.lock",
         )
         try:
+            provider_reviews=SqlcipherCurrentProviderReviews(
+                runtime_provider_identities,
+            )
             core = CoreContainer(
                 sqlcipher_uow_factory=sqlcipher_uow_factory,
                 clock=clock,
@@ -8744,7 +9316,9 @@ class ProductionContainer:
 `CoreProcessLease` before constructing `CoreContainer`, constructs exactly one
 `ExpiredBudgetReconciler`, `StartupTurnRecovery`, and
 `BudgetReconciliationSupervisor` from `core.budget_guard`, and registers that exact
-supervisor once in the immutable readiness dependencies. Construction failure
+supervisor once in the immutable readiness dependencies. It accepts the fixed
+runtime identity reader, constructs `SqlcipherCurrentProviderReviews` internally,
+and never accepts a production review bypass/fake. Construction failure
 releases the not-yet-published lease; normal shutdown releases it only through the
 supervisor after traffic and its worker stop. The Task-04
 `build_provider_gateway` factory is deleted at this point; no production or test
@@ -8752,7 +9326,7 @@ path can activate a gateway with a budget fake after Task 05.
 
 The SQL shown is the contract, not permission to infer unsent from age alone. A releasable reservation must be `reserved`, carry budget outcome `allow|allow_soft_warning`, and use exact ordering version `1`. It is proven unsent only as `(phase=not_claimed, no call row)` or `(phase=claim_begun, exactly one matching provider-call row with ordering=1, phase=claim_begun, outcome=started)`. `_calls.begin` creates that second pair atomically; `mark_sent` and `mark_network_invocation_starting` follow. A proven-unsent `claim_begun` transaction changes the call to `outcome=cancelled, transport_phase=finished, finished_at=<now>` and the reservation to `state=released, transport_phase=finished, reconciled_at=<same transaction>`; the no-call case closes only the reservation. Recovery of one matching started sent call changes it to `outcome=ambiguous, transport_phase=finished, finished_at=<now>` and conservatively settles the signed reservation in the same transaction. An already terminal call is accepted only with exact `finished` phase/non-null timestamp: `succeeded` requires a complete verified usage receipt and is repriced against the immutable snapshot (even above the reservation), while `failed|cancelled|ambiguous` must have all usage-receipt columns null and charge the signed reservation. Both ordinary settlement and recovery invoke the same locked terminalizer and unique ledger insertion. Duplicate calls, ordering/phase disagreement, a terminal call without `finished_at`, a missing half after claim, receipt material on a non-success outcome, or any unknown shape raises `budget_transport_proof_quarantined` and rolls back the entire batch. Invalid/missing successful usage or invalid price/FX evidence rolls the batch back, persists a separate unknown-overage freeze/alert, and keeps startup unready or withdraws periodic readiness until owner repair/restart. No successful terminalization leaves `provider_calls.outcome='started'`. The reservation's persisted `month_key` is copied to the ledger; reconciliation after the Singapore month boundary never moves an August charge into September.
 
-`mark_sent`, provider-call terminalization, reservation terminalization, and ledger insertion serialize on the same SQLCipher writer and use mutually exclusive conditional updates. Fault injection after either half proves transaction rollback restores both rows, while retry closes them exactly once. The reserve transaction also persists the content-free exact household/turn/request/attempt binding under `budget.turn.<reservation_id>`. `reconcile_turn` treats that server-side binding as authoritative, rejects supplied mismatches, discovers a committed reservation missed by the in-memory track step, conservatively settles any such open pair, and treats an already terminal exact pair as an idempotent retry after partial barrier failure. Thus an empty in-memory attempt set is not evidence that no durable attempt exists.
+`mark_sent`, provider-call terminalization, reservation terminalization, and ledger insertion serialize on the same SQLCipher writer and use mutually exclusive conditional updates. Fault injection after either half proves transaction rollback restores both rows, while retry closes them exactly once. The reserve transaction also persists the content-free exact household/turn/request/attempt binding under `budget.turn.<reservation_id>`. `reconcile_turn` treats that server-side binding as authoritative, rejects supplied mismatches, discovers a committed reservation missed by the in-memory track step, releases the two exact durable proven-unsent shapes without a ledger row, conservatively settles only sent/ambiguous shapes, and treats an already terminal exact pair as an idempotent retry after partial barrier failure. Thus an empty in-memory attempt set is not evidence that no durable attempt exists.
 
 The production bootstrap obtains one nonblocking `CoreProcessLease` before opening the Reachy connection, constructs exactly one reconciler and one `StartupTurnRecovery`, and registers their ordered supervisor as a required readiness dependency. `core_process_lock_path` is the fixed absolute lock path in the same configured owner-only `0700` state root as SQLCipher; it is not accepted from a request, environment override, or relative working directory. The lock file is a non-symlink regular file owned by the effective user with exact mode `0600`, and its descriptor remains held until traffic, readiness, and the periodic worker have all stopped. A competing process cannot call either recovery leg or publish readiness. After current commissioning/firewall/route-neighbor gates and the required RTC-or-signed-core secure-time lifecycle has passed its fresh strict-mTLS probe, the authenticated Reachy application connection is established. Before any conversation/admin traffic or readiness, startup concurrently verifies an exact all-true global `SafetyReceipt(turn_id=None)` and drains every `reserved|sent` row created at or before the process-start cutoff, including unexpired rows. Only after both succeed does it close prior-process open sessions as `cancelled`. A lease, time, safety, reconciliation, or session-tombstone failure leaves readiness false and the open session recoverable for the next process; one leg cannot suppress the other. It then drains expired batches and starts the at-most-60-second periodic loop; a drain failure prevents readiness and an unexpected worker exception/cancellation immediately withdraws it. Reservations that expire after startup are therefore reconciled without requiring a restart. Restart, duplicate reconciliation calls and privacy reconciliation are idempotent because terminal state and the unique reservation-ledger key prevent a second effect; a second supervisor in one process is forbidden. No background path calls provider I/O, resumes a pre-crash turn, or relabels an old reservation with the current month.
 
@@ -8988,10 +9562,11 @@ from typing import Annotated,Literal
 from urllib.parse import urlsplit
 import re
 
-from pydantic import AwareDatetime,Field
+from pydantic import AwareDatetime,Field,field_validator
 
 from tuntun_contracts.base import ContractModel
 from tuntun_core.config.loader import read_bounded_strict_yaml
+from tuntun_core.services.storage_time import parse_utc_storage
 
 _DIGEST=re.compile(r"^[0-9a-f]{64}$")
 MAX_RATE_MICROS_USD=1_000_000_000
@@ -9022,6 +9597,11 @@ class PriceCatalogDocumentV1(ContractModel):
     expires_at:AwareDatetime
     records:Annotated[tuple[PriceCatalogRowV1,...],Field(min_length=1,max_length=64)]
 
+    @field_validator("retrieved_at","expires_at",mode="before")
+    @classmethod
+    def exact_utc_strings(cls,value):
+        return parse_utc_storage(value)
+
 
 class FxCatalogDocumentV1(ContractModel):
     micros_sgd_per_usd:Annotated[int,Field(ge=1,le=MAX_FX_MICROS_SGD_PER_USD)]
@@ -9030,6 +9610,11 @@ class FxCatalogDocumentV1(ContractModel):
     expires_at:AwareDatetime
     source:Annotated[str,Field(min_length=1,max_length=512)]
     source_sha256:Annotated[str,Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @field_validator("effective_at","expires_at",mode="before")
+    @classmethod
+    def exact_utc_strings(cls,value):
+        return parse_utc_storage(value)
 
 
 def _valid_interval(effective_at,expires_at) -> bool:
@@ -9315,13 +9900,12 @@ providers:
 ```yaml
 # config/providers/prices/openai-2026-08-27.yaml
 pricing_version: openai-2026-08-27
-retrieved_at: 2026-08-27T00:00:00Z
-expires_at: 2026-11-20T00:00:00Z
+retrieved_at: "2026-08-27T00:00:00.000000Z"
+expires_at: "2026-11-20T00:00:00.000000Z"
 records:
   - {provider: openai, model: gpt-5.6-sol, category: llm, native_currency: USD, input_micro_usd_per_million: 4000000, output_micro_usd_per_million: 20000000, audio_micro_usd_per_minute: 0, web_search_micro_usd_per_call: 0, primary_accounting_basis: provider_reported_exact, missing_evidence_policy: freeze_unknown_overage, source_url: "https://developers.openai.com/api/docs/models/gpt-5.6-sol", source_sha256: "c028e5b0700e60f80e0f5bdb59bc9653e3c3543d5436287d5337f7488d62dafa"}
   - {provider: openai, model: gpt-transcribe, category: stt, native_currency: USD, input_micro_usd_per_million: 0, output_micro_usd_per_million: 0, audio_micro_usd_per_minute: 4500, web_search_micro_usd_per_call: 0, primary_accounting_basis: provider_reported_exact, missing_evidence_policy: freeze_unknown_overage, source_url: "https://developers.openai.com/api/docs/models/gpt-transcribe", source_sha256: "4682df2d8f9ccee74d7b983ae891ca1daa11b0ab7a413d200e5710c1166b1648"}
   - {provider: openai, model: tts-1, category: tts, native_currency: USD, input_micro_usd_per_million: 15000000, output_micro_usd_per_million: 0, audio_micro_usd_per_minute: 0, web_search_micro_usd_per_call: 0, primary_accounting_basis: request_bound_exact, missing_evidence_policy: freeze_unknown_overage, source_url: "https://developers.openai.com/api/docs/models/tts-1", source_sha256: "0ec6885e9e7b8efeff2a66784f6d7e490a85a97ff85eeb26a7b375b9962bed89"}
-  - {provider: openai, model: gpt-5.6-sol, category: web_search, native_currency: USD, input_micro_usd_per_million: 4000000, output_micro_usd_per_million: 20000000, audio_micro_usd_per_minute: 0, web_search_micro_usd_per_call: 10000, primary_accounting_basis: provider_reported_exact, missing_evidence_policy: conservative_full_reservation, source_url: "https://developers.openai.com/api/docs/pricing", source_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
 ```
 
 ```yaml
@@ -9329,8 +9913,8 @@ records:
 fx_version: bootstrap-safety-factor-2026-08-27
 source: owner_policy
 micros_sgd_per_usd: 1500000
-effective_at: 2026-08-27T00:00:00Z
-expires_at: 2026-09-26T00:00:00Z
+effective_at: "2026-08-27T00:00:00.000000Z"
+expires_at: "2026-09-26T00:00:00.000000Z"
 source_sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 ```
 
@@ -9338,14 +9922,14 @@ source_sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 <!-- docs/provider-sources/openai-2026-08-27.md -->
 # OpenAI source snapshot — 2026-08-27
 
-Owner review must capture and hash the official GPT-5.6 Sol, GPT Transcribe, `tts-1`, `/audio/speech`, web-search pricing/tool-event, endpoint-retention, business-data-control, and project Spend Limit evidence named in the master plan. The YAML seed hashes are test sentinels only and keep cloud disabled; commissioning replaces each with the SHA-256 of the locally retained owner-reviewed capture, records dashboard-setting commitments, and creates a review expiring within 90 days. The review proves one dedicated Tuntun project, binds its opaque project-ID commitment and an actively enforcing provider-month USD threshold no greater than `100000000` micro-USD, and proves the Keychain runtime credential is project-scoped rather than an organization/project admin key. A missing, warning-only, raised, changed-project, changed-cycle/currency, stale, or noncanonical setting denies all OpenAI routes. The local S$150 `Asia/Singapore` ledger remains authoritative because the provider cycle is independent. The `tts-1` review binds character pricing, the 4,096-character request limit, exact NFC character-count algorithm, binary/event-stream response shape with no usage, and strict request-ID capture. Search review binds the fixed per-call rate, model-token rates, `max_tool_calls=1`, and exact event schema. Any changed page/config commitment, missing capture, stale price, stale FX, stale review, or failed isolated account fixture denies that route.
+Owner review must capture and hash the official GPT-5.6 Sol, GPT Transcribe, `tts-1`, `/audio/speech`, endpoint-retention, business-data-control, and project Spend Limit evidence named in the master plan. The YAML seed hashes are test sentinels only and keep cloud disabled; commissioning replaces each with the SHA-256 of the locally retained owner-reviewed capture, records dashboard-setting commitments, and creates a review expiring within 90 days. The review proves one dedicated Tuntun project, binds its opaque project-ID commitment and an actively enforcing provider-month USD threshold no greater than `100000000` micro-USD, and proves the Keychain runtime credential is project-scoped rather than an organization/project admin key. A missing, warning-only, raised, changed-project, changed-cycle/currency, stale, or noncanonical setting denies all OpenAI routes. The local S$150 `Asia/Singapore` ledger remains authoritative because the provider cycle is independent. The `tts-1` review binds character pricing, the 4,096-character request limit, exact NFC character-count algorithm, binary/event-stream response shape with no usage, and strict request-ID capture. Web search has no checked-in production price or route registration in Task 05 and remains unreachable until its dedicated work package passes. Any changed page/config commitment, missing capture, stale price, stale FX, stale review, or failed isolated account fixture denies that route.
 ```
 
 - [ ] **Step 4: Run green tests, concurrency, and static checks**
 
-Run: `uv run pytest tests/unit/budget tests/security/test_provider_review_freshness.py tests/security/test_provider_boundary.py tests/integration/storage/test_migrations.py tests/integration/budget/test_hard_stop.py tests/integration/budget/test_expiry_reconciliation.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/integration/providers/test_usage_receipt_repository.py tests/contract/test_budget_port.py tests/contract/test_v1_types_and_ports.py -q`
+Run: `uv run pytest tests/unit/budget tests/security/test_provider_review_freshness.py tests/security/test_provider_boundary.py tests/integration/storage/test_migrations.py tests/integration/budget/test_hard_stop.py tests/integration/budget/test_expiry_reconciliation.py tests/integration/test_session_exclusivity.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/integration/providers/test_usage_receipt_repository.py tests/contract/test_budget_port.py tests/contract/test_v1_types_and_ports.py -q`
 
-Expected: PASS; the 50-worker test reports a maximum aggregate of exactly `150000000` or lower; an unclean restart proves exact global Reachy silence plus terminal unexpired prior-process attempts before its persisted session closes/readiness publishes; every successful recovery leaves no matching provider call `started`, closes both proof phases/timestamps transactionally, and remains idempotent; injected between-half faults roll back both rows; malformed proof multiplicity/order/phase blocks readiness without partial terminalization; and every injected recovery-leg failure keeps readiness false.
+Expected: PASS; the 50-worker test reports a maximum aggregate of exactly `150000000` or lower; an unclean restart proves exact global Reachy silence plus terminal unexpired prior-process attempts before its persisted session closes/readiness publishes; every successful recovery leaves no matching provider call `started`, closes both proof phases/timestamps transactionally, and remains idempotent; silently ignored reservation, turn-binding, and ledger inserts are detected and roll back their transactions; malformed phase pairs quarantine without partial terminalization; and the existing session-shutdown contract remains green.
 
 Run: `uv run ruff check apps/core/src/tuntun_core/adapters/sqlcipher/foundation_0001.py apps/core/src/tuntun_core/services/storage_time.py apps/core/src/tuntun_core/services/budget apps/core/src/tuntun_core/services/providers/review.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/bootstrap/lifecycle.py apps/core/src/tuntun_core/bootstrap/container.py tests/fixtures/budget.py tests/fixtures/provider_egress.py tests/unit/budget tests/security/test_provider_review_freshness.py tests/security/test_provider_boundary.py tests/integration/storage/test_migrations.py tests/integration/budget tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/integration/providers/test_usage_receipt_repository.py tests/contract/test_budget_port.py tests/contract/test_v1_types_and_ports.py && uv run mypy apps/core/src/tuntun_core/adapters/sqlcipher/foundation_0001.py apps/core/src/tuntun_core/services/storage_time.py apps/core/src/tuntun_core/services/budget apps/core/src/tuntun_core/services/providers/review.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/bootstrap/lifecycle.py apps/core/src/tuntun_core/bootstrap/container.py`
 
@@ -9354,7 +9938,7 @@ Expected: PASS with no diagnostics.
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add apps/core/src/tuntun_core/adapters/sqlcipher/foundation_0001.py apps/core/src/tuntun_core/services/storage_time.py apps/core/src/tuntun_core/services/budget/pricing.py apps/core/src/tuntun_core/services/budget/catalog.py apps/core/src/tuntun_core/services/budget/evidence.py apps/core/src/tuntun_core/services/budget/month.py apps/core/src/tuntun_core/services/budget/guard.py apps/core/src/tuntun_core/services/budget/reconciler.py apps/core/src/tuntun_core/services/providers/review.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/bootstrap/lifecycle.py apps/core/src/tuntun_core/bootstrap/container.py config/providers/default.yaml config/providers/prices/openai-2026-08-27.yaml config/providers/fx/bootstrap-safety-factor-2026-08-27.yaml docs/provider-sources/openai-2026-08-27.md tests/fixtures/budget.py tests/fixtures/provider_egress.py tests/unit/budget/test_boundaries.py tests/unit/budget/test_pricing.py tests/unit/budget/test_currency.py tests/unit/budget/test_month_boundary.py tests/unit/budget/test_settlement.py tests/security/test_provider_review_freshness.py tests/integration/storage/test_migrations.py tests/integration/budget/test_hard_stop.py tests/integration/budget/test_expiry_reconciliation.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/integration/providers/test_usage_receipt_repository.py tests/contract/test_budget_port.py tests/contract/test_v1_types_and_ports.py
+git add apps/core/src/tuntun_core/adapters/sqlcipher/foundation_0001.py apps/core/src/tuntun_core/services/storage_time.py apps/core/src/tuntun_core/services/budget/pricing.py apps/core/src/tuntun_core/services/budget/catalog.py apps/core/src/tuntun_core/services/budget/evidence.py apps/core/src/tuntun_core/services/budget/month.py apps/core/src/tuntun_core/services/budget/guard.py apps/core/src/tuntun_core/services/budget/reconciler.py apps/core/src/tuntun_core/services/providers/review.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/bootstrap/lifecycle.py apps/core/src/tuntun_core/bootstrap/container.py config/providers/default.yaml config/providers/prices/openai-2026-08-27.yaml config/providers/fx/bootstrap-safety-factor-2026-08-27.yaml docs/provider-sources/openai-2026-08-27.md tests/fixtures/budget.py tests/fixtures/provider_egress.py tests/unit/budget/test_boundaries.py tests/unit/budget/test_pricing.py tests/unit/budget/test_currency.py tests/unit/budget/test_month_boundary.py tests/unit/budget/test_settlement.py tests/security/test_provider_review_freshness.py tests/security/test_provider_boundary.py tests/integration/storage/test_migrations.py tests/integration/budget/test_hard_stop.py tests/integration/budget/test_expiry_reconciliation.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/integration/providers/test_usage_receipt_repository.py tests/contract/test_budget_port.py tests/contract/test_v1_types_and_ports.py
 git diff --cached --check
 git commit -m "feat(budget): reserve and settle every provider attempt"
 ```
@@ -9403,6 +9987,7 @@ git commit -m "feat(budget): reserve and settle every provider attempt"
 - Retry limits: STT upload `1` attempt; reasoning `2` attempts total; each TTS sentence segment `2` attempts total. Only pre-response connection failure, HTTP 408, 409, 429, 500, 502, 503, and 504 are retryable. Cancellation, validation errors, other 4xx responses, and a settled turn are never retried.
 - Transcription language metadata is truthful: the optional provider `languages` field may be absent or a bounded array of zero through eight entries whose entries are strict objects/models exposing one documented ISO `code`; absent and provider-documented empty/uncertain results normalize to `unknown`. Exact `en`, exact `hi`, and a duplicate-free set containing both normalize to `en`, `hi`, and `hinglish`, respectively, while every other shape emits `unknown`. The turn-local deterministic tracker, not the transport adapter, derives later code-switching from transcript evidence and bounded recent-turn context.
 - Family voice readiness is a disjunction, never optimistic prose. Cloud TTS is eligible only after the `tts-1` request-bound accounting capability receipt passes. Otherwise the concrete local macOS adapter must pass exact `/usr/bin/say` and `/usr/bin/afconvert` owner/license/hash receipts, installed English and Hindi voice IDs, no-network execution, PCM format, Hindi/English/Hinglish corpus intelligibility, time-to-first-audio/total latency, and cold-restart voice-presence checks. If neither branch passes, Stage 1 readiness and the family-private-beta gate remain false.
+- Task 06 does not smuggle search through the reasoning adapter. `AttemptTemplate`, route purposes, registered adapters, tests, and UI capability evidence remain closed to STT/reasoning/TTS; no `web_search` or `experimental_web_search` string is accepted until the dedicated search work package named by Task 05 lands.
 
 - [ ] **Step 1: Write failing per-attempt reservation and telemetry tests**
 
@@ -9410,8 +9995,10 @@ git commit -m "feat(budget): reserve and settle every provider attempt"
 # tests/integration/providers/test_attempt_runner.py
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Literal, cast
+import unicodedata
 from uuid import uuid4
 
 import pytest
@@ -9478,6 +10065,34 @@ def _tts_template() -> AttemptTemplate:
     )
 
 
+def _stt_template() -> AttemptTemplate:
+    return AttemptTemplate(
+        request_id=uuid4(),purpose="cloud_stt",household_id=uuid4(),
+        subject_id=None,session_id=uuid4(),turn_id=uuid4(),provider="openai",
+        model="gpt-transcribe",
+        request_commitment=Commitment(
+            algorithm="HMAC-SHA-256",key_id="route-hmac-v1",
+            value_b64="A"*43+"=",
+        ),
+        max_input_bytes=8_388_608,max_input_units=90_000,
+        input_bytes=1_024,input_units=500,privacy_receipt_id=uuid4(),
+        consent_receipt_ids=(uuid4(),),maximum_sensitivity=Sensitivity.PERSONAL,
+        month_key="2026-08",category="stt",
+        usage_ceiling=SttUsageUnits(category="stt",audio_millis=90_000),
+    )
+
+
+@pytest.mark.parametrize("purpose",("web_search","experimental_web_search"))
+def test_search_attempt_purposes_fail_closed_with_controlled_error(purpose) -> None:
+    with pytest.raises(ValueError,match="attempt_budget_purpose_mismatch"):
+        replace(
+            _reasoning_template(),
+            purpose=cast(
+                Literal["cloud_stt","cloud_reasoning","cloud_tts"],purpose,
+            ),
+        )
+
+
 class _BlockingSettlementBudget(RecordingBudget):
     def __init__(self,clock) -> None:
         super().__init__(clock)
@@ -9488,6 +10103,18 @@ class _BlockingSettlementBudget(RecordingBudget):
         self.settle_started.set()
         await self.allow_settle.wait()
         return await super().settle(request)
+
+
+class _BlockingReleaseBudget(RecordingBudget):
+    def __init__(self,clock) -> None:
+        super().__init__(clock)
+        self.release_started=asyncio.Event()
+        self.allow_release=asyncio.Event()
+
+    async def release_unsent(self,reservation_id,attempt_id,proof):
+        self.release_started.set()
+        await self.allow_release.wait()
+        return await super().release_unsent(reservation_id,attempt_id,proof)
 
 
 @pytest.mark.asyncio
@@ -9505,6 +10132,9 @@ async def test_reasoning_retry_has_distinct_authorization_and_reservation() -> N
         nonlocal calls
         calls += 1
         if calls == 1:
+            await budget.mark_sent(
+                _route.budget_reservation_id,_route.attempt_id,
+            )
             raise TransientProviderError(
                 status_code=503,disposition="sent",evidence_code="http_503",
             )
@@ -9559,6 +10189,70 @@ async def test_gateway_pre_network_failure_releases_reservation_without_egress(
 
 
 @pytest.mark.asyncio
+async def test_stt_local_byte_mismatch_releases_without_network_or_ledger() -> None:
+    clock=FakeClock(datetime(2026,8,27,tzinfo=UTC))
+    budget=RecordingBudget(clock)
+    attempts=RecordingTurnAttempts(budget)
+    runner=AttemptRunner(
+        RecordingRouteAuthorizer(clock),budget,attempts,clock,
+    )
+    network_calls=0
+
+    async def invoke(_route,_consumption):
+        nonlocal network_calls
+        body=b"short"
+        declared_bytes=len(body)+1
+        if len(body)!=declared_bytes:
+            raise ValueError("WAV byte count mismatch")
+        network_calls+=1
+        return "unreachable"
+
+    with pytest.raises(ValueError,match="WAV byte count mismatch"):
+        await runner.run(
+            _stt_template(),RetryPolicy(max_attempts=1,base_delay_ms=1),invoke,
+        )
+    assert network_calls==0
+    assert budget.released_pairs==budget.terminal_pairs
+    assert budget.conservative_settlements==[]
+    assert attempts.completed==attempts.tracked
+
+
+@pytest.mark.asyncio
+async def test_tts_local_non_nfc_releases_without_network_or_ledger() -> None:
+    clock=FakeClock(datetime(2026,8,27,tzinfo=UTC))
+    budget=RecordingBudget(clock)
+    attempts=RecordingTurnAttempts(budget)
+    runner=AttemptRunner(
+        RecordingRouteAuthorizer(clock),budget,attempts,clock,
+    )
+    template=_tts_template()
+    network_calls=0
+
+    def invoke(_route,_consumption) -> AsyncIterator[SpeechChunk]:
+        async def source() -> AsyncIterator[SpeechChunk]:
+            nonlocal network_calls
+            text="e\u0301"
+            if unicodedata.normalize("NFC",text)!=text:
+                raise ValueError("tts_text_must_be_bounded_nfc")
+            network_calls+=1
+            if False:
+                yield SpeechChunk(
+                    request_id=template.request_id,sequence=0,
+                    pcm=b"unreachable",final=False,
+                )
+        return source()
+
+    with pytest.raises(ValueError,match="tts_text_must_be_bounded_nfc"):
+        await _collect_speech(runner.stream(
+            template,RetryPolicy(max_attempts=1,base_delay_ms=1),invoke,
+        ))
+    assert network_calls==0
+    assert budget.released_pairs==budget.terminal_pairs
+    assert budget.conservative_settlements==[]
+    assert attempts.completed==attempts.tracked
+
+
+@pytest.mark.asyncio
 async def test_stt_never_retries_after_upload() -> None:
     clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
     budget=RecordingBudget(clock)
@@ -9566,24 +10260,12 @@ async def test_stt_never_retries_after_upload() -> None:
         RecordingRouteAuthorizer(clock),budget,RecordingTurnAttempts(budget),clock,
     )
 
-    request_id = uuid4()
-    template = AttemptTemplate(
-        request_id=request_id, purpose="cloud_stt", household_id=uuid4(), subject_id=None,
-        session_id=uuid4(), turn_id=uuid4(), provider="openai", model="gpt-transcribe",
-        request_commitment=Commitment(
-            algorithm="HMAC-SHA-256",key_id="route-hmac-v1",
-            value_b64="A"*43+"=",
-        ),
-        max_input_bytes=8_388_608, max_input_units=90_000, input_bytes=1_024, input_units=500,
-        privacy_receipt_id=uuid4(),
-        consent_receipt_ids=(uuid4(),),maximum_sensitivity=Sensitivity.PERSONAL,
-        month_key="2026-08",
-        category="stt",usage_ceiling=SttUsageUnits(
-            category="stt",audio_millis=90_000,
-        ),
-    )
+    template=_stt_template()
 
     async def fail(_route, _supplied) -> str:
+        await budget.mark_sent(
+            _route.budget_reservation_id,_route.attempt_id,
+        )
         raise TransientProviderError(status_code=503, disposition="sent", evidence_code="http_503")
 
     with pytest.raises(TransientProviderError):
@@ -9606,6 +10288,9 @@ async def test_stream_terminal_marker_is_budget_and_turn_completion_barrier() ->
 
     def invoke(route,_consumption) -> AsyncIterator[SpeechChunk]:
         async def source() -> AsyncIterator[SpeechChunk]:
+            await budget.mark_sent(
+                route.budget_reservation_id,route.attempt_id,
+            )
             yield SpeechChunk(
                 request_id=template.request_id,sequence=0,pcm=b"pcm",final=False,
             )
@@ -9648,6 +10333,9 @@ async def test_stream_retries_only_never_sent_before_first_chunk() -> None:
         async def source() -> AsyncIterator[SpeechChunk]:
             if this_attempt==1:
                 raise TransientProviderError(503,"never_sent","connect_failed")
+            await budget.mark_sent(
+                route.budget_reservation_id,route.attempt_id,
+            )
             yield SpeechChunk(
                 request_id=template.request_id,sequence=0,pcm=b"pcm",final=False,
             )
@@ -9680,10 +10368,13 @@ async def test_stream_sent_or_unknown_failure_before_pcm_never_retries(
     template=_tts_template()
     calls=0
 
-    def invoke(_route,_consumption) -> AsyncIterator[SpeechChunk]:
+    def invoke(route,_consumption) -> AsyncIterator[SpeechChunk]:
         nonlocal calls
         calls+=1
         async def source() -> AsyncIterator[SpeechChunk]:
+            await budget.mark_sent(
+                route.budget_reservation_id,route.attempt_id,
+            )
             if False:
                 yield SpeechChunk(
                     request_id=template.request_id,sequence=0,
@@ -9760,7 +10451,56 @@ async def test_stream_typed_pre_network_failure_terminalizes_once_without_retry(
 
 
 @pytest.mark.asyncio
-async def test_stream_synchronous_invoke_failure_settles_without_retry() -> None:
+@pytest.mark.parametrize("mode",("run","stream"))
+async def test_cancellation_during_typed_pre_network_terminalization_wins(
+    mode:Literal["run","stream"],
+) -> None:
+    clock=FakeClock(datetime(2026,8,27,tzinfo=UTC))
+    budget=_BlockingReleaseBudget(clock)
+    attempts=RecordingTurnAttempts(budget)
+    runner=AttemptRunner(
+        RecordingRouteAuthorizer(clock),budget,attempts,clock,
+    )
+
+    def failure(route):
+        return ProviderNotSentError(
+            route.budget_reservation_id,route.attempt_id,
+            "validation_failed_before_network",
+            RuntimeError("original provider failure"),
+        )
+
+    if mode=="run":
+        async def invoke(route,_consumption):
+            raise failure(route)
+        task=asyncio.create_task(runner.run(
+            _reasoning_template(),
+            RetryPolicy(max_attempts=1,base_delay_ms=1),invoke,
+        ))
+    else:
+        template=_tts_template()
+        def invoke(route,_consumption) -> AsyncIterator[SpeechChunk]:
+            async def source() -> AsyncIterator[SpeechChunk]:
+                raise failure(route)
+                if False:
+                    yield SpeechChunk(
+                        request_id=template.request_id,sequence=0,
+                        pcm=b"unreachable",final=False,
+                    )
+            return source()
+        task=asyncio.create_task(_collect_speech(runner.stream(
+            template,RetryPolicy(max_attempts=1,base_delay_ms=1),invoke,
+        )))
+    await asyncio.wait_for(budget.release_started.wait(),WAIT_SECONDS)
+    task.cancel()
+    budget.allow_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task,WAIT_SECONDS)
+    assert budget.released_pairs==budget.terminal_pairs
+    assert attempts.completed==attempts.tracked
+
+
+@pytest.mark.asyncio
+async def test_stream_synchronous_local_validation_failure_releases_without_retry() -> None:
     clock=FakeClock(datetime(2026,8,27,tzinfo=UTC))
     budget=RecordingBudget(clock)
     attempts=RecordingTurnAttempts(budget)
@@ -9782,8 +10522,8 @@ async def test_stream_synchronous_invoke_failure_settles_without_retry() -> None
 
     with pytest.raises(RuntimeError,match="synchronous adapter construction failure"):
         await asyncio.wait_for(collect(),WAIT_SECONDS)
-    assert calls==1 and not budget.released_pairs
-    assert len(budget.conservative_settlements)==1
+    assert calls==1 and budget.released_pairs==budget.terminal_pairs
+    assert budget.conservative_settlements==[]
     assert attempts.completed==attempts.tracked
 
 
@@ -9837,11 +10577,14 @@ async def test_stream_after_first_pcm_never_retries_even_never_sent_error() -> N
     closed=asyncio.Event()
     calls=0
 
-    def invoke(_route,_consumption) -> AsyncIterator[SpeechChunk]:
+    def invoke(route,_consumption) -> AsyncIterator[SpeechChunk]:
         nonlocal calls
         calls+=1
         async def source() -> AsyncIterator[SpeechChunk]:
             try:
+                await budget.mark_sent(
+                    route.budget_reservation_id,route.attempt_id,
+                )
                 yield SpeechChunk(
                     request_id=template.request_id,sequence=0,
                     pcm=b"pcm",final=False,
@@ -9876,6 +10619,9 @@ async def test_stream_backpressure_never_prefetches_second_pcm_chunk() -> None:
 
     def invoke(route,_consumption) -> AsyncIterator[SpeechChunk]:
         async def source() -> AsyncIterator[SpeechChunk]:
+            await budget.mark_sent(
+                route.budget_reservation_id,route.attempt_id,
+            )
             yield SpeechChunk(
                 request_id=template.request_id,sequence=0,
                 pcm=b"a"*65_536,final=False,
@@ -9929,9 +10675,12 @@ async def test_stream_invalid_terminal_protocol_settles_once_and_exposes_no_fina
     template=_tts_template()
     closed=asyncio.Event()
 
-    def invoke(_route,_consumption) -> AsyncIterator[SpeechChunk]:
+    def invoke(route,_consumption) -> AsyncIterator[SpeechChunk]:
         async def source() -> AsyncIterator[SpeechChunk]:
             try:
+                await budget.mark_sent(
+                    route.budget_reservation_id,route.attempt_id,
+                )
                 for sequence,(final,pcm) in enumerate(chunks):
                     yield SpeechChunk(
                         request_id=template.request_id,sequence=sequence,
@@ -9970,9 +10719,12 @@ async def test_stream_close_or_cancel_shields_one_terminal_settlement(
     source_closed=asyncio.Event()
     never=asyncio.Event()
 
-    def invoke(_route,_consumption) -> AsyncIterator[SpeechChunk]:
+    def invoke(route,_consumption) -> AsyncIterator[SpeechChunk]:
         async def source() -> AsyncIterator[SpeechChunk]:
             try:
+                await budget.mark_sent(
+                    route.budget_reservation_id,route.attempt_id,
+                )
                 yield SpeechChunk(
                     request_id=template.request_id,sequence=0,
                     pcm=b"pcm",final=False,
@@ -10582,10 +11334,7 @@ R = TypeVar("R")
 @dataclass(frozen=True, slots=True)
 class AttemptTemplate:
     request_id: UUID
-    purpose: Literal[
-        "cloud_stt", "cloud_reasoning", "cloud_tts",
-        "web_search", "experimental_web_search",
-    ]
+    purpose: Literal["cloud_stt", "cloud_reasoning", "cloud_tts"]
     household_id: UUID
     subject_id: UUID | None
     session_id: UUID
@@ -10601,15 +11350,18 @@ class AttemptTemplate:
     consent_receipt_ids: tuple[UUID, ...]
     maximum_sensitivity: Sensitivity
     month_key: str
-    category: Literal["stt", "llm", "tts", "web_search"]
+    category: Literal["stt", "llm", "tts"]
     usage_ceiling:UsageUnits
 
     def __post_init__(self) -> None:
         expected={
             "cloud_stt":"stt","cloud_reasoning":"llm","cloud_tts":"tts",
-            "web_search":"web_search","experimental_web_search":"web_search",
-        }[self.purpose]
-        if self.category!=expected or self.usage_ceiling.category!=expected:
+        }.get(self.purpose)
+        if (
+            expected is None
+            or self.category!=expected
+            or self.usage_ceiling.category!=expected
+        ):
             raise ValueError("attempt_budget_purpose_mismatch")
 
 
@@ -10778,20 +11530,26 @@ class AttemptRunner[T]:
                 budget_reservation_id=reservation.reservation_id,
                 maximum_sensitivity=template.maximum_sensitivity,
             ))
-        except BaseException:
+        except BaseException as error:
             proof=self._proof(
                 reservation,attempt_id,
                 "authorization_failed" if tracked else "turn_tracking_rejected",
                 self._clock,
             )
             if tracked:
-                await self._shield_terminal(self._release_or_settle_terminal(
-                    template,reservation,attempt_id,proof,
-                ))
+                _,cancelled=await self._shield_terminal(
+                    self._release_or_settle_terminal(
+                        template,reservation,attempt_id,proof,
+                    ),
+                )
             else:
-                await self._shield_terminal(self._release_untracked_or_settle(
-                    reservation,attempt_id,proof,
-                ))
+                _,cancelled=await self._shield_terminal(
+                    self._release_untracked_or_settle(
+                        reservation,attempt_id,proof,
+                    ),
+                )
+            if cancelled:
+                raise asyncio.CancelledError from error
             raise
         consumption=RouteConsumption(
             request_id=template.request_id,attempt_id=attempt_id,
@@ -10867,18 +11625,30 @@ class AttemptRunner[T]:
             try:
                 result=await invoke(lease.route,lease.consumption)
             except ProviderNotSentCancellation as error:
-                await self._shield_terminal(self._resolve_pre_network_failure(
-                    template,lease.reservation,lease.attempt_id,error,
-                ))
+                _,cancelled=await self._shield_terminal(
+                    self._resolve_pre_network_failure(
+                        template,lease.reservation,lease.attempt_id,error,
+                    ),
+                )
+                if cancelled:
+                    raise asyncio.CancelledError from error
                 raise error.cause from error
             except ProviderNotSentError as error:
-                await self._shield_terminal(self._resolve_pre_network_failure(
-                    template,lease.reservation,lease.attempt_id,error,
-                ))
+                _,cancelled=await self._shield_terminal(
+                    self._resolve_pre_network_failure(
+                        template,lease.reservation,lease.attempt_id,error,
+                    ),
+                )
+                if cancelled:
+                    raise asyncio.CancelledError from error
                 raise error.cause from error
             except asyncio.CancelledError:
-                await self._shield_terminal(self._settle_terminal(
+                await self._shield_terminal(self._release_or_settle_terminal(
                     template,lease.reservation,lease.attempt_id,
+                    self._proof(
+                        lease.reservation,lease.attempt_id,
+                        "caller_cancelled_before_or_after_claim",self._clock,
+                    ),
                 ))
                 raise
             except TransientProviderError as error:
@@ -10909,10 +11679,18 @@ class AttemptRunner[T]:
                     raise
                 await asyncio.sleep(policy.base_delay_ms * (2**index) / 1_000)
                 continue
-            except BaseException:
-                await self._shield_terminal(self._settle_terminal(
-                    template,lease.reservation,lease.attempt_id,
-                ))
+            except BaseException as error:
+                _,cancelled=await self._shield_terminal(
+                    self._release_or_settle_terminal(
+                        template,lease.reservation,lease.attempt_id,
+                        self._proof(
+                            lease.reservation,lease.attempt_id,
+                            "invoke_failed_before_or_after_claim",self._clock,
+                        ),
+                    ),
+                )
+                if cancelled:
+                    raise asyncio.CancelledError from error
                 raise
             # The gateway persisted any exact usage receipt before returning.
             # Settlement resolves it from SQLCipher; result data is never cost authority.
@@ -10983,14 +11761,22 @@ class AttemptRunner[T]:
                 yield terminal_chunk
                 return
             except ProviderNotSentCancellation as error:
-                await self._shield_terminal(self._close_then_resolve_pre_network(
-                    provider_stream,template,lease,error,
-                ))
+                _,cancelled=await self._shield_terminal(
+                    self._close_then_resolve_pre_network(
+                        provider_stream,template,lease,error,
+                    ),
+                )
+                if cancelled:
+                    raise asyncio.CancelledError from error
                 raise error.cause from error
             except ProviderNotSentError as error:
-                await self._shield_terminal(self._close_then_resolve_pre_network(
-                    provider_stream,template,lease,error,
-                ))
+                _,cancelled=await self._shield_terminal(
+                    self._close_then_resolve_pre_network(
+                        provider_stream,template,lease,error,
+                    ),
+                )
+                if cancelled:
+                    raise asyncio.CancelledError from error
                 raise error.cause from error
             except TransientProviderError as error:
                 if (
@@ -11023,28 +11809,60 @@ class AttemptRunner[T]:
                     raise
                 if not terminal_committed and not terminalization_started:
                     terminalization_started=True
-                    await self._shield_terminal(self._close_then_settle(
-                        provider_stream,template,lease,
-                    ))
+                    _,cancelled=await self._shield_terminal(
+                        self._close_then_settle(
+                            provider_stream,template,lease,
+                        ),
+                    )
+                    if cancelled:
+                        raise asyncio.CancelledError from error
                 raise
             except asyncio.CancelledError:
                 if not terminal_committed and not terminalization_started:
                     terminalization_started=True
-                    await self._shield_terminal(self._close_then_settle(
-                        provider_stream,template,lease,
-                    ))
+                    if not delivered_any and terminal_chunk is None:
+                        await self._shield_terminal(
+                            self._close_then_release_or_settle(
+                                provider_stream,template,lease,
+                                self._proof(
+                                    lease.reservation,lease.attempt_id,
+                                    "caller_cancelled_before_or_after_claim",
+                                    self._clock,
+                                ),
+                            ),
+                        )
+                    else:
+                        await self._shield_terminal(self._close_then_settle(
+                            provider_stream,template,lease,
+                        ))
                 raise
-            except BaseException:
+            except BaseException as error:
                 if not terminal_committed and not terminalization_started:
                     terminalization_started=True
-                    await self._shield_terminal(self._close_then_settle(
-                        provider_stream,template,lease,
-                    ))
+                    if not delivered_any and terminal_chunk is None:
+                        _,cancelled=await self._shield_terminal(
+                            self._close_then_release_or_settle(
+                                provider_stream,template,lease,
+                                self._proof(
+                                    lease.reservation,lease.attempt_id,
+                                    "invoke_failed_before_or_after_claim",
+                                    self._clock,
+                                ),
+                            ),
+                        )
+                    else:
+                        _,cancelled=await self._shield_terminal(
+                            self._close_then_settle(
+                                provider_stream,template,lease,
+                            ),
+                        )
+                    if cancelled:
+                        raise asyncio.CancelledError from error
                 raise
         raise RuntimeError("attempt loop exhausted")
 ```
 
-The shared reservation/authorization body lives in private `_open_attempt(template) -> _AttemptLease`; `run` and `stream` are its only public consumers. Both catch `ProviderNotSentError`/`ProviderNotSentCancellation` before their generic exception/cancellation branches, call `_resolve_pre_network_failure`, then re-raise the original cause. The lease tracks the exact reservation/attempt synchronously immediately after `reserve` returns and invokes `complete_reservation` only after `settle` or `release_unsent` returns from its durable commit. Neither public API accepts a cost integer, usage-present boolean, or settlement callback; `AttemptTemplate.usage_ceiling` is the sole bounded pricing input and the gateway-persisted receipt is the sole exact-actual input. A cancellation race may cause post-cancel completion to be rejected; that is expected, because the coordinator barrier scans the durable `budget.turn.*` binding and idempotently owns final reconciliation.
+The shared reservation/authorization body lives in private `_open_attempt(template) -> _AttemptLease`; `run` and `stream` are its only public consumers. Both catch `ProviderNotSentError`/`ProviderNotSentCancellation` before their generic exception/cancellation branches, call `_resolve_pre_network_failure`, then re-raise the original cause unless caller cancellation arrived while the durable terminal barrier was running. Local adapter validation can also fail before the gateway claims a call; generic pre-output error/cancellation paths therefore attempt the exact proof-based release first and fall back to settlement only when Task 05's durable phase pair rejects unsent. The test budget enforces the same rule. The lease tracks the exact reservation/attempt synchronously immediately after `reserve` returns and invokes `complete_reservation` only after `settle` or `release_unsent` returns from its durable commit. Neither public API accepts a cost integer, usage-present boolean, or settlement callback; `AttemptTemplate.usage_ceiling` is the sole bounded pricing input and the gateway-persisted receipt is the sole exact-actual input. A cancellation race may cause post-cancel completion to be rejected; that is expected, because the coordinator barrier scans the durable `budget.turn.*` binding and idempotently owns final reconciliation.
 
 `AttemptRunner.stream` is deliberately speech-specific: `invoke` returns `AsyncIterator[SpeechChunk]`, every PCM-bearing chunk has `final=False`, and the adapter emits exactly one empty `final=True` terminal marker only after `GatewayStreamLease.finalize()` has persisted the usage receipt. The runner forwards nonterminal chunks immediately and tracks `delivered_any`; when it receives the terminal marker, it durably settles the exact reservation and synchronously completes turn tracking **before** yielding that marker to playback. It records `terminal_committed=True`, so generator close after the consumer observes `final=True` cannot settle twice. EOF without the terminal marker, more than one marker, a PCM-bearing terminal marker, cancellation, timeout, or generator close first closes the provider stream, then shield-waits the one settlement barrier before propagating. A retry is permitted only when `TransientProviderError.disposition == "never_sent"` and `delivered_any is False`; after the first accepted PCM chunk, no failure retries. Tests use a blocking fake stream to prove chunk 0 is observed before chunk 1 is produced, maximum buffered PCM is one 64 KiB provider chunk, cancellation after chunk 0 makes exactly one provider attempt/charge, and playback cannot observe the terminal marker before the ledger row and turn-attempt completion are durable.
 
@@ -11061,7 +11879,8 @@ class RecordingBudget:
     def __init__(self, clock) -> None:
         self.clock = clock; self.reservation_ids = []; self.sent = set(); self.conservative_settlements = []
         self.terminal_pairs=set(); self.released_pairs=set()
-        self._reserved={}; self._usage={}; self._exact_attempts=set()
+        self._reserved={}; self._usage={}; self._attempt_reservations={}
+        self._exact_attempts=set()
     async def reserve(self, request):
         reservation_id = uuid4(); self.reservation_ids.append(reservation_id)
         # Test-only server-side quote; still derived from the closed ceiling,
@@ -11069,6 +11888,7 @@ class RecordingBudget:
         amount=max(1,usage_total(request.usage_ceiling))
         self._reserved[reservation_id]=amount
         self._usage[reservation_id]=request.usage_ceiling
+        self._attempt_reservations[request.attempt_id]=reservation_id
         return BudgetReservation(
             reservation_id=reservation_id,request_id=request.request_id,
             attempt_id=request.attempt_id,outcome="allow",
@@ -11078,7 +11898,9 @@ class RecordingBudget:
             ),
             expires_at=self.clock.now()+timedelta(minutes=15),
         )
-    def record_exact_usage(self,attempt_id): self._exact_attempts.add(attempt_id)
+    def record_exact_usage(self,attempt_id):
+        self._exact_attempts.add(attempt_id)
+        self.sent.add((self._attempt_reservations[attempt_id],attempt_id))
     async def mark_sent(self, reservation_id, attempt_id): self.sent.add((reservation_id, attempt_id))
     async def require_accounting_context(self,route,_consumption):
         usage=self._usage[route.budget_reservation_id]
@@ -11089,14 +11911,16 @@ class RecordingBudget:
                 else "provider_reported_exact"
             ),
             missing_evidence_policy=(
-                "conservative_full_reservation"
-                if usage.category=="web_search" else "freeze_unknown_overage"
+                "freeze_unknown_overage"
             ),
         )
     async def settle(self, request):
+        pair=(request.reservation_id,request.attempt_id)
+        if pair not in self.sent:
+            raise PermissionError("proven_unsent_requires_release")
         conservative=request.attempt_id not in self._exact_attempts
         if conservative: self.conservative_settlements.append(request.reservation_id)
-        self.terminal_pairs.add((request.reservation_id,request.attempt_id))
+        self.terminal_pairs.add(pair)
         return BudgetSettlement(
             reservation_id=request.reservation_id,
             charged_micros_sgd=self._reserved[request.reservation_id],
