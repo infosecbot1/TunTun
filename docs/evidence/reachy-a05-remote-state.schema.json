@@ -1,0 +1,495 @@
+{
+  "$defs": {
+    "PttInputMode": {
+      "enum": [
+        "reachy_local",
+        "core_terminal_toggle"
+      ],
+      "title": "PttInputMode",
+      "type": "string"
+    },
+    "ReachyA05DeploymentBinding": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "staged"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "active_bundle_sha256": {
+                "type": "null"
+              },
+              "staged_bundle_sha256": {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "active"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "active_bundle_sha256": {
+                "maxLength": 64,
+                "minLength": 64,
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "staged_bundle_sha256": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "commissioned",
+                  "removed"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "active_bundle_sha256": {
+                "type": "null"
+              },
+              "staged_bundle_sha256": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "active_bundle_sha256": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Active Bundle Sha256"
+        },
+        "authorized_key_line_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Authorized Key Line Sha256",
+          "type": "string"
+        },
+        "boot_identity_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Boot Identity Sha256",
+          "type": "string"
+        },
+        "capability_report_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Capability Report Sha256",
+          "type": "string"
+        },
+        "commissioning_id": {
+          "format": "uuid",
+          "title": "Commissioning Id",
+          "type": "string"
+        },
+        "dispatcher_path": {
+          "maxLength": 512,
+          "minLength": 2,
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "//"
+              },
+              {
+                "pattern": "(?:^|/)[.]{1,2}(?:/|$)"
+              },
+              {
+                "pattern": "/$"
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          },
+          "pattern": "^/(?:[A-Za-z0-9._+-]+/)*[A-Za-z0-9._+-]+$",
+          "title": "Dispatcher Path",
+          "type": "string"
+        },
+        "dispatcher_protocol_version": {
+          "const": "tuntun.reachy-a05-dispatcher.v1",
+          "title": "Dispatcher Protocol Version",
+          "type": "string"
+        },
+        "dispatcher_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Dispatcher Sha256",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "issued_at": {
+          "format": "date-time",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "ptt_input_mode": {
+          "$ref": "#/$defs/PttInputMode"
+        },
+        "remote_home": {
+          "maxLength": 512,
+          "minLength": 2,
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "//"
+              },
+              {
+                "pattern": "(?:^|/)[.]{1,2}(?:/|$)"
+              },
+              {
+                "pattern": "/$"
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          },
+          "pattern": "^/(?:[A-Za-z0-9._+-]+/)*[A-Za-z0-9._+-]+$",
+          "title": "Remote Home",
+          "type": "string"
+        },
+        "remote_root": {
+          "maxLength": 512,
+          "minLength": 2,
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "//"
+              },
+              {
+                "pattern": "(?:^|/)[.]{1,2}(?:/|$)"
+              },
+              {
+                "pattern": "/$"
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          },
+          "pattern": "^/(?:[A-Za-z0-9._+-]+/)*[A-Za-z0-9._+-]+$",
+          "title": "Remote Root",
+          "type": "string"
+        },
+        "runtime": {
+          "$ref": "#/$defs/ReachyA05RuntimeBinding"
+        },
+        "ssh_principal": {
+          "maxLength": 32,
+          "minLength": 1,
+          "not": {
+            "anyOf": [
+              {
+                "const": "root"
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          },
+          "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+          "title": "Ssh Principal",
+          "type": "string"
+        },
+        "staged_bundle_sha256": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Staged Bundle Sha256"
+        },
+        "state_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "State Generation",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "commissioned",
+            "staged",
+            "active",
+            "removed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commissioning_id",
+        "state_generation",
+        "status",
+        "issued_at",
+        "expires_at",
+        "boot_identity_sha256",
+        "capability_report_sha256",
+        "ptt_input_mode",
+        "runtime",
+        "ssh_principal",
+        "remote_home",
+        "remote_root",
+        "dispatcher_path",
+        "dispatcher_protocol_version",
+        "dispatcher_sha256",
+        "authorized_key_line_sha256",
+        "staged_bundle_sha256",
+        "active_bundle_sha256"
+      ],
+      "title": "ReachyA05DeploymentBinding",
+      "type": "object"
+    },
+    "ReachyA05RuntimeBinding": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "python_abi": {
+                "const": "cp311"
+              }
+            },
+            "required": [
+              "python_abi"
+            ]
+          },
+          "then": {
+            "properties": {
+              "python_version": {
+                "not": {
+                  "pattern": "[\\r\\n]"
+                },
+                "pattern": "^3[.]11[.](?:0|[1-9][0-9]{0,2})$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "python_abi": {
+                "const": "cp312"
+              }
+            },
+            "required": [
+              "python_abi"
+            ]
+          },
+          "then": {
+            "properties": {
+              "python_version": {
+                "not": {
+                  "pattern": "[\\r\\n]"
+                },
+                "pattern": "^3[.]12[.](?:0|[1-9][0-9]{0,2})$"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "daemon_artifact_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Daemon Artifact Sha256",
+          "type": "string"
+        },
+        "daemon_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "[Xx][Nn]--"
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          },
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+!-]{0,63}$",
+          "title": "Daemon Version",
+          "type": "string"
+        },
+        "python_abi": {
+          "enum": [
+            "cp311",
+            "cp312"
+          ],
+          "title": "Python Abi",
+          "type": "string"
+        },
+        "python_executable": {
+          "maxLength": 512,
+          "minLength": 2,
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "//"
+              },
+              {
+                "pattern": "(?:^|/)[.]{1,2}(?:/|$)"
+              },
+              {
+                "pattern": "/$"
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          },
+          "pattern": "^/(?:[A-Za-z0-9._+-]+/)*[A-Za-z0-9._+-]+$",
+          "title": "Python Executable",
+          "type": "string"
+        },
+        "python_version": {
+          "maxLength": 11,
+          "minLength": 5,
+          "not": {
+            "pattern": "[\\r\\n]"
+          },
+          "pattern": "^(?:0|[1-9][0-9]{0,2})[.](?:0|[1-9][0-9]{0,2})[.](?:0|[1-9][0-9]{0,2})$",
+          "title": "Python Version",
+          "type": "string"
+        },
+        "runtime_inventory_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Runtime Inventory Sha256",
+          "type": "string"
+        },
+        "sdk_artifact_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sdk Artifact Sha256",
+          "type": "string"
+        },
+        "sdk_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "[Xx][Nn]--"
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          },
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+!-]{0,63}$",
+          "title": "Sdk Version",
+          "type": "string"
+        },
+        "selected_wheel_tag": {
+          "const": "py3-none-any",
+          "title": "Selected Wheel Tag",
+          "type": "string"
+        },
+        "target_tag_set_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Tag Set Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "python_executable",
+        "python_version",
+        "python_abi",
+        "selected_wheel_tag",
+        "target_tag_set_sha256",
+        "sdk_version",
+        "sdk_artifact_sha256",
+        "daemon_version",
+        "daemon_artifact_sha256",
+        "runtime_inventory_sha256"
+      ],
+      "title": "ReachyA05RuntimeBinding",
+      "type": "object"
+    }
+  },
+  "$id": "https://tuntun.local/schemas/evidence/reachy-a05-remote-state.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Structural private-state schema; runtime model parsing is required for freshness, fixed-path, distinctness, lifecycle, and repository semantics.",
+  "properties": {
+    "deployment": {
+      "$ref": "#/$defs/ReachyA05DeploymentBinding"
+    },
+    "schema_version": {
+      "const": "tuntun.reachy-a05-remote-state.v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "deployment"
+  ],
+  "title": "ReachyA05RemoteStateV1",
+  "type": "object",
+  "x-tuntun-runtime-semantic-validation-required": true,
+  "x-tuntun-validation-scope": "structural"
+}
