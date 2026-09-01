@@ -216,11 +216,13 @@ class BudgetGuard:
             if binding_insert.rowcount != 1:
                 raise PermissionError("budget_turn_binding_insert_failed")
             if outcome == "allow_soft_warning":
-                db.exec_driver_sql(
+                warning_insert = db.exec_driver_sql(
                     "INSERT INTO runtime_settings(key,value_json,version,updated_at) "
                     "VALUES(?,?,1,?)",
                     (warning_key, '{"emitted":true}', utc_storage(now)),
                 )
+                if warning_insert.rowcount != 1:
+                    raise PermissionError("budget_soft_warning_insert_failed")
             return BudgetReservation(
                 reservation_id=reservation_id,
                 request_id=request.request_id,
@@ -364,16 +366,33 @@ class BudgetGuard:
             sort_keys=True,
             separators=(",", ":"),
         )
-        db.exec_driver_sql(
+        freeze_key = f"budget.cloud_egress_freeze.{month_key}"
+        freeze_insert = db.exec_driver_sql(
             "INSERT INTO runtime_settings(key,value_json,version,updated_at) "
             "VALUES(?,?,1,?) ON CONFLICT(key) DO NOTHING",
-            (f"budget.cloud_egress_freeze.{month_key}", payload, utc_storage(now)),
+            (freeze_key, payload, utc_storage(now)),
         )
-        db.exec_driver_sql(
+        if freeze_insert.rowcount != 1:
+            freeze_exists = db.exec_driver_sql(
+                "SELECT 1 FROM runtime_settings WHERE key=?",
+                (freeze_key,),
+            ).fetchone()
+            if freeze_exists is None:
+                raise PermissionError("budget_cloud_egress_freeze_insert_failed")
+
+        alert_key = f"budget.owner_alert.{month_key}.{reservation_id}"
+        alert_insert = db.exec_driver_sql(
             "INSERT INTO runtime_settings(key,value_json,version,updated_at) "
             "VALUES(?,?,1,?) ON CONFLICT(key) DO NOTHING",
-            (f"budget.owner_alert.{month_key}.{reservation_id}", payload, utc_storage(now)),
+            (alert_key, payload, utc_storage(now)),
         )
+        if alert_insert.rowcount != 1:
+            existing_alert = db.exec_driver_sql(
+                "SELECT value_json FROM runtime_settings WHERE key=?",
+                (alert_key,),
+            ).fetchone()
+            if existing_alert is None or existing_alert[0] != payload:
+                raise PermissionError("budget_owner_alert_insert_failed")
 
     async def _freeze_evidence_quarantine(
         self,
@@ -612,9 +631,7 @@ class BudgetGuard:
         now = self._clock.now()
         try:
             async with self._uow_factory() as uow:
-                result = await uow.run_sync(
-                    lambda db: self._settle_locked(db, request, now)
-                )
+                result = await uow.run_sync(lambda db: self._settle_locked(db, request, now))
                 await uow.commit()
                 return cast(BudgetSettlement, result)
         except BudgetEvidenceQuarantined as error:

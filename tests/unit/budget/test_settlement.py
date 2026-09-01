@@ -104,6 +104,64 @@ async def test_silent_ignored_ledger_insert_rolls_back_terminalization(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("marker", "error"),
+    (
+        ("freeze", "budget_cloud_egress_freeze_insert_failed"),
+        ("owner_alert", "budget_owner_alert_insert_failed"),
+    ),
+)
+async def test_silent_ignored_estimate_overrun_marker_rolls_back_settlement(
+    production_provider_gateway_case,
+    marker,
+    error,
+) -> None:
+    case = await production_provider_gateway_case(
+        usage_ceiling=LlmUsageUnits(category="llm", input_tokens=1, output_tokens=0),
+        reported_usage=LlmUsageUnits(category="llm", input_tokens=2, output_tokens=0),
+    )
+    await case.invoke()
+    before = await case.proof_rows()
+    trigger = await case.install_budget_marker_ignore_trigger(marker)
+    try:
+        with pytest.raises(PermissionError, match=error):
+            await case.settle()
+    finally:
+        await case.drop_trigger(trigger)
+    assert await case.proof_rows() == before
+    assert await case.budget_marker_counts() == (0, 0)
+    assert case.cloud_egress_frozen is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("marker", "error"),
+    (
+        ("freeze", "budget_cloud_egress_freeze_insert_failed"),
+        ("owner_alert", "budget_owner_alert_insert_failed"),
+    ),
+)
+async def test_silent_ignored_unknown_overage_marker_fails_without_freezing(
+    production_provider_gateway_case,
+    marker,
+    error,
+) -> None:
+    case = await production_provider_gateway_case(valid_usage=False)
+    with pytest.raises(ProviderUsageUnknownError):
+        await case.invoke()
+    before = await case.proof_rows()
+    trigger = await case.install_budget_marker_ignore_trigger(marker)
+    try:
+        with pytest.raises(PermissionError, match=error):
+            await case.settle()
+    finally:
+        await case.drop_trigger(trigger)
+    assert await case.proof_rows() == before
+    assert await case.budget_marker_counts() == (0, 0)
+    assert case.cloud_egress_frozen is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider_outcome", ("failed", "cancelled", "ambiguous"))
 async def test_non_success_terminal_call_has_no_usage_receipt_and_charges_reserve(
     production_provider_gateway_case,

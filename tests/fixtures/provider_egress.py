@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID, uuid4
@@ -86,12 +86,6 @@ _BOUNDARY_MUTATIONS = frozenset(
         "session_label_in_canonical_body",
     }
 )
-
-
-def _utc_storage(value: datetime) -> str:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise TypeError("stored timestamp must be timezone-aware")
-    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _other_commitment(label: str) -> Commitment:
@@ -205,8 +199,8 @@ async def _seed_reservation(
         "reserved",
         1,
         "not_claimed",
-        _utc_storage(now),
-        _utc_storage(now + timedelta(minutes=5)),
+        utc_storage(now),
+        utc_storage(now + timedelta(minutes=5)),
     )
     async with factory() as uow:
 
@@ -316,7 +310,7 @@ class SqlBudgetPortFake:
         self._clock = clock
 
     async def mark_sent(self, reservation_id: UUID, attempt_id: UUID) -> None:
-        now = _utc_storage(self._clock.now())
+        now = utc_storage(self._clock.now())
 
         def mark(db) -> None:
             call_count = db.exec_driver_sql(
@@ -1242,6 +1236,23 @@ class ProductionProviderGatewayCase:
             await uow.rollback()
         return int(count)
 
+    async def budget_marker_counts(self) -> tuple[int, int]:
+        async with self.factory() as uow:
+
+            def load(transaction) -> tuple[int, int]:
+                freezes = transaction.exec_driver_sql(
+                    "SELECT count(*) FROM runtime_settings "
+                    "WHERE key LIKE 'budget.cloud_egress_freeze.%'",
+                ).scalar_one()
+                alerts = transaction.exec_driver_sql(
+                    "SELECT count(*) FROM runtime_settings WHERE key LIKE 'budget.owner_alert.%'",
+                ).scalar_one()
+                return int(freezes), int(alerts)
+
+            counts = await uow.run_sync(load)
+            await uow.rollback()
+        return counts
+
     async def tamper_pricing_source_digest(self) -> None:
         async with self.factory() as uow:
             await uow.run_sync(
@@ -1295,6 +1306,30 @@ class ProductionProviderGatewayCase:
                     ).rowcount
                 )
             )
+            await uow.commit()
+        return name
+
+    async def install_budget_marker_ignore_trigger(
+        self,
+        marker: Literal["freeze", "owner_alert"],
+    ) -> str:
+        reservation = await self.reservation_row()
+        key = (
+            f"budget.cloud_egress_freeze.{reservation.month_key}"
+            if marker == "freeze"
+            else f"budget.owner_alert.{reservation.month_key}.{self.route.budget_reservation_id}"
+        )
+        name = f"test_budget_{marker}_ignore_{self.route.attempt_id.hex}"
+        async with self.factory() as uow:
+
+            def install_trigger(transaction) -> None:
+                transaction.exec_driver_sql(
+                    f"CREATE TRIGGER {name} BEFORE INSERT ON runtime_settings "
+                    f"WHEN NEW.key='{key}' "
+                    "BEGIN SELECT RAISE(IGNORE); END",
+                )
+
+            await uow.run_sync(install_trigger)
             await uow.commit()
         return name
 

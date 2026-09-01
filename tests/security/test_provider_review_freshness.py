@@ -15,6 +15,7 @@ from tuntun_core.services.providers.review import (
     RuntimeProviderIdentity,
     commission_openai_provider_hard_limit,
 )
+from tuntun_core.services.storage_time import utc_storage
 
 from tests.fixtures.provider_routes import RouteDatabase
 
@@ -167,7 +168,7 @@ def _valid_review() -> dict[str, object]:
         "schema_version": "tuntun.provider-review.v1",
         "provider": "openai",
         "accepted": True,
-        "expires_at": (NOW + timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "expires_at": utc_storage(NOW + timedelta(days=90)),
         "source_changed": False,
         "dashboard_changed": False,
         "purposes": ["cloud_stt", "cloud_reasoning", "cloud_tts"],
@@ -201,7 +202,7 @@ def _insert_review(
             (
                 "provider.review.openai",
                 raw,
-                updated_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                utc_storage(updated_at),
             ),
         )
         uow.commit()
@@ -475,7 +476,7 @@ def test_malformed_review_parse_error_is_sanitized(
 
 def test_expiry_equality_and_qwen_fail_closed(route_database: RouteDatabase) -> None:
     value = _valid_review()
-    value["expires_at"] = NOW.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    value["expires_at"] = utc_storage(NOW)
     _insert_review(route_database, canonical_mapping_bytes(value).decode("utf-8"))
 
     with pytest.raises(PermissionError, match="provider_review_not_current"):
@@ -505,7 +506,7 @@ def test_review_timestamp_cannot_be_future_or_exceed_ninety_days(
     expires_at: datetime,
 ) -> None:
     value = _valid_review()
-    value["expires_at"] = expires_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    value["expires_at"] = utc_storage(expires_at)
     _insert_review(
         route_database,
         canonical_mapping_bytes(value).decode("utf-8"),

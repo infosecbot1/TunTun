@@ -310,6 +310,85 @@ async def test_silent_ignored_budget_insert_rolls_back_reservation_and_binding(
 
 
 @pytest.mark.asyncio
+async def test_silent_ignored_soft_warning_marker_rolls_back_reservation_and_binding(
+    async_uow_factory,
+    clock,
+    catalog,
+    provider_reviews,
+    budget_evidence,
+) -> None:
+    guard = BudgetGuard(
+        async_uow_factory,
+        clock,
+        catalog,
+        provider_reviews,
+        budget_evidence,
+        hard_limit=150_000_000,
+        soft_limit=1,
+    )
+    request = BudgetReservationRequest(
+        household_id=uuid4(),
+        turn_id=uuid4(),
+        request_id=uuid4(),
+        attempt_id=uuid4(),
+        provider="openai",
+        model="gpt-5.6-sol",
+        category="llm",
+        usage_ceiling=LlmUsageUnits(category="llm", input_tokens=1, output_tokens=0),
+        month_key="2026-08",
+    )
+    warning_key = f"budget.soft_warning.{request.month_key}"
+    trigger_name = f"test_budget_soft_warning_ignore_{request.attempt_id.hex}"
+    trigger_sql = (
+        f"CREATE TRIGGER {trigger_name} BEFORE INSERT ON runtime_settings "
+        f"WHEN NEW.key='{warning_key}' "
+        "BEGIN SELECT RAISE(IGNORE); END"
+    )
+
+    async with async_uow_factory() as uow:
+
+        def install_trigger(db) -> None:
+            db.exec_driver_sql(trigger_sql)
+
+        await uow.run_sync(install_trigger)
+        await uow.commit()
+    try:
+        with pytest.raises(PermissionError, match="budget_soft_warning_insert_failed"):
+            await guard.reserve(request)
+    finally:
+        async with async_uow_factory() as uow:
+
+            def drop_trigger(db) -> None:
+                db.exec_driver_sql(f"DROP TRIGGER IF EXISTS {trigger_name}")
+
+            await uow.run_sync(drop_trigger)
+            await uow.commit()
+
+    async with async_uow_factory() as uow:
+
+        def counts(db) -> tuple[int, int, int]:
+            reservations = db.exec_driver_sql(
+                "SELECT count(*) FROM budget_reservations WHERE attempt_id=?",
+                (str(request.attempt_id),),
+            ).scalar_one()
+            bindings = db.exec_driver_sql(
+                "SELECT count(*) FROM runtime_settings "
+                "WHERE key LIKE 'budget.turn.%' "
+                "AND json_extract(value_json,'$.attempt_id')=?",
+                (str(request.attempt_id),),
+            ).scalar_one()
+            warnings = db.exec_driver_sql(
+                "SELECT count(*) FROM runtime_settings WHERE key=?",
+                (warning_key,),
+            ).scalar_one()
+            return int(reservations), int(bindings), int(warnings)
+
+        persisted = await uow.run_sync(counts)
+        await uow.rollback()
+    assert persisted == (0, 0, 0)
+
+
+@pytest.mark.asyncio
 async def test_sent_attempt_cannot_be_released(
     async_uow_factory,
     clock,
