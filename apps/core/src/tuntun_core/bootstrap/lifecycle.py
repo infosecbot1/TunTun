@@ -277,10 +277,13 @@ class BudgetReconciliationSupervisor:
             return result
         return None
 
-    async def _cleanup_failed_start(self) -> None:
+    def _prepare_shutdown_cleanup(self) -> None:
         self._ready = False
         self.startup_recovery.withdraw_readiness()
         self._stop.set()
+
+    async def _cleanup_failed_start(self) -> None:
+        self._prepare_shutdown_cleanup()
         try:
             await self._cancel_and_observe_worker()
             await self.startup_recovery.cancel_owned_startup_activity()
@@ -288,9 +291,13 @@ class BudgetReconciliationSupervisor:
             self.startup_recovery.process_lease.release_after_shutdown()
 
     async def _cleanup_failed_start_uninterrupted(self) -> None:
-        cleanup = asyncio.create_task(
-            self._cleanup_failed_start(),
-            name="budget-reconciliation-start-cleanup",
+        self._prepare_shutdown_cleanup()
+        cleanup = cast(
+            asyncio.Task[None],
+            self.startup_recovery._spawn_owned(
+                self._cleanup_failed_start,
+                "budget-reconciliation-start-cleanup",
+            ),
         )
         while not cleanup.done():
             try:
@@ -435,9 +442,12 @@ class BudgetReconciliationSupervisor:
         self,
         caller_task: asyncio.Task[Any] | None,
     ) -> BaseException | None:
-        cleanup = asyncio.create_task(
-            self._stop_cleanup(caller_task),
-            name="budget-reconciliation-stop-cleanup",
+        cleanup = cast(
+            asyncio.Task[BaseException | None],
+            self.startup_recovery._spawn_owned(
+                lambda: self._stop_cleanup(caller_task),
+                "budget-reconciliation-stop-cleanup",
+            ),
         )
         cancelled = False
         while not cleanup.done():
@@ -454,9 +464,7 @@ class BudgetReconciliationSupervisor:
         return primary
 
     async def stop(self) -> None:
-        self._ready = False
-        self.startup_recovery.withdraw_readiness()
-        self._stop.set()
+        self._prepare_shutdown_cleanup()
         caller_task = asyncio.current_task()
         if self._start_task is caller_task:
             self._failure_code = "startup:stop_from_start_task"

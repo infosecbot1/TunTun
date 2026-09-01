@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import warnings
+from collections.abc import Coroutine
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +54,19 @@ def _lease_is_reacquirable(lock_path: Path) -> bool:
     return True
 
 
+async def _wait_for_event(event: asyncio.Event, timeout: float = 0.1) -> None:
+    async with asyncio.timeout(timeout):
+        await event.wait()
+
+
+def _loop_bound_task(
+    coroutine: Coroutine[Any, Any, Any],
+    *,
+    name: str,
+) -> asyncio.Task[Any]:
+    return asyncio.Task(coroutine, loop=asyncio.get_running_loop(), name=name)
+
+
 async def _session_row(factory: Any, session_id: object) -> tuple[str, bool]:
     async with factory() as uow:
 
@@ -72,6 +89,53 @@ class _PassingReachySafety:
     async def stop_all(self, turn_id: object) -> SafetyReceipt:
         self.calls.append(turn_id)
         return _global_safety_receipt()
+
+
+class _RejectingTaskFactory:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        coroutine: Coroutine[Any, Any, Any],
+        **kwargs: Any,
+    ) -> asyncio.Task[Any]:
+        del loop, coroutine, kwargs
+        self.calls += 1
+        raise RuntimeError("synthetic_create_task_rejected")
+
+
+class _NoopClock:
+    def now(self) -> datetime:
+        return datetime(2026, 8, 27, 1, 2, 3, 4, tzinfo=UTC)
+
+
+class _NoopDriver:
+    def exec_driver_sql(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+
+
+class _NoopUnitOfWork:
+    async def __aenter__(self) -> _NoopUnitOfWork:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        del args
+
+    async def run_sync(self, operation: Any) -> Any:
+        return operation(_NoopDriver())
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+
+class _NoopUnitOfWorkFactory:
+    def __call__(self) -> _NoopUnitOfWork:
+        return _NoopUnitOfWork()
 
 
 class _DelayedReachySafety:
@@ -550,6 +614,304 @@ async def test_initial_budget_drain_failure_releases_process_lease_and_blocks_re
             recovery.require_ready()
         _assert_lease_released(lock_path)
     finally:
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_start_cleanup_uses_task_fallback_and_releases_process_lease(
+    tmp_path: Path,
+) -> None:
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reconciler = _SupervisorReconciler(initial_drain_error=RuntimeError("synthetic_drain_fail"))
+    recovery = StartupTurnRecovery(
+        _PassingReachySafety(),
+        reconciler,
+        _NoopUnitOfWorkFactory(),
+        _NoopClock(),
+        lease,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    rejecting_factory = _RejectingTaskFactory()
+    loop.set_task_factory(rejecting_factory)
+    try:
+        caught: BaseException | None = None
+        try:
+            await supervisor.start()
+        except BaseException as error:
+            caught = error
+        finally:
+            loop.set_task_factory(previous_factory)
+
+        lease_released = _lease_is_reacquirable(lock_path)
+        supervisor_ready = True
+        try:
+            supervisor.require_ready()
+        except RuntimeError:
+            supervisor_ready = False
+        recovery_ready = True
+        try:
+            recovery.require_ready()
+        except RuntimeError:
+            recovery_ready = False
+        lease.release_after_shutdown()
+
+        assert isinstance(caught, RuntimeError)
+        assert "budget_reconciliation_unhealthy" in str(caught)
+        assert rejecting_factory.calls >= 2
+        assert not supervisor_ready
+        assert not recovery_ready
+        assert lease_released
+    finally:
+        loop.set_task_factory(previous_factory)
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_cleanup_uses_task_fallback_and_observes_startup_work(
+    tmp_path: Path,
+) -> None:
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reachy = _CancellationObservingReachySafety(block_cancel_finish=True)
+    reconciler = _SupervisorReconciler()
+    recovery = StartupTurnRecovery(
+        reachy,
+        reconciler,
+        _NoopUnitOfWorkFactory(),
+        _NoopClock(),
+        lease,
+        attempt_timeout=0.5,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    rejecting_factory = _RejectingTaskFactory()
+    start_task = _loop_bound_task(supervisor.start(), name="rejecting-factory-start")
+    loop.set_task_factory(rejecting_factory)
+    try:
+        await _wait_for_event(reachy.started)
+        start_task.cancel()
+        await _wait_for_event(reachy.cancelled)
+        assert not _lease_is_reacquirable(lock_path)
+
+        reachy.release.set()
+        start_error: BaseException | None = None
+        try:
+            async with asyncio.timeout(0.5):
+                await start_task
+        except BaseException as error:
+            start_error = error
+        loop.set_task_factory(previous_factory)
+        lease_released = _lease_is_reacquirable(lock_path)
+        lease.release_after_shutdown()
+
+        assert isinstance(start_error, asyncio.CancelledError)
+        assert reachy.finished.is_set()
+        assert rejecting_factory.calls >= 2
+        assert lease_released
+    finally:
+        reachy.release.set()
+        loop.set_task_factory(previous_factory)
+        if not start_task.done():
+            start_task.cancel()
+        with suppress(BaseException):
+            await start_task
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stop_cleanup_uses_task_fallback_to_join_live_start_before_lease_release(
+    tmp_path: Path,
+) -> None:
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reconciler = _BlockingInitialDrainReconciler()
+    recovery = StartupTurnRecovery(
+        _PassingReachySafety(),
+        reconciler,
+        _NoopUnitOfWorkFactory(),
+        _NoopClock(),
+        lease,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    rejecting_factory = _RejectingTaskFactory()
+    loop.set_task_factory(rejecting_factory)
+    start_task = _loop_bound_task(supervisor.start(), name="rejecting-factory-live-start")
+    stop_task: asyncio.Task[Any] | None = None
+    try:
+        await _wait_for_event(reconciler.initial_drain_started)
+        stop_task = _loop_bound_task(supervisor.stop(), name="rejecting-factory-stop-start")
+        await asyncio.sleep(0)
+
+        stop_done_early = stop_task.done()
+        lease_released_early = _lease_is_reacquirable(lock_path)
+        if not stop_done_early:
+            await _wait_for_event(reconciler.initial_drain_cancelled)
+
+        reconciler.release_initial_drain.set()
+        stop_error: BaseException | None = None
+        try:
+            async with asyncio.timeout(0.5):
+                await stop_task
+        except BaseException as error:
+            stop_error = error
+        start_error: BaseException | None = None
+        try:
+            async with asyncio.timeout(0.5):
+                await start_task
+        except BaseException as error:
+            start_error = error
+        loop.set_task_factory(previous_factory)
+        lease_released = _lease_is_reacquirable(lock_path)
+        lease.release_after_shutdown()
+
+        assert not stop_done_early
+        assert not lease_released_early
+        assert reconciler.initial_drain_cancelled.is_set()
+        assert stop_error is None
+        assert isinstance(start_error, asyncio.CancelledError)
+        assert rejecting_factory.calls >= 3
+        assert lease_released
+    finally:
+        reconciler.release_initial_drain.set()
+        loop.set_task_factory(previous_factory)
+        if stop_task is not None and not stop_task.done():
+            stop_task.cancel()
+            with suppress(BaseException):
+                await stop_task
+        if not start_task.done():
+            start_task.cancel()
+        with suppress(BaseException):
+            await start_task
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stop_cleanup_uses_task_fallback_to_join_live_worker_before_lease_release(
+    tmp_path: Path,
+) -> None:
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reconciler = _BlockingWorkerReconciler()
+    recovery = StartupTurnRecovery(
+        _PassingReachySafety(),
+        reconciler,
+        _NoopUnitOfWorkFactory(),
+        _NoopClock(),
+        lease,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    rejecting_factory = _RejectingTaskFactory()
+    loop.set_task_factory(rejecting_factory)
+    stop_task: asyncio.Task[Any] | None = None
+    try:
+        await supervisor.start()
+        await _wait_for_event(reconciler.worker_started)
+        stop_task = _loop_bound_task(supervisor.stop(), name="rejecting-factory-stop-worker")
+        await asyncio.sleep(0)
+
+        stop_done_early = stop_task.done()
+        worker_finished_early = reconciler.worker_finished.is_set()
+        lease_released_early = _lease_is_reacquirable(lock_path)
+
+        reconciler.release_worker.set()
+        stop_error: BaseException | None = None
+        try:
+            async with asyncio.timeout(0.5):
+                await stop_task
+        except BaseException as error:
+            stop_error = error
+        loop.set_task_factory(previous_factory)
+        lease_released = _lease_is_reacquirable(lock_path)
+        lease.release_after_shutdown()
+
+        assert not stop_done_early
+        assert not worker_finished_early
+        assert not lease_released_early
+        assert stop_error is None
+        assert reconciler.worker_finished.is_set()
+        assert rejecting_factory.calls >= 3
+        assert lease_released
+    finally:
+        reconciler.release_worker.set()
+        loop.set_task_factory(previous_factory)
+        if stop_task is not None and not stop_task.done():
+            stop_task.cancel()
+            with suppress(BaseException):
+                await stop_task
+        with suppress(BaseException):
+            await supervisor.stop()
+        lease.release_after_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_task_construction_failure_fails_closed_without_coroutine_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_path = _owner_only_lock_path(tmp_path)
+    lease = CoreProcessLease.acquire(lock_path)
+    reconciler = _SupervisorReconciler()
+    recovery = StartupTurnRecovery(
+        _PassingReachySafety(),
+        reconciler,
+        _NoopUnitOfWorkFactory(),
+        _NoopClock(),
+        lease,
+        retry_limit=0,
+    )
+    supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    rejecting_factory = _RejectingTaskFactory()
+    original_task_type = asyncio.Task
+
+    class _RejectingLoopBoundTask:
+        @classmethod
+        def __class_getitem__(cls, item: object) -> object:
+            return original_task_type[item]
+
+        def __new__(
+            cls,
+            coroutine: Coroutine[Any, Any, Any],
+            *args: Any,
+            **kwargs: Any,
+        ) -> asyncio.Task[Any]:
+            del coroutine, args, kwargs
+            raise RuntimeError("synthetic_task_constructor_rejected")
+
+    loop.set_task_factory(rejecting_factory)
+    monkeypatch.setattr(asyncio, "Task", _RejectingLoopBoundTask)
+    try:
+        caught: BaseException | None = None
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always", RuntimeWarning)
+            try:
+                await supervisor.start()
+            except BaseException as error:
+                caught = error
+            gc.collect()
+        loop.set_task_factory(previous_factory)
+        monkeypatch.undo()
+
+        assert isinstance(caught, RuntimeError)
+        assert "synthetic_task_constructor_rejected" in str(caught)
+        assert not any("was never awaited" in str(item.message) for item in captured)
+        with pytest.raises(RuntimeError, match="budget_reconciliation_unhealthy"):
+            supervisor.require_ready()
+        with pytest.raises(RuntimeError, match="startup_turn_recovery_unhealthy"):
+            recovery.require_ready()
+        assert not _lease_is_reacquirable(lock_path)
+    finally:
+        loop.set_task_factory(previous_factory)
+        monkeypatch.undo()
         lease.release_after_shutdown()
 
 
