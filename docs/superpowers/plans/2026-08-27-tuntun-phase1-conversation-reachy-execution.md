@@ -73,6 +73,16 @@ import pytest
 
 from tuntun_core.domain.conversation import TurnEvent, TurnState, transition
 
+ACTIVE_STATES = (
+    TurnState.AWAKE,
+    TurnState.LISTENING,
+    TurnState.TRANSCRIBING,
+    TurnState.IDENTIFYING,
+    TurnState.AUTHORIZING,
+    TurnState.THINKING,
+    TurnState.SPEAKING,
+)
+
 
 @pytest.mark.parametrize(
     ("state", "event", "expected"),
@@ -91,11 +101,11 @@ def test_happy_path(state: TurnState, event: TurnEvent, expected: TurnState) -> 
     assert transition(state, event).state is expected
 
 
-@pytest.mark.parametrize("state", [state for state in TurnState if state is not TurnState.IDLE])
+@pytest.mark.parametrize("state", ACTIVE_STATES)
 def test_stop_is_accepted_from_every_active_state(state: TurnState) -> None:
     result = transition(state, TurnEvent.STOP)
     assert result.state is TurnState.IDLE
-    assert result.effects == ("cancel_turn", "stop_reachy", "reconcile_budget", "clear_ephemeral")
+    assert result.effects == ("stop_reachy", "cancel_turn", "reconcile_budget", "clear_ephemeral")
 
 
 def test_privacy_preempts_thinking() -> None:
@@ -107,7 +117,38 @@ def test_privacy_preempts_thinking() -> None:
 def test_illegal_transition_fails_closed() -> None:
     with pytest.raises(ValueError, match=r"illegal transition IDLE \+ RESPONSE"):
         transition(TurnState.IDLE, TurnEvent.RESPONSE)
+
+
+@pytest.mark.parametrize("state", (TurnState.PRIVACY, TurnState.ERROR_SAFE))
+@pytest.mark.parametrize("event", tuple(TurnEvent))
+def test_safety_states_require_separate_owner_recovery(
+    state: TurnState,
+    event: TurnEvent,
+) -> None:
+    with pytest.raises(ValueError, match=rf"illegal transition {state.name} \+ {event.name}"):
+        transition(state, event)
+
+
+def test_wake_while_speaking_stops_reachy_before_safe_reopen() -> None:
+    result = transition(TurnState.SPEAKING, TurnEvent.WAKE)
+    assert result.state is TurnState.IDLE
+    assert result.effects == (
+        "stop_reachy",
+        "cancel_turn",
+        "reconcile_budget",
+        "clear_ephemeral",
+        "queue_wake_after_safe_idle",
+    )
 ```
+
+The committed suite expands this readable sample into the complete closed
+`TurnState × TurnEvent` matrix and asserts each exact transition/effect tuple. `PRIVACY` and
+`ERROR_SAFE` are latched safety states, not active turn states; Task 02's authenticated recovery
+path owns any later return to `IDLE`.
+Stop effects are ordered with Reachy first. A speaking-state wake additionally queues exactly one
+deferred wake; Task 02 may consume it only after the prior turn's safety barrier proves safe idle.
+The implementation rejects raw strings and other non-exact enum inputs before `StrEnum` equality can
+make them look like trusted typed events.
 
 - [ ] **Step 2: Run the test and observe the red result**
 
@@ -159,30 +200,56 @@ class Transition:
     effects: tuple[str, ...]
 
 
+_ACTIVE_STATES = frozenset(
+    {
+        TurnState.AWAKE,
+        TurnState.LISTENING,
+        TurnState.TRANSCRIBING,
+        TurnState.IDENTIFYING,
+        TurnState.AUTHORIZING,
+        TurnState.THINKING,
+        TurnState.SPEAKING,
+    }
+)
+_STOP_EFFECTS = ("stop_reachy", "cancel_turn", "reconcile_budget", "clear_ephemeral")
+_CANCELLATION_EFFECTS = (
+    "cancel_turn",
+    "stop_reachy",
+    "reconcile_budget",
+    "clear_ephemeral",
+)
+
 _FORWARD = {
-    (TurnState.IDLE, TurnEvent.WAKE): TurnState.AWAKE,
-    (TurnState.AWAKE, TurnEvent.AUDIO_OPEN): TurnState.LISTENING,
-    (TurnState.LISTENING, TurnEvent.AUDIO_END): TurnState.TRANSCRIBING,
-    (TurnState.TRANSCRIBING, TurnEvent.TRANSCRIPT): TurnState.IDENTIFYING,
-    (TurnState.IDENTIFYING, TurnEvent.IDENTITY): TurnState.AUTHORIZING,
-    (TurnState.AUTHORIZING, TurnEvent.AUTHORIZED): TurnState.THINKING,
-    (TurnState.THINKING, TurnEvent.RESPONSE): TurnState.SPEAKING,
-    (TurnState.SPEAKING, TurnEvent.PLAYBACK_END): TurnState.IDLE,
+    (TurnState.IDLE, TurnEvent.WAKE): Transition(TurnState.AWAKE, ()),
+    (TurnState.AWAKE, TurnEvent.AUDIO_OPEN): Transition(TurnState.LISTENING, ()),
+    (TurnState.LISTENING, TurnEvent.AUDIO_END): Transition(TurnState.TRANSCRIBING, ()),
+    (TurnState.TRANSCRIBING, TurnEvent.TRANSCRIPT): Transition(TurnState.IDENTIFYING, ()),
+    (TurnState.IDENTIFYING, TurnEvent.IDENTITY): Transition(TurnState.AUTHORIZING, ()),
+    (TurnState.AUTHORIZING, TurnEvent.AUTHORIZED): Transition(TurnState.THINKING, ()),
+    (TurnState.THINKING, TurnEvent.RESPONSE): Transition(TurnState.SPEAKING, ()),
+    (TurnState.SPEAKING, TurnEvent.PLAYBACK_END): Transition(
+        TurnState.IDLE,
+        ("finish_turn", "clear_ephemeral"),
+    ),
+    (TurnState.SPEAKING, TurnEvent.WAKE): Transition(
+        TurnState.IDLE,
+        (*_STOP_EFFECTS, "queue_wake_after_safe_idle"),
+    ),
 }
 
 
 def transition(state: TurnState, event: TurnEvent) -> Transition:
-    if state is not TurnState.IDLE and event in {
-        TurnEvent.STOP,
+    if type(state) is not TurnState or type(event) is not TurnEvent:
+        raise TypeError("state and event must be exact enums")
+    if state in _ACTIVE_STATES and event is TurnEvent.STOP:
+        return Transition(TurnState.IDLE, _STOP_EFFECTS)
+    if state in _ACTIVE_STATES and event in {
         TurnEvent.CANCEL,
         TurnEvent.TIMEOUT,
         TurnEvent.DISCONNECT,
     }:
-        return Transition(
-            TurnState.IDLE,
-            ("cancel_turn", "stop_reachy", "reconcile_budget", "clear_ephemeral"),
-        )
-    if state is not TurnState.IDLE and event is TurnEvent.PRIVACY:
+        return Transition(TurnState.IDLE, _CANCELLATION_EFFECTS)
+    if state in _ACTIVE_STATES and event is TurnEvent.PRIVACY:
         return Transition(
             TurnState.PRIVACY,
             (
@@ -193,19 +260,19 @@ def transition(state: TurnState, event: TurnEvent) -> Transition:
                 "clear_ephemeral",
             ),
         )
-    if state is not TurnState.IDLE and event is TurnEvent.INVARIANT_FAILURE:
+    if state in _ACTIVE_STATES and event is TurnEvent.INVARIANT_FAILURE:
         return Transition(TurnState.ERROR_SAFE, ("close_media_egress", "stop_reachy"))
-    next_state = _FORWARD.get((state, event))
-    if next_state is None:
+    forward = _FORWARD.get((state, event))
+    if forward is None:
         raise ValueError(f"illegal transition {state.name} + {event.name}")
-    return Transition(next_state, ())
+    return forward
 ```
 
 - [ ] **Step 4: Run the green test and static checks**
 
 Run: `uv run pytest tests/unit/conversation/test_state_machine.py -q`
 
-Expected: PASS with `19 passed`.
+Expected: PASS with the complete closed state/event matrix and 100% branch coverage for the module.
 
 Run: `uv run ruff check apps/core/src/tuntun_core/domain/conversation.py tests/unit/conversation/test_state_machine.py && uv run mypy apps/core/src/tuntun_core/domain/conversation.py`
 
@@ -214,7 +281,7 @@ Expected: PASS with no diagnostics.
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add apps/core/src/tuntun_core/domain/conversation.py tests/unit/conversation/test_state_machine.py
+git add apps/core/src/tuntun_core/domain/conversation.py tests/unit/conversation/test_state_machine.py docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md
 git diff --cached --check
 git commit -m "feat(conversation): add fail-closed turn state machine"
 ```
