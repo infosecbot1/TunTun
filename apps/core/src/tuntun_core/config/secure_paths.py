@@ -300,13 +300,21 @@ def _descriptor_has_unsafe_acl(descriptor: int) -> bool:
     raise _AclInspectionError("ACL inspection is unsupported")
 
 
-def _require_no_unsafe_acl(descriptor: int, message: str) -> None:
+def require_no_unsafe_acl(descriptor: int, message: str) -> None:
+    """Fail closed unless a borrowed descriptor has no extended discretionary ACL."""
+
     try:
         has_unsafe_acl = _descriptor_has_unsafe_acl(descriptor)
     except Exception:
         raise PermissionError(message) from None
     if has_unsafe_acl:
         raise PermissionError(message)
+
+
+def _require_no_unsafe_acl(descriptor: int, message: str) -> None:
+    """Compatibility alias for existing internal callers."""
+
+    require_no_unsafe_acl(descriptor, message)
 
 
 def _ancestor_mode_is_safe(owner: int, mode: int) -> bool:
@@ -332,7 +340,7 @@ def _require_directory(
         or (leaf_private and (owner != os.geteuid() or stat.S_IMODE(opened.st_mode) != 0o700))
     ):
         raise PermissionError("unsafe application path")
-    _require_no_unsafe_acl(descriptor, "unsafe application path")
+    require_no_unsafe_acl(descriptor, "unsafe application path")
 
 
 @dataclass(slots=True)

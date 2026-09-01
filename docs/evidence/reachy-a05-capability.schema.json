@@ -1,0 +1,1034 @@
+{
+  "$defs": {
+    "AudioFormat": {
+      "additionalProperties": false,
+      "properties": {
+        "channel_layout": {
+          "enum": [
+            "mono",
+            "stereo",
+            "reachy_native"
+          ],
+          "title": "Channel Layout",
+          "type": "string"
+        },
+        "channels": {
+          "maximum": 4,
+          "minimum": 1,
+          "title": "Channels",
+          "type": "integer"
+        },
+        "interleaved": {
+          "title": "Interleaved",
+          "type": "boolean"
+        },
+        "sample_format": {
+          "enum": [
+            "float32_le",
+            "s16le"
+          ],
+          "title": "Sample Format",
+          "type": "string"
+        },
+        "sample_rate_hz": {
+          "maximum": 96000,
+          "minimum": 8000,
+          "title": "Sample Rate Hz",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sample_format",
+        "sample_rate_hz",
+        "channels",
+        "interleaved",
+        "channel_layout"
+      ],
+      "title": "AudioFormat",
+      "type": "object"
+    },
+    "CapabilityStatus": {
+      "enum": [
+        "available",
+        "unavailable",
+        "unknown"
+      ],
+      "title": "CapabilityStatus",
+      "type": "string"
+    },
+    "CheckStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "unknown"
+      ],
+      "title": "CheckStatus",
+      "type": "string"
+    },
+    "HostObservation": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "resource_limits": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "resource_limits"
+            ]
+          },
+          "then": {
+            "properties": {
+              "logical_cpu_count": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "memory_bytes": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "temperature_millicelsius": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "logical_cpu_count",
+              "memory_bytes",
+              "temperature_millicelsius"
+            ]
+          }
+        }
+      ],
+      "dependentRequired": {
+        "logical_cpu_count": [
+          "logical_cpu_count",
+          "memory_bytes",
+          "temperature_millicelsius"
+        ],
+        "memory_bytes": [
+          "logical_cpu_count",
+          "memory_bytes",
+          "temperature_millicelsius"
+        ],
+        "temperature_millicelsius": [
+          "logical_cpu_count",
+          "memory_bytes",
+          "temperature_millicelsius"
+        ]
+      },
+      "properties": {
+        "bind_surface": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "logical_cpu_count": {
+          "anyOf": [
+            {
+              "maximum": 1024,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logical Cpu Count"
+        },
+        "memory_bytes": {
+          "anyOf": [
+            {
+              "maximum": 1099511627776,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Memory Bytes"
+        },
+        "network_topology": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "report_privacy": {
+          "$ref": "#/$defs/CheckStatus",
+          "description": "Probe hard check for exact known private values and private-value provenance; the model token checks are lexical guardrails only."
+        },
+        "resource_evidence": {
+          "discriminator": {
+            "mapping": {
+              "observed": "#/$defs/ObservedEvidence",
+              "unobserved": "#/$defs/UnobservedEvidence"
+            },
+            "propertyName": "observation"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ObservedEvidence"
+            },
+            {
+              "$ref": "#/$defs/UnobservedEvidence"
+            }
+          ],
+          "title": "Resource Evidence"
+        },
+        "resource_limits": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "rtc": {
+          "$ref": "#/$defs/CapabilityStatus"
+        },
+        "ssh_boundary": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "temperature_millicelsius": {
+          "anyOf": [
+            {
+              "maximum": 200000,
+              "minimum": -100000,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Temperature Millicelsius"
+        }
+      },
+      "required": [
+        "resource_evidence",
+        "network_topology",
+        "bind_surface",
+        "ssh_boundary",
+        "resource_limits",
+        "report_privacy",
+        "rtc"
+      ],
+      "title": "HostObservation",
+      "type": "object"
+    },
+    "MediaObservation": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "microphone_capture": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "microphone_capture"
+            ]
+          },
+          "then": {
+            "properties": {
+              "native_input_format": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "native_input_format"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "speaker_playback": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "speaker_playback"
+            ]
+          },
+          "then": {
+            "properties": {
+              "native_output_format": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "native_output_format"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "playback_stop": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "playback_stop"
+            ]
+          },
+          "then": {
+            "properties": {
+              "native_output_format": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "native_output_format"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "aec": {
+          "$ref": "#/$defs/CapabilityStatus"
+        },
+        "camera_frame_observed": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "doa": {
+          "$ref": "#/$defs/CapabilityStatus"
+        },
+        "microphone_capture": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "native_input_evidence": {
+          "discriminator": {
+            "mapping": {
+              "observed": "#/$defs/ObservedEvidence",
+              "unobserved": "#/$defs/UnobservedEvidence"
+            },
+            "propertyName": "observation"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ObservedEvidence"
+            },
+            {
+              "$ref": "#/$defs/UnobservedEvidence"
+            }
+          ],
+          "title": "Native Input Evidence"
+        },
+        "native_input_format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "native_output_evidence": {
+          "discriminator": {
+            "mapping": {
+              "observed": "#/$defs/ObservedEvidence",
+              "unobserved": "#/$defs/UnobservedEvidence"
+            },
+            "propertyName": "observation"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ObservedEvidence"
+            },
+            {
+              "$ref": "#/$defs/UnobservedEvidence"
+            }
+          ],
+          "title": "Native Output Evidence"
+        },
+        "native_output_format": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "playback_stop": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "speaker_playback": {
+          "$ref": "#/$defs/CheckStatus"
+        }
+      },
+      "required": [
+        "native_input_evidence",
+        "native_output_evidence",
+        "microphone_capture",
+        "speaker_playback",
+        "camera_frame_observed",
+        "playback_stop",
+        "aec",
+        "doa"
+      ],
+      "title": "MediaObservation",
+      "type": "object"
+    },
+    "ObservedEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "observation": {
+          "const": "observed",
+          "title": "Observation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "observation"
+      ],
+      "title": "ObservedEvidence",
+      "type": "object"
+    },
+    "RuntimeDependency": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "distribution": {
+          "maxLength": 64,
+          "minLength": 1,
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "^(?:[0-9]{1,3}[.]){3}[0-9]{1,3}$"
+              },
+              {
+                "pattern": "[.][Ll][Oo][Cc][Aa][Ll]$"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Pp][Rr][Ii][Nn][Cc][Ii][Pp][Aa][Ll](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Ss][Ee][Rr][Ii][Aa][Ll](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Ss][Ss][Ii][Dd](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Uu][Ss][Ee][Rr][Nn][Aa][Mm][Ee](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "[Xx][Nn]--"
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          },
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Distribution",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "not": {
+            "anyOf": [
+              {
+                "pattern": "^(?:[0-9]{1,3}[.]){3}[0-9]{1,3}$"
+              },
+              {
+                "pattern": "[.][Ll][Oo][Cc][Aa][Ll]$"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Pp][Rr][Ii][Nn][Cc][Ii][Pp][Aa][Ll](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Ss][Ee][Rr][Ii][Aa][Ll](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Ss][Ss][Ii][Dd](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "(?:^|[-_.+!])[Uu][Ss][Ee][Rr][Nn][Aa][Mm][Ee](?:$|[-_.+!])"
+              },
+              {
+                "pattern": "[Xx][Nn]--"
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          },
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+!-]{0,63}$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "distribution",
+        "version",
+        "artifact_sha256"
+      ],
+      "title": "RuntimeDependency",
+      "type": "object"
+    },
+    "RuntimeObservation": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "daemon_available": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "daemon_available"
+            ]
+          },
+          "then": {
+            "properties": {
+              "daemon_artifact_sha256": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "daemon_version": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "daemon_version",
+              "daemon_artifact_sha256"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "sdk_daemon_match": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "sdk_daemon_match"
+            ]
+          },
+          "then": {
+            "properties": {
+              "daemon_artifact_sha256": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "daemon_version": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "dependencies": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "runtime_inventory_sha256": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "sdk_artifact_sha256": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "sdk_version": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "sdk_version",
+              "sdk_artifact_sha256",
+              "runtime_inventory_sha256",
+              "dependencies",
+              "daemon_version",
+              "daemon_artifact_sha256"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "interpreter_supported": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "interpreter_supported"
+            ]
+          },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "python_abi": {
+                    "const": "cp311"
+                  },
+                  "python_version": {
+                    "not": {
+                      "pattern": "[\\r\\n]"
+                    },
+                    "pattern": "^3[.]11[.](?:0|[1-9][0-9]{0,2})$"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "python_abi": {
+                    "const": "cp312"
+                  },
+                  "python_version": {
+                    "not": {
+                      "pattern": "[\\r\\n]"
+                    },
+                    "pattern": "^3[.]12[.](?:0|[1-9][0-9]{0,2})$"
+                  }
+                }
+              }
+            ],
+            "required": [
+              "python_version",
+              "python_abi"
+            ]
+          }
+        }
+      ],
+      "dependentRequired": {
+        "daemon_artifact_sha256": [
+          "daemon_version"
+        ],
+        "daemon_version": [
+          "daemon_artifact_sha256"
+        ],
+        "dependencies": [
+          "sdk_version",
+          "sdk_artifact_sha256",
+          "runtime_inventory_sha256"
+        ],
+        "python_abi": [
+          "python_version"
+        ],
+        "python_version": [
+          "python_abi"
+        ],
+        "runtime_inventory_sha256": [
+          "sdk_version",
+          "sdk_artifact_sha256",
+          "dependencies"
+        ],
+        "sdk_artifact_sha256": [
+          "sdk_version",
+          "runtime_inventory_sha256",
+          "dependencies"
+        ],
+        "sdk_version": [
+          "sdk_artifact_sha256",
+          "runtime_inventory_sha256",
+          "dependencies"
+        ]
+      },
+      "properties": {
+        "daemon_artifact_sha256": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Daemon Artifact Sha256"
+        },
+        "daemon_available": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "daemon_evidence": {
+          "discriminator": {
+            "mapping": {
+              "observed": "#/$defs/ObservedEvidence",
+              "unobserved": "#/$defs/UnobservedEvidence"
+            },
+            "propertyName": "observation"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ObservedEvidence"
+            },
+            {
+              "$ref": "#/$defs/UnobservedEvidence"
+            }
+          ],
+          "title": "Daemon Evidence"
+        },
+        "daemon_version": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "not": {
+                "anyOf": [
+                  {
+                    "pattern": "^(?:[0-9]{1,3}[.]){3}[0-9]{1,3}$"
+                  },
+                  {
+                    "pattern": "[.][Ll][Oo][Cc][Aa][Ll]$"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Pp][Rr][Ii][Nn][Cc][Ii][Pp][Aa][Ll](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Ss][Ee][Rr][Ii][Aa][Ll](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Ss][Ss][Ii][Dd](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Uu][Ss][Ee][Rr][Nn][Aa][Mm][Ee](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "[Xx][Nn]--"
+                  },
+                  {
+                    "pattern": "[\\r\\n]"
+                  }
+                ]
+              },
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._+!-]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Daemon Version"
+        },
+        "dependencies": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RuntimeDependency"
+              },
+              "maxItems": 128,
+              "type": "array",
+              "uniqueItems": true
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dependencies"
+        },
+        "interpreter_evidence": {
+          "discriminator": {
+            "mapping": {
+              "observed": "#/$defs/ObservedEvidence",
+              "unobserved": "#/$defs/UnobservedEvidence"
+            },
+            "propertyName": "observation"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ObservedEvidence"
+            },
+            {
+              "$ref": "#/$defs/UnobservedEvidence"
+            }
+          ],
+          "title": "Interpreter Evidence"
+        },
+        "interpreter_supported": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "python_abi": {
+          "anyOf": [
+            {
+              "not": {
+                "pattern": "[\\r\\n]"
+              },
+              "pattern": "^cp[0-9]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Python Abi"
+        },
+        "python_version": {
+          "anyOf": [
+            {
+              "maxLength": 11,
+              "minLength": 5,
+              "not": {
+                "pattern": "[\\r\\n]"
+              },
+              "pattern": "^(?:0|[1-9][0-9]{0,2})[.](?:0|[1-9][0-9]{0,2})[.](?:0|[1-9][0-9]{0,2})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Python Version"
+        },
+        "runtime_inventory_sha256": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime Inventory Sha256"
+        },
+        "sdk_artifact_sha256": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sdk Artifact Sha256"
+        },
+        "sdk_daemon_match": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "sdk_evidence": {
+          "discriminator": {
+            "mapping": {
+              "observed": "#/$defs/ObservedEvidence",
+              "unobserved": "#/$defs/UnobservedEvidence"
+            },
+            "propertyName": "observation"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ObservedEvidence"
+            },
+            {
+              "$ref": "#/$defs/UnobservedEvidence"
+            }
+          ],
+          "title": "Sdk Evidence"
+        },
+        "sdk_version": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "not": {
+                "anyOf": [
+                  {
+                    "pattern": "^(?:[0-9]{1,3}[.]){3}[0-9]{1,3}$"
+                  },
+                  {
+                    "pattern": "[.][Ll][Oo][Cc][Aa][Ll]$"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Pp][Rr][Ii][Nn][Cc][Ii][Pp][Aa][Ll](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Ss][Ee][Rr][Ii][Aa][Ll](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Ss][Ss][Ii][Dd](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "(?:^|[-_.+!])[Uu][Ss][Ee][Rr][Nn][Aa][Mm][Ee](?:$|[-_.+!])"
+                  },
+                  {
+                    "pattern": "[Xx][Nn]--"
+                  },
+                  {
+                    "pattern": "[\\r\\n]"
+                  }
+                ]
+              },
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._+!-]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sdk Version"
+        }
+      },
+      "required": [
+        "daemon_evidence",
+        "sdk_evidence",
+        "interpreter_evidence",
+        "daemon_available",
+        "sdk_daemon_match",
+        "interpreter_supported"
+      ],
+      "title": "RuntimeObservation",
+      "type": "object"
+    },
+    "SafetyObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "app_lock": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "controller_collision_clear": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "controller_detection": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "local_capture_input": {
+          "$ref": "#/$defs/CapabilityStatus"
+        },
+        "local_stop_input": {
+          "$ref": "#/$defs/CapabilityStatus"
+        },
+        "motion_stop": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "movement_enumerated": {
+          "$ref": "#/$defs/CheckStatus"
+        }
+      },
+      "required": [
+        "movement_enumerated",
+        "motion_stop",
+        "app_lock",
+        "controller_detection",
+        "controller_collision_clear",
+        "local_capture_input",
+        "local_stop_input"
+      ],
+      "title": "SafetyObservation",
+      "type": "object"
+    },
+    "UnobservedEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "observation": {
+          "const": "unobserved",
+          "title": "Observation",
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/UnobservedReason"
+        }
+      },
+      "required": [
+        "observation",
+        "reason"
+      ],
+      "title": "UnobservedEvidence",
+      "type": "object"
+    },
+    "UnobservedReason": {
+      "enum": [
+        "not_attempted",
+        "dependency_unavailable",
+        "permission_denied",
+        "probe_error"
+      ],
+      "title": "UnobservedReason",
+      "type": "string"
+    }
+  },
+  "$id": "https://tuntun.local/schemas/evidence/reachy-a05-capability.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Structural sanitized capability schema; runtime model parsing and a trusted in-memory privacy authority are required for cross-field and private-provenance semantics.",
+  "properties": {
+    "host": {
+      "$ref": "#/$defs/HostObservation"
+    },
+    "media": {
+      "$ref": "#/$defs/MediaObservation"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeObservation"
+    },
+    "safety": {
+      "$ref": "#/$defs/SafetyObservation"
+    },
+    "schema_version": {
+      "const": "tuntun.reachy-a05-capability.v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "observed_at",
+    "runtime",
+    "media",
+    "safety",
+    "host"
+  ],
+  "title": "ReachyCapabilityReportV1",
+  "type": "object",
+  "x-tuntun-runtime-semantic-validation-required": true,
+  "x-tuntun-validation-scope": "structural"
+}
