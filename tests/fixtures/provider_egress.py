@@ -661,7 +661,7 @@ class ProviderBoundaryCase:
 
     async def run_reasoning(self) -> None:
         user_text = (
-            "Use sk-proj-abcdefghijklmnopqrstuv"
+            "".join(("Use sk-", "proj-", "abcdefghijkl", "mnopqrstuv"))
             if self.mutation == "secret_in_input"
             else self.user_text
         )
@@ -683,7 +683,7 @@ class ProviderBoundaryCase:
         )
         units = sum(len(message.content.encode("utf-8")) for message in draft.provider_messages)
         injected = {
-            "secret_in_canonical_body": "sk-proj-abcdefghijklmnopqrstuv",
+            "secret_in_canonical_body": "".join(("sk-", "proj-", "abcdefghijkl", "mnopqrstuv")),
             "email_in_canonical_body": "person@example.test",
             "phone_in_canonical_body": "+65 8123 4567",
             "session_label_in_canonical_body": "session-1",
