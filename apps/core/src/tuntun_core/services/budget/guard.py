@@ -37,6 +37,16 @@ BudgetOutcome = Literal[
 ]
 
 
+class _ReservationNotSettleable(PermissionError):
+    def __init__(self) -> None:
+        super().__init__("reservation_not_settleable")
+
+
+class _SentReservationRequiresSettlement(PermissionError):
+    def __init__(self) -> None:
+        super().__init__("sent_reservation_requires_settlement")
+
+
 class BudgetTurnBindingV1(ContractModel):
     household_id: UUID
     turn_id: UUID
@@ -440,7 +450,7 @@ class BudgetGuard:
             or reservation["state"] not in {"reserved", "sent"}
             or reservation["outcome"] not in {"allow", "allow_soft_warning"}
         ):
-            raise PermissionError("reservation_not_settleable")
+            raise _ReservationNotSettleable()
         snapshot = self._evidence.require_pricing_snapshot(reservation)
         calls = (
             db.exec_driver_sql(
@@ -568,7 +578,7 @@ class BudgetGuard:
             ),
         )
         if changed.rowcount != 1:
-            raise PermissionError("reservation_not_settleable")
+            raise _ReservationNotSettleable()
         usage_json = (
             "null" if receipt is None else self._evidence.canonical_usage(receipt.billable_usage)
         )
@@ -676,7 +686,7 @@ class BudgetGuard:
             )
         )
         if not proven:
-            raise PermissionError("sent_reservation_requires_settlement")
+            raise _SentReservationRequiresSettlement()
         if calls:
             closed = db.exec_driver_sql(
                 "UPDATE provider_calls SET outcome='cancelled',"
@@ -686,7 +696,7 @@ class BudgetGuard:
                 (utc_storage(now), calls[0][0]),
             )
             if closed.rowcount != 1:
-                raise PermissionError("sent_reservation_requires_settlement")
+                raise _SentReservationRequiresSettlement()
         cursor = db.exec_driver_sql(
             "UPDATE budget_reservations SET state='released',"
             "transport_phase='finished',reconciled_at=? "
@@ -695,7 +705,7 @@ class BudgetGuard:
             (utc_storage(now), str(reservation_id), str(attempt_id), reservation[2]),
         )
         if cursor.rowcount != 1:
-            raise PermissionError("sent_reservation_requires_settlement")
+            raise _SentReservationRequiresSettlement()
 
     async def _release_proven_unsent(self, reservation_id: UUID, attempt_id: UUID) -> None:
         now = self._clock.now()
@@ -782,9 +792,7 @@ class BudgetGuard:
                 continue
             try:
                 await self._release_proven_unsent(reservation_id, attempt_id)
-            except PermissionError as error:
-                if str(error) != "sent_reservation_requires_settlement":
-                    raise
+            except _SentReservationRequiresSettlement:
                 if await self._reservation_is_terminal(reservation_id, attempt_id):
                     continue
                 try:
@@ -796,9 +804,7 @@ class BudgetGuard:
                             )
                         )
                     )
-                except PermissionError as settle_error:
-                    if str(settle_error) != "reservation_not_settleable" or not (
-                        await self._reservation_is_terminal(reservation_id, attempt_id)
-                    ):
+                except _ReservationNotSettleable:
+                    if not await self._reservation_is_terminal(reservation_id, attempt_id):
                         raise
         return tuple(settlements)
