@@ -50,10 +50,19 @@ def test_exact_native_and_fx_integer_formulas(catalog, clock) -> None:
     assert search.web_search_micro_usd_per_call == 10_000
 
 
-def test_checked_in_catalog_loads_only_exact_quoted_utc_timestamps() -> None:
+def test_checked_in_catalog_loads_only_exact_quoted_utc_timestamps(tmp_path: Path) -> None:
+    price_path = tmp_path / "openai-prices.yaml"
+    fx_path = tmp_path / "fx.yaml"
+    shutil.copyfile("config/providers/prices/openai-2026-08-27.yaml", price_path)
+    shutil.copyfile(
+        "config/providers/fx/bootstrap-safety-factor-2026-08-27.yaml",
+        fx_path,
+    )
+    price_path.chmod(0o600)
+    fx_path.chmod(0o600)
     loaded = PriceCatalog.load(
-        Path("config/providers/prices/openai-2026-08-27.yaml"),
-        Path("config/providers/fx/bootstrap-safety-factor-2026-08-27.yaml"),
+        price_path,
+        fx_path,
     )
     assert len(loaded.prices) == 3
     assert all(row.category in {"llm", "stt", "tts"} for row in loaded.prices)

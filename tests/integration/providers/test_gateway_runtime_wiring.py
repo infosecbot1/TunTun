@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import shutil
 from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -212,6 +213,9 @@ async def test_static_provider_defaults_do_not_satisfy_missing_provider_review(
     state_root = tmp_path / "production-state"
     state_root.mkdir(mode=0o700)
     state_root.chmod(0o700)
+    defaults_path = tmp_path / "provider-defaults.yaml"
+    shutil.copyfile(PROJECT_ROOT / "config/providers/default.yaml", defaults_path)
+    defaults_path.chmod(0o600)
     production = ProductionContainer.build(
         configured_state_root=state_root,
         reachy=object(),
@@ -221,7 +225,7 @@ async def test_static_provider_defaults_do_not_satisfy_missing_provider_review(
         price_catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
-        provider_defaults_path=PROJECT_ROOT / "config/providers/default.yaml",
+        provider_defaults_path=defaults_path,
     )
     try:
         with pytest.raises(PermissionError, match="provider_review_not_current"):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -45,10 +46,13 @@ def _mutated(path: tuple[str, ...], value: object) -> dict[str, object]:
     return payload
 
 
-def test_checked_in_provider_defaults_manifest_loads() -> None:
+def test_checked_in_provider_defaults_manifest_loads(tmp_path: Path) -> None:
     from tuntun_core.services.providers.defaults import load_provider_defaults
 
-    document = load_provider_defaults(PROJECT_ROOT / "config/providers/default.yaml")
+    defaults_path = tmp_path / "provider-defaults.yaml"
+    shutil.copyfile(PROJECT_ROOT / "config/providers/default.yaml", defaults_path)
+    defaults_path.chmod(0o600)
+    document = load_provider_defaults(defaults_path)
 
     assert document.schema_version == "tuntun.provider-defaults.v1"
     assert document.budget.timezone == "Asia/Singapore"

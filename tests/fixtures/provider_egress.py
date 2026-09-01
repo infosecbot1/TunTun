@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -89,6 +90,13 @@ _BOUNDARY_MUTATIONS = frozenset(
         "session_label_in_canonical_body",
     }
 )
+
+
+def _copy_provider_defaults_to_private_path(directory: Path) -> Path:
+    target = directory / "provider-defaults.yaml"
+    shutil.copyfile(_PROVIDER_DEFAULTS_PATH, target)
+    target.chmod(0o600)
+    return target
 
 
 def _other_commitment(label: str) -> Commitment:
@@ -1718,6 +1726,7 @@ async def production_core_container(
     catalog,
     provider_reviews,
     budget_evidence,
+    tmp_path,
 ):
     context, _reservation, _guard = await _create_production_context(
         async_uow_factory,
@@ -1734,7 +1743,7 @@ async def production_core_container(
         price_catalog=catalog,
         provider_reviews=provider_reviews,
         budget_evidence=budget_evidence,
-        provider_defaults=load_provider_defaults(_PROVIDER_DEFAULTS_PATH),
+        provider_defaults=load_provider_defaults(_copy_provider_defaults_to_private_path(tmp_path)),
     )
 
 
@@ -1761,6 +1770,7 @@ async def production_container(
     state_root = tmp_path / "production-state"
     state_root.mkdir(mode=0o700)
     state_root.chmod(0o700)
+    provider_defaults_path = _copy_provider_defaults_to_private_path(tmp_path)
     reachy = _ProductionReachySafety()
     container = ProductionContainer.build(
         configured_state_root=state_root,
@@ -1771,7 +1781,7 @@ async def production_container(
         price_catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
-        provider_defaults_path=_PROVIDER_DEFAULTS_PATH,
+        provider_defaults_path=provider_defaults_path,
     )
     try:
         yield _ProductionContainerCase(container, context, reachy)
