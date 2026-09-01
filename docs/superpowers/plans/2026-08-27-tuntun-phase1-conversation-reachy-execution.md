@@ -1811,6 +1811,7 @@ git commit -m "security(provider): persist and consume frozen route authorizatio
 
 **Files:**
 - Create: `packages/contracts/src/tuntun_contracts/commitments.py`
+- Modify: `apps/core/src/tuntun_core/adapters/sqlcipher/engine.py` (bind SQLAlchemy's dialect to the actual SQLCipher DB-API so integrity failures are typed correctly)
 - Create: `apps/core/src/tuntun_core/services/providers/allowlist.py`
 - Create: `apps/core/src/tuntun_core/services/providers/reasoning_wire.py`
 - Create: `apps/core/src/tuntun_core/services/providers/redactor.py`
@@ -1830,7 +1831,7 @@ git commit -m "security(provider): persist and consume frozen route authorizatio
 
 **Interfaces:**
 - Consumes a versioned 32-byte Keychain root; frozen `Commitment`, `RedactionReceipt`, `RouteAuthorization`, `RouteConsumption`, `SanitizedProviderRequest`, and `AuthorizedSynthesisRequest`; exact foundation `RouteAuthorizerPort` and `BudgetPort` protocols. Task 04 does not import or instantiate Task 05's concrete `BudgetGuard`.
-- Produces dependency-free RFC 5869 `derive_purpose_key`, `commit_private`, `Redactor.sanitize`/`finalize`, one `build_openai_reasoning_wire_request` builder, a SQLCipher-backed `RedactionReceiptRepository`, the concrete SQLCipher-backed `ProviderCallRepository`, and the only network-capable `ProviderGateway.send`. The wire builder converts the private `memory_data` role to provider-supported `developer`, requires the Phase-1 empty tool set and `store=false`, snapshots the strict output schema, and returns one detached SDK payload plus its exact canonical semantic bytes; Task 06 must send that returned payload without reconstructing it. `sanitize` performs normalization, prohibited-input rejection, field redaction, the input commitment, and an ephemeral purpose-keyed commitment over the complete sanitized draft; after the trusted purpose-specific builder has produced the exact canonical provider body, `finalize` verifies that draft commitment, parses bounded JSON, requires an object whose bytes equal its canonical encoding, scans every string key/value for secrets, email, phone, controls, non-NFC text, or the original session label, and creates the output commitment and body-free receipt. Only a successful `finalize` may call `RedactionReceiptRepository.record`; the repository persists content-minimized receipt metadata before route authorization or egress. `ProviderCallRepository.begin` uses one transaction to verify and bind the exact persisted receipt when required, insert the provider-call proof, and move its exact reservation to `claim_begun`; `mark_network_invocation_starting` atomically advances both proof rows.
+- Produces dependency-free RFC 5869 `derive_purpose_key`, `commit_private`, `Redactor.sanitize`/`finalize`, one `build_openai_reasoning_wire_request` builder, a SQLCipher-backed `RedactionReceiptRepository`, the concrete SQLCipher-backed `ProviderCallRepository`, and the only network-capable `ProviderGateway.send`. The SQLCipher engine identifies its real DB-API module to SQLAlchemy, so driver integrity failures cross the unit-of-work boundary as `sqlalchemy.exc.IntegrityError` instead of leaking an unclassified driver exception. The wire builder converts the private `memory_data` role to provider-supported `developer`, requires the Phase-1 empty tool set and `store=false`, snapshots the strict output schema, and returns one detached SDK payload plus its exact canonical semantic bytes; Task 06 must send that returned payload without reconstructing it. `sanitize` performs normalization, prohibited-input rejection, field redaction, the input commitment, and an ephemeral purpose-keyed commitment over the complete sanitized draft; after the trusted purpose-specific builder has produced the exact canonical provider body, `finalize` verifies that draft commitment, parses bounded JSON, requires an object whose bytes equal its canonical encoding, scans every string key/value for secrets, email, phone, controls, non-NFC text, or the original session label, and creates the output commitment and body-free receipt. Only a successful `finalize` may call `RedactionReceiptRepository.record`; the repository persists content-minimized receipt metadata before route authorization or egress. `ProviderCallRepository.begin` uses one transaction to verify and bind the exact persisted receipt when required, insert the provider-call proof, and move its exact reservation to `claim_begun`; `mark_network_invocation_starting` atomically advances both proof rows.
 - Reasoning and TTS claims require a non-null receipt ID whose persisted purpose, output commitment, and maximum sensitivity match the exact sanitized request and route. STT requires a null receipt ID; search purposes remain unreachable in this task. The enforced order is sanitize → persist the content-minimized receipt → reserve → authorize → adapter recomputes the exact body commitment/bytes/units → consume authorization → atomically verify/bind receipt and claim call+reservation → mark both sent through the injected `BudgetPort` → mark both network-starting → invoke network.
 - The Task 04 composition root constructs the SQL repositories and a gateway factory that requires an injected `BudgetPort`; it does not publish a live provider-egress path. Task 05 owns concrete `BudgetGuard.mark_sent`, startup reconciliation, expiry-release races, and activation of the live gateway.
 
@@ -1854,6 +1855,7 @@ This explicit plugin keeps Task-04 fixtures out of root `tests/conftest.py`, so
 unrelated minimal-wheel suites retain their current dependency boundary.
 
 ```python
+# tests/fixtures/provider_egress.py
 # tests/fixtures/provider_egress.py
 from __future__ import annotations
 
@@ -1897,21 +1899,32 @@ _KEY_ID = "route-hmac-v1"
 _PURPOSES = frozenset({"cloud_stt", "cloud_reasoning", "cloud_tts"})
 _RECEIPT_MUTATIONS = frozenset(
     {
-        "valid", "missing", "present", "swapped", "wrong_purpose",
-        "wrong_output_commitment", "wrong_sensitivity",
+        "valid",
+        "missing",
+        "present",
+        "swapped",
+        "wrong_purpose",
+        "wrong_output_commitment",
+        "wrong_sensitivity",
     }
 )
 _FAULTS = frozenset(
     {
-        "after_reservation_update", "after_call_insert",
-        "after_network_reservation_update", "after_call_finish",
+        "after_reservation_update",
+        "after_call_insert",
+        "before_call_insert_ignore",
+        "after_network_reservation_update",
+        "after_call_finish",
         "reservation_finish_cas_lost",
     }
 )
 _BOUNDARY_MUTATIONS = frozenset(
     {
-        "secret_in_input", "secret_in_canonical_body", "email_in_canonical_body",
-        "phone_in_canonical_body", "session_label_in_canonical_body",
+        "secret_in_input",
+        "secret_in_canonical_body",
+        "email_in_canonical_body",
+        "phone_in_canonical_body",
+        "session_label_in_canonical_body",
     }
 )
 
@@ -1924,7 +1937,9 @@ def _utc_storage(value: datetime) -> str:
 
 def _other_commitment(label: str) -> Commitment:
     return commit_private(
-        _ROOT, _KEY_ID, "provider.request.test-mutation",
+        _ROOT,
+        _KEY_ID,
+        "provider.request.test-mutation",
         canonical_mapping_bytes({"label": label}),
     )
 
@@ -1944,9 +1959,7 @@ def _artifact(
     user_text: str = "Email me at person@example.test",
 ) -> tuple[RedactionReceipt | None, bytes, int]:
     if purpose == "cloud_stt":
-        body = canonical_mapping_bytes(
-            {"audio_sha256": "a" * 64, "model": "gpt-transcribe"}
-        )
+        body = canonical_mapping_bytes({"audio_sha256": "a" * 64, "model": "gpt-transcribe"})
         return None, body, 1_000
     redactor = Redactor(
         root_key=_ROOT,
@@ -2007,23 +2020,39 @@ async def _seed_reservation(
     route: RouteAuthorization,
     clock: FakeClock,
 ) -> None:
-    category = {"cloud_stt": "stt", "cloud_reasoning": "llm", "cloud_tts": "tts"}[
-        route.purpose
-    ]
+    category = {"cloud_stt": "stt", "cloud_reasoning": "llm", "cloud_tts": "tts"}[route.purpose]
     accounting = "request_bound_exact" if category == "tts" else "provider_reported_exact"
     now = clock.now()
     values = (
-        str(route.budget_reservation_id), str(route.request_id), str(route.attempt_id),
-        now.strftime("%Y-%m"), category, route.provider, route.model, "allow", 10_000,
-        json.dumps({"category": category}, separators=(",", ":")), "{}", accounting,
-        "freeze_unknown_overage", "test-pricing-v1", "a" * 64, "test-fx-v1",
-        "b" * 64, _KEY_ID, _other_commitment("pricing").value_b64,
-        "reserved", 1, "not_claimed", _utc_storage(now),
+        str(route.budget_reservation_id),
+        str(route.request_id),
+        str(route.attempt_id),
+        now.strftime("%Y-%m"),
+        category,
+        route.provider,
+        route.model,
+        "allow",
+        10_000,
+        json.dumps({"category": category}, separators=(",", ":")),
+        "{}",
+        accounting,
+        "freeze_unknown_overage",
+        "test-pricing-v1",
+        "a" * 64,
+        "test-fx-v1",
+        "b" * 64,
+        _KEY_ID,
+        _other_commitment("pricing").value_b64,
+        "reserved",
+        1,
+        "not_claimed",
+        _utc_storage(now),
         _utc_storage(now + timedelta(minutes=5)),
     )
     async with factory() as uow:
-        await uow.run_sync(
-            lambda db: db.exec_driver_sql(
+
+        def insert_reservation(db) -> int:
+            return db.exec_driver_sql(
                 "INSERT INTO budget_reservations "
                 "(id,request_id,attempt_id,month_key,category,provider,model,outcome,"
                 "reserved_micros_sgd,usage_ceiling_json,price_snapshot_json,"
@@ -2032,8 +2061,10 @@ async def _seed_reservation(
                 "pricing_commitment_hmac_b64,state,gateway_ordering_version,transport_phase,"
                 "created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 values,
-            )
-        )
+            ).rowcount
+
+        if await uow.run_sync(insert_reservation) != 1:
+            raise RuntimeError("test reservation insert lost ownership")
         await uow.commit()
 
 
@@ -2055,9 +2086,9 @@ async def _create_context(
     units = units if input_units is None else input_units
     if receipt is not None and persist_receipt:
         await repository.record(receipt)
-    model = {
-        "cloud_stt": "gpt-transcribe", "cloud_reasoning": "gpt-5.6-sol", "cloud_tts": "tts-1"
-    }[purpose]
+    model = {"cloud_stt": "gpt-transcribe", "cloud_reasoning": "gpt-5.6-sol", "cloud_tts": "tts-1"}[
+        purpose
+    ]
     commitment = (
         receipt.output_commitment
         if receipt is not None
@@ -2223,23 +2254,23 @@ class GatewayCase:
 
 
 async def _proof_rows(factory: AsyncUnitOfWorkFactory, route: RouteAuthorization):
+    def select_rows(db):
+        reservation = db.exec_driver_sql(
+            "SELECT state,gateway_ordering_version,transport_phase "
+            "FROM budget_reservations WHERE id=? AND attempt_id=?",
+            (str(route.budget_reservation_id), str(route.attempt_id)),
+        ).fetchone()
+        call = db.exec_driver_sql(
+            "SELECT id,gateway_ordering_version,transport_phase,outcome "
+            "FROM provider_calls WHERE budget_reservation_id=? AND attempt_id=?",
+            (str(route.budget_reservation_id), str(route.attempt_id)),
+        ).fetchone()
+        return tuple(row if row is None else tuple(row) for row in (reservation, call))
+
     async with factory() as uow:
-        rows = await uow.run_sync(
-            lambda db: (
-                db.exec_driver_sql(
-                    "SELECT state,gateway_ordering_version,transport_phase "
-                    "FROM budget_reservations WHERE id=? AND attempt_id=?",
-                    (str(route.budget_reservation_id), str(route.attempt_id)),
-                ).fetchone(),
-                db.exec_driver_sql(
-                    "SELECT id,gateway_ordering_version,transport_phase,outcome "
-                    "FROM provider_calls WHERE budget_reservation_id=? AND attempt_id=?",
-                    (str(route.budget_reservation_id), str(route.attempt_id)),
-                ).fetchone(),
-            )
-        )
+        rows = await uow.run_sync(select_rows)
         await uow.rollback()
-    return tuple(tuple(row) if row is not None else None for row in rows)
+    return rows
 
 
 class ProviderCallBindingCase:
@@ -2256,18 +2287,22 @@ class ProviderCallBindingCase:
         if self.context is not None:
             return
         context = await _create_context(
-            self._harness.factory, self._harness.redaction_receipt_repository,
-            self._harness.clock, self._purpose,  # type: ignore[arg-type]
+            self._harness.factory,
+            self._harness.redaction_receipt_repository,
+            self._harness.clock,
+            self._purpose,  # type: ignore[arg-type]
         )
         supplied = context.receipt
         if self._mutation in {"missing"}:
             supplied = None
         elif self._mutation == "present":
             supplied = RedactionReceipt(
-                receipt_id=uuid4(), purpose="cloud_reasoning",
+                receipt_id=uuid4(),
+                purpose="cloud_reasoning",
                 input_commitment=_other_commitment("present-input"),
                 output_commitment=_other_commitment("present-output"),
-                removed_categories=(), removed_count=0,
+                removed_categories=(),
+                removed_count=0,
                 policy_version="provider-redaction-v1",
                 maximum_sensitivity=Sensitivity.PERSONAL,
             )
@@ -2327,8 +2362,10 @@ class CallRepositoryFaultCase:
     async def _prepare(self) -> None:
         if self.context is None:
             self.context = await _create_context(
-                self._harness.factory, self._harness.redaction_receipt_repository,
-                self._harness.clock, "cloud_reasoning",
+                self._harness.factory,
+                self._harness.redaction_receipt_repository,
+                self._harness.clock,
+                "cloud_reasoning",
             )
 
     async def _trigger(self, phase: str) -> str:
@@ -2347,6 +2384,12 @@ class CallRepositoryFaultCase:
                 f"CREATE TRIGGER {name} AFTER INSERT ON provider_calls "
                 f"WHEN NEW.attempt_id='{attempt}' "
                 "BEGIN SELECT RAISE(ABORT,'injected claim fault'); END"
+            )
+        elif phase == "before_call_insert_ignore":
+            sql = (
+                f"CREATE TRIGGER {name} BEFORE INSERT ON provider_calls "
+                f"WHEN NEW.attempt_id='{attempt}' "
+                "BEGIN SELECT RAISE(IGNORE); END"
             )
         elif phase == "after_network_reservation_update":
             sql = (
@@ -2370,7 +2413,7 @@ class CallRepositoryFaultCase:
         else:
             raise ValueError("unknown trigger phase")
         async with self._harness.factory() as uow:
-            await uow.run_sync(lambda db: db.exec_driver_sql(sql))
+            await uow.run_sync(lambda db: db.exec_driver_sql(sql).rowcount)
             await uow.commit()
         return name
 
@@ -2378,7 +2421,9 @@ class CallRepositoryFaultCase:
         if name is None:
             return
         async with self._harness.factory() as uow:
-            await uow.run_sync(lambda db: db.exec_driver_sql(f"DROP TRIGGER IF EXISTS {name}"))
+            await uow.run_sync(
+                lambda db: db.exec_driver_sql(f"DROP TRIGGER IF EXISTS {name}").rowcount
+            )
             await uow.commit()
 
     async def begin(self) -> UUID:
@@ -2386,7 +2431,12 @@ class CallRepositoryFaultCase:
         assert self.context is not None
         name = (
             await self._trigger(self._fault)
-            if self._fault in {"after_reservation_update", "after_call_insert"}
+            if self._fault
+            in {
+                "after_reservation_update",
+                "after_call_insert",
+                "before_call_insert_ignore",
+            }
             else None
         )
         try:
@@ -2418,9 +2468,11 @@ class CallRepositoryFaultCase:
             await self._drop_trigger(name)
 
     async def finish(self, call_id: UUID, outcome: str) -> None:
-        name = await self._trigger(self._fault) if self._fault in {
-            "after_call_finish", "reservation_finish_cas_lost"
-        } else None
+        name = (
+            await self._trigger(self._fault)
+            if self._fault in {"after_call_finish", "reservation_finish_cas_lost"}
+            else None
+        )
         try:
             await self._harness.provider_call_repository.finish(call_id, outcome)
         finally:
@@ -2480,8 +2532,11 @@ class ProviderBoundaryCase:
             memory_texts=(),
         )
         _, body = build_openai_reasoning_wire_request(
-            model="gpt-5.6-sol", messages=draft.provider_messages,
-            allowed_tools=(), max_output_tokens=512, store=False,
+            model="gpt-5.6-sol",
+            messages=draft.provider_messages,
+            allowed_tools=(),
+            max_output_tokens=512,
+            store=False,
             output_schema={"type": "object", "additionalProperties": False},
         )
         units = sum(len(message.content.encode("utf-8")) for message in draft.provider_messages)
@@ -2496,19 +2551,27 @@ class ProviderBoundaryCase:
             payload["injected"] = injected
             body = canonical_mapping_bytes(payload)
         receipt = redactor.finalize(
-            draft, purpose="cloud_reasoning", canonical_provider_body=body,
+            draft,
+            purpose="cloud_reasoning",
+            canonical_provider_body=body,
             policy_version="provider-redaction-v1",
             maximum_sensitivity=Sensitivity.PERSONAL,
         )
         await self._harness.redaction_receipt_repository.record(receipt)
         context = await _create_context(
-            self._harness.factory, self._harness.redaction_receipt_repository,
-            self._harness.clock, "cloud_reasoning", receipt=receipt,
-            canonical_body=body, input_units=units, persist_receipt=False,
+            self._harness.factory,
+            self._harness.redaction_receipt_repository,
+            self._harness.clock,
+            "cloud_reasoning",
+            receipt=receipt,
+            canonical_body=body,
+            input_units=units,
+            persist_receipt=False,
             request_id=self.request_id,
         )
         calls = ProviderCallRepository(
-            self._harness.factory, self._harness.clock,
+            self._harness.factory,
+            self._harness.clock,
             self._harness.redaction_receipt_repository,
         )
         gateway = ProviderGateway(
@@ -2525,9 +2588,7 @@ class ProviderBoundaryCase:
         await gateway.send(context.route, context.consumption, receipt.receipt_id, capture)
 
     async def _count(self, table: str, column: str, value: UUID) -> int:
-        if (table, column) not in {
-            ("redaction_receipts", "id"), ("provider_calls", "request_id")
-        }:
+        if (table, column) not in {("redaction_receipts", "id"), ("provider_calls", "request_id")}:
             raise ValueError("unapproved test count target")
         async with self._harness.factory() as uow:
             count = await uow.run_sync(
@@ -2545,21 +2606,21 @@ class ProviderBoundaryCase:
         return await self._count("provider_calls", "request_id", self.request_id)
 
     async def serialized_receipt_and_call_rows(self) -> str:
+        def select_rows(db):
+            receipt_rows = db.exec_driver_sql(
+                "SELECT * FROM redaction_receipts WHERE id=?",
+                (str(self.receipt_id),),
+            ).fetchall()
+            call_rows = db.exec_driver_sql(
+                "SELECT * FROM provider_calls WHERE request_id=?",
+                (str(self.request_id),),
+            ).fetchall()
+            return tuple(tuple(tuple(row) for row in group) for group in (receipt_rows, call_rows))
+
         async with self._harness.factory() as uow:
-            rows = await uow.run_sync(
-                lambda db: (
-                    db.exec_driver_sql(
-                        "SELECT * FROM redaction_receipts WHERE id=?",
-                        (str(self.receipt_id),),
-                    ).fetchall(),
-                    db.exec_driver_sql(
-                        "SELECT * FROM provider_calls WHERE request_id=?",
-                        (str(self.request_id),),
-                    ).fetchall(),
-                )
-            )
+            rows = await uow.run_sync(select_rows)
             await uow.rollback()
-        return json.dumps([[tuple(row) for row in group] for group in rows], sort_keys=True)
+        return json.dumps(rows, sort_keys=True)
 
 
 class ProviderEgressHarness:
@@ -2577,7 +2638,9 @@ class ProviderEgressHarness:
         self.finalized_redaction_receipt = context.receipt
         self.redaction_receipt_repository = RedactionReceiptRepository(factory, clock)
         self.provider_call_repository = ProviderCallRepository(
-            factory, clock, self.redaction_receipt_repository,
+            factory,
+            clock,
+            self.redaction_receipt_repository,
         )
         self.budget_port_fake = SqlBudgetPortFake(factory, clock)
         self.core_container = CoreContainer(
@@ -2585,9 +2648,7 @@ class ProviderEgressHarness:
             clock=clock,
             route_authorizer=BoundAuthorizerFake(context),
         )
-        self.provider_gateway = self.core_container.build_provider_gateway(
-            self.budget_port_fake
-        )
+        self.provider_gateway = self.core_container.build_provider_gateway(self.budget_port_fake)
 
     @classmethod
     async def create(
@@ -2599,7 +2660,10 @@ class ProviderEgressHarness:
         del route_database
         repository = RedactionReceiptRepository(factory, clock)
         context = await _create_context(
-            factory, repository, clock, "cloud_reasoning",
+            factory,
+            repository,
+            clock,
+            "cloud_reasoning",
         )
         return cls(factory, clock, context)
 
@@ -2615,7 +2679,10 @@ class ProviderEgressHarness:
         return GatewayCase(context, mark_sent_error)
 
     def provider_call_binding_case(
-        self, *, purpose: str, receipt_mutation: str,
+        self,
+        *,
+        purpose: str,
+        receipt_mutation: str,
     ) -> ProviderCallBindingCase:
         return ProviderCallBindingCase(self, purpose, receipt_mutation)
 
@@ -2638,10 +2705,14 @@ def clock(route_clock):
 
 @pytest_asyncio.fixture
 async def provider_egress_harness(
-    route_database: RouteDatabase, async_uow_factory, clock,
+    route_database: RouteDatabase,
+    async_uow_factory,
+    clock,
 ) -> AsyncIterator[ProviderEgressHarness]:
     harness = await ProviderEgressHarness.create(
-        route_database, async_uow_factory, clock,
+        route_database,
+        async_uow_factory,
+        clock,
     )
     try:
         yield harness
@@ -2711,8 +2782,8 @@ def provider_gateway(provider_egress_harness):
 
 ```python
 # tests/unit/providers/test_commitments.py
+# tests/unit/providers/test_commitments.py
 import pytest
-
 from tuntun_contracts.commitments import commit_private
 
 
@@ -2738,10 +2809,10 @@ def test_commitment_inputs_fail_closed(root, purpose, error) -> None:
 
 ```python
 # tests/unit/providers/test_reasoning_wire.py
+# tests/unit/providers/test_reasoning_wire.py
 import json
 
 import pytest
-
 from tuntun_contracts.provider import SanitizedProviderMessage
 from tuntun_core.services.providers.reasoning_wire import (
     build_openai_reasoning_wire_request,
@@ -2777,9 +2848,7 @@ def test_reasoning_wire_body_is_the_exact_detached_openai_payload() -> None:
     )
 
     assert payload == json.loads(body)
-    assert set(payload) == {
-        "model", "input", "store", "max_output_tokens", "reasoning", "text"
-    }
+    assert set(payload) == {"model", "input", "store", "max_output_tokens", "reasoning", "text"}
     assert payload["input"][1]["role"] == "developer"
     assert payload["reasoning"] == {"effort": "low"}
     assert payload["text"]["format"]["schema"] == schema
@@ -2802,7 +2871,8 @@ def test_reasoning_wire_body_is_the_exact_detached_openai_payload() -> None:
     ),
 )
 def test_reasoning_wire_rejects_unapproved_or_ambiguous_inputs(
-    change: dict[str, object], error: str,
+    change: dict[str, object],
+    error: str,
 ) -> None:
     values: dict[str, object] = {
         "model": "gpt-5.6-sol",
@@ -2819,11 +2889,11 @@ def test_reasoning_wire_rejects_unapproved_or_ambiguous_inputs(
 
 ```python
 # tests/unit/providers/test_redaction.py
+# tests/unit/providers/test_redaction.py
 from dataclasses import replace
 
-import rfc8785
 import pytest
-
+import rfc8785
 from tuntun_contracts.base import Sensitivity
 from tuntun_core.services.providers.reasoning_wire import (
     build_openai_reasoning_wire_request,
@@ -2839,6 +2909,24 @@ def test_redactor_rejects_secrets_before_receipt_creation() -> None:
             session_label="session-1",
             system_text="Answer briefly",
             user_text="".join(("Use sk-", "proj-", "abcdefghijkl", "mnopqrstuv")),
+            memory_texts=(),
+        )
+
+
+@pytest.mark.parametrize(
+    "invisible_control",
+    ("\x00", "\u200b", "\u2028", "\u2029", "\u202e", "\ud800"),
+)
+def test_redactor_rejects_unicode_controls_before_receipt_creation(
+    invisible_control: str,
+) -> None:
+    redactor = Redactor(root_key=b"k" * 32, key_id="route-hmac-v1")
+    with pytest.raises(ValueError, match="PROHIBITED_CONTROL"):
+        redactor.sanitize(
+            purpose="cloud_reasoning",
+            session_label="session-1",
+            system_text="Answer briefly",
+            user_text=f"hello{invisible_control}secret",
             memory_texts=(),
         )
 
@@ -2907,11 +2995,34 @@ def test_second_pass_rejection_emits_no_receipt(injected: str) -> None:
         )
 
 
+@pytest.mark.parametrize("invisible_control", ("\u200b", "\u2028", "\u2029", "\u202e"))
+def test_second_pass_rejects_unicode_controls(invisible_control: str) -> None:
+    redactor = Redactor(root_key=b"k" * 32, key_id="route-hmac-v1")
+    draft = redactor.sanitize(
+        purpose="cloud_reasoning",
+        session_label="session-1",
+        system_text="Answer briefly",
+        user_text="safe",
+        memory_texts=(),
+    )
+    with pytest.raises(ValueError, match="SECOND_PASS_REJECTED"):
+        redactor.finalize(
+            draft,
+            purpose="cloud_reasoning",
+            canonical_provider_body=rfc8785.dumps({"injected": f"hello{invisible_control}secret"}),
+            policy_version="provider-redaction-v1",
+            maximum_sensitivity=Sensitivity.PERSONAL,
+        )
+
+
 def test_finalize_rejects_tampered_ephemeral_draft() -> None:
     redactor = Redactor(root_key=b"k" * 32, key_id="route-hmac-v1")
     draft = redactor.sanitize(
-        purpose="cloud_reasoning", session_label="session-1",
-        system_text="Answer briefly", user_text="safe", memory_texts=(),
+        purpose="cloud_reasoning",
+        session_label="session-1",
+        system_text="Answer briefly",
+        user_text="safe",
+        memory_texts=(),
     )
     tampered = replace(draft, session_label="different-session")
     with pytest.raises(ValueError, match="redaction draft mismatch"):
@@ -2928,8 +3039,11 @@ def test_finalize_rejects_tampered_ephemeral_draft() -> None:
 def test_finalize_requires_one_canonical_json_object(body: bytes) -> None:
     redactor = Redactor(root_key=b"k" * 32, key_id="route-hmac-v1")
     draft = redactor.sanitize(
-        purpose="cloud_reasoning", session_label="session-1",
-        system_text="Answer briefly", user_text="safe", memory_texts=(),
+        purpose="cloud_reasoning",
+        session_label="session-1",
+        system_text="Answer briefly",
+        user_text="safe",
+        memory_texts=(),
     )
     with pytest.raises(ValueError, match="SECOND_PASS_REJECTED"):
         redactor.finalize(
@@ -2943,6 +3057,7 @@ def test_finalize_requires_one_canonical_json_object(body: bytes) -> None:
 
 ```python
 # tests/unit/providers/test_gateway_ordering.py
+# tests/unit/providers/test_gateway_ordering.py
 import asyncio
 
 import pytest
@@ -2954,24 +3069,50 @@ from tuntun_core.services.providers.gateway import (
 
 pytest_plugins = ("tests.fixtures.provider_egress",)
 
+
 @pytest.mark.asyncio
 async def test_consume_precedes_mark_sent_and_network(
     route, consumption, redaction_receipt_id
 ) -> None:
     events = []
+
     class Authorizer:
-        async def consume(self, authorization_id, supplied): events.append("consume")
+        async def consume(self, authorization_id, supplied):
+            events.append("consume")
+
     class Budget:
-        async def mark_sent(self, reservation_id, attempt_id): events.append("mark_sent")
+        async def mark_sent(self, reservation_id, attempt_id):
+            events.append("mark_sent")
+
     class Calls:
-        async def begin(self,route,supplied,receipt_id): events.append("call_started"); return route.attempt_id
-        async def mark_network_invocation_starting(self,call_id): events.append("network_starting")
-        async def finish(self,call_id,outcome): events.append(outcome)
-    async def network(): events.append("network"); return "ok"
-    assert await ProviderGateway(Authorizer(), Budget(), Calls()).send(
-        route, consumption, redaction_receipt_id, network
-    ) == "ok"
-    assert events == ["consume","call_started","mark_sent","network_starting","network","succeeded"]
+        async def begin(self, route, supplied, receipt_id):
+            events.append("call_started")
+            return route.attempt_id
+
+        async def mark_network_invocation_starting(self, call_id):
+            events.append("network_starting")
+
+        async def finish(self, call_id, outcome):
+            events.append(outcome)
+
+    async def network():
+        events.append("network")
+        return "ok"
+
+    assert (
+        await ProviderGateway(Authorizer(), Budget(), Calls()).send(
+            route, consumption, redaction_receipt_id, network
+        )
+        == "ok"
+    )
+    assert events == [
+        "consume",
+        "call_started",
+        "mark_sent",
+        "network_starting",
+        "network",
+        "succeeded",
+    ]
 
 
 @pytest.mark.asyncio
@@ -2997,10 +3138,10 @@ async def test_mark_sent_cancellation_is_classified_before_network(gateway_case)
 
 ```python
 # tests/integration/providers/test_redaction_receipt_repository.py
+# tests/integration/providers/test_redaction_receipt_repository.py
 import json
 
 import pytest
-
 from tuntun_core.services.providers.redaction_repository import RedactionReceiptRepository
 
 pytest_plugins = ("tests.fixtures.provider_egress",)
@@ -3012,15 +3153,19 @@ async def test_receipt_record_is_content_minimized_and_restart_visible(
 ) -> None:
     repository = RedactionReceiptRepository(async_uow_factory, clock)
     await repository.record(finalized_redaction_receipt)
-    async with async_uow_factory() as uow:
-        row = await uow.run_sync(
-            lambda db: db.exec_driver_sql(
+
+    def select_row(db):
+        return tuple(
+            db.exec_driver_sql(
                 "SELECT purpose,input_hmac_key_id,input_hmac_b64,output_hmac_key_id,"
                 "output_hmac_b64,removed_categories_json,removed_count,policy_version,"
                 "maximum_sensitivity,occurred_at FROM redaction_receipts WHERE id=?",
                 (str(finalized_redaction_receipt.receipt_id),),
             ).one()
         )
+
+    async with async_uow_factory() as uow:
+        row = await uow.run_sync(select_row)
         await uow.rollback()
     assert row[0] == finalized_redaction_receipt.purpose
     assert tuple(row[3:5]) == (
@@ -3048,6 +3193,7 @@ async def test_exact_receipt_retry_is_idempotent_but_conflict_fails_closed(
 
 ```python
 # tests/integration/providers/test_call_proof_repository.py
+# tests/integration/providers/test_call_proof_repository.py
 from datetime import UTC, datetime
 
 import pytest
@@ -3069,6 +3215,7 @@ def _utc_storage(value: datetime) -> str:
 def task04_sql_mark_sent(async_uow_factory, clock):
     async def mark_sent(reservation_id, attempt_id):
         now = _utc_storage(clock.now())
+
         def mark(db):
             call = db.exec_driver_sql(
                 "SELECT count(*) FROM provider_calls WHERE budget_reservation_id=? "
@@ -3095,53 +3242,71 @@ def task04_sql_mark_sent(async_uow_factory, clock):
             )
             if reservation.rowcount != 1 or paired_call.rowcount != 1:
                 raise PermissionError("task04_mark_sent_proof_mismatch")
+
         async with async_uow_factory() as uow:
             await uow.run_sync(mark)
             await uow.commit()
+
     return mark_sent
 
 
-async def proof_rows(factory,route):
+async def proof_rows(factory, route):
+    def select_rows(db):
+        reservation = db.exec_driver_sql(
+            "SELECT state,gateway_ordering_version,transport_phase "
+            "FROM budget_reservations WHERE id=? AND attempt_id=?",
+            (str(route.budget_reservation_id), str(route.attempt_id)),
+        ).fetchone()
+        call = db.exec_driver_sql(
+            "SELECT id,gateway_ordering_version,transport_phase,outcome "
+            "FROM provider_calls WHERE budget_reservation_id=? AND attempt_id=?",
+            (str(route.budget_reservation_id), str(route.attempt_id)),
+        ).fetchone()
+        return tuple(row if row is None else tuple(row) for row in (reservation, call))
+
     async with factory() as uow:
-        rows=await uow.run_sync(lambda db:(
-            db.exec_driver_sql(
-                "SELECT state,gateway_ordering_version,transport_phase "
-                "FROM budget_reservations WHERE id=? AND attempt_id=?",
-                (str(route.budget_reservation_id),str(route.attempt_id)),
-            ).fetchone(),
-            db.exec_driver_sql(
-                "SELECT id,gateway_ordering_version,transport_phase,outcome "
-                "FROM provider_calls WHERE budget_reservation_id=? AND attempt_id=?",
-                (str(route.budget_reservation_id),str(route.attempt_id)),
-            ).fetchone(),
-        )); await uow.rollback()
-    return tuple(tuple(row) if row is not None else None for row in rows)
+        rows = await uow.run_sync(select_rows)
+        await uow.rollback()
+    return rows
+
 
 @pytest.mark.asyncio
 async def test_claim_and_network_boundaries_are_atomic_and_survive_restart(
-    async_uow_factory, clock, route, consumption, redaction_receipt_id,
-    redaction_receipt_repository, task04_sql_mark_sent,
+    async_uow_factory,
+    clock,
+    route,
+    consumption,
+    redaction_receipt_id,
+    redaction_receipt_repository,
+    task04_sql_mark_sent,
 ):
-    calls=ProviderCallRepository(
-        async_uow_factory,clock,redaction_receipt_repository,
+    calls = ProviderCallRepository(
+        async_uow_factory,
+        clock,
+        redaction_receipt_repository,
     )
-    call_id=await calls.begin(route,consumption,redaction_receipt_id)
-    restarted_calls=ProviderCallRepository(
-        async_uow_factory,clock,redaction_receipt_repository,
+    call_id = await calls.begin(route, consumption, redaction_receipt_id)
+    restarted_calls = ProviderCallRepository(
+        async_uow_factory,
+        clock,
+        redaction_receipt_repository,
     )
-    assert await proof_rows(async_uow_factory,route)==(
-        ("reserved",1,"claim_begun"),(str(call_id),1,"claim_begun","started"),
+    assert await proof_rows(async_uow_factory, route) == (
+        ("reserved", 1, "claim_begun"),
+        (str(call_id), 1, "claim_begun", "started"),
     )
     await task04_sql_mark_sent(
-        route.budget_reservation_id,route.attempt_id,
+        route.budget_reservation_id,
+        route.attempt_id,
     )
-    assert await proof_rows(async_uow_factory,route)==(
-        ("sent",1,"marked_sent"),(str(call_id),1,"marked_sent","started"),
+    assert await proof_rows(async_uow_factory, route) == (
+        ("sent", 1, "marked_sent"),
+        (str(call_id), 1, "marked_sent", "started"),
     )
     await restarted_calls.mark_network_invocation_starting(call_id)
-    assert await proof_rows(async_uow_factory,route)==(
-        ("sent",1,"network_invocation_starting"),
-        (str(call_id),1,"network_invocation_starting","started"),
+    assert await proof_rows(async_uow_factory, route) == (
+        ("sent", 1, "network_invocation_starting"),
+        (str(call_id), 1, "network_invocation_starting", "started"),
     )
 
 
@@ -3184,74 +3349,96 @@ async def test_stt_requires_null_receipt_and_persists_null_fk(
     await accepted.begin()
     assert await accepted.persisted_redaction_receipt_id() is None
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault",("after_reservation_update","after_call_insert"))
-async def test_claim_fault_rolls_back_both_proof_rows(call_repository_fault_case,fault):
-    case=call_repository_fault_case(fault)
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "after_reservation_update",
+        "after_call_insert",
+        "before_call_insert_ignore",
+    ),
+)
+async def test_claim_fault_rolls_back_both_proof_rows(call_repository_fault_case, fault):
+    case = call_repository_fault_case(fault)
     # ProviderCallRepository intentionally converts claim-time integrity errors
     # to one content-free public denial while the transaction rolls back both rows.
-    with pytest.raises(PermissionError,match="provider_call_claim_conflict"):
+    with pytest.raises(PermissionError, match="provider_call_claim_conflict"):
         await case.begin()
-    assert await case.persisted_proof_rows()==(("reserved",1,"not_claimed"),None)
+    assert await case.persisted_proof_rows() == (("reserved", 1, "not_claimed"), None)
+
 
 @pytest.mark.asyncio
 async def test_network_phase_cannot_advance_only_one_half(call_repository_fault_case):
-    case=call_repository_fault_case("after_network_reservation_update")
-    await case.begin(); await case.mark_sent()
-    with pytest.raises(IntegrityError,match="injected network fault"):
+    case = call_repository_fault_case("after_network_reservation_update")
+    await case.begin()
+    await case.mark_sent()
+    with pytest.raises(IntegrityError, match="injected network fault"):
         await case.mark_network_invocation_starting()
-    assert await case.persisted_phases()==("marked_sent","marked_sent")
+    assert await case.persisted_phases() == ("marked_sent", "marked_sent")
 
 
 @pytest.mark.asyncio
 async def test_finish_rejects_proven_unsent_claim(call_repository_fault_case):
-    case=call_repository_fault_case(None)
-    call_id=await case.begin()
-    before=await case.persisted_proof_rows()
-    with pytest.raises(PermissionError,match="provider_call_unsent_requires_release"):
-        await case.finish(call_id,"failed")
-    assert await case.persisted_proof_rows()==before
+    case = call_repository_fault_case(None)
+    call_id = await case.begin()
+    before = await case.persisted_proof_rows()
+    with pytest.raises(PermissionError, match="provider_call_unsent_requires_release"):
+        await case.finish(call_id, "failed")
+    assert await case.persisted_proof_rows() == before
+
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault",("after_call_finish","reservation_finish_cas_lost"))
+@pytest.mark.parametrize("fault", ("after_call_finish", "reservation_finish_cas_lost"))
 async def test_finish_requires_and_atomically_closes_both_proof_halves(
-    call_repository_fault_case,fault,
+    call_repository_fault_case,
+    fault,
 ):
-    case=call_repository_fault_case(fault)
-    call_id=await case.begin(); await case.mark_sent()
-    before=await case.persisted_proof_rows()
-    expected="injected finish fault" if fault=="after_call_finish" else "provider_reservation_finish_race"
-    error_type=IntegrityError if fault=="after_call_finish" else PermissionError
-    with pytest.raises(error_type,match=expected):
-        await case.finish(call_id,"failed")
-    assert await case.persisted_proof_rows()==before
+    case = call_repository_fault_case(fault)
+    call_id = await case.begin()
+    await case.mark_sent()
+    before = await case.persisted_proof_rows()
+    expected = (
+        "injected finish fault"
+        if fault == "after_call_finish"
+        else "provider_reservation_finish_race"
+    )
+    error_type = IntegrityError if fault == "after_call_finish" else PermissionError
+    with pytest.raises(error_type, match=expected):
+        await case.finish(call_id, "failed")
+    assert await case.persisted_proof_rows() == before
     case.clear_fault()
-    await case.finish(call_id,"failed")
-    reservation,call=await case.persisted_proof_rows()
-    assert reservation[2]==call[2]=="finished"
-    assert call[3]=="failed"
+    await case.finish(call_id, "failed")
+    reservation, call = await case.persisted_proof_rows()
+    assert reservation[2] == call[2] == "finished"
+    assert call[3] == "failed"
     assert case.provider_call_finished_at is not None
 ```
 
 ```python
+# tests/integration/providers/test_gateway_runtime_wiring.py
 # tests/integration/providers/test_gateway_runtime_wiring.py
 from tuntun_core.services.providers.call_repository import ProviderCallRepository
 from tuntun_core.services.providers.redaction_repository import RedactionReceiptRepository
 
 pytest_plugins = ("tests.fixtures.provider_egress",)
 
+
 def test_task04_container_requires_explicit_budget_injection_before_gateway_activation(
     core_container, budget_port_fake
 ):
-    assert isinstance(core_container.provider_call_repository,ProviderCallRepository)
-    assert isinstance(core_container.redaction_receipt_repository,RedactionReceiptRepository)
-    assert core_container.provider_call_repository.uow_factory is core_container.sqlcipher_uow_factory
-    assert not hasattr(core_container,"provider_gateway")
-    gateway=core_container.build_provider_gateway(budget_port_fake)
+    assert isinstance(core_container.provider_call_repository, ProviderCallRepository)
+    assert isinstance(core_container.redaction_receipt_repository, RedactionReceiptRepository)
+    assert (
+        core_container.provider_call_repository.uow_factory is core_container.sqlcipher_uow_factory
+    )
+    assert not hasattr(core_container, "provider_gateway")
+    gateway = core_container.build_provider_gateway(budget_port_fake)
     assert gateway.calls is core_container.provider_call_repository
 ```
 
 ```python
+# tests/security/test_provider_boundary.py
 # tests/security/test_provider_boundary.py
 import pytest
 
@@ -3306,7 +3493,7 @@ Expected: FAIL during collection because `tuntun_contracts.commitments`, `tuntun
 
 Materialize the sketches below, run `uv run ruff check --fix` over exactly the
 scoped file list in the following command, and then run the formatter once before
-the read-only green gate: `uv run ruff format packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py tests/fixtures/provider_egress.py tests/unit/providers/test_commitments.py tests/unit/providers/test_reasoning_wire.py tests/unit/providers/test_redaction.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_redaction_receipt_repository.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/security/test_provider_boundary.py`.
+the read-only green gate: `uv run ruff format packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/adapters/sqlcipher/engine.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py tests/fixtures/provider_egress.py tests/unit/providers/test_commitments.py tests/unit/providers/test_reasoning_wire.py tests/unit/providers/test_redaction.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_redaction_receipt_repository.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/security/test_provider_boundary.py`.
 
 ```python
 # packages/contracts/src/tuntun_contracts/commitments.py
@@ -3334,7 +3521,12 @@ def derive_purpose_key(root_key: bytes, purpose: str) -> bytes:
     return hmac.new(prk, info + b"\x01", sha256).digest()
 
 
-def commit_private(root_key: bytes, key_id: str, purpose: str, canonical_body: bytes) -> Commitment:
+def commit_private(
+    root_key: bytes,
+    key_id: str,
+    purpose: str,
+    canonical_body: bytes,
+) -> Commitment:
     if type(canonical_body) is not bytes:
         raise TypeError("canonical body must be bytes")
     purpose_key = derive_purpose_key(root_key, purpose)
@@ -3358,6 +3550,39 @@ def commit_private(root_key: bytes, key_id: str, purpose: str, canonical_body: b
 # apps/core/src/tuntun_core/services/providers/allowlist.py
 ALLOWED_OPENAI_MODELS = frozenset({"gpt-transcribe", "gpt-5.6-sol", "tts-1"})
 ALLOWED_OPENAI_HOSTS = frozenset({"api.openai.com"})
+```
+
+```python
+# apps/core/src/tuntun_core/adapters/sqlcipher/engine.py
+from __future__ import annotations
+
+from pathlib import Path
+from typing import cast
+
+from sqlalchemy import Engine, create_engine
+from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.pool import NullPool
+from sqlcipher3 import dbapi2 as sqlcipher3  # type: ignore[import-untyped]
+
+from .connection import open_sqlcipher
+
+
+def create_sqlcipher_engine(path: Path, key: bytes) -> Engine:
+    """Create an unpooled SQLAlchemy engine whose only opener is SQLCipher."""
+
+    if type(key) is not bytes or len(key) != 32:
+        raise ValueError("SQLCipher key must be exactly 32 bytes")
+
+    def _connect() -> DBAPIConnection:
+        return cast(DBAPIConnection, open_sqlcipher(path, key))
+
+    return create_engine(
+        "sqlite://",
+        creator=_connect,
+        module=sqlcipher3,
+        poolclass=NullPool,
+        future=True,
+    )
 ```
 
 ```python
@@ -3470,11 +3695,16 @@ from tuntun_contracts.base import (
 from tuntun_contracts.commitments import commit_private
 from tuntun_contracts.provider import RedactionReceipt, SanitizedProviderMessage
 
-
 _SECRET = re.compile(r"(?:sk-(?:proj-)?[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]+PRIVATE KEY-----)")
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE = re.compile(r"(?<!\d)(?:\+?\d[ -]?){8,15}(?!\d)")
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_PROHIBITED_TEXT_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def _has_prohibited_control(value: str) -> bool:
+    return any(
+        unicodedata.category(character) in _PROHIBITED_TEXT_CATEGORIES for character in value
+    )
 
 
 def _text_leaves(value: JSONValue) -> Iterator[str]:
@@ -3529,9 +3759,12 @@ class Redactor:
         label = unicodedata.normalize("NFC", session_label)
         if not 8 <= len(label.encode("utf-8")) <= 128:
             raise ValueError("session label outside bounds")
-        raw_values = ((system_text,) if system_text is not None else ()) + (user_text, *memory_texts)
+        raw_values = ((system_text,) if system_text is not None else ()) + (
+            user_text,
+            *memory_texts,
+        )
         values = tuple(unicodedata.normalize("NFC", value) for value in raw_values)
-        if any(_CONTROL.search(value) for value in values):
+        if any(_has_prohibited_control(value) for value in values):
             raise ValueError("PROHIBITED_CONTROL")
         if any(_SECRET.search(value) for value in values):
             raise ValueError("PROHIBITED_SECRET")
@@ -3556,7 +3789,7 @@ class Redactor:
             return value
 
         sanitized = tuple(redact(value) for value in values)
-        if any(_SECRET.search(value) or _CONTROL.search(value) for value in sanitized):
+        if any(_SECRET.search(value) or _has_prohibited_control(value) for value in sanitized):
             raise ValueError("SECOND_PASS_REJECTED")
         index = 0
         sanitized_system = None
@@ -3575,19 +3808,25 @@ class Redactor:
         raw_body = canonical_mapping_bytes(
             {"purpose": purpose, "session_label": label, "values": list(values)}
         )
-        input_commitment=commit_private(
-            self._root_key, self._key_id, f"redaction.input.{purpose}", raw_body
+        input_commitment = commit_private(
+            self._root_key,
+            self._key_id,
+            f"redaction.input.{purpose}",
+            raw_body,
         )
-        draft_body=canonical_mapping_bytes({
-            "purpose":purpose,"session_label":label,
-            "system_text":sanitized_system,"user_text":sanitized_user,
-            "memory_texts":list(sanitized_memory),
-            "provider_messages":[
-                message.model_dump(mode="json") for message in messages
-            ],
-            "input_commitment":input_commitment.model_dump(mode="json"),
-            "removed_categories":sorted(removed),"removed_count":removed_count,
-        })
+        draft_body = canonical_mapping_bytes(
+            {
+                "purpose": purpose,
+                "session_label": label,
+                "system_text": sanitized_system,
+                "user_text": sanitized_user,
+                "memory_texts": list(sanitized_memory),
+                "provider_messages": [message.model_dump(mode="json") for message in messages],
+                "input_commitment": input_commitment.model_dump(mode="json"),
+                "removed_categories": sorted(removed),
+                "removed_count": removed_count,
+            }
+        )
         return RedactionDraft(
             purpose=purpose,
             session_label=label,
@@ -3597,7 +3836,10 @@ class Redactor:
             provider_messages=tuple(messages),
             input_commitment=input_commitment,
             draft_commitment=commit_private(
-                self._root_key,self._key_id,f"redaction.draft.{purpose}",draft_body,
+                self._root_key,
+                self._key_id,
+                f"redaction.draft.{purpose}",
+                draft_body,
             ),
             removed_categories=tuple(sorted(removed)),
             removed_count=removed_count,
@@ -3614,27 +3856,33 @@ class Redactor:
     ) -> RedactionReceipt:
         if type(draft) is not RedactionDraft or draft.purpose != purpose:
             raise ValueError("redaction purpose mismatch")
-        draft_body=canonical_mapping_bytes({
-            "purpose":draft.purpose,"session_label":draft.session_label,
-            "system_text":draft.system_text,"user_text":draft.user_text,
-            "memory_texts":list(draft.memory_texts),
-            "provider_messages":[
-                message.model_dump(mode="json") for message in draft.provider_messages
-            ],
-            "input_commitment":draft.input_commitment.model_dump(mode="json"),
-            "removed_categories":list(draft.removed_categories),
-            "removed_count":draft.removed_count,
-        })
-        expected_draft_commitment=commit_private(
-            self._root_key,self._key_id,f"redaction.draft.{purpose}",draft_body,
+        draft_body = canonical_mapping_bytes(
+            {
+                "purpose": draft.purpose,
+                "session_label": draft.session_label,
+                "system_text": draft.system_text,
+                "user_text": draft.user_text,
+                "memory_texts": list(draft.memory_texts),
+                "provider_messages": [
+                    message.model_dump(mode="json") for message in draft.provider_messages
+                ],
+                "input_commitment": draft.input_commitment.model_dump(mode="json"),
+                "removed_categories": list(draft.removed_categories),
+                "removed_count": draft.removed_count,
+            }
         )
-        if (
-            not hmac.compare_digest(
-                expected_draft_commitment.key_id,draft.draft_commitment.key_id,
-            )
-            or not hmac.compare_digest(
-                expected_draft_commitment.value_b64,draft.draft_commitment.value_b64,
-            )
+        expected_draft_commitment = commit_private(
+            self._root_key,
+            self._key_id,
+            f"redaction.draft.{purpose}",
+            draft_body,
+        )
+        if not hmac.compare_digest(
+            expected_draft_commitment.key_id,
+            draft.draft_commitment.key_id,
+        ) or not hmac.compare_digest(
+            expected_draft_commitment.value_b64,
+            draft.draft_commitment.value_b64,
         ):
             raise ValueError("redaction draft mismatch")
         if (
@@ -3669,7 +3917,7 @@ class Redactor:
                 or _SECRET.search(text)
                 or _EMAIL.search(text)
                 or _PHONE.search(text)
-                or _CONTROL.search(text)
+                or _has_prohibited_control(text)
                 or draft.session_label in text
             ):
                 raise ValueError("SECOND_PASS_REJECTED")
@@ -3698,8 +3946,6 @@ from datetime import UTC, datetime
 from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
-
-from sqlalchemy.exc import IntegrityError
 
 from tuntun_contracts.base import Commitment, Sensitivity
 from tuntun_contracts.ports import ClockPort
@@ -3737,7 +3983,8 @@ class RedactionReceiptRepository:
         uow_factory: AsyncUnitOfWorkFactory,
         clock: ClockPort,
     ) -> None:
-        self._uow_factory, self._clock = uow_factory, clock
+        self._uow_factory = uow_factory
+        self._clock = clock
 
     async def record(self, receipt: RedactionReceipt) -> None:
         occurred_at = _utc_storage(self._clock.now())
@@ -3758,33 +4005,41 @@ class RedactionReceiptRepository:
             receipt.policy_version,
             receipt.maximum_sensitivity.value,
         )
-        try:
-            async with self._uow_factory() as uow:
-                await uow.run_sync(
-                    lambda db: db.exec_driver_sql(
-                        "INSERT INTO redaction_receipts "
-                        "(id,purpose,input_hmac_key_id,input_hmac_b64,output_hmac_key_id,"
-                        "output_hmac_b64,removed_categories_json,removed_count,policy_version,"
-                        "maximum_sensitivity,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (str(receipt.receipt_id), *expected, occurred_at),
-                    )
-                )
+
+        def insert(transaction: UnitOfWorkProtocol) -> int:
+            return transaction.exec_driver_sql(
+                "INSERT INTO redaction_receipts "
+                "(id,purpose,input_hmac_key_id,input_hmac_b64,output_hmac_key_id,"
+                "output_hmac_b64,removed_categories_json,removed_count,policy_version,"
+                "maximum_sensitivity,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO NOTHING",
+                (str(receipt.receipt_id), *expected, occurred_at),
+            ).rowcount
+
+        def select_existing(
+            transaction: UnitOfWorkProtocol,
+        ) -> tuple[object, ...] | None:
+            row = transaction.exec_driver_sql(
+                "SELECT purpose,input_hmac_key_id,input_hmac_b64,"
+                "output_hmac_key_id,output_hmac_b64,removed_categories_json,"
+                "removed_count,policy_version,maximum_sensitivity "
+                "FROM redaction_receipts WHERE id=?",
+                (str(receipt.receipt_id),),
+            ).fetchone()
+            return None if row is None else tuple(row)
+
+        async with self._uow_factory() as uow:
+            inserted = await uow.run_sync(insert)
+            if inserted == 1:
                 await uow.commit()
-        except IntegrityError:
-            async with self._uow_factory() as uow:
-                existing = await uow.run_sync(
-                    lambda db: db.exec_driver_sql(
-                        "SELECT purpose,input_hmac_key_id,input_hmac_b64,"
-                        "output_hmac_key_id,output_hmac_b64,removed_categories_json,"
-                        "removed_count,policy_version,maximum_sensitivity "
-                        "FROM redaction_receipts WHERE id=?",
-                        (str(receipt.receipt_id),),
-                    ).fetchone()
-                )
-                await uow.rollback()
-            if existing is not None and tuple(existing) == expected:
                 return
-            raise PermissionError("redaction_receipt_conflict") from None
+            if inserted != 0:
+                raise RuntimeError("redaction receipt insert returned invalid rowcount")
+            existing = await uow.run_sync(select_existing)
+            await uow.rollback()
+        if existing is not None and existing == expected:
+            return
+        raise PermissionError("redaction_receipt_conflict")
 
     def require_bound_in_transaction(
         self,
@@ -3809,8 +4064,7 @@ class RedactionReceiptRepository:
             maximum_sensitivity.value,
         )
         if len(row) != len(expected) or any(
-            type(actual) is not str
-            or not hmac.compare_digest(actual, wanted)
+            type(actual) is not str or not hmac.compare_digest(actual, wanted)
             for actual, wanted in zip(row, expected, strict=True)
         ):
             raise PermissionError("redaction_receipt_binding_mismatch")
@@ -3887,23 +4141,34 @@ class ProviderGateway:
         consumption: RouteConsumption,
         redaction_receipt_id: UUID | None,
     ) -> UUID:
-        stage="consume"
+        stage = "consume"
         try:
             await self._authorizations.consume(route.authorization_id, consumption)
-            stage="claim"
-            call_id=await self._calls.begin(route,consumption,redaction_receipt_id)
-            stage="mark_sent"
+            stage = "claim"
+            call_id = await self._calls.begin(
+                route,
+                consumption,
+                redaction_receipt_id,
+            )
+            stage = "mark_sent"
             # If mark_sent fails or is cancelled, keep claim_begun/started open.
-            await self._budget.mark_sent(route.budget_reservation_id, route.attempt_id)
+            await self._budget.mark_sent(
+                route.budget_reservation_id,
+                route.attempt_id,
+            )
         except asyncio.CancelledError as error:
             raise ProviderNotSentCancellation(
-                route.budget_reservation_id,route.attempt_id,
-                f"{stage}_cancelled_before_network",error,
+                route.budget_reservation_id,
+                route.attempt_id,
+                f"{stage}_cancelled_before_network",
+                error,
             ) from error
         except Exception as error:
             raise ProviderNotSentError(
-                route.budget_reservation_id,route.attempt_id,
-                f"{stage}_failed_before_network",error,
+                route.budget_reservation_id,
+                route.attempt_id,
+                f"{stage}_failed_before_network",
+                error,
             ) from error
         return call_id
 
@@ -3914,15 +4179,17 @@ class ProviderGateway:
         redaction_receipt_id: UUID | None,
         invoke: Callable[[], Awaitable[T]],
     ) -> T:
-        call_id=await self._claim(route,consumption,redaction_receipt_id)
+        call_id = await self._claim(route, consumption, redaction_receipt_id)
         try:
             await self._calls.mark_network_invocation_starting(call_id)
-            result=await invoke()
+            result = await invoke()
         except asyncio.CancelledError:
-            await self._calls.finish(call_id,"cancelled"); raise
+            await self._calls.finish(call_id, "cancelled")
+            raise
         except BaseException:
-            await self._calls.finish(call_id,"ambiguous"); raise
-        await self._calls.finish(call_id,"succeeded")
+            await self._calls.finish(call_id, "ambiguous")
+            raise
+        await self._calls.finish(call_id, "succeeded")
         return result
 
     @asynccontextmanager
@@ -3931,18 +4198,20 @@ class ProviderGateway:
         route: RouteAuthorization,
         consumption: RouteConsumption,
         redaction_receipt_id: UUID | None,
-        open_response: Callable[[],AbstractAsyncContextManager[T]],
+        open_response: Callable[[], AbstractAsyncContextManager[T]],
     ) -> AsyncIterator[T]:
-        call_id=await self._claim(route,consumption,redaction_receipt_id)
+        call_id = await self._claim(route, consumption, redaction_receipt_id)
         try:
             await self._calls.mark_network_invocation_starting(call_id)
             async with open_response() as response:
                 yield response
         except asyncio.CancelledError:
-            await self._calls.finish(call_id,"cancelled"); raise
+            await self._calls.finish(call_id, "cancelled")
+            raise
         except BaseException:
-            await self._calls.finish(call_id,"ambiguous"); raise
-        await self._calls.finish(call_id,"succeeded")
+            await self._calls.finish(call_id, "ambiguous")
+            raise
+        await self._calls.finish(call_id, "succeeded")
 ```
 
 ```python
@@ -3952,7 +4221,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.exc import IntegrityError
 from tuntun_contracts.ports import ClockPort
-from tuntun_contracts.provider import RouteAuthorization,RouteConsumption
+from tuntun_contracts.provider import RouteAuthorization, RouteConsumption
 from tuntun_core.services.providers.redaction_repository import (
     AsyncUnitOfWorkFactory,
     RedactionReceiptRepository,
@@ -3960,15 +4229,18 @@ from tuntun_core.services.providers.redaction_repository import (
 from tuntun_core.services.providers.route_verifier import verify_route_consumption
 from tuntun_core.services.transactions.protocols import UnitOfWorkProtocol
 
-_CATEGORY={
-    "cloud_stt":"stt","cloud_reasoning":"llm","cloud_tts":"tts",
+_CATEGORY = {
+    "cloud_stt": "stt",
+    "cloud_reasoning": "llm",
+    "cloud_tts": "tts",
 }
 
 
-def _utc_storage(value:datetime)->str:
+def _utc_storage(value: datetime) -> str:
     if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         raise TypeError("stored timestamp must be timezone-aware")
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
 
 class ProviderCallRepository:
     def __init__(
@@ -3977,115 +4249,160 @@ class ProviderCallRepository:
         clock: ClockPort,
         receipts: RedactionReceiptRepository,
     ) -> None:
-        self._uow_factory,self._clock,self._receipts=uow_factory,clock,receipts
+        self._uow_factory = uow_factory
+        self._clock = clock
+        self._receipts = receipts
 
     @property
     def uow_factory(self) -> AsyncUnitOfWorkFactory:
         return self._uow_factory
 
     async def begin(
-        self,route:RouteAuthorization,consumption:RouteConsumption,
-        redaction_receipt_id:UUID|None,
+        self,
+        route: RouteAuthorization,
+        consumption: RouteConsumption,
+        redaction_receipt_id: UUID | None,
     ) -> UUID:
-        call_id=uuid4(); now=self._clock.now()
-        verify_route_consumption(route,consumption,now=now)
+        call_id = uuid4()
+        now = self._clock.now()
+        verify_route_consumption(route, consumption, now=now)
+
         def claim(db: UnitOfWorkProtocol) -> None:
-            if route.purpose=="cloud_stt":
+            if route.purpose == "cloud_stt":
                 if redaction_receipt_id is not None:
                     raise PermissionError("redaction_receipt_forbidden")
             else:
                 if redaction_receipt_id is None:
                     raise PermissionError("redaction_receipt_binding_mismatch")
                 self._receipts.require_bound_in_transaction(
-                    db,receipt_id=redaction_receipt_id,purpose=route.purpose,
+                    db,
+                    receipt_id=redaction_receipt_id,
+                    purpose=route.purpose,
                     output_commitment=consumption.request_commitment,
                     maximum_sensitivity=route.maximum_sensitivity,
                 )
-            changed=db.exec_driver_sql(
+            changed = db.exec_driver_sql(
                 "UPDATE budget_reservations SET transport_phase='claim_begun' "
-                "WHERE id=? AND request_id=? AND attempt_id=? AND provider=? AND model=? AND category=? "
-                "AND state='reserved' AND gateway_ordering_version=1 "
+                "WHERE id=? AND request_id=? AND attempt_id=? AND provider=? AND model=? "
+                "AND category=? AND state='reserved' AND gateway_ordering_version=1 "
                 "AND transport_phase='not_claimed' AND expires_at>?",
-                (str(route.budget_reservation_id),str(route.request_id),str(route.attempt_id),
-                 route.provider,route.model,_CATEGORY[route.purpose],_utc_storage(now)),
+                (
+                    str(route.budget_reservation_id),
+                    str(route.request_id),
+                    str(route.attempt_id),
+                    route.provider,
+                    route.model,
+                    _CATEGORY[route.purpose],
+                    _utc_storage(now),
+                ),
             )
-            if changed.rowcount!=1: raise PermissionError("reservation_not_claimable")
-            db.exec_driver_sql(
+            if changed.rowcount != 1:
+                raise PermissionError("reservation_not_claimable")
+            inserted = db.exec_driver_sql(
                 "INSERT INTO provider_calls "
-                "(id,request_id,attempt_id,authorization_id,budget_reservation_id,purpose,provider,model,redaction_receipt_id,"
-                "request_hmac_key_id,request_hmac_b64,category,outcome,gateway_ordering_version,transport_phase,started_at) "
+                "(id,request_id,attempt_id,authorization_id,budget_reservation_id,purpose,"
+                "provider,model,redaction_receipt_id,request_hmac_key_id,request_hmac_b64,"
+                "category,outcome,gateway_ordering_version,transport_phase,started_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,'claim_begun',?)",
-                (str(call_id),str(route.request_id),str(route.attempt_id),str(route.authorization_id),
-                 str(route.budget_reservation_id),route.purpose,route.provider,route.model,
-                 None if redaction_receipt_id is None else str(redaction_receipt_id),
-                 consumption.request_commitment.key_id,consumption.request_commitment.value_b64,
-                 _CATEGORY[route.purpose],"started",_utc_storage(now)),
+                (
+                    str(call_id),
+                    str(route.request_id),
+                    str(route.attempt_id),
+                    str(route.authorization_id),
+                    str(route.budget_reservation_id),
+                    route.purpose,
+                    route.provider,
+                    route.model,
+                    None if redaction_receipt_id is None else str(redaction_receipt_id),
+                    consumption.request_commitment.key_id,
+                    consumption.request_commitment.value_b64,
+                    _CATEGORY[route.purpose],
+                    "started",
+                    _utc_storage(now),
+                ),
             )
+            if inserted.rowcount != 1:
+                raise PermissionError("provider_call_claim_conflict")
+
         try:
             async with self._uow_factory() as uow:
-                await uow.run_sync(claim); await uow.commit()
+                await uow.run_sync(claim)
+                await uow.commit()
         except IntegrityError:
             raise PermissionError("provider_call_claim_conflict") from None
         return call_id
 
-    async def mark_network_invocation_starting(self,call_id:UUID) -> None:
+    async def mark_network_invocation_starting(self, call_id: UUID) -> None:
         def advance(db: UnitOfWorkProtocol) -> None:
-            row=db.exec_driver_sql(
+            row = db.exec_driver_sql(
                 "SELECT budget_reservation_id,attempt_id,provider_usage_json,"
                 "provider_usage_receipt_key_id,provider_usage_receipt_hmac_b64 "
                 "FROM provider_calls "
                 "WHERE id=? AND outcome='started' AND gateway_ordering_version=1 "
-                "AND transport_phase='marked_sent'",(str(call_id),),
+                "AND transport_phase='marked_sent'",
+                (str(call_id),),
             ).fetchone()
             if row is None or any(value is not None for value in row[2:]):
                 raise PermissionError("provider_call_not_markable_network")
-            reservation_id,attempt_id=row[:2]
-            reservation=db.exec_driver_sql(
+            reservation_id, attempt_id = row[:2]
+            reservation = db.exec_driver_sql(
                 "UPDATE budget_reservations SET transport_phase='network_invocation_starting' "
-                "WHERE id=? AND attempt_id=? AND state='sent' AND gateway_ordering_version=1 "
-                "AND transport_phase='marked_sent'",(reservation_id,attempt_id),
+                "WHERE id=? AND attempt_id=? AND state='sent' "
+                "AND gateway_ordering_version=1 AND transport_phase='marked_sent'",
+                (reservation_id, attempt_id),
             )
-            if reservation.rowcount!=1: raise PermissionError("budget_proof_pair_mismatch")
-            call=db.exec_driver_sql(
+            if reservation.rowcount != 1:
+                raise PermissionError("budget_proof_pair_mismatch")
+            call = db.exec_driver_sql(
                 "UPDATE provider_calls SET transport_phase='network_invocation_starting' "
                 "WHERE id=? AND outcome='started' AND gateway_ordering_version=1 "
-                "AND transport_phase='marked_sent'",(str(call_id),),
+                "AND transport_phase='marked_sent'",
+                (str(call_id),),
             )
-            if call.rowcount!=1: raise PermissionError("provider_call_phase_race")
-        async with self._uow_factory() as uow:
-            await uow.run_sync(advance); await uow.commit()
+            if call.rowcount != 1:
+                raise PermissionError("provider_call_phase_race")
 
-    async def finish(self,call_id:UUID,outcome:str) -> None:
-        if outcome not in {"succeeded","failed","cancelled","ambiguous"}:
+        async with self._uow_factory() as uow:
+            await uow.run_sync(advance)
+            await uow.commit()
+
+    async def finish(self, call_id: UUID, outcome: str) -> None:
+        if outcome not in {"succeeded", "failed", "cancelled", "ambiguous"}:
             raise ValueError("invalid provider call outcome")
-        now=self._clock.now()
+        now = self._clock.now()
+
         def finish_pair(db: UnitOfWorkProtocol) -> None:
-            row=db.exec_driver_sql(
+            row = db.exec_driver_sql(
                 "SELECT budget_reservation_id,attempt_id,transport_phase FROM provider_calls "
-                "WHERE id=? AND outcome='started' AND gateway_ordering_version=1",(str(call_id),),
+                "WHERE id=? AND outcome='started' AND gateway_ordering_version=1",
+                (str(call_id),),
             ).fetchone()
-            if row is None: raise PermissionError("provider_call_not_finishable")
-            reservation_id,attempt_id,phase=row
+            if row is None:
+                raise PermissionError("provider_call_not_finishable")
+            reservation_id, attempt_id, phase = row
             if phase == "claim_begun":
                 raise PermissionError("provider_call_unsent_requires_release")
-            if phase not in {"marked_sent","network_invocation_starting"}:
+            if phase not in {"marked_sent", "network_invocation_starting"}:
                 raise PermissionError("provider_call_not_finishable")
-            call=db.exec_driver_sql(
+            call = db.exec_driver_sql(
                 "UPDATE provider_calls SET outcome=?,transport_phase='finished',finished_at=? "
                 "WHERE id=? AND outcome='started' AND transport_phase=?",
-                (outcome,_utc_storage(now),str(call_id),phase),
+                (outcome, _utc_storage(now), str(call_id), phase),
             )
-            if call.rowcount!=1: raise PermissionError("provider_call_finish_race")
-            reservation=db.exec_driver_sql(
+            if call.rowcount != 1:
+                raise PermissionError("provider_call_finish_race")
+            reservation = db.exec_driver_sql(
                 "UPDATE budget_reservations SET transport_phase='finished' "
                 "WHERE id=? AND attempt_id=? AND state='sent' "
                 "AND gateway_ordering_version=1 AND transport_phase=?",
-                (reservation_id,attempt_id,phase),
+                (reservation_id, attempt_id, phase),
             )
-            if reservation.rowcount!=1:
+            if reservation.rowcount != 1:
                 raise PermissionError("provider_reservation_finish_race")
+
         async with self._uow_factory() as uow:
-            await uow.run_sync(finish_pair); await uow.commit()
+            await uow.run_sync(finish_pair)
+            await uow.commit()
 ```
 
 ```python
@@ -4148,10 +4465,10 @@ Run:
 
 ```bash
 set -euo pipefail
-uv run ruff format --check packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py tests/fixtures/provider_egress.py tests/unit/providers/test_commitments.py tests/unit/providers/test_reasoning_wire.py tests/unit/providers/test_redaction.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_redaction_receipt_repository.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/security/test_provider_boundary.py
+uv run ruff format --check packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/adapters/sqlcipher/engine.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py tests/fixtures/provider_egress.py tests/unit/providers/test_commitments.py tests/unit/providers/test_reasoning_wire.py tests/unit/providers/test_redaction.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_redaction_receipt_repository.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/security/test_provider_boundary.py
 uv run pytest tests/unit/providers/test_commitments.py tests/unit/providers/test_reasoning_wire.py tests/unit/providers/test_redaction.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_redaction_receipt_repository.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/security/test_provider_boundary.py tests/contract/test_dependency_direction.py -q
-uv run ruff check packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py tests/fixtures/provider_egress.py tests/unit/providers/test_commitments.py tests/unit/providers/test_reasoning_wire.py tests/unit/providers/test_redaction.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_redaction_receipt_repository.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/security/test_provider_boundary.py
-uv run mypy packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py
+uv run ruff check packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/adapters/sqlcipher/engine.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py tests/fixtures/provider_egress.py tests/unit/providers/test_commitments.py tests/unit/providers/test_reasoning_wire.py tests/unit/providers/test_redaction.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_redaction_receipt_repository.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/security/test_provider_boundary.py
+uv run mypy packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/adapters/sqlcipher/engine.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py
 ```
 
 Expected: PASS with no provider capture or durable receipt/call row containing the private sentinel, and no Ruff or mypy diagnostics.
@@ -4159,7 +4476,7 @@ Expected: PASS with no provider capture or durable receipt/call row containing t
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py tests/fixtures/provider_egress.py tests/unit/providers/test_commitments.py tests/unit/providers/test_reasoning_wire.py tests/unit/providers/test_redaction.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_redaction_receipt_repository.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/security/test_provider_boundary.py docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md
+git add packages/contracts/src/tuntun_contracts/commitments.py apps/core/src/tuntun_core/adapters/sqlcipher/engine.py apps/core/src/tuntun_core/services/providers/allowlist.py apps/core/src/tuntun_core/services/providers/reasoning_wire.py apps/core/src/tuntun_core/services/providers/redactor.py apps/core/src/tuntun_core/services/providers/redaction_repository.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/bootstrap/container.py tests/fixtures/provider_egress.py tests/unit/providers/test_commitments.py tests/unit/providers/test_reasoning_wire.py tests/unit/providers/test_redaction.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_redaction_receipt_repository.py tests/integration/providers/test_call_proof_repository.py tests/integration/providers/test_gateway_runtime_wiring.py tests/security/test_provider_boundary.py docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md
 git diff --cached --check
 git commit -m "feat(privacy): add purpose-bound provider sanitization"
 ```
