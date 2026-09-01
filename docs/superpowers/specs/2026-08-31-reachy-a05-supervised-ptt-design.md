@@ -303,8 +303,11 @@ continuously reads controls while provider work runs; `stop|cancel` cancels the 
 provider/playback task immediately. Core-origin
 failure, timeout, or Ctrl-C closes admission and sends `abort` immediately on the reserved priority
 lane while provider cancellation runs concurrently from the same monotonic cleanup T0. It drops late
-results, acknowledges the safety receipt, joins owned tasks within their separate bound, and only
-then escalates the SSH process group. A partial receipt is failed evidence.
+results, acknowledges the safety receipt, and joins Core-owned supervisor/pipeline tasks within their
+separate bound. The already-fenced SSH close may concurrently continue through bounded TERM/KILL
+escalation. Core fixes a separate nonrenewable transport epoch S0 at the first synchronous
+`bridge.close()` fence. Transport close starts at the beginning of final teardown, concurrently with
+remaining Core joins, or earlier on a hard transport failure. A partial receipt is failed evidence.
 
 The diagnostic freezes these outer bounds: 5 seconds for session ready; 2 seconds for capture open
 after start and capture close after submit; 90 seconds capture; 30 seconds STT, 45 seconds reasoning,
@@ -328,13 +331,27 @@ error starts immediately at T0 while observations run; if it completes, the trut
 and both sends share T+2.5, with no acknowledgement read. Core enqueues `abort` at T0 while
 concurrently closing provider transports within 0.5 seconds and joining them within 1 second;
 provider teardown never delays the 3.5-second abort/receipt/ack path. Admission stays closed while
-transport close and owned-task joins finish by the separate T+4.0 teardown deadline. SSH connect is
-5 seconds, server-alive is
-2 seconds with count 2, stdin-close grace is 1 second, TERM grace is 1 second, and KILL observation
-is 1 second. Timing failure yields content-free failed evidence and no unbounded join or retry.
-Caller cancellation while acquiring the lifecycle lock, adopting cleanup, handling any
-post-startup exit, or rolling back a partially created runtime is remembered; the same bounded
-cleanup/rollback ownership finishes before cancellation is re-raised.
+Core-owned supervisor/pipeline joins finish by the separate T+4.0 Core teardown deadline. Bridge
+close is synchronously fenced no later than final teardown and follows its separate S0+3 bound.
+Cancellation reaches every owned sibling before Core observes any one of them. The supervisor and
+voice pipeline retain separate quarantines; both finish or remain explicitly owned by T0+4 seconds,
+and incomplete observation forces `cleanup_incomplete`. Mixed provider/adapter exception groups are
+reduced to content-free outcomes, with nested cleanup incompleteness taking precedence. Abandoned
+late provider results and source/converted audio destinations are re-wiped when their owning work
+settles; an iterator-close error cannot downgrade known cleanup incompleteness. Before the final
+`safety_ack`, Core fences normal/heartbeat admission and makes terminal input final. Exact committed
+ACK is the clean-EOF boundary and no later frame is emitted; truncated or malformed bytes still
+poison the session. SSH connect is 5 seconds and server-alive is 2 seconds with count 2. The first
+synchronous `bridge.close()` fixes a separate nonrenewable S0. After S0, stdin-close grace ends at
+S0+1, validated process-group TERM grace at S0+2, and KILL observation/reap at S0+3; repeated close
+cannot extend S0. Thus a valid-stream failure may finish by T0+6.5, while hard-failure completion is
+bounded by `max(T0+4, S0+3)`; S0+3 bounds only bridge escalation. A fenced transport may finish
+after Core T0+4 only for already-started transport teardown; it cannot reopen admission, admit or
+emit another frame, renew S0, extend Core's cleanup budget, or weaken poison semantics.
+Timing failure yields content-free failed evidence and no unbounded join or retry. Caller
+cancellation while acquiring the lifecycle lock, adopting cleanup, handling any post-startup exit,
+or rolling back a partially created runtime is remembered; the same bounded cleanup/rollback
+ownership finishes before cancellation is re-raised.
 
 Python, the SDK, operating system, and provider may retain copies outside Tuntun's owned buffers;
 buffer clearing is therefore best-effort cleanup, not cryptographic erasure.

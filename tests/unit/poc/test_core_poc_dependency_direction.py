@@ -69,3 +69,22 @@ def test_core_poc_foundation_has_no_file_network_or_logging_side_effect_imports(
 
 def test_captured_turn_is_deliberately_not_a_serializable_contract_model() -> None:
     assert not issubclass(CapturedTurn, ContractModel)
+
+
+def test_core_supervisor_has_exactly_one_bridge_wire_writer() -> None:
+    path = SERVICE_ROOT / "session_supervisor.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    sites: list[str] = []
+
+    for function in (node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)):
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "send"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "_bridge"
+            ):
+                sites.append(function.name)
+
+    assert sites == ["_writer"]

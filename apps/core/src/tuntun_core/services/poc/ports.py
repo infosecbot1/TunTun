@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import suppress
 from enum import StrEnum
 from hashlib import sha256
@@ -19,6 +20,7 @@ from tuntun_contracts.speech import (
     AudioFormat,
     AuthorizedSynthesisRequest,
     AuthorizedTranscriptionRequest,
+    SpeechChunk,
     TranscriptResult,
 )
 
@@ -29,8 +31,15 @@ class CorePttEvent(StrEnum):
     CANCEL = "cancel"
 
 
+class PttSendCommit(StrEnum):
+    COMMITTED = "committed"
+    UNCOMMITTED = "uncommitted"
+
+
 @runtime_checkable
 class CorePttInputPort(Protocol):
+    """Terminal input whose receive/close cancellation must settle within the Core bound."""
+
     async def receive(self) -> CorePttEvent: ...
 
     async def close(self) -> None: ...
@@ -38,11 +47,23 @@ class CorePttInputPort(Protocol):
 
 @runtime_checkable
 class PttBridgePort(Protocol):
+    """Bounded frame transport with bounded cancellation and priority admission.
+
+    COMMITTED means the complete frame was admitted before return; UNCOMMITTED means no part can
+    commit later. A cancelled, failed, or otherwise unsuccessful send cannot commit later. The
+    synchronous call to close atomically fences every uncommitted and future send before returning
+    its bounded awaitable. The first close call fixes one nonrenewable real-loop epoch S0; its
+    awaitable must settle no later than S0+3 seconds, and repeated close calls cannot restart that
+    budget. Priority admission is reserved from normal-media backpressure. Bytes already committed
+    at a cancellation tie are unavoidable and require peer late-discard. A hardware adapter must
+    separately qualify speaker sink/drain completion.
+    """
+
     async def receive(self, max_bytes: int) -> bytes: ...
 
-    async def send(self, frame: bytes) -> None: ...
+    def send(self, frame: bytes, *, priority: bool) -> Awaitable[PttSendCommit]: ...
 
-    async def close(self) -> None: ...
+    def close(self) -> Awaitable[None]: ...
 
 
 @runtime_checkable
@@ -52,6 +73,8 @@ class ProviderCancellationPort(Protocol):
 
 @runtime_checkable
 class MonotonicClock(Protocol):
+    """Clock whose sleeper must honor bounded task cancellation."""
+
     def now(self) -> float: ...
 
     async def sleep_until(self, deadline: float) -> None: ...
@@ -82,6 +105,21 @@ class VoiceAttemptAuthorizerPort(Protocol):
         turn_id: UUID,
         response: ProviderResponse,
     ) -> AuthorizedSynthesisRequest: ...
+
+
+@runtime_checkable
+class VoiceTurnPort(Protocol):
+    """Ephemeral voice pipeline whose retained deadline work remains observable."""
+
+    @property
+    def clock(self) -> MonotonicClock: ...
+
+    def run(self, captured: CapturedTurn) -> AsyncIterator[SpeechChunk]: ...
+
+    def observe_quarantine(self, *, deadline: float) -> Awaitable[bool]:
+        """Settle retained work by a real-loop absolute deadline, or return false."""
+
+        ...
 
 
 class CapturedTurnError(RuntimeError):

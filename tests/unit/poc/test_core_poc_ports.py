@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import pickle
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
+from typing import get_type_hints
 from uuid import UUID
 
 import pytest
@@ -14,8 +16,10 @@ from tuntun_contracts.speech import (
     AudioFormat,
     AuthorizedSynthesisRequest,
     AuthorizedTranscriptionRequest,
+    SpeechChunk,
     TranscriptResult,
 )
+from tuntun_core.services.poc import ports as ports_module
 from tuntun_core.services.poc.ports import (
     CapturedTurn,
     CapturedTurnError,
@@ -24,7 +28,9 @@ from tuntun_core.services.poc.ports import (
     MonotonicClock,
     ProviderCancellationPort,
     PttBridgePort,
+    PttSendCommit,
     VoiceAttemptAuthorizerPort,
+    VoiceTurnPort,
 )
 
 TURN_ID = UUID("10000000-0000-4000-8000-000000000001")
@@ -42,11 +48,17 @@ class _Bridge:
     async def receive(self, max_bytes: int) -> bytes:
         return b"" if max_bytes > 0 else b""
 
-    async def send(self, frame: bytes) -> None:
-        return None
+    def send(self, frame: bytes, *, priority: bool) -> Awaitable[PttSendCommit]:
+        async def committed() -> PttSendCommit:
+            return PttSendCommit.COMMITTED
 
-    async def close(self) -> None:
-        return None
+        return committed()
+
+    def close(self) -> Awaitable[None]:
+        async def closed() -> None:
+            return None
+
+        return closed()
 
 
 class _Cancellation:
@@ -91,6 +103,22 @@ class _Authorizer:
         raise NotImplementedError
 
 
+class _VoiceTurn:
+    def __init__(self) -> None:
+        self._clock = _Clock()
+
+    @property
+    def clock(self) -> MonotonicClock:
+        return self._clock
+
+    async def run(self, captured: CapturedTurn) -> AsyncIterator[SpeechChunk]:
+        if False:
+            yield SpeechChunk.model_construct()
+
+    async def observe_quarantine(self, *, deadline: float) -> bool:
+        return True
+
+
 def test_core_local_ports_have_the_frozen_runtime_shape() -> None:
     assert {event.value for event in CorePttEvent} == {"start", "submit", "cancel"}
     assert isinstance(_Input(), CorePttInputPort)
@@ -98,6 +126,36 @@ def test_core_local_ports_have_the_frozen_runtime_shape() -> None:
     assert isinstance(_Cancellation(), ProviderCancellationPort)
     assert isinstance(_Clock(), MonotonicClock)
     assert isinstance(_Authorizer(), VoiceAttemptAuthorizerPort)
+    assert isinstance(_VoiceTurn(), VoiceTurnPort)
+
+
+def test_bridge_port_freezes_commit_priority_cancellation_and_atomic_fence_contract() -> None:
+    commit_type = getattr(ports_module, "PttSendCommit", None)
+    assert commit_type is not None
+    assert {member.value for member in commit_type} == {"committed", "uncommitted"}
+
+    send_signature = inspect.signature(PttBridgePort.send)
+    assert tuple(send_signature.parameters) == ("self", "frame", "priority")
+    assert send_signature.parameters["priority"].kind is inspect.Parameter.KEYWORD_ONLY
+    send_hints = get_type_hints(PttBridgePort.send)
+    close_hints = get_type_hints(PttBridgePort.close)
+    assert send_hints["return"] == Awaitable[commit_type]
+    assert close_hints["return"] == Awaitable[None]
+
+    contract = inspect.getdoc(PttBridgePort) or ""
+    assert "bounded cancellation" in contract
+    assert "cannot commit later" in contract
+    assert "atomically fences" in contract
+    assert "late-discard" in contract
+
+
+def test_voice_turn_port_exposes_bounded_quarantine_observation() -> None:
+    signature = inspect.signature(VoiceTurnPort.observe_quarantine)
+    assert tuple(signature.parameters) == ("self", "deadline")
+    assert signature.parameters["deadline"].kind is inspect.Parameter.KEYWORD_ONLY
+    hints = get_type_hints(VoiceTurnPort.observe_quarantine)
+    assert hints["deadline"] is float
+    assert hints["return"] == Awaitable[bool]
 
 
 def test_captured_turn_transfers_the_exact_mutable_buffer_once() -> None:
