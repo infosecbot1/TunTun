@@ -1135,7 +1135,6 @@ git commit -m "feat(conversation): enforce one session and safe cancellation"
 - Create: `apps/core/src/tuntun_core/services/providers/route_authorization.py`
 - Create: `apps/core/src/tuntun_core/services/providers/review.py`
 - Create: `tests/__init__.py`
-- Create: `tests/conftest.py`
 - Create: `tests/fixtures/__init__.py`
 - Create: `tests/fixtures/provider_routes.py`
 - Test: `tests/contract/test_provider_route_binding.py`
@@ -1218,8 +1217,9 @@ def route_service(async_uow_factory, prerequisites, clock):
 ```
 
 ```python
-# append once to tests/conftest.py
-pytest_plugins = (*globals().get("pytest_plugins", ()), "tests.fixtures.provider_routes")
+# add only to the four Task-03 test modules that consume these fixtures;
+# root tests/conftest.py stays dependency-free for the wheel-only Python 3.11 CI job
+pytest_plugins = ("tests.fixtures.provider_routes",)
 ```
 
 ```python
@@ -1797,7 +1797,7 @@ Expected: PASS; foundation fixtures stay unchanged, every direct substitution an
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add apps/core/src/tuntun_core/services/providers/route_verifier.py apps/core/src/tuntun_core/services/providers/route_authorization.py apps/core/src/tuntun_core/services/providers/review.py tests/__init__.py tests/conftest.py tests/fixtures/__init__.py tests/fixtures/provider_routes.py tests/contract/test_provider_route_binding.py tests/integration/providers/test_route_authorization_once.py tests/security/test_provider_review_freshness.py tests/security/test_route_consent_binding.py docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md
+git add apps/core/src/tuntun_core/services/providers/route_verifier.py apps/core/src/tuntun_core/services/providers/route_authorization.py apps/core/src/tuntun_core/services/providers/review.py tests/__init__.py tests/fixtures/__init__.py tests/fixtures/provider_routes.py tests/contract/test_provider_route_binding.py tests/integration/providers/test_route_authorization_once.py tests/security/test_provider_review_freshness.py tests/security/test_route_consent_binding.py docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md
 git diff --cached --check
 git commit -m "security(provider): persist and consume frozen route authorizations"
 ```
@@ -2310,7 +2310,6 @@ git commit -m "feat(privacy): add purpose-bound provider sanitization"
 - Create: `config/providers/fx/bootstrap-safety-factor-2026-08-27.yaml`
 - Create: `docs/provider-sources/openai-2026-08-27.md`
 - Create: `tests/fixtures/budget.py`
-- Modify: `tests/conftest.py`
 - Test: `tests/unit/budget/test_boundaries.py`
 - Test: `tests/unit/budget/test_pricing.py`
 - Test: `tests/unit/budget/test_currency.py`
@@ -2817,8 +2816,9 @@ def budget_evidence(clock):
 ```
 
 ```python
-# append to tests/conftest.py
-pytest_plugins = (*globals().get("pytest_plugins", ()), "tests.fixtures.budget")
+# add only to budget/provider test modules that consume these fixtures;
+# never register SQL-backed fixtures from root tests/conftest.py
+pytest_plugins = ("tests.fixtures.budget",)
 ```
 
 ```python
@@ -5799,7 +5799,7 @@ Expected: PASS with no diagnostics.
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add apps/core/src/tuntun_core/services/budget/pricing.py apps/core/src/tuntun_core/services/budget/catalog.py apps/core/src/tuntun_core/services/budget/evidence.py apps/core/src/tuntun_core/services/budget/month.py apps/core/src/tuntun_core/services/budget/guard.py apps/core/src/tuntun_core/services/budget/reconciler.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/bootstrap/lifecycle.py apps/core/src/tuntun_core/bootstrap/container.py config/providers/default.yaml config/providers/prices/openai-2026-08-27.yaml config/providers/fx/bootstrap-safety-factor-2026-08-27.yaml docs/provider-sources/openai-2026-08-27.md tests/fixtures/budget.py tests/conftest.py tests/unit/budget/test_boundaries.py tests/unit/budget/test_pricing.py tests/unit/budget/test_currency.py tests/unit/budget/test_month_boundary.py tests/unit/budget/test_settlement.py tests/security/test_provider_review_freshness.py tests/integration/budget/test_concurrency.py tests/integration/budget/test_hard_stop.py tests/integration/budget/test_expiry_reconciliation.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_gateway_runtime_wiring.py tests/integration/providers/test_usage_receipt_repository.py tests/contract/test_budget_port.py
+git add apps/core/src/tuntun_core/services/budget/pricing.py apps/core/src/tuntun_core/services/budget/catalog.py apps/core/src/tuntun_core/services/budget/evidence.py apps/core/src/tuntun_core/services/budget/month.py apps/core/src/tuntun_core/services/budget/guard.py apps/core/src/tuntun_core/services/budget/reconciler.py apps/core/src/tuntun_core/services/providers/gateway.py apps/core/src/tuntun_core/services/providers/call_repository.py apps/core/src/tuntun_core/bootstrap/lifecycle.py apps/core/src/tuntun_core/bootstrap/container.py config/providers/default.yaml config/providers/prices/openai-2026-08-27.yaml config/providers/fx/bootstrap-safety-factor-2026-08-27.yaml docs/provider-sources/openai-2026-08-27.md tests/fixtures/budget.py tests/unit/budget/test_boundaries.py tests/unit/budget/test_pricing.py tests/unit/budget/test_currency.py tests/unit/budget/test_month_boundary.py tests/unit/budget/test_settlement.py tests/security/test_provider_review_freshness.py tests/integration/budget/test_concurrency.py tests/integration/budget/test_hard_stop.py tests/integration/budget/test_expiry_reconciliation.py tests/unit/providers/test_gateway_ordering.py tests/integration/providers/test_gateway_runtime_wiring.py tests/integration/providers/test_usage_receipt_repository.py tests/contract/test_budget_port.py
 git diff --cached --check
 git commit -m "feat(budget): reserve and settle every provider attempt"
 ```

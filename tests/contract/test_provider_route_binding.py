@@ -16,6 +16,8 @@ from tuntun_core.services.providers.route_verifier import (
 )
 from tuntun_testing.fake_clock import FakeClock
 
+pytest_plugins = ("tests.fixtures.provider_routes",)
+
 
 def _route(request: RouteAuthorizationRequest, clock: FakeClock):
     return authorization_from_request(

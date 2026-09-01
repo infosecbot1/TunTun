@@ -17,6 +17,8 @@ from tuntun_core.services.providers.review import (
 
 from tests.fixtures.provider_routes import RouteDatabase
 
+pytest_plugins = ("tests.fixtures.provider_routes",)
+
 NOW = datetime(2026, 8, 27, 1, 2, 3, 4, tzinfo=UTC)
 
 

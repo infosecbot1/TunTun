@@ -32,6 +32,8 @@ from tuntun_testing.fake_clock import FakeClock
 
 from tests.fixtures.provider_routes import PrerequisitesFake, RouteDatabase
 
+pytest_plugins = ("tests.fixtures.provider_routes",)
+
 
 async def _stored_envelope(
     factory: AsyncUnitOfWorkFactory,

@@ -10,6 +10,8 @@ from tuntun_testing.fake_clock import FakeClock
 
 from tests.fixtures.provider_routes import PrerequisitesFake
 
+pytest_plugins = ("tests.fixtures.provider_routes",)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
