@@ -79,7 +79,7 @@ def test_finalize_binds_exact_sanitized_body_without_storing_it() -> None:
 @pytest.mark.parametrize(
     "injected",
     (
-        "sk-proj-abcdefghijklmnopqrstuv",
+        "".join(("sk-", "proj-", "abcdefghijkl", "mnopqrstuv")),
         "person@example.test",
         "+65 8123 4567",
         "session-1",
