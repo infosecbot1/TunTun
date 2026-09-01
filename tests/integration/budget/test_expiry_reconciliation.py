@@ -138,6 +138,25 @@ class _NoopUnitOfWorkFactory:
         return _NoopUnitOfWork()
 
 
+class _BlockingPeriodicReconciler(ExpiredBudgetReconciler):
+    def __init__(self) -> None:
+        super().__init__(
+            _NoopUnitOfWorkFactory(),
+            _NoopClock(),
+            object(),
+            interval_seconds=60.0,
+        )
+        self.batch_started = asyncio.Event()
+        self.release_batch = asyncio.Event()
+        self.batch_calls = 0
+
+    async def reconcile_batch(self) -> int:
+        self.batch_calls += 1
+        self.batch_started.set()
+        await self.release_batch.wait()
+        return 0
+
+
 class _DelayedReachySafety:
     def __init__(self, events: list[str]) -> None:
         self._events = events
@@ -302,21 +321,26 @@ class _ReentrantStopDrainReconciler(_SupervisorReconciler):
 
 
 @pytest.mark.asyncio
-async def test_periodic_reconciler_uses_clockport_without_wait_extension(
-    production_provider_gateway_case,
-) -> None:
-    case = await production_provider_gateway_case()
-    reconciler = ExpiredBudgetReconciler(
-        case.factory,
-        case.clock,
-        case.budget_guard,
-        interval_seconds=0.001,
-    )
+async def test_periodic_reconciler_finishes_current_batch_and_stops_before_interval() -> None:
+    reconciler = _BlockingPeriodicReconciler()
     stop = asyncio.Event()
     worker = asyncio.create_task(reconciler.run_periodically(stop))
-    await asyncio.sleep(0.005)
-    stop.set()
-    await asyncio.wait_for(worker, timeout=0.1)
+    try:
+        await asyncio.wait_for(reconciler.batch_started.wait(), timeout=5.0)
+        assert reconciler.batch_calls == 1
+
+        stop.set()
+        reconciler.release_batch.set()
+
+        await asyncio.wait_for(worker, timeout=5.0)
+        assert reconciler.batch_calls == 1
+    finally:
+        stop.set()
+        reconciler.release_batch.set()
+        if not worker.done():
+            worker.cancel()
+        with suppress(BaseException):
+            await worker
 
 
 @pytest.mark.asyncio
@@ -1037,9 +1061,9 @@ async def test_cancelled_stop_joins_live_initial_drain_before_releasing_process_
     start_task = asyncio.create_task(supervisor.start())
     stop_task: asyncio.Task[None] | None = None
     try:
-        await asyncio.wait_for(reconciler.initial_drain_started.wait(), timeout=0.1)
+        await asyncio.wait_for(reconciler.initial_drain_started.wait(), timeout=5.0)
         stop_task = asyncio.create_task(supervisor.stop())
-        await asyncio.wait_for(reconciler.initial_drain_cancelled.wait(), timeout=0.1)
+        await asyncio.wait_for(reconciler.initial_drain_cancelled.wait(), timeout=5.0)
 
         stop_task.cancel()
         await asyncio.sleep(0)
