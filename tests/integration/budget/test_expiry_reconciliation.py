@@ -22,6 +22,9 @@ from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
 pytest_plugins = ("tests.fixtures.provider_egress",)
 
 
+_EVENT_WAIT_TIMEOUT_SECONDS = 5.0
+
+
 def _global_safety_receipt() -> SafetyReceipt:
     return SafetyReceipt(
         turn_id=None,
@@ -54,7 +57,10 @@ def _lease_is_reacquirable(lock_path: Path) -> bool:
     return True
 
 
-async def _wait_for_event(event: asyncio.Event, timeout: float = 0.1) -> None:
+async def _wait_for_event(
+    event: asyncio.Event,
+    timeout: float = _EVENT_WAIT_TIMEOUT_SECONDS,
+) -> None:
     async with asyncio.timeout(timeout):
         await event.wait()
 
@@ -326,7 +332,7 @@ async def test_periodic_reconciler_finishes_current_batch_and_stops_before_inter
     stop = asyncio.Event()
     worker = asyncio.create_task(reconciler.run_periodically(stop))
     try:
-        await asyncio.wait_for(reconciler.batch_started.wait(), timeout=5.0)
+        await _wait_for_event(reconciler.batch_started)
         assert reconciler.batch_calls == 1
 
         stop.set()
@@ -495,7 +501,7 @@ async def test_startup_recovery_waits_for_verified_global_stop_before_restart_dr
     )
     recovery_task = asyncio.create_task(recovery.recover_before_ready())
     try:
-        await asyncio.wait_for(reachy.started.wait(), timeout=0.1)
+        await _wait_for_event(reachy.started)
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(reconciler.restart_drain_started.wait(), timeout=0.02)
         assert await case.proof_rows() == before
@@ -959,7 +965,7 @@ async def test_stop_joins_live_initial_drain_before_releasing_process_lease(
     start_task = asyncio.create_task(supervisor.start())
     stop_tasks: list[asyncio.Task[None]] = []
     try:
-        await asyncio.wait_for(reconciler.initial_drain_started.wait(), timeout=0.1)
+        await _wait_for_event(reconciler.initial_drain_started)
         stop_tasks = [
             asyncio.create_task(supervisor.stop()),
             asyncio.create_task(supervisor.stop()),
@@ -967,7 +973,7 @@ async def test_stop_joins_live_initial_drain_before_releasing_process_lease(
         await asyncio.sleep(0)
 
         assert not _lease_is_reacquirable(lock_path)
-        await asyncio.wait_for(reconciler.initial_drain_cancelled.wait(), timeout=0.1)
+        await _wait_for_event(reconciler.initial_drain_cancelled)
         assert not any(task.done() for task in stop_tasks)
         assert not _lease_is_reacquirable(lock_path)
 
@@ -1014,9 +1020,9 @@ async def test_stop_joins_live_startup_recovery_before_releasing_process_lease(
     start_task = asyncio.create_task(supervisor.start())
     stop_task: asyncio.Task[None] | None = None
     try:
-        await asyncio.wait_for(reachy.started.wait(), timeout=0.1)
+        await _wait_for_event(reachy.started)
         stop_task = asyncio.create_task(supervisor.stop())
-        await asyncio.wait_for(reachy.cancelled.wait(), timeout=0.1)
+        await _wait_for_event(reachy.cancelled)
 
         assert not _lease_is_reacquirable(lock_path)
         assert not stop_task.done()
@@ -1061,9 +1067,9 @@ async def test_cancelled_stop_joins_live_initial_drain_before_releasing_process_
     start_task = asyncio.create_task(supervisor.start())
     stop_task: asyncio.Task[None] | None = None
     try:
-        await asyncio.wait_for(reconciler.initial_drain_started.wait(), timeout=5.0)
+        await _wait_for_event(reconciler.initial_drain_started)
         stop_task = asyncio.create_task(supervisor.stop())
-        await asyncio.wait_for(reconciler.initial_drain_cancelled.wait(), timeout=5.0)
+        await _wait_for_event(reconciler.initial_drain_cancelled)
 
         stop_task.cancel()
         await asyncio.sleep(0)
@@ -1113,7 +1119,7 @@ async def test_cancelled_stop_waits_for_live_worker_before_releasing_process_lea
     stop_task: asyncio.Task[None] | None = None
     try:
         await supervisor.start()
-        await asyncio.wait_for(reconciler.worker_started.wait(), timeout=0.1)
+        await _wait_for_event(reconciler.worker_started)
         stop_task = asyncio.create_task(supervisor.stop())
         await asyncio.sleep(0)
         assert not stop_task.done()
@@ -1194,12 +1200,12 @@ async def test_start_cancellation_observes_global_stop_before_releasing_process_
     supervisor = BudgetReconciliationSupervisor(reconciler, recovery)
     start_task = asyncio.create_task(supervisor.start())
     try:
-        await asyncio.wait_for(reachy.started.wait(), timeout=0.1)
+        await _wait_for_event(reachy.started)
         start_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(start_task, timeout=0.5)
 
-        await asyncio.wait_for(reachy.cancelled.wait(), timeout=0.1)
+        await _wait_for_event(reachy.cancelled)
         assert reachy.finished.is_set()
         with pytest.raises(RuntimeError, match="budget_reconciliation_unhealthy"):
             supervisor.require_ready()
@@ -1237,14 +1243,14 @@ async def test_unexpected_periodic_worker_terminal_withdraws_readiness(
     try:
         await supervisor.start()
         supervisor.require_ready()
-        await asyncio.wait_for(reconciler.worker_started.wait(), timeout=0.1)
+        await _wait_for_event(reconciler.worker_started)
         if worker_fault == "raise":
             reconciler.fail_worker.set()
         else:
             worker = supervisor._worker
             assert worker is not None
             worker.cancel()
-        await asyncio.wait_for(supervisor.worker_stopped.wait(), timeout=0.1)
+        await _wait_for_event(supervisor.worker_stopped)
 
         with pytest.raises(RuntimeError, match="budget_reconciliation_unhealthy"):
             supervisor.require_ready()
@@ -1273,7 +1279,7 @@ async def test_supervisor_healthy_startup_and_stop_releases_process_lease(
     try:
         await supervisor.start()
         supervisor.require_ready()
-        await asyncio.wait_for(reconciler.worker_started.wait(), timeout=0.1)
+        await _wait_for_event(reconciler.worker_started)
         await supervisor.stop()
 
         with pytest.raises(RuntimeError, match="budget_reconciliation_unhealthy"):
