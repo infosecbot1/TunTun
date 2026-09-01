@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
 import os
 import stat
@@ -48,7 +49,16 @@ class CoreProcessLease:
         try:
             descriptor = os.open(path, flags | os.O_EXCL, 0o600)
         except FileExistsError:
-            descriptor = os.open(path, flags, 0o600)
+            try:
+                descriptor = os.open(path, flags, 0o600)
+            except OSError as error:
+                if error.errno == errno.ELOOP:
+                    raise PermissionError("core_process_lease_symlink_rejected") from error
+                raise
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise PermissionError("core_process_lease_symlink_rejected") from error
+            raise
         try:
             metadata = os.fstat(descriptor)
             if (
@@ -117,6 +127,19 @@ class StartupTurnRecovery:
 
         task.add_done_callback(observed)
 
+    def withdraw_readiness(self) -> None:
+        self._ready = False
+
+    async def cancel_owned_startup_activity(self) -> None:
+        self._ready = False
+        while self._background:
+            tasks = tuple(self._background)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for task in tasks:
+                self._background.discard(task)
+
     @staticmethod
     def _spawn_owned(
         factory: Callable[[], Coroutine[Any, Any, Any]],
@@ -149,10 +172,14 @@ class StartupTurnRecovery:
                 )
             except BaseException:
                 continue
-            done, pending = await asyncio.wait({operation}, timeout=self._attempt_timeout)
+            self._retain(operation)
+            try:
+                done, pending = await asyncio.wait({operation}, timeout=self._attempt_timeout)
+            except asyncio.CancelledError:
+                operation.cancel()
+                raise
             for task in pending:
                 task.cancel()
-                self._retain(task)
             if operation not in done:
                 continue
             try:
@@ -172,30 +199,11 @@ class StartupTurnRecovery:
         self._ready = False
         try:
             self.process_lease.require_held()
-        except BaseException as error:
-            raise RuntimeError("startup_turn_recovery_unhealthy") from error
-        cutoff = self._clock.now()
-        tasks = []
-        failures = []
-        for factory, name in (
-            (self._verify_global_safety, "startup-global-reachy-safety"),
-            (
-                lambda: self._reconciler.drain_restart_open_attempts(cutoff),
-                "startup-orphan-budget-reconciliation",
-            ),
-        ):
-            try:
-                tasks.append(self._spawn_owned(factory, name))
-            except BaseException as error:
-                failures.append(error)
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        failures.extend(result for result in results if isinstance(result, BaseException))
-        if failures:
-            raise RuntimeError("startup_turn_recovery_unhealthy") from BaseExceptionGroup(
-                "startup turn recovery effects degraded",
-                failures,
-            )
-        try:
+            cutoff = self._clock.now()
+            await self._verify_global_safety()
+            self.process_lease.require_held()
+            await self._reconciler.drain_restart_open_attempts(cutoff)
+            self.process_lease.require_held()
             async with self._uow_factory() as uow:
 
                 def abandon(db: Any) -> None:
@@ -207,7 +215,12 @@ class StartupTurnRecovery:
 
                 await uow.run_sync(abandon)
                 await uow.commit()
+            self.process_lease.require_held()
+        except asyncio.CancelledError:
+            self._ready = False
+            raise
         except BaseException as error:
+            self._ready = False
             raise RuntimeError("startup_turn_recovery_unhealthy") from error
         self._ready = True
 
@@ -232,41 +245,91 @@ class BudgetReconciliationSupervisor:
         self._failure_code: str | None = "not_started"
         self.worker_stopped = asyncio.Event()
 
+    async def _cancel_and_observe_worker(self) -> None:
+        if self._worker is None:
+            return
+        self._worker.cancel()
+        await asyncio.gather(self._worker, return_exceptions=True)
+
+    async def _cleanup_failed_start(self) -> None:
+        self._ready = False
+        self.startup_recovery.withdraw_readiness()
+        self._stop.set()
+        try:
+            await self._cancel_and_observe_worker()
+            await self.startup_recovery.cancel_owned_startup_activity()
+        finally:
+            self.startup_recovery.process_lease.release_after_shutdown()
+
+    async def _cleanup_failed_start_uninterrupted(self) -> None:
+        cleanup = asyncio.create_task(
+            self._cleanup_failed_start(),
+            name="budget-reconciliation-start-cleanup",
+        )
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
     async def start(self) -> None:
         if self._worker is not None:
             raise RuntimeError("budget_reconciliation_already_started")
         try:
-            await self.startup_recovery.recover_before_ready()
-        except BaseException as error:
-            self._failure_code = f"startup_turn:{type(error).__name__}"
-            if isinstance(error, RuntimeError):
-                raise
-            raise RuntimeError("startup_turn_recovery_unhealthy") from error
-        try:
-            await self.reconciler.drain_before_ready()
-        except BaseException as error:
-            self._failure_code = f"startup:{type(error).__name__}"
-            raise RuntimeError("budget_reconciliation_unhealthy") from error
-        self._failure_code = None
-        try:
-            self._worker = cast(
-                asyncio.Task[None],
-                self.startup_recovery._spawn_owned(
-                    self._run_required_worker,
-                    "expired-budget-reconciler",
-                ),
-            )
-        except BaseException as error:
-            self._failure_code = f"worker_factory:{type(error).__name__}"
-            raise RuntimeError("budget_reconciliation_unhealthy") from error
-        self._worker.add_done_callback(self._observe_worker_done)
-        await asyncio.sleep(0)
-        if self._worker.done():
             try:
-                self._worker.result()
+                await self.startup_recovery.recover_before_ready()
+            except asyncio.CancelledError:
+                self._failure_code = "startup_turn:CancelledError"
+                raise
             except BaseException as error:
+                self._failure_code = f"startup_turn:{type(error).__name__}"
+                if isinstance(error, RuntimeError):
+                    raise
+                raise RuntimeError("startup_turn_recovery_unhealthy") from error
+            try:
+                await self.reconciler.drain_before_ready()
+            except asyncio.CancelledError:
+                self._failure_code = "startup:CancelledError"
+                raise
+            except BaseException as error:
+                self._failure_code = f"startup:{type(error).__name__}"
                 raise RuntimeError("budget_reconciliation_unhealthy") from error
-        self._ready = True
+            self._failure_code = None
+            try:
+                self._worker = cast(
+                    asyncio.Task[None],
+                    self.startup_recovery._spawn_owned(
+                        self._run_required_worker,
+                        "expired-budget-reconciler",
+                    ),
+                )
+            except BaseException as error:
+                self._failure_code = f"worker_factory:{type(error).__name__}"
+                raise RuntimeError("budget_reconciliation_unhealthy") from error
+            self._worker.add_done_callback(self._observe_worker_done)
+            await asyncio.sleep(0)
+            if self._worker.done():
+                try:
+                    self._worker.result()
+                except asyncio.CancelledError as error:
+                    self._failure_code = "worker:unexpected_cancel"
+                    raise RuntimeError("budget_reconciliation_unhealthy") from error
+                except BaseException as error:
+                    raise RuntimeError("budget_reconciliation_unhealthy") from error
+                else:
+                    self._failure_code = "worker:unexpected_exit"
+                    raise RuntimeError("budget_reconciliation_unhealthy")
+            self._ready = True
+        except asyncio.CancelledError:
+            await self._cleanup_failed_start_uninterrupted()
+            raise
+        except BaseException:
+            await self._cleanup_failed_start_uninterrupted()
+            raise
 
     def _observe_worker_done(self, task: asyncio.Task[None]) -> None:
         self._ready = False
@@ -311,10 +374,21 @@ class BudgetReconciliationSupervisor:
 
     async def stop(self) -> None:
         self._ready = False
+        self.startup_recovery.withdraw_readiness()
         self._stop.set()
+        primary: BaseException | None = None
         try:
             if self._worker is not None:
                 with suppress(asyncio.CancelledError):
                     await self._worker
+        except BaseException as error:
+            primary = error
+        try:
+            await self.startup_recovery.cancel_owned_startup_activity()
+        except BaseException as error:
+            if primary is None:
+                primary = error
         finally:
             self.startup_recovery.process_lease.release_after_shutdown()
+        if primary is not None:
+            raise primary
