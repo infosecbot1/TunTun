@@ -1134,15 +1134,18 @@ git commit -m "feat(conversation): enforce one session and safe cancellation"
 - Create: `apps/core/src/tuntun_core/services/providers/route_verifier.py`
 - Create: `apps/core/src/tuntun_core/services/providers/route_authorization.py`
 - Create: `apps/core/src/tuntun_core/services/providers/review.py`
+- Create: `tests/__init__.py`
+- Create: `tests/conftest.py`
+- Create: `tests/fixtures/__init__.py`
 - Create: `tests/fixtures/provider_routes.py`
-- Modify: `tests/conftest.py`
 - Test: `tests/contract/test_provider_route_binding.py`
 - Test: `tests/integration/providers/test_route_authorization_once.py`
+- Test: `tests/security/test_provider_review_freshness.py`
 - Test: `tests/security/test_route_consent_binding.py`
 
 **Interfaces:**
 - Consumes unchanged foundation `RouteAuthorizationRequest`, `RouteAuthorization`, `RouteConsumption`, `Commitment`, and `RouteAuthorizerPort`, plus HMAC-authenticated consent evidence. Enrolled evidence is exact household/subject/purpose-bound; Guest evidence is exact household/session/purpose/disclosure-bound and expires with that session. A subject receipt can never authorize Guest and a Guest receipt can never authorize a subject.
-- Produces `authorization_from_request`, `verify_route_consumption`, and a persistent `RouteAuthorizationService` implementing the exact foundation port. Issued authorizations are stored inside a private versioned envelope with the locked active subject authority generation as canonical JSON in encrypted `runtime_settings`; the foundation `idempotency_receipts` unique key atomically makes consumption single-use across restarts. Guest envelopes carry no subject generation. A Qwen envelope additionally carries the exact private `QwenRouteActivationBindingV1` returned by the C05 activation store: owner-activation and accepted-evaluation-report commitments, endpoint-authority and pricing-schedule commitments, workspace/probe/region/host/model-snapshot, provider/terms review versions and digests, price/source/FX versions and digests, and their earliest expiry. Authorization captures that binding only after a current exact check. Consumption starts a serialized writer transaction, reopens the same owner activation, accepted report, provider/terms review, endpoint, catalog, and FX rows, requires canonical equality to the envelope, and only then inserts the single-use receipt. Equality at any expiry boundary fails. The public frozen DTO remains unchanged.
+- Produces `authorization_from_request`, `verify_route_consumption`, and a persistent `RouteAuthorizationService` implementing the exact foundation port. Issued authorizations are stored inside a private versioned envelope with the locked active subject authority generation as canonical JSON in encrypted `runtime_settings`; the foundation `idempotency_receipts` unique key atomically makes consumption single-use across restarts. Guest envelopes carry no subject generation. Task 03 defines and contract-tests the exact private `QwenRouteActivationBindingV1`, but its production SQL adapter intentionally denies every Qwen authorization and consumption with `route_invalidated:qwen_activation`, even when an activation store is injected. Full C05/Qwen routing remains deferred until a Qwen provider-review/runtime-account reader and exact pricing/FX binding are implemented together. The public frozen DTO remains unchanged.
 
 - [ ] **Step 1: Write failing derived-binding and restart-safe single-use tests**
 
@@ -1201,7 +1204,8 @@ class PrerequisitesFake:
         ):
             raise PermissionError("route_invalidated:qwen_activation")
         return self.qwen_activation_binding
-    async def require_budget_reservation(self, uow, *args): self.checked_reservation = args
+    async def require_budget_reservation(self, uow, request: RouteAuthorizationRequest):
+        self.checked_reservation = request
     def require_consumable_in_transaction(self, db, envelope, consumption, now):
         assert db.connection is not None and db.connection.in_transaction()
         if self.invalid is not None: raise PermissionError(f"route_invalidated:{self.invalid}")
@@ -1259,12 +1263,10 @@ async def test_consume_is_single_use_after_service_restart(async_uow_factory, pr
         await restarted.consume(route.authorization_id, consumption)
 
 @pytest.mark.asyncio
-async def test_authorize_requires_the_actual_reserved_attempt(route_service, request) -> None:
+async def test_authorize_binds_the_complete_request_to_the_reservation(route_service, request) -> None:
     await route_service.authorize(request)
     prerequisites = route_service._prerequisites
-    assert prerequisites.checked_reservation == (
-        request.budget_reservation_id, request.attempt_id, request.provider, request.model
-    )
+    assert prerequisites.checked_reservation == request
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid", ["consent", "privacy", "turn", "provider_review", "budget_reservation"])
@@ -1285,45 +1287,20 @@ async def test_review_change_between_authorize_and_consume_denies_without_networ
     assert network_capture.calls==[]
     assert await sql_route_service.count_consumptions(route.authorization_id)==0
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("change",(
-    "owner_activation_commitment","evaluation_report_commitment",
-    "endpoint_authority_commitment","pricing_schedule_commitment","workspace_id",
-    "workspace_probe_receipt_id","workspace_probe_generation",
-    "workspace_probe_commitment","workspace_probe_expiry_equality",
-    "workspace_probe_endpoint","workspace_probe_snapshot","region","base_url",
-    "model_snapshot",
-    "endpoint_review_version","endpoint_source_sha256","pricing_version",
-    "price_source_url","price_source_sha256","price_tier","price_validity",
-    "fx_version","fx_rate","fx_source","fx_source_sha256",
-    "fx_record_commitment","terms_review_version","terms_source_sha256",
-    "terms_expiry_equality","accepted_report_expiry_equality",
-    "fx_expiry_equality","endpoint_review_expiry_equality",
-))
-async def test_qwen_activation_drift_between_authorize_and_consume_denies_in_writer(
-    qwen_route_case,change,
-) -> None:
-    route=await qwen_route_case.authorize()
-    qwen_route_case.mutate_current_material(change)
-    with pytest.raises(PermissionError,match="route_invalidated:qwen_activation"):
-        await qwen_route_case.consume(route)
-    assert qwen_route_case.network.calls==[]
-    assert await qwen_route_case.service.count_consumptions(route.authorization_id)==0
+def test_qwen_activation_contract_binds_endpoint_and_earliest_expiry(qwen_values) -> None:
+    QwenRouteActivationBindingV1(**qwen_values)
+    for change in qwen_endpoint_or_expiry_mutations(qwen_values):
+        with pytest.raises(ValueError):
+            QwenRouteActivationBindingV1(**(qwen_values | change))
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change",(
-    "endpoint_review_expiry_equality","price_expiry_equality","fx_expiry_equality",
-    "endpoint_authority_commitment","pricing_schedule_commitment",
-))
-async def test_qwen_drift_between_gate_and_authorize_creates_no_route_or_io(
-    qwen_route_case,change,
+async def test_sql_phase1_keeps_qwen_disabled_with_an_activation_store(
+    sql_route_service_with_qwen_store,qwen_request,
 ) -> None:
-    qwen_route_case.pass_outer_gate_then_mutate(change)
     with pytest.raises(PermissionError,match="route_invalidated:qwen_activation"):
-        await qwen_route_case.authorize()
-    assert qwen_route_case.network.calls==[]
-    assert await qwen_route_case.authorization_count()==0
+        await sql_route_service_with_qwen_store.authorize(qwen_request)
+    assert await sql_route_service_with_qwen_store.authorization_count()==0
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changed", ["household_id", "subject_id", "session_id", "purpose"])
@@ -1535,10 +1512,12 @@ class ProviderReviewStore:
 # apps/core/src/tuntun_core/services/providers/route_authorization.py
 import json
 from datetime import timedelta
+from functools import partial
 from typing import Literal,Protocol
 from uuid import UUID, uuid4
 from pydantic import AwareDatetime,BaseModel, ConfigDict, Field, model_validator
 from tuntun_contracts.base import Commitment,canonical_bytes,parse_contract_json
+from tuntun_contracts.budget import LlmUsageUnits,SttUsageUnits,TtsUsageUnits
 from tuntun_contracts.provider import RouteAuthorization, RouteAuthorizationRequest, RouteConsumption
 from tuntun_core.services.providers.route_verifier import authorization_from_request, verify_route_consumption
 from tuntun_core.services.providers.review import ProviderReviewStore
@@ -1606,7 +1585,7 @@ class RoutePrerequisites(Protocol):
     async def require_privacy_receipt(self, uow, receipt_id: UUID, turn_id: UUID) -> None: ...
     async def require_provider_review(self, uow, provider: str, model: str, purpose: str) -> None: ...
     async def require_provider_activation(self,uow,provider:str,model:str,purpose:str,expected:QwenRouteActivationBindingV1|None=None) -> QwenRouteActivationBindingV1|None: ...
-    async def require_budget_reservation(self, uow, reservation_id: UUID, attempt_id: UUID, provider: str, model: str) -> None: ...
+    async def require_budget_reservation(self, uow, request: RouteAuthorizationRequest) -> None: ...
     def require_consumable_in_transaction(self, db, envelope:RouteAuthorizationEnvelopeV1, consumption: RouteConsumption, now) -> None: ...
 
 class SqlRoutePrerequisites:
@@ -1651,35 +1630,41 @@ class SqlRoutePrerequisites:
             if row is None: raise PermissionError("route_invalidated:privacy")
         await uow.run_sync(check)
     async def require_provider_review(self, uow, provider, model, purpose):
+        if provider=="qwen":
+            raise PermissionError("route_invalidated:qwen_activation")
         await uow.run_sync(lambda db: ProviderReviewStore(
             db,self.provider_account_bindings,
         ).require_current(provider, model, purpose, self.clock.now()))
     async def require_provider_activation(self,uow,provider,model,purpose,expected=None):
-        if provider!="qwen":
-            if expected is not None:
-                raise PermissionError("route_invalidated:qwen_activation")
-            return None
-        if self.qwen_activation_store is None:
+        if provider=="qwen" or provider!="openai" or expected is not None:
             raise PermissionError("route_invalidated:qwen_activation")
-        return await uow.run_sync(lambda db:
-            self.qwen_activation_store.require_current_in_transaction(
-                db,model=model,purpose=purpose,expected=expected,now=self.clock.now(),
-            )
-        )
-    async def require_budget_reservation(self, uow, reservation_id, attempt_id, provider, model):
+        return None
+    async def require_budget_reservation(self, uow, request):
         def check(db):
-            row=db.exec_driver_sql("SELECT 1 FROM budget_reservations WHERE id=? AND attempt_id=? AND provider=? AND model=? AND state='reserved' AND expires_at>?", (str(reservation_id),str(attempt_id),provider,model,self.clock.now().isoformat())).fetchone()
+            category={"cloud_stt":"stt","cloud_reasoning":"llm","cloud_tts":"tts"}[request.purpose]
+            row=db.exec_driver_sql(
+                "SELECT usage_ceiling_json FROM budget_reservations "
+                "WHERE id=? AND request_id=? AND attempt_id=? AND provider=? AND model=? AND category=? "
+                "AND outcome IN ('allow','allow_soft_warning') AND state='reserved' "
+                "AND transport_phase='not_claimed' AND gateway_ordering_version=1 "
+                "AND reserved_micros_sgd>0 AND price_snapshot_json IS NOT NULL "
+                "AND charged_micros_sgd IS NULL AND settled_at IS NULL AND expires_at>?",
+                (str(request.budget_reservation_id),str(request.request_id),str(request.attempt_id),
+                 request.provider,request.model,category,self.clock.now().isoformat()),
+            ).fetchone()
             if row is None: raise PermissionError("route_invalidated:budget_reservation")
+            usage_type={"llm":LlmUsageUnits,"stt":SttUsageUnits,"tts":TtsUsageUnits}[category]
+            usage=parse_contract_json(
+                usage_type,row[0].encode("utf-8"),max_bytes=8192,require_canonical=True,
+            )
+            input_units={"llm":usage.input_tokens,"stt":usage.audio_millis,"tts":usage.characters}[category]
+            if input_units!=request.max_input_units:
+                raise PermissionError("route_invalidated:budget_reservation")
         await uow.run_sync(check)
     def require_consumable_in_transaction(self, db, envelope, consumption, now) -> None:
         route=envelope.route
-        if route.provider=="qwen":
-            if self.qwen_activation_store is None:
-                raise PermissionError("route_invalidated:qwen_activation")
-            self.qwen_activation_store.require_current_in_transaction(
-                db,model=route.model,purpose=route.purpose,
-                expected=envelope.qwen_activation,now=now,
-            )
+        if route.provider=="qwen" or envelope.qwen_activation is not None:
+            raise PermissionError("route_invalidated:qwen_activation")
         active_session = db.exec_driver_sql(
             "SELECT 1 FROM sessions WHERE id=? AND household_id=? AND state NOT IN ('cancelled','closed') AND closed_at IS NULL",
             (str(route.session_id), str(route.household_id)),
@@ -1770,38 +1755,49 @@ class RouteAuthorizationService:
 
     async def invalidate_subject_purpose_in_uow(self, uow, subject_id: UUID, purpose: str, now) -> tuple[UUID, ...]:
         """Revoke every still-unconsumed authorization under the serialized writer."""
-        def invalidate(db):
+        def invalidate_batch(db,cursor):
             rows = db.exec_driver_sql(
-                "SELECT key,value_json FROM runtime_settings WHERE key LIKE 'route.authorization.%'"
+                "SELECT key,value_json FROM runtime_settings "
+                "WHERE key GLOB 'route.authorization.*' "
+                "AND json_extract(value_json,'$.route.subject_id')=? "
+                "AND json_extract(value_json,'$.route.purpose')=? "
+                "AND key>? ORDER BY key LIMIT 128",
+                (str(subject_id),purpose,cursor),
             ).fetchall()
-            revoked = []
+            next_cursor=cursor; batch=[]
             for key, value_json in rows:
-                route = _parse_persisted_route_envelope(value_json).route
-                if route.subject_id != subject_id or route.purpose != purpose:
-                    continue
+                next_cursor=key
+                envelope=_parse_persisted_route_envelope(value_json)
+                route=envelope.route
                 consumed = db.exec_driver_sql(
                     "SELECT 1 FROM idempotency_receipts WHERE operation='provider.route.consume' AND scope=? AND idempotency_key=?",
                     (str(route.household_id), str(route.authorization_id)),
                 ).fetchone()
                 if consumed is None:
                     db.exec_driver_sql("DELETE FROM runtime_settings WHERE key=?", (key,))
-                    revoked.append(route.authorization_id)
-            return tuple(revoked)
-        return await uow.run_sync(invalidate)
+                    batch.append(route.authorization_id)
+            return next_cursor,tuple(batch),len(rows)
+        cursor=""; revoked=[]
+        while True:
+            cursor,batch,scanned=await uow.run_sync(
+                partial(invalidate_batch,cursor=cursor)
+            )
+            revoked.extend(batch)
+            if scanned<128: return tuple(revoked)
 ```
 
-The serialized writer defines the revocation race: an unused authorization deleted first cannot be consumed; a consumption committed first is already an in-flight egress and is conservatively settled. The existing content-minimized `IdentityConsentRevoked` event is also delivered after commit to the turn coordinator, which cancels matching active provider tasks. No handler claims that bytes already accepted by a provider were recalled.
+The serialized writer defines the revocation race: an unused authorization deleted first cannot be consumed; a consumption committed first is already an in-flight egress and is conservatively settled. The implementation keyset-pages matching routes in fixed 128-row batches inside that same caller-owned transaction, skips consumed routes without deleting their envelopes, and fail-closed deletes matching corrupt unused envelopes. Tests place a live matching route after more than 1,024 matching consumed routes and assert every scan is bounded by `LIMIT`. The existing content-minimized `IdentityConsentRevoked` event is also delivered after commit to the turn coordinator, which cancels matching active provider tasks. No handler claims that bytes already accepted by a provider were recalled.
 
 - [ ] **Step 4: Run green compatibility and restart gates**
 
-Run: `uv run pytest tests/contract/test_provider_route_binding.py tests/integration/providers/test_route_authorization_once.py tests/security/test_route_consent_binding.py tests/contract/test_v1_types_and_ports.py tests/contract/test_v1_fixtures.py tests/integration/storage/test_migrations.py -q && uv run mypy apps/core/src/tuntun_core/services/providers/route_verifier.py apps/core/src/tuntun_core/services/providers/route_authorization.py apps/core/src/tuntun_core/services/providers/review.py`
+Run: `uv run pytest tests/contract/test_provider_route_binding.py tests/integration/providers/test_route_authorization_once.py tests/security/test_route_consent_binding.py tests/security/test_provider_review_freshness.py tests/contract/test_v1_types_and_ports.py tests/contract/test_v1_fixtures.py tests/integration/storage/test_migrations.py -q && uv run mypy apps/core/src/tuntun_core/services/providers/route_verifier.py apps/core/src/tuntun_core/services/providers/route_authorization.py apps/core/src/tuntun_core/services/providers/review.py`
 
-Expected: PASS; foundation fixtures stay unchanged, every direct substitution and both limit overages fail, and a second consume after restart is rejected by persistent uniqueness.
+Expected: PASS; foundation fixtures stay unchanged, every direct substitution and both limit overages fail, the complete request/category/usage ceiling is reservation-bound, a second consume after restart is rejected by persistent uniqueness, matching-route revocation stays bounded beyond 1,024 rows, and Qwen is schema-bound but disabled in the production SQL adapter.
 
 - [ ] **Step 5: Stage and commit exactly this unit**
 
 ```bash
-git add apps/core/src/tuntun_core/services/providers/route_verifier.py apps/core/src/tuntun_core/services/providers/route_authorization.py apps/core/src/tuntun_core/services/providers/review.py tests/fixtures/provider_routes.py tests/conftest.py tests/contract/test_provider_route_binding.py tests/integration/providers/test_route_authorization_once.py tests/security/test_route_consent_binding.py
+git add apps/core/src/tuntun_core/services/providers/route_verifier.py apps/core/src/tuntun_core/services/providers/route_authorization.py apps/core/src/tuntun_core/services/providers/review.py tests/__init__.py tests/conftest.py tests/fixtures/__init__.py tests/fixtures/provider_routes.py tests/contract/test_provider_route_binding.py tests/integration/providers/test_route_authorization_once.py tests/security/test_provider_review_freshness.py tests/security/test_route_consent_binding.py docs/superpowers/plans/2026-08-27-tuntun-phase1-conversation-reachy-execution.md
 git diff --cached --check
 git commit -m "security(provider): persist and consume frozen route authorizations"
 ```
@@ -2319,7 +2315,7 @@ git commit -m "feat(privacy): add purpose-bound provider sanitization"
 - Test: `tests/unit/budget/test_pricing.py`
 - Test: `tests/unit/budget/test_currency.py`
 - Test: `tests/unit/budget/test_month_boundary.py`
-- Test: `tests/security/test_provider_review_freshness.py`
+- Modify: `tests/security/test_provider_review_freshness.py`
 - Test: `tests/integration/budget/test_concurrency.py`
 - Test: `tests/integration/budget/test_hard_stop.py`
 - Test: `tests/unit/budget/test_settlement.py`
@@ -17408,7 +17404,7 @@ Run: `uv run pytest tests/unit/workflows tests/integration/test_langgraph_turn.p
 
 Expected: PASS; checkpoint, ephemeral content and lifecycle counts are zero after success, cancellation, timeout, privacy, start failure and injected node error; cleanup cannot mask the primary outcome; and the linear/LangGraph fake scenarios emit the same external event sequence.
 
-Run: `uv run pytest tests/unit/conversation tests/unit/providers tests/unit/budget tests/unit/edge tests/unit/persona tests/unit/workflows tests/contract/openai tests/contract/reachy tests/contract/test_conversation_workflow_adapter.py tests/integration/providers tests/integration/budget tests/integration/reachy tests/integration/test_simulated_voice_turn.py tests/integration/test_turn_cancellation.py tests/integration/test_turn_lifecycle.py tests/integration/test_personalized_conversation_workflow.py tests/security/test_provider_boundary.py tests/security/test_openai_local_non_retention.py tests/security/test_no_external_telemetry.py tests/security/test_reachy_endpoint_commissioning.py tests/security/test_reachy_pairing.py tests/security/test_reachy_replay.py tests/security/test_camera_window.py tests/security/test_edge_key_handling.py tests/security/test_competing_controller.py tests/security/test_reachy_firewall.py tests/security/test_privacy_gate.py tests/security/test_turn_non_retention.py tests/security/test_langgraph_non_ownership.py tests/acceptance/test_bilingual_personas.py -q`
+Run: `uv run pytest tests/unit/conversation tests/unit/providers tests/unit/budget tests/unit/edge tests/unit/persona tests/unit/workflows tests/contract/openai tests/contract/reachy tests/contract/test_conversation_workflow_adapter.py tests/integration/providers tests/integration/budget tests/integration/reachy tests/integration/test_simulated_voice_turn.py tests/integration/test_turn_cancellation.py tests/integration/test_turn_lifecycle.py tests/integration/test_personalized_conversation_workflow.py tests/security/test_provider_boundary.py tests/security/test_provider_review_freshness.py tests/security/test_route_consent_binding.py tests/security/test_openai_local_non_retention.py tests/security/test_no_external_telemetry.py tests/security/test_reachy_endpoint_commissioning.py tests/security/test_reachy_pairing.py tests/security/test_reachy_replay.py tests/security/test_camera_window.py tests/security/test_edge_key_handling.py tests/security/test_competing_controller.py tests/security/test_reachy_firewall.py tests/security/test_privacy_gate.py tests/security/test_turn_non_retention.py tests/security/test_langgraph_non_ownership.py tests/acceptance/test_bilingual_personas.py -q`
 
 Expected: PASS with no skipped non-hardware/non-paid test.
 
