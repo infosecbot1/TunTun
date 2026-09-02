@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import time
 from collections import deque
 from collections.abc import Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
@@ -16,7 +17,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from tuntun_contracts.base import canonical_bytes, parse_contract_json
 from tuntun_contracts.reachy import CameraWindowGrant
-from tuntun_contracts.reachy_media import MAX_CAMERA_PAYLOAD, MAX_HEADER, PREFIX, CameraWindow
+from tuntun_contracts.reachy_media import (
+    MAX_CAMERA_PAYLOAD,
+    MAX_HEADER,
+    PREFIX,
+    CameraWindow,
+    parse_prefix,
+)
 from tuntun_contracts.reachy_wire import (
     MAX_CONTROL_FRAME_JSON_BYTES,
     MAX_CONTROL_PAYLOAD_BYTES,
@@ -252,19 +259,27 @@ class ReachySession:
             grant_ticket = self._camera_grant_ticket
             generation = self._camera_generation
         window = CameraWindow.open(grant, self._hmac_root, self._clock.now())
-        claimed = await self._claim_grant(grant)
+        try:
+            claimed = await self._claim_grant(grant)
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                window.close("cancel")
+            raise
         if type(claimed) is not bool:
-            window.close("cancel")
+            with contextlib.suppress(BaseException):
+                window.close("cancel")
             raise TypeError("camera grant claim result must be a bool")
         if not claimed:
-            window.close("cancel")
+            with contextlib.suppress(BaseException):
+                window.close("cancel")
             raise PermissionError("camera_grant_already_used")
         async with self._camera_install_lock:
             if (
                 self._camera_generation != generation
                 or grant_ticket < self._camera_installed_ticket
             ):
-                window.close("cancel")
+                with contextlib.suppress(BaseException):
+                    window.close("cancel")
                 raise PermissionError("camera_grant_window_invalidated")
             self._close_camera("cancel", invalidate=False)
             self._camera = window
@@ -328,6 +343,7 @@ class PriorityControlQueues:
         self._safety: deque[bytes] = deque()
         self._control: deque[bytes] = deque()
         self._media: deque[bytes] = deque()
+        self._media_dropped = 0
 
     @property
     def depths(self) -> dict[str, int]:
@@ -337,6 +353,11 @@ class PriorityControlQueues:
                 "control": len(self._control),
                 "media": len(self._media),
             }
+
+    @property
+    def dropped_media_frames(self) -> int:
+        with self._lock:
+            return self._media_dropped
 
     def put_safety_nowait(self, frame: bytes) -> bool:
         self._put_strict(self._safety, self._safety_max, frame)
@@ -351,6 +372,7 @@ class PriorityControlQueues:
         with self._lock:
             if len(self._media) >= self._media_max:
                 self._media.popleft()
+                self._media_dropped += 1
             self._media.append(checked)
             self._available.set()
         return True
@@ -500,11 +522,10 @@ class CoreReachySession:
                 expected_kind="response",
                 future=future,
             )
-            await self._socket.send(canonical_bytes(frame).decode("utf-8"))
+            await self._send_control_text_bounded(canonical_bytes(frame).decode("utf-8"))
             return await asyncio.wait_for(future, timeout=self._request_timeout)
         except BaseException:
-            with contextlib.suppress(BaseException):
-                await self._state.abandon_correlation(correlation_id, "exchange_failed")
+            await self._abandon_exchange_correlation(correlation_id)
             raise
         finally:
             self._pending.pop(correlation_id, None)
@@ -512,7 +533,8 @@ class CoreReachySession:
     async def _receive_loop(self) -> None:
         async for raw in self._socket:
             if isinstance(raw, bytes):
-                await self._handler.media(raw)
+                media_frame = self._require_binary_media_frame(raw)
+                await self._handler.media(media_frame)
                 continue
             if type(raw) is not str:
                 raise PermissionError("reachy_control_frame_text_required")
@@ -554,6 +576,64 @@ class CoreReachySession:
                 await self._send_response(frame, response)
             await self._state.complete(frame.correlation_id)
         raise ConnectionError("reachy websocket closed")
+
+    async def _abandon_exchange_correlation(self, correlation_id: UUID) -> None:
+        try:
+            cleanup_task = self._spawn_cleanup_owned(
+                lambda: self._state.abandon_correlation(correlation_id, "exchange_failed"),
+                name="core_exchange_correlation_abandon",
+            )
+        except BaseException:
+            self._latch_exchange_abandon_degraded(
+                ("exchange_correlation_abandon:factory_unavailable",)
+            )
+            return
+        self._retain_cleanup(cleanup_task)
+        cancellations = 0
+        deadline = time.monotonic() + self._cleanup_timeout
+        while not cleanup_task.done():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=remaining)
+            except TimeoutError:
+                break
+            except asyncio.CancelledError:
+                cancellations += 1
+                _clear_current_task_cancellation()
+                continue
+            except BaseException:
+                break
+
+        degraded: list[str] = []
+        if cleanup_task.done():
+            try:
+                cleanup_task.result()
+            except BaseException as error:
+                degraded.append(f"exchange_correlation_abandon:{type(error).__name__}")
+        else:
+            cleanup_task.cancel()
+            degraded.append("exchange_correlation_abandon:timeout")
+        if cancellations:
+            degraded.append("exchange_correlation_abandon:cancelled_deferred")
+        if degraded:
+            self._latch_exchange_abandon_degraded(tuple(degraded))
+
+    def _latch_exchange_abandon_degraded(self, codes: tuple[str, ...]) -> None:
+        with contextlib.suppress(BaseException):
+            self._readiness.latch_disconnect_degraded(codes, restart_required=True)
+
+    def _require_binary_media_frame(self, raw: bytes) -> bytes:
+        if type(raw) is not bytes:
+            raise TypeError("reachy_media_frame_must_be_exact_bytes")
+        if not 1 <= len(raw) <= MAX_MEDIA_FRAME_BYTES:
+            raise ValueError("reachy_media_frame_byte_bound")
+        _media_type, _flags, header_len, payload_len = parse_prefix(raw[: PREFIX.size])
+        expected_size = PREFIX.size + header_len + payload_len
+        if len(raw) != expected_size:
+            raise ValueError("reachy_media_frame_length_mismatch")
+        return bytes(raw)
 
     def _require_legal_inbound(self, frame: SignedControlFrameV1) -> None:
         if frame.kind == "response":
@@ -606,7 +686,10 @@ class CoreReachySession:
             purpose=frame.purpose,
             payload=response,
         )
-        await self._socket.send(canonical_bytes(reply).decode("utf-8"))
+        await self._send_control_text_bounded(canonical_bytes(reply).decode("utf-8"))
+
+    async def _send_control_text_bounded(self, message: str) -> None:
+        await asyncio.wait_for(self._socket.send(message), timeout=self._request_timeout)
 
     async def _heartbeat_loop(self) -> None:
         misses = 0
@@ -910,6 +993,14 @@ def _require_exact_key_id(value: object, error: str) -> str:
 
 def _is_runtime_task_factory_unavailable(error: BaseException) -> bool:
     return type(error) is RuntimeError and str(error).endswith(":factory_unavailable")
+
+
+def _clear_current_task_cancellation() -> None:
+    task = asyncio.current_task()
+    if task is None:
+        return
+    with contextlib.suppress(AttributeError):
+        task.uncancel()
 
 
 def _require_purpose(value: str) -> None:

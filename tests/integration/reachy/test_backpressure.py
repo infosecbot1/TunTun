@@ -82,6 +82,28 @@ async def test_priority_queues_media_lane_accepts_full_contract_camera_frame() -
         queues.put_control_nowait(b"x" * (MAX_CONTROL_FRAME_JSON_BYTES + 1))
 
 
+@pytest.mark.asyncio
+async def test_priority_queues_media_drop_count_is_monotonic_exact_and_content_free() -> None:
+    queues = PriorityControlQueues(safety_max=1, control_max=1, media_max=2)
+    assert queues.dropped_media_frames == 0
+
+    for index in range(5):
+        assert queues.put_media_nowait(f"media-{index}".encode()) is True
+        assert queues.dropped_media_frames == max(0, index - 1)
+
+    assert queues.depths == {"safety": 0, "control": 0, "media": 2}
+    assert queues.dropped_media_frames == 3
+    assert await queues.get() == ("media", b"media-3")
+    assert await queues.get() == ("media", b"media-4")
+    assert queues.dropped_media_frames == 3
+
+    queues.put_media_nowait(b"later-1")
+    queues.put_media_nowait(b"later-2")
+    queues.put_media_nowait(b"later-3")
+
+    assert queues.dropped_media_frames == 4
+
+
 @dataclass(slots=True)
 class RegisteredStream:
     stream_id: UUID

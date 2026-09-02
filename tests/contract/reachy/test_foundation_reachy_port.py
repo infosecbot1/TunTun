@@ -33,6 +33,13 @@ from tuntun_contracts.reachy import (
     SafetyReceipt,
     StopAllReceiptBundleV1,
 )
+from tuntun_contracts.reachy_media import (
+    MAX_CAMERA_PAYLOAD,
+    MAX_HEADER,
+    MEDIA_MAGIC,
+    MEDIA_TYPE_CAMERA,
+    PREFIX,
+)
 from tuntun_contracts.reachy_wire import (
     MAX_CONTROL_FRAME_JSON_BYTES,
     MAX_CONTROL_PAYLOAD_BYTES,
@@ -345,6 +352,61 @@ class HangingTombstoneState(RecordingState):
         await super().abandon_connection(reason)
 
 
+class AbandonCorrelationState(RecordingState):
+    def __init__(
+        self,
+        events: list[str],
+        mode: str,
+        release: asyncio.Event | None = None,
+    ) -> None:
+        super().__init__(events)
+        self.mode = mode
+        self.release = release
+        self.entered = asyncio.Event()
+        self.cancelled = 0
+
+    async def abandon_correlation(self, correlation_id: UUID, reason: str) -> None:
+        self.events.append(f"abandon:start:{reason}")
+        self.entered.set()
+        if self.mode == "raise":
+            raise RuntimeError("abandon store unavailable")
+        if self.mode in {"hang", "wait"}:
+            try:
+                if self.release is None:
+                    await asyncio.Event().wait()
+                else:
+                    await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+        await super().abandon_correlation(correlation_id, reason)
+
+
+class FailingSendSocket(ScriptedSocket):
+    async def send(self, message: str | bytes) -> None:
+        del message
+        self.events.append("send:fail")
+        raise RuntimeError("primary send unavailable")
+
+
+class HangingSendSocket(ScriptedSocket):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.send_entered = asyncio.Event()
+        self.send_cancelled = 0
+
+    async def send(self, message: str | bytes) -> None:
+        del message
+        self.events.append("send:start")
+        self.send_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.send_cancelled += 1
+            self.events.append("send:cancelled")
+            raise
+
+
 def _core_session(
     *,
     socket: ScriptedSocket,
@@ -450,6 +512,18 @@ async def test_authenticated_control_client_requires_canonical_bound_command_rec
 
 
 @pytest.mark.asyncio
+async def test_authenticated_control_rejects_stop_all_on_generic_request_before_exchange() -> None:
+    command = _stop_command(uuid4())
+    channel = PayloadChannel()
+    client = AuthenticatedControlClient(channel)
+
+    with pytest.raises(ValueError, match="stop_all requires request_stop_all_signed"):
+        await client.request_signed(command)
+
+    assert channel.requests == []
+
+
+@pytest.mark.asyncio
 async def test_authenticated_stop_all_uses_canonical_bundle_and_exact_binding() -> None:
     turn_id = uuid4()
     command = _stop_command(turn_id)
@@ -486,8 +560,10 @@ async def test_authenticated_stop_all_uses_canonical_bundle_and_exact_binding() 
 class GatewayControl:
     def __init__(self) -> None:
         self.stop_receipts: list[tuple[ReachyReceipt, SafetyReceipt]] = []
+        self.signed_commands: list[ReachyCommand] = []
 
     async def request_signed(self, command: ReachyCommand) -> ReachyReceipt:
+        self.signed_commands.append(command)
         return ReachyReceipt(command_id=command.command_id, accepted=True, reason_code="accepted")
 
     async def request_health_signed(self) -> ReachyHealth:
@@ -528,6 +604,17 @@ async def test_gateway_implements_reachy_port_and_returns_exact_receipts() -> No
         motion_stopped=True,
         buffers_cleared=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_gateway_rejects_stop_all_on_generic_send_before_control_request() -> None:
+    control = GatewayControl()
+    gateway = ReachyGateway(control, Clock())
+
+    with pytest.raises(ValueError, match="stop_all requires gateway stop_all"):
+        await gateway.send(_stop_command(uuid4()))
+
+    assert control.signed_commands == []
 
 
 @pytest.mark.asyncio
@@ -696,6 +783,238 @@ async def test_core_session_abandons_reserved_correlation_when_pending_setup_fai
     assert socket.sent == []
     assert session.pending_count == 0
     assert state.abandoned == [(state.reserved[0][0], "exchange_failed")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primary", ("signing", "future", "send", "timeout", "cancel"))
+async def test_core_exchange_abandon_cleanup_preserves_primary_for_all_setup_failures(
+    primary: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    state = RecordingState(events)
+    readiness = RecordingReadiness()
+    socket: ScriptedSocket = (
+        FailingSendSocket(events) if primary == "send" else ScriptedSocket(events)
+    )
+    session = _core_session(
+        socket=socket,
+        state=state,
+        handler=RecordingHandler(events),
+        readiness=readiness,
+        request_timeout=0.01 if primary == "timeout" else 30,
+    )
+
+    if primary == "signing":
+
+        def fail_signing(*_args: object, **_kwargs: object) -> SignedControlFrameV1:
+            raise RuntimeError("primary signing offline")
+
+        monkeypatch.setattr(reachy_session_module, "sign_control_frame", fail_signing)
+    elif primary == "future":
+
+        class FailingLoop:
+            def create_future(self) -> asyncio.Future[bytes]:
+                raise RuntimeError("primary future allocation unavailable")
+
+        monkeypatch.setattr(
+            reachy_session_module.asyncio,
+            "get_running_loop",
+            lambda: FailingLoop(),
+        )
+
+    if primary == "cancel":
+        task = asyncio.create_task(
+            session.exchange_signed(purpose="reachy.command.v1", payload=b"{}")
+        )
+        while not socket.sent:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        expected: type[BaseException]
+        match primary:
+            case "signing":
+                expected = RuntimeError
+                message = "primary signing offline"
+            case "future":
+                expected = RuntimeError
+                message = "primary future allocation unavailable"
+            case "send":
+                expected = RuntimeError
+                message = "primary send unavailable"
+            case "timeout":
+                expected = TimeoutError
+                message = ""
+            case _:
+                raise AssertionError(f"unhandled primary mode {primary}")
+        if message:
+            with pytest.raises(expected, match=message):
+                await session.exchange_signed(purpose="reachy.command.v1", payload=b"{}")
+        else:
+            with pytest.raises(expected):
+                await session.exchange_signed(purpose="reachy.command.v1", payload=b"{}")
+
+    assert session.pending_count == 0
+    assert state.abandoned == [(state.reserved[0][0], "exchange_failed")]
+    assert readiness.ready is True
+    await asyncio.sleep(0)
+    assert session._cleanup_background == set()
+
+
+@pytest.mark.asyncio
+async def test_core_exchange_hanging_request_send_times_out_and_abandons_owned_correlation() -> (
+    None
+):
+    events: list[str] = []
+    state = RecordingState(events)
+    readiness = RecordingReadiness()
+    socket = HangingSendSocket(events)
+    session = _core_session(
+        socket=socket,
+        state=state,
+        handler=RecordingHandler(events),
+        readiness=readiness,
+        request_timeout=0.01,
+        cleanup_timeout=0.05,
+    )
+    task = asyncio.create_task(session.exchange_signed(purpose="reachy.command.v1", payload=b"{}"))
+    await socket.send_entered.wait()
+
+    try:
+        await asyncio.sleep(0.05)
+        assert task.done() is True
+        with pytest.raises(TimeoutError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+
+    assert socket.send_cancelled == 1
+    assert state.abandoned == [(state.reserved[0][0], "exchange_failed")]
+    assert session.pending_count == 0
+    assert readiness.ready is True
+    await asyncio.sleep(0)
+    assert session._cleanup_background == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cleanup_mode", "expected_code"),
+    (
+        ("raise", "exchange_correlation_abandon:RuntimeError"),
+        ("hang", "exchange_correlation_abandon:timeout"),
+        ("factory", "exchange_correlation_abandon:factory_unavailable"),
+    ),
+)
+async def test_core_exchange_abandon_cleanup_degrades_but_preserves_primary(
+    cleanup_mode: str,
+    expected_code: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    state: RecordingState
+    state = (
+        RecordingState(events)
+        if cleanup_mode == "factory"
+        else AbandonCorrelationState(events, cleanup_mode)
+    )
+    readiness = RecordingReadiness()
+    session = _core_session(
+        socket=ScriptedSocket(events),
+        state=state,
+        handler=RecordingHandler(events),
+        readiness=readiness,
+        cleanup_timeout=0.01,
+    )
+
+    def fail_signing(*_args: object, **_kwargs: object) -> SignedControlFrameV1:
+        raise RuntimeError("primary signing offline")
+
+    monkeypatch.setattr(reachy_session_module, "sign_control_frame", fail_signing)
+
+    if cleanup_mode == "factory":
+        original_direct_task = asyncio.Task
+
+        def create_task_fail(
+            coroutine: Any,
+            *,
+            name: str | None = None,
+            context: object | None = None,
+        ) -> asyncio.Task[Any]:
+            del context
+            if name == "core_exchange_correlation_abandon":
+                raise RuntimeError("synthetic exchange cleanup create_task failure")
+            return original_direct_task(cast(Any, coroutine), name=name)
+
+        def direct_task_fail(
+            coroutine: Any,
+            *,
+            loop: asyncio.AbstractEventLoop | None = None,
+            name: str | None = None,
+            context: object | None = None,
+        ) -> asyncio.Task[Any]:
+            del loop, context
+            if name == "core_exchange_correlation_abandon":
+                raise RuntimeError("synthetic exchange cleanup direct task failure")
+            return original_direct_task(cast(Any, coroutine), name=name)
+
+        monkeypatch.setattr(reachy_session_module.asyncio, "create_task", create_task_fail)
+        monkeypatch.setattr(reachy_session_module.asyncio, "Task", direct_task_fail)
+
+    with pytest.raises(RuntimeError, match="primary signing offline"):
+        await session.exchange_signed(purpose="reachy.command.v1", payload=b"{}")
+
+    assert session.pending_count == 0
+    assert expected_code in readiness.disconnect_degraded_codes
+    assert readiness.restart_required is True
+    if cleanup_mode == "factory":
+        assert "core_exchange_correlation_abandon" in session.task_factory_failure_points
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert session._cleanup_background == set()
+
+
+@pytest.mark.asyncio
+async def test_core_exchange_abandon_cleanup_shields_repeated_caller_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    release = asyncio.Event()
+    state = AbandonCorrelationState(events, "wait", release)
+    readiness = RecordingReadiness()
+    session = _core_session(
+        socket=ScriptedSocket(events),
+        state=state,
+        handler=RecordingHandler(events),
+        readiness=readiness,
+        cleanup_timeout=0.5,
+    )
+
+    def fail_signing(*_args: object, **_kwargs: object) -> SignedControlFrameV1:
+        raise RuntimeError("primary signing offline")
+
+    monkeypatch.setattr(reachy_session_module, "sign_control_frame", fail_signing)
+    task = asyncio.create_task(session.exchange_signed(purpose="reachy.command.v1", payload=b"{}"))
+    await state.entered.wait()
+
+    for _ in range(3):
+        task.cancel()
+        await asyncio.sleep(0)
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(RuntimeError, match="primary signing offline"):
+        await task
+
+    assert state.abandoned == [(state.reserved[0][0], "exchange_failed")]
+    assert "exchange_correlation_abandon:cancelled_deferred" in readiness.disconnect_degraded_codes
+    assert readiness.restart_required is True
+    await asyncio.sleep(0)
+    assert session._cleanup_background == set()
 
 
 @pytest.mark.asyncio
@@ -950,6 +1269,132 @@ async def test_core_session_rejects_signed_illegal_inbound_kind_purpose_before_s
     assert state.completed == []
     assert handler.control_calls == []
     assert socket.sent == []
+
+
+def _camera_media_frame(
+    *,
+    header_len: int = 0,
+    payload_len: int = 0,
+    magic: bytes = MEDIA_MAGIC,
+    media_type: int = MEDIA_TYPE_CAMERA,
+    flags: int = 0,
+) -> bytes:
+    return (
+        PREFIX.pack(magic, media_type, flags, header_len, payload_len)
+        + (b"h" * header_len)
+        + (b"p" * payload_len)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    (
+        (b"", "reachy_media_frame_byte_bound"),
+        (_camera_media_frame(magic=b"TNT1"), "invalid media magic"),
+        (_camera_media_frame(media_type=255), "unsupported media type"),
+        (_camera_media_frame(flags=1), "media flags must be zero"),
+        (
+            PREFIX.pack(MEDIA_MAGIC, MEDIA_TYPE_CAMERA, 0, 2, 3) + b"xxxx",
+            "reachy_media_frame_length_mismatch",
+        ),
+        (
+            b"x" * (PREFIX.size + MAX_HEADER + MAX_CAMERA_PAYLOAD + 1),
+            "reachy_media_frame_byte_bound",
+        ),
+    ),
+    ids=("empty", "bad_magic", "bad_type", "flags", "truncated", "oversized"),
+)
+async def test_core_session_rejects_malformed_binary_media_before_handler(
+    raw: bytes,
+    message: str,
+) -> None:
+    events: list[str] = []
+    state = RecordingState(events)
+    socket = ScriptedSocket(events)
+    handler = RecordingHandler(events)
+    await socket.push(raw)
+    await socket.push(None)
+    session = _core_session(socket=socket, state=state, handler=handler)
+
+    with pytest.raises(ValueError, match=message):
+        await session._receive_loop()
+
+    assert handler.media_calls == []
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_core_session_accepts_exact_max_binary_media_frame_after_shared_validation() -> None:
+    events: list[str] = []
+    state = RecordingState(events)
+    socket = ScriptedSocket(events)
+    handler = RecordingHandler(events)
+    frame = _camera_media_frame(header_len=MAX_HEADER, payload_len=MAX_CAMERA_PAYLOAD)
+    assert len(frame) == PREFIX.size + MAX_HEADER + MAX_CAMERA_PAYLOAD
+    await socket.push(frame)
+    await socket.push(None)
+    session = _core_session(socket=socket, state=state, handler=handler)
+
+    with pytest.raises(ConnectionError, match="reachy websocket closed"):
+        await session._receive_loop()
+
+    assert handler.media_calls == [frame]
+    assert events == [f"media:{len(frame)}"]
+
+
+@pytest.mark.asyncio
+async def test_core_serve_hanging_response_send_times_out_and_runs_fail_safe_cleanup() -> None:
+    events: list[str] = []
+    state = RecordingState(events)
+    safety = RecordingSafety(events)
+    socket = HangingSendSocket(events)
+    edge_signer = Ed25519PrivateKey.generate()
+    frame = sign_control_frame(
+        edge_signer,
+        HMAC_ROOT,
+        signing_key_id=EDGE_SIGNING_KEY_ID,
+        hmac_key_id=HMAC_KEY_ID,
+        direction="edge_to_core",
+        kind="request",
+        connection_nonce=CONNECTION_NONCE,
+        sequence=1,
+        correlation_id=uuid4(),
+        purpose="reachy.media_control.v1",
+        payload=b"{}",
+    )
+    await socket.push(canonical_bytes(frame).decode("utf-8"))
+    session = _core_session(
+        socket=socket,
+        state=state,
+        handler=RecordingHandler(events),
+        edge_signer=edge_signer,
+        safety=safety,
+        request_timeout=0.01,
+        cleanup_timeout=0.05,
+        heartbeat_interval=10.0,
+    )
+    runner = asyncio.create_task(session.serve())
+    await socket.send_entered.wait()
+
+    try:
+        await asyncio.sleep(0.05)
+        assert runner.done() is True
+        with pytest.raises(BaseExceptionGroup) as exc_info:
+            await runner
+    finally:
+        if not runner.done():
+            runner.cancel()
+            with contextlib.suppress(BaseException):
+                await runner
+
+    assert any(isinstance(error, TimeoutError) for error in exc_info.value.exceptions)
+    assert socket.send_cancelled == 1
+    assert safety.latched == [("transport_disconnect", 0)]
+    assert state.abandoned == [(None, "disconnect")]
+    assert session.pending_count == 0
+    await asyncio.sleep(0)
+    assert session._cleanup_background == set()
 
 
 @pytest.mark.asyncio
@@ -1418,6 +1863,107 @@ async def test_reachy_session_later_accepted_camera_grant_wins_over_delayed_olde
 
     assert session.active_camera is newer_window
     assert newer_window.closed is False
+
+
+class FakeCameraWindow:
+    def __init__(self, grant: CameraWindowGrant) -> None:
+        self.grant = grant
+        self.closed = False
+        self.close_reasons: list[str] = []
+
+    def close(self, reason: str) -> None:
+        self.closed = True
+        self.close_reasons.append(reason)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claim_mode", "expected"),
+    (
+        ("raise", RuntimeError),
+        ("cancel", asyncio.CancelledError),
+        ("lose", PermissionError),
+    ),
+)
+async def test_reachy_session_closes_transient_camera_window_when_claim_fails(
+    claim_mode: str,
+    expected: type[BaseException],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grant = _grant()
+    opened: list[FakeCameraWindow] = []
+
+    def open_window(
+        candidate: CameraWindowGrant,
+        hmac_root: bytes,
+        observed_at: datetime,
+    ) -> FakeCameraWindow:
+        del hmac_root, observed_at
+        window = FakeCameraWindow(candidate)
+        opened.append(window)
+        return window
+
+    async def claim(candidate: CameraWindowGrant) -> bool:
+        assert candidate.grant_id == grant.grant_id
+        if claim_mode == "raise":
+            raise RuntimeError("claim store unavailable")
+        if claim_mode == "cancel":
+            raise asyncio.CancelledError
+        return False
+
+    monkeypatch.setattr(reachy_session_module.CameraWindow, "open", open_window)
+    session = ReachySession(claim_grant=claim, hmac_root=HMAC_ROOT, clock=Clock())
+
+    with pytest.raises(expected):
+        await session.grant_camera(grant)
+
+    assert len(opened) == 1
+    assert opened[0].closed is True
+    assert opened[0].close_reasons == ["cancel"]
+    assert session.active_camera is None
+
+
+@pytest.mark.asyncio
+async def test_reachy_session_claim_failure_race_closes_only_transient_not_newer_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    older = _grant()
+    newer = _grant()
+    older_claim_entered = asyncio.Event()
+    release_older_claim = asyncio.Event()
+    opened: dict[UUID, FakeCameraWindow] = {}
+
+    def open_window(
+        candidate: CameraWindowGrant,
+        hmac_root: bytes,
+        observed_at: datetime,
+    ) -> FakeCameraWindow:
+        del hmac_root, observed_at
+        window = FakeCameraWindow(candidate)
+        opened[candidate.grant_id] = window
+        return window
+
+    async def claim(candidate: CameraWindowGrant) -> bool:
+        if candidate.grant_id == older.grant_id:
+            older_claim_entered.set()
+            await release_older_claim.wait()
+            raise RuntimeError("older claim store unavailable")
+        return True
+
+    monkeypatch.setattr(reachy_session_module.CameraWindow, "open", open_window)
+    session = ReachySession(claim_grant=claim, hmac_root=HMAC_ROOT, clock=Clock())
+    older_task = asyncio.create_task(session.grant_camera(older))
+    await older_claim_entered.wait()
+
+    newer_window = await session.grant_camera(newer)
+    release_older_claim.set()
+    with pytest.raises(RuntimeError, match="older claim store unavailable"):
+        await older_task
+
+    assert opened[older.grant_id].closed is True
+    assert opened[older.grant_id].close_reasons == ["cancel"]
+    assert session.active_camera is newer_window
+    assert opened[newer.grant_id].closed is False
 
 
 def test_reachy_transport_supervisor_state_deduplicates_degradation_and_restart() -> None:

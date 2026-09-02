@@ -35,6 +35,8 @@ class ReachyGateway:
     async def send(self, command: ReachyCommand) -> ReachyReceipt:
         if type(command) is not ReachyCommand:
             raise TypeError("reachy command must be exact ReachyCommand")
+        if command.kind == "stop_all":
+            raise ValueError("stop_all requires gateway stop_all")
         receipt = await self._control.request_signed(command)
         if type(receipt) is not ReachyReceipt or receipt.command_id != command.command_id:
             raise RuntimeError("reachy_receipt_binding_mismatch")

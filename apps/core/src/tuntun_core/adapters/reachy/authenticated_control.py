@@ -26,6 +26,8 @@ class AuthenticatedControlClient:
     async def request_signed(self, command: ReachyCommand) -> ReachyReceipt:
         if type(command) is not ReachyCommand:
             raise TypeError("reachy command must be exact ReachyCommand")
+        if command.kind == "stop_all":
+            raise ValueError("stop_all requires request_stop_all_signed")
         body = await self._channel.exchange_signed(
             purpose="reachy.command.v1",
             payload=canonical_bytes(command),
