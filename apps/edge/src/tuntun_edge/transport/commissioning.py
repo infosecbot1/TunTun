@@ -4,8 +4,8 @@ import base64
 import hashlib
 import hmac
 import secrets
-import weakref
-from typing import Annotated, Literal, Protocol, Self, cast
+from collections.abc import Callable
+from typing import Annotated, Literal, Protocol, Self, TypeVar, cast
 from uuid import uuid4
 
 from pydantic import Field, StringConstraints, field_validator, model_validator
@@ -30,6 +30,7 @@ MacAddress = Annotated[
     str,
     StringConstraints(strict=True, pattern=r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$"),
 ]
+_LocalPhysicalTransitionResultT = TypeVar("_LocalPhysicalTransitionResultT")
 
 
 class _SyntheticLocalPhysicalEvidence(ContractModel):
@@ -82,76 +83,6 @@ class LocalPhysicalProof(ContractModel):
         return self
 
 
-_LOCAL_TRANSITION_AUTHORIZATION_MARKER = object()
-
-
-class _LocalPhysicalTransitionAuthorization:
-    __slots__ = (
-        "proof_id",
-        "operation",
-        "request_sha256",
-        "current_state_sha256",
-        "current_generation",
-        "target_generation",
-        "_marker",
-        "_consumed",
-        "__weakref__",
-    )
-
-    proof_id: str
-    operation: Literal["commission", "recommission", "revoke"]
-    request_sha256: str | None
-    current_state_sha256: str | None
-    current_generation: int | None
-    target_generation: int
-    _marker: object
-    _consumed: bool
-
-    def __init__(self, *_args: object, **_kwargs: object) -> None:
-        raise TypeError("local physical transition authorization is internal")
-
-    @classmethod
-    def _from_consumed_proof(
-        cls,
-        marker: object,
-        *,
-        proof: LocalPhysicalProof,
-        operation: Literal["commission", "recommission", "revoke"],
-        request: ReachyCommissioningRequestV1 | None,
-        current: CommissioningStateV1 | None,
-    ) -> _LocalPhysicalTransitionAuthorization:
-        if marker is not _LOCAL_TRANSITION_AUTHORIZATION_MARKER:
-            raise PermissionError("local_physical_transition_authorization_required")
-        expected_values = _local_physical_proof_values(
-            proof_id=proof.proof_id,
-            operation=operation,
-            request=request,
-            current=current,
-        )
-        authorization = cls.__new__(cls)
-        authorization.proof_id = proof.proof_id
-        authorization.operation = cast(
-            Literal["commission", "recommission", "revoke"],
-            expected_values["operation"],
-        )
-        authorization.request_sha256 = cast(str | None, expected_values["request_sha256"])
-        authorization.current_state_sha256 = cast(
-            str | None,
-            expected_values["current_state_sha256"],
-        )
-        authorization.current_generation = cast(int | None, expected_values["current_generation"])
-        authorization.target_generation = cast(int, expected_values["target_generation"])
-        authorization._marker = marker
-        authorization._consumed = False
-        _ACTIVE_LOCAL_TRANSITION_AUTHORIZATIONS.add(authorization)
-        return authorization
-
-
-_ACTIVE_LOCAL_TRANSITION_AUTHORIZATIONS: weakref.WeakSet[_LocalPhysicalTransitionAuthorization] = (
-    weakref.WeakSet()
-)
-
-
 class LocalPhysicalProofVerifier:
     def __init__(self) -> None:
         self._key = secrets.token_bytes(32)
@@ -181,7 +112,7 @@ class LocalPhysicalProofVerifier:
         operation: Literal["commission", "recommission", "revoke"],
         request: ReachyCommissioningRequestV1 | None = None,
         current: CommissioningStateV1 | None = None,
-    ) -> _LocalPhysicalTransitionAuthorization:
+    ) -> None:
         _consume_local_physical_proof(
             key=self._key,
             issued=self._issued,
@@ -191,13 +122,23 @@ class LocalPhysicalProofVerifier:
             request=request,
             current=current,
         )
-        return _LocalPhysicalTransitionAuthorization._from_consumed_proof(
-            _LOCAL_TRANSITION_AUTHORIZATION_MARKER,
+
+    def consume_and_execute(
+        self,
+        proof: LocalPhysicalProof,
+        *,
+        operation: Literal["commission", "recommission", "revoke"],
+        request: ReachyCommissioningRequestV1 | None = None,
+        current: CommissioningStateV1 | None = None,
+        transition: Callable[[], _LocalPhysicalTransitionResultT],
+    ) -> _LocalPhysicalTransitionResultT:
+        self.consume(
             proof=proof,
             operation=operation,
             request=request,
             current=current,
         )
+        return transition()
 
 
 class _SyntheticLocalPhysicalProofIssuer:
@@ -690,14 +631,15 @@ class OperatorAcceptancePublisherPort(Protocol):
 
 
 class LocalPhysicalProofVerifierPort(Protocol):
-    def consume(
+    def consume_and_execute(
         self,
         proof: LocalPhysicalProof,
         *,
         operation: Literal["commission", "recommission", "revoke"],
         request: ReachyCommissioningRequestV1 | None = None,
         current: CommissioningStateV1 | None = None,
-    ) -> _LocalPhysicalTransitionAuthorization: ...
+        transition: Callable[[], _LocalPhysicalTransitionResultT],
+    ) -> _LocalPhysicalTransitionResultT: ...
 
 
 class ReachyCommissioningRequestFactoryPort(Protocol):
@@ -994,21 +936,63 @@ class ReachyCommissioningService:
         request: ReachyCommissioningRequestV1 | None = None,
     ) -> CommissioningStateV1:
         selected = self._select_request(request)
-        authorization = self._require_local_proof_verifier().consume(
+        generation = 1
+
+        def transition() -> CommissioningStateV1:
+            if self._repository.has_current():
+                raise PermissionError("already_commissioned_use_recommission")
+            prepared: PreparedCoreMaterialV1 | None = None
+            material: GeneratedReachyMaterialV1 | None = None
+            state: CommissioningStateV1 | None = None
+            try:
+                prepared = self._issuer.begin_generation(request=selected, generation=generation)
+                material = self._generator.generate(
+                    request=selected,
+                    generation=generation,
+                    core_hmac_agreement_public_key_b64=prepared.core_hmac_agreement_public_key_b64,
+                )
+                issued = self._issuer.complete_generation(
+                    prepared=prepared,
+                    reachy_material=material,
+                )
+                self._generator.install_client_certificate(
+                    material=material,
+                    certificate_pem=issued.client_certificate_pem,
+                )
+                endpoint = _endpoint_from_material(
+                    request=selected,
+                    prepared=prepared,
+                    reachy_material=material,
+                    issued=issued,
+                )
+                state = CommissioningStateV1(
+                    schema_version="tuntun.reachy-commissioning-state.v1",
+                    status="active",
+                    endpoint=endpoint,
+                    revoked_key_ids=(),
+                    revoked_certificate_sha256=(),
+                )
+                self._repository.replace_atomic(
+                    state,
+                    expected_current=None,
+                    assurance=self._issuer.commissioning_assurance(),
+                )
+                self._issuer.activate_staged_generation(generation=generation, endpoint=endpoint)
+                return state
+            except BaseException:
+                publication_status = _published_state_status(self._repository, state)
+                if publication_status == "not_published":
+                    self._issuer.abort_staged_generation(generation)
+                    if material is not None:
+                        self._generator.discard(material)
+                raise
+
+        return self._require_local_proof_verifier().consume_and_execute(
             proof,
             operation="commission",
             request=selected,
             current=None,
-        )
-        if self._repository.has_current():
-            raise PermissionError("already_commissioned_use_recommission")
-        return _replace_commissioning_state(
-            repository=self._repository,
-            generator=self._generator,
-            issuer=self._issuer,
-            current=None,
-            request=selected,
-            authorization=authorization,
+            transition=transition,
         )
 
     def recommission_local(
@@ -1018,36 +1002,91 @@ class ReachyCommissioningService:
     ) -> CommissioningStateV1:
         selected = self._select_request(request)
         current = self._repository.require_current()
-        authorization = self._require_local_proof_verifier().consume(
+        generation = current.endpoint.generation + 1
+
+        def transition() -> CommissioningStateV1:
+            self._require_acceptance_publisher().clear_before_recommission(current)
+            prepared: PreparedCoreMaterialV1 | None = None
+            material: GeneratedReachyMaterialV1 | None = None
+            state: CommissioningStateV1 | None = None
+            try:
+                prepared = self._issuer.begin_generation(request=selected, generation=generation)
+                material = self._generator.generate(
+                    request=selected,
+                    generation=generation,
+                    core_hmac_agreement_public_key_b64=prepared.core_hmac_agreement_public_key_b64,
+                )
+                issued = self._issuer.complete_generation(
+                    prepared=prepared,
+                    reachy_material=material,
+                )
+                self._generator.install_client_certificate(
+                    material=material,
+                    certificate_pem=issued.client_certificate_pem,
+                )
+                endpoint = _endpoint_from_material(
+                    request=selected,
+                    prepared=prepared,
+                    reachy_material=material,
+                    issued=issued,
+                )
+                state = CommissioningStateV1(
+                    schema_version="tuntun.reachy-commissioning-state.v1",
+                    status="active",
+                    endpoint=endpoint,
+                    revoked_key_ids=_endpoint_key_ids(current.endpoint),
+                    revoked_certificate_sha256=_endpoint_certificate_digests(current.endpoint),
+                )
+                self._repository.replace_atomic(
+                    state,
+                    expected_current=current,
+                    assurance=self._issuer.commissioning_assurance(),
+                )
+                self._issuer.activate_staged_generation(generation=generation, endpoint=endpoint)
+                return state
+            except BaseException:
+                publication_status = _published_state_status(self._repository, state)
+                if publication_status == "not_published":
+                    self._issuer.abort_staged_generation(generation)
+                    if material is not None:
+                        self._generator.discard(material)
+                raise
+
+        return self._require_local_proof_verifier().consume_and_execute(
             proof,
             operation="recommission",
             request=selected,
             current=current,
-        )
-        self._require_acceptance_publisher().clear_before_recommission(current)
-        return _replace_commissioning_state(
-            repository=self._repository,
-            generator=self._generator,
-            issuer=self._issuer,
-            current=current,
-            request=selected,
-            authorization=authorization,
+            transition=transition,
         )
 
     def revoke_local(self, proof: LocalPhysicalProof) -> CommissioningStateV1:
         current = self._repository.require_current()
-        authorization = self._require_local_proof_verifier().consume(
+
+        def transition() -> CommissioningStateV1:
+            if current.status != "revoked":
+                self._require_acceptance_publisher().clear_before_revoke(current)
+            if current.status == "revoked":
+                return current
+            revoked = CommissioningStateV1(
+                schema_version="tuntun.reachy-commissioning-state.v1",
+                status="revoked",
+                endpoint=current.endpoint,
+                revoked_key_ids=_endpoint_key_ids(current.endpoint),
+                revoked_certificate_sha256=_endpoint_certificate_digests(current.endpoint),
+            )
+            self._repository.replace_atomic(
+                revoked,
+                expected_current=current,
+            )
+            self._issuer.revoke_generation(endpoint=current.endpoint)
+            return revoked
+
+        return self._require_local_proof_verifier().consume_and_execute(
             proof,
             operation="revoke",
             current=current,
-        )
-        if current.status != "revoked":
-            self._require_acceptance_publisher().clear_before_revoke(current)
-        return _revoke_commissioning_state(
-            repository=self._repository,
-            issuer=self._issuer,
-            current=current,
-            authorization=authorization,
+            transition=transition,
         )
 
     def _select_request(
@@ -1069,146 +1108,6 @@ class ReachyCommissioningService:
         if self._local_proof_verifier is None:
             raise RuntimeError("local_physical_proof_verifier_required")
         return self._local_proof_verifier
-
-
-def _replace_commissioning_state(
-    *,
-    repository: CommissioningRepositoryPort,
-    generator: ReachyPrivateMaterialGeneratorPort,
-    issuer: CoreCommissioningIssuerPort,
-    current: CommissioningStateV1 | None,
-    request: ReachyCommissioningRequestV1,
-    authorization: object,
-) -> CommissioningStateV1:
-    if current is None:
-        generation = 1
-        operation: Literal["commission", "recommission"] = "commission"
-    else:
-        generation = current.endpoint.generation + 1
-        operation = "recommission"
-    _consume_local_transition_authorization(
-        authorization,
-        operation=operation,
-        request=request,
-        current=current,
-    )
-    prepared: PreparedCoreMaterialV1 | None = None
-    material: GeneratedReachyMaterialV1 | None = None
-    state: CommissioningStateV1 | None = None
-    try:
-        prepared = issuer.begin_generation(request=request, generation=generation)
-        material = generator.generate(
-            request=request,
-            generation=generation,
-            core_hmac_agreement_public_key_b64=prepared.core_hmac_agreement_public_key_b64,
-        )
-        issued = issuer.complete_generation(
-            prepared=prepared,
-            reachy_material=material,
-        )
-        generator.install_client_certificate(
-            material=material,
-            certificate_pem=issued.client_certificate_pem,
-        )
-        endpoint = _endpoint_from_material(
-            request=request,
-            prepared=prepared,
-            reachy_material=material,
-            issued=issued,
-        )
-        revoked_key_ids = () if current is None else _endpoint_key_ids(current.endpoint)
-        revoked_certificates = (
-            () if current is None else _endpoint_certificate_digests(current.endpoint)
-        )
-        state = CommissioningStateV1(
-            schema_version="tuntun.reachy-commissioning-state.v1",
-            status="active",
-            endpoint=endpoint,
-            revoked_key_ids=revoked_key_ids,
-            revoked_certificate_sha256=revoked_certificates,
-        )
-        repository.replace_atomic(
-            state,
-            expected_current=current,
-            assurance=issuer.commissioning_assurance(),
-        )
-        issuer.activate_staged_generation(generation=generation, endpoint=endpoint)
-        return state
-    except BaseException:
-        publication_status = _published_state_status(repository, state)
-        if publication_status == "not_published":
-            issuer.abort_staged_generation(generation)
-            if material is not None:
-                generator.discard(material)
-        raise
-
-
-def _revoke_commissioning_state(
-    *,
-    repository: CommissioningRepositoryPort,
-    issuer: CoreCommissioningIssuerPort,
-    current: CommissioningStateV1,
-    authorization: object,
-) -> CommissioningStateV1:
-    _consume_local_transition_authorization(
-        authorization,
-        operation="revoke",
-        request=None,
-        current=current,
-    )
-    if current.status == "revoked":
-        return current
-    revoked = CommissioningStateV1(
-        schema_version="tuntun.reachy-commissioning-state.v1",
-        status="revoked",
-        endpoint=current.endpoint,
-        revoked_key_ids=_endpoint_key_ids(current.endpoint),
-        revoked_certificate_sha256=_endpoint_certificate_digests(current.endpoint),
-    )
-    repository.replace_atomic(
-        revoked,
-        expected_current=current,
-    )
-    issuer.revoke_generation(endpoint=current.endpoint)
-    return revoked
-
-
-def _consume_local_transition_authorization(
-    authorization: object,
-    *,
-    operation: Literal["commission", "recommission", "revoke"],
-    request: ReachyCommissioningRequestV1 | None,
-    current: CommissioningStateV1 | None,
-) -> None:
-    if type(authorization) is not _LocalPhysicalTransitionAuthorization:
-        raise PermissionError("local_physical_transition_authorization_required")
-    try:
-        marker = authorization._marker
-        consumed = authorization._consumed
-    except AttributeError as error:
-        raise PermissionError("local_physical_transition_authorization_required") from error
-    if marker is not _LOCAL_TRANSITION_AUTHORIZATION_MARKER or (
-        authorization not in _ACTIVE_LOCAL_TRANSITION_AUTHORIZATIONS
-    ):
-        raise PermissionError("local_physical_transition_authorization_required")
-    if consumed:
-        raise PermissionError("local_physical_transition_authorization_consumed")
-    authorization._consumed = True
-    _ACTIVE_LOCAL_TRANSITION_AUTHORIZATIONS.discard(authorization)
-    expected_values = _local_physical_proof_values(
-        proof_id=authorization.proof_id,
-        operation=operation,
-        request=request,
-        current=current,
-    )
-    if (
-        authorization.operation != expected_values["operation"]
-        or authorization.request_sha256 != expected_values["request_sha256"]
-        or authorization.current_state_sha256 != expected_values["current_state_sha256"]
-        or authorization.current_generation != expected_values["current_generation"]
-        or authorization.target_generation != expected_values["target_generation"]
-    ):
-        raise PermissionError("local_physical_transition_authorization_mismatch")
 
 
 def _endpoint_from_material(

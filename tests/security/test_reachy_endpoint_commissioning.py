@@ -1138,6 +1138,117 @@ def test_service_instance_has_no_direct_commissioning_transition_callable(
     assert events == []
 
 
+def test_commissioning_module_does_not_expose_transition_authorization_surfaces() -> None:
+    leaked_transition_surfaces = {
+        "_ACTIVE_LOCAL_TRANSITION_AUTHORIZATIONS",
+        "_LOCAL_TRANSITION_AUTHORIZATION_MARKER",
+        "_LocalPhysicalTransitionAuthorization",
+        "_consume_local_transition_authorization",
+        "_replace_commissioning_state",
+        "_revoke_commissioning_state",
+    }
+
+    assert not {name for name in leaked_transition_surfaces if hasattr(commissioning_module, name)}
+
+
+def test_shape_valid_unverified_proof_cannot_mint_authorization_and_publish_generation(
+    tmp_path: Path,
+) -> None:
+    (
+        _service,
+        repository,
+        generator,
+        issuer,
+        _acceptance,
+        _proof_issuer,
+        _keys,
+        _certs,
+        _issuer_store,
+        events,
+    ) = _service_case(tmp_path)
+    request = _request(1)
+    authorization_type_name = "_LocalPhysicalTransitionAuthorization"
+    marker_name = "_LOCAL_TRANSITION_AUTHORIZATION_MARKER"
+    replace_name = "_replace_commissioning_state"
+    fake_proof = LocalPhysicalProof(
+        schema_version="tuntun.reachy-local-physical-proof.v1",
+        proof_id=_uuid(41),
+        operation="commission",
+        request_sha256=hashlib.sha256(canonical_bytes(request)).hexdigest(),
+        current_state_sha256=None,
+        current_generation=None,
+        target_generation=1,
+        verifier_mac_sha256=_digest("unauthenticated-local-physical-proof"),
+    )
+
+    with pytest.raises((AttributeError, PermissionError)):
+        authorization_type: Any = getattr(commissioning_module, authorization_type_name)
+        authorization = authorization_type._from_consumed_proof(
+            getattr(commissioning_module, marker_name),
+            proof=fake_proof,
+            operation="commission",
+            request=request,
+            current=None,
+        )
+        getattr(commissioning_module, replace_name)(
+            repository=repository,
+            generator=generator,
+            issuer=issuer,
+            current=None,
+            request=request,
+            authorization=authorization,
+        )
+
+    assert not repository.has_current()
+    assert events == []
+
+
+def test_authorization_registry_cannot_activate_forgery_and_publish_generation(
+    tmp_path: Path,
+) -> None:
+    (
+        _service,
+        repository,
+        generator,
+        issuer,
+        _acceptance,
+        _proof_issuer,
+        _keys,
+        _certs,
+        _issuer_store,
+        events,
+    ) = _service_case(tmp_path)
+    request = _request(1)
+    authorization_type_name = "_LocalPhysicalTransitionAuthorization"
+    marker_name = "_LOCAL_TRANSITION_AUTHORIZATION_MARKER"
+    registry_name = "_ACTIVE_LOCAL_TRANSITION_AUTHORIZATIONS"
+    replace_name = "_replace_commissioning_state"
+
+    with pytest.raises((AttributeError, PermissionError)):
+        authorization_type: Any = getattr(commissioning_module, authorization_type_name)
+        forged_internal = authorization_type.__new__(authorization_type)
+        forged_internal.proof_id = _uuid(42)
+        forged_internal.operation = "commission"
+        forged_internal.request_sha256 = hashlib.sha256(canonical_bytes(request)).hexdigest()
+        forged_internal.current_state_sha256 = None
+        forged_internal.current_generation = None
+        forged_internal.target_generation = 1
+        forged_internal._marker = getattr(commissioning_module, marker_name)
+        forged_internal._consumed = False
+        getattr(commissioning_module, registry_name).add(forged_internal)
+        getattr(commissioning_module, replace_name)(
+            repository=repository,
+            generator=generator,
+            issuer=issuer,
+            current=None,
+            request=request,
+            authorization=forged_internal,
+        )
+
+    assert not repository.has_current()
+    assert events == []
+
+
 def test_forged_transition_authorization_cannot_publish_generation(
     tmp_path: Path,
 ) -> None:
@@ -1163,30 +1274,16 @@ def test_forged_transition_authorization_cannot_publish_generation(
         current_generation = None
         target_generation = 1
 
-    authorization_type: Any = commissioning_module._LocalPhysicalTransitionAuthorization
-    forged_internal = authorization_type.__new__(authorization_type)
-    forged_internal.proof_id = _uuid(1)
-    forged_internal.operation = "commission"
-    forged_internal.request_sha256 = hashlib.sha256(canonical_bytes(request)).hexdigest()
-    forged_internal.current_state_sha256 = None
-    forged_internal.current_generation = None
-    forged_internal.target_generation = 1
-    forged_internal._marker = commissioning_module._LOCAL_TRANSITION_AUTHORIZATION_MARKER
-    forged_internal._consumed = False
-
-    for authorization in (ForgedTransitionAuthorization(), forged_internal):
-        with pytest.raises(
-            PermissionError,
-            match="local_physical_transition_authorization_required",
-        ):
-            commissioning_module._replace_commissioning_state(
-                repository=repository,
-                generator=generator,
-                issuer=issuer,
-                current=None,
-                request=request,
-                authorization=authorization,
-            )
+    replace_name = "_replace_commissioning_state"
+    with pytest.raises((AttributeError, PermissionError)):
+        getattr(commissioning_module, replace_name)(
+            repository=repository,
+            generator=generator,
+            issuer=issuer,
+            current=None,
+            request=request,
+            authorization=ForgedTransitionAuthorization(),
+        )
 
     assert not repository.has_current()
     assert events == []
