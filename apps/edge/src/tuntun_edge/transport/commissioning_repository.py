@@ -16,14 +16,17 @@ from types import TracebackType
 from typing import Final, Literal, Self
 from uuid import uuid4
 
-from tuntun_contracts.base import canonical_bytes, parse_contract_json
+from tuntun_contracts.base import ContractParseError, canonical_bytes, parse_contract_json
 from tuntun_contracts.reachy_operator import ReachyOperatorStateV1
 
 from .commissioning import (
     CommissioningAssuranceV1,
     CommissioningStateV1,
+    LegacyCommissioningStateV1,
     ReachyCoreEndpointV1,
     _commissioning_assurance_kind,
+    _commissioning_state_from_legacy,
+    _commissioning_state_storage_sha256,
 )
 
 MAX_COMMISSIONING_STATE_BYTES: Final = 65_536
@@ -59,6 +62,27 @@ _LOCK_TIMEOUT_SECONDS: Final = 5.0
 _ARTIFACT_NAME_PATTERN: Final = re.compile(r"[A-Za-z0-9_.-]+")
 
 OS_MODULE: Final = os
+
+
+def _parse_commissioning_state(raw: bytes) -> CommissioningStateV1:
+    try:
+        return parse_contract_json(
+            CommissioningStateV1,
+            raw,
+            max_bytes=MAX_COMMISSIONING_STATE_BYTES,
+            require_canonical=True,
+        )
+    except ContractParseError as current_error:
+        try:
+            legacy = parse_contract_json(
+                LegacyCommissioningStateV1,
+                raw,
+                max_bytes=MAX_COMMISSIONING_STATE_BYTES,
+                require_canonical=True,
+            )
+        except ContractParseError:
+            raise current_error from None
+        return _commissioning_state_from_legacy(legacy)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,15 +206,12 @@ class CommissioningRepository:
         return True
 
     def require_current(self) -> CommissioningStateV1:
-        return parse_contract_json(
-            CommissioningStateV1,
+        return _parse_commissioning_state(
             _read_owner_file(
                 self._directory,
                 COMMISSIONING_STATE_NAME,
                 max_bytes=MAX_COMMISSIONING_STATE_BYTES,
-            ),
-            max_bytes=MAX_COMMISSIONING_STATE_BYTES,
-            require_canonical=True,
+            )
         )
 
     def replace_atomic(
@@ -232,6 +253,8 @@ class CommissioningRepository:
     def require_usable(self, endpoint: ReachyCoreEndpointV1) -> ReachyCoreEndpointV1:
         with _exclusive_lock(self._directory, COMMISSIONING_LOCK_NAME):
             state = self.require_current()
+            if state.legacy_key_id_format or state.artifact_map is None:
+                raise RuntimeError("commissioning_material_legacy_recommission_required")
             if state.status != "active":
                 raise PermissionError("commissioning_material_revoked")
             if endpoint != state.endpoint:
@@ -477,7 +500,7 @@ class ReachyOperatorAcceptancePublisher:
     def _clear(self, state: CommissioningStateV1) -> None:
         self._operator_state_repository.clear_accepted_capability(
             commissioning_generation=state.endpoint.generation,
-            commissioning_state_sha256=hashlib.sha256(canonical_bytes(state)).hexdigest(),
+            commissioning_state_sha256=_commissioning_state_storage_sha256(state),
         )
 
 
@@ -485,9 +508,14 @@ def _absolute_lexical_path(path: Path) -> Path:
     raw = os.fspath(path)
     if type(raw) is not str or "\x00" in raw or raw == "":
         raise PermissionError("unsafe commissioning filesystem path")
+    if not os.path.isabs(raw) or raw.startswith("//"):
+        raise PermissionError("unsafe commissioning filesystem path")
+    normalized = os.path.normpath(raw)
+    if normalized != raw:
+        raise PermissionError("unsafe commissioning filesystem path")
     if any(part in {".", ".."} for part in raw.split(os.sep)):
         raise PermissionError("unsafe commissioning filesystem path")
-    absolute = Path(os.path.abspath(raw))
+    absolute = Path(normalized)
     if absolute == Path("/") or any(part in {".", ".."} for part in absolute.parts):
         raise PermissionError("unsafe commissioning filesystem path")
     return absolute

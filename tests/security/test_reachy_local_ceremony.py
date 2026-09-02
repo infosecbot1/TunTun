@@ -447,41 +447,92 @@ def test_ceremony_uses_no_dns_shell_subprocess_or_ambient_path(
 
     composition = _composition(tmp_path)
 
-    with pytest.raises(ceremony.ReachyLocalCeremonyError, match="unsafe Reachy local ceremony"):
-        composition.ceremony.issue_proof(
-            operation="commission",
-            request=composition.ceremony.current_rfc1918_request(),
-            current=None,
-            one_time_code=ONE_TIME_CODE,
-        )
+    proof = composition.ceremony.issue_proof(
+        operation="commission",
+        request=composition.ceremony.current_rfc1918_request(),
+        current=None,
+        one_time_code=ONE_TIME_CODE,
+    )
+
+    assert proof.operation == "commission"
 
 
-def test_ceremony_reports_reviewed_commissioning_key_identity_gap(tmp_path: Path) -> None:
+def test_ceremony_accepts_sound_commissioning_key_identity_contract(tmp_path: Path) -> None:
     _write_fixture(tmp_path)
     composition = _composition(tmp_path)
 
-    assert not ceremony.commissioning_key_identity_contract_supports_required_ed25519_ids()
-    with pytest.raises(ceremony.ReachyLocalCeremonyError, match="unsafe Reachy local ceremony"):
-        composition.ceremony.issue_proof(
-            operation="commission",
-            request=_request_model(),
-            current=None,
-            one_time_code=ONE_TIME_CODE,
-        )
+    assert ceremony.commissioning_key_identity_contract_supports_required_ed25519_ids()
+    proof = composition.ceremony.issue_proof(
+        operation="commission",
+        request=_request_model(),
+        current=None,
+        one_time_code=ONE_TIME_CODE,
+    )
+
+    assert proof.operation == "commission"
+    assert proof.target_generation == 1
+    assert proof.current_generation is None
 
 
-def test_concrete_builder_fails_closed_before_state_when_key_identity_contract_is_unsound(
+def test_concrete_builder_rejects_bad_otp_before_state_or_artifacts(
     tmp_path: Path,
 ) -> None:
     _write_fixture(tmp_path)
     composition = _composition(tmp_path)
 
     with pytest.raises(ceremony.ReachyLocalCeremonyError, match="unsafe Reachy local ceremony"):
-        composition.commission(ONE_TIME_CODE)
+        composition.commission("654321")
 
     assert not composition.repository.has_current()
     assert os.listdir(composition.key_store.root) == []
     assert os.listdir(composition.certificate_store.root) == []
+
+
+def test_concrete_builder_commissions_reopens_recommissions_and_revokes_with_public_signing_ids(
+    tmp_path: Path,
+) -> None:
+    _write_fixture(tmp_path)
+    composition = _composition(tmp_path)
+
+    first = composition.commission(ONE_TIME_CODE)
+    first_artifacts = first.artifact_map
+    assert first_artifacts is not None
+    assert first.endpoint.server_key_id == "ed25519:reachy-server:v1"
+    assert first.endpoint.device_signing_key_id == "ed25519:reachy-device-sign:v1"
+    assert ":" not in first_artifacts.device_signing_private_key_handle
+    assert first_artifacts.device_signing_private_key_handle != first.endpoint.device_signing_key_id
+    assert composition.repository.require_current() == first
+
+    reopened = composition.reopen()
+    assert reopened.resume_current_activation() == first
+    assert reopened.issuer.active_generation == first.endpoint.generation
+
+    descriptor = _descriptor()
+    descriptor["request"] = _request(2)
+    _write_fixture(tmp_path, descriptor=descriptor)
+    second = reopened.recommission(ONE_TIME_CODE)
+    assert second.endpoint.generation == 2
+    assert set(second.revoked_key_ids) == {
+        first.endpoint.server_key_id,
+        first.endpoint.client_tls_key_id,
+        first.endpoint.device_signing_key_id,
+        first.endpoint.hmac_key_id,
+    }
+    assert first_artifacts.device_signing_private_key_handle not in set(second.revoked_key_ids)
+
+    reopened_again = reopened.reopen()
+    assert reopened_again.resume_current_activation() == second
+    revoked = reopened_again.revoke(ONE_TIME_CODE)
+
+    assert revoked.status == "revoked"
+    assert set(revoked.revoked_key_ids) == {
+        second.endpoint.server_key_id,
+        second.endpoint.client_tls_key_id,
+        second.endpoint.device_signing_key_id,
+        second.endpoint.hmac_key_id,
+    }
+    with pytest.raises(PermissionError, match="commissioning_revoked"):
+        reopened_again.resume_current_activation()
 
 
 def test_concrete_builder_uses_real_owner_only_repositories_for_state_and_artifacts(

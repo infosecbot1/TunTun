@@ -1,22 +1,42 @@
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import json
 import os
 import stat
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 import pytest
 import tuntun_edge.transport as transport_exports
 import tuntun_edge.transport.commissioning as commissioning_module
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
-from tuntun_contracts.base import ContractModel, ContractParseError, canonical_bytes
+from tuntun_contracts.base import (
+    Commitment,
+    ContractModel,
+    ContractParseError,
+    Sensitivity,
+    canonical_bytes,
+    canonical_mapping_bytes,
+)
+from tuntun_contracts.events import (
+    EventEnvelope,
+    EventType,
+    SignedEventEnvelope,
+    WakeDetectedPayload,
+)
 from tuntun_contracts.reachy_operator import ReachyAcceptedCapabilityV1, ReachyOperatorStateV1
+from tuntun_contracts.reachy_time import CoreTimeProofV1
 from tuntun_edge.transport import commissioning_repository as repository_module
 from tuntun_edge.transport.commissioning import (
     CommissioningStateV1,
+    GeneratedReachyMaterialBundle,
     GeneratedReachyMaterialV1,
     IssuedClientMaterialV1,
     LocalPhysicalProof,
@@ -64,6 +84,32 @@ def _state_digest(state: CommissioningStateV1) -> str:
     return hashlib.sha256(canonical_bytes(state)).hexdigest()
 
 
+def _event_envelope() -> EventEnvelope:
+    return EventEnvelope(
+        schema_version="1.0",
+        event_id=UUID(int=101),
+        event_type=EventType.WAKE_DETECTED,
+        household_id=UUID(int=102),
+        device_id=UUID(int=103),
+        session_id=None,
+        correlation_id=UUID(int=104),
+        causation_id=None,
+        device_sequence=1,
+        occurred_at=datetime(2026, 8, 27, tzinfo=UTC),
+        sensitivity=Sensitivity.HOUSEHOLD,
+        payload_commitment=Commitment(
+            algorithm="HMAC-SHA-256",
+            key_id="audit-v1",
+            value_b64=base64.b64encode(bytes(32)).decode("ascii"),
+        ),
+        payload=WakeDetectedPayload(
+            kind="speech.wake_detected",
+            turn_id=UUID(int=105),
+            score_micros=900_000,
+        ),
+    )
+
+
 def _request(
     generation: int = 1,
     *,
@@ -103,9 +149,58 @@ def _endpoint(
         "port": 7443,
         "household_ca_sha256": _digest(f"ca-{generation}"),
         "server_leaf_sha256": _digest(f"server-leaf-{generation}"),
-        "server_key_id": f"reachy-server-g{generation}",
+        "server_key_id": f"ed25519:reachy-server:v{generation}",
         "server_public_key_sha256": _digest(f"server-public-{generation}"),
         "server_ip_sans": (core_ipv4,),
+        "client_certificate_sha256": _digest(f"client-cert-{generation}"),
+        "client_tls_key_id": f"reachy-client-tls-id-g{generation}",
+        "client_tls_public_key_sha256": _digest(f"client-public-{generation}"),
+        "device_signing_key_id": f"ed25519:reachy-device-sign:v{generation}",
+        "device_signing_public_key_sha256": _digest(f"device-public-{generation}"),
+        "hmac_key_id": f"reachy-frame-hmac-id-g{generation}",
+        "hmac_key_sha256": _digest(f"hmac-root-{generation}"),
+        "hmac_agreement_public_key_sha256": _digest(f"hmac-public-{generation}"),
+        "dhcp_reservation_receipt_sha256": _digest(f"dhcp-{generation}"),
+        "boot_identity_sha256": _digest(f"boot-{generation}"),
+        "capability_evidence_sha256": _digest(f"capability-{generation}"),
+    }
+    if overrides is not None:
+        values.update(overrides)
+        if "core_ipv4" in overrides and "server_ip_sans" not in overrides:
+            values["server_ip_sans"] = (overrides["core_ipv4"],)
+    return ReachyCoreEndpointV1.model_validate(values)
+
+
+def _artifact_map(generation: int = 1) -> dict[str, object]:
+    return {
+        "schema_version": "tuntun.reachy-commissioning-artifact-map.v1",
+        "generation": generation,
+        "client_tls_private_key_handle": f"reachy-client-tls-g{generation}",
+        "client_certificate_handle": f"reachy-client-cert-g{generation}",
+        "device_signing_private_key_handle": f"reachy-device-sign-g{generation}",
+        "frame_hmac_root_handle": f"reachy-frame-hmac-g{generation}",
+    }
+
+
+def _legacy_endpoint_values(generation: int = 1) -> dict[str, object]:
+    return {
+        "schema_version": "tuntun.reachy-core-endpoint.v1",
+        "commissioning_uuid": _uuid(generation),
+        "generation": generation,
+        "certificate_generation": generation,
+        "server_key_generation": generation,
+        "trust_digest_generation": generation,
+        "client_tls_key_generation": generation,
+        "device_signing_key_generation": generation,
+        "hmac_key_generation": generation,
+        "core_ipv4": "192.168.50.10",
+        "core_link_address": "02:00:5e:00:53:01",
+        "port": 7443,
+        "household_ca_sha256": _digest(f"ca-{generation}"),
+        "server_leaf_sha256": _digest(f"server-leaf-{generation}"),
+        "server_key_id": f"reachy-server-g{generation}",
+        "server_public_key_sha256": _digest(f"server-public-{generation}"),
+        "server_ip_sans": ("192.168.50.10",),
         "client_certificate_sha256": _digest(f"client-cert-{generation}"),
         "client_tls_key_id": f"reachy-client-tls-g{generation}",
         "client_tls_public_key_sha256": _digest(f"client-public-{generation}"),
@@ -118,11 +213,18 @@ def _endpoint(
         "boot_identity_sha256": _digest(f"boot-{generation}"),
         "capability_evidence_sha256": _digest(f"capability-{generation}"),
     }
-    if overrides is not None:
-        values.update(overrides)
-        if "core_ipv4" in overrides and "server_ip_sans" not in overrides:
-            values["server_ip_sans"] = (overrides["core_ipv4"],)
-    return ReachyCoreEndpointV1.model_validate(values)
+
+
+def _legacy_state_bytes(generation: int = 1) -> bytes:
+    return canonical_mapping_bytes(
+        {
+            "schema_version": "tuntun.reachy-commissioning-state.v1",
+            "status": "active",
+            "endpoint": _legacy_endpoint_values(generation),
+            "revoked_key_ids": [],
+            "revoked_certificate_sha256": [],
+        }
+    )
 
 
 def _state(
@@ -147,6 +249,8 @@ def _state(
         schema_version="tuntun.reachy-commissioning-state.v1",
         status=status,
         endpoint=endpoint,
+        artifact_map=_artifact_map(generation),
+        legacy_key_id_format=False,
         revoked_key_ids=revoked_key_ids,
         revoked_certificate_sha256=revoked_certificate_sha256,
     )
@@ -247,6 +351,26 @@ def test_repository_rejects_raw_dot_path_components_before_normalization(
 
 
 @pytest.mark.parametrize(
+    "raw_path",
+    (
+        "relative/commissioning",
+        "//private/tmp/tuntun-commissioning",
+        "{tmp}/state//commissioning",
+        "{tmp}/state/./commissioning",
+        "{tmp}/state/../commissioning",
+    ),
+)
+def test_repository_rejects_relative_or_nonnormal_raw_paths(
+    tmp_path: Path,
+    raw_path: str,
+) -> None:
+    selected = raw_path.format(tmp=tmp_path)
+
+    with pytest.raises(PermissionError, match="unsafe commissioning filesystem path"):
+        CommissioningRepository(_RawPath(selected))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
     "address",
     (
         "192.168.001.010",
@@ -315,6 +439,8 @@ def test_commissioning_state_revocation_inventory_is_closed_bounded_unique() -> 
             schema_version="tuntun.reachy-commissioning-state.v1",
             status="active",
             endpoint=first.endpoint,
+            artifact_map=_artifact_map(1),
+            legacy_key_id_format=False,
             revoked_key_ids=(first.endpoint.server_key_id,),
             revoked_certificate_sha256=(),
         )
@@ -323,6 +449,8 @@ def test_commissioning_state_revocation_inventory_is_closed_bounded_unique() -> 
             schema_version="tuntun.reachy-commissioning-state.v1",
             status="active",
             endpoint=second.endpoint,
+            artifact_map=_artifact_map(2),
+            legacy_key_id_format=False,
             revoked_key_ids=second.revoked_key_ids[:3],
             revoked_certificate_sha256=second.revoked_certificate_sha256,
         )
@@ -331,6 +459,8 @@ def test_commissioning_state_revocation_inventory_is_closed_bounded_unique() -> 
             schema_version="tuntun.reachy-commissioning-state.v1",
             status="active",
             endpoint=second.endpoint,
+            artifact_map=_artifact_map(2),
+            legacy_key_id_format=False,
             revoked_key_ids=(second.revoked_key_ids[0],) * 4,
             revoked_certificate_sha256=second.revoked_certificate_sha256,
         )
@@ -339,6 +469,8 @@ def test_commissioning_state_revocation_inventory_is_closed_bounded_unique() -> 
             schema_version="tuntun.reachy-commissioning-state.v1",
             status="active",
             endpoint=second.endpoint,
+            artifact_map=_artifact_map(2),
+            legacy_key_id_format=False,
             revoked_key_ids=second.revoked_key_ids,
             revoked_certificate_sha256=("not-a-digest",),
         )
@@ -592,6 +724,8 @@ def test_repository_rejects_unrelated_or_incomplete_recommission_tombstones(
             schema_version="tuntun.reachy-commissioning-state.v1",
             status="active",
             endpoint=next_endpoint,
+            artifact_map=_artifact_map(2),
+            legacy_key_id_format=False,
             revoked_key_ids=revoked_key_ids,
             revoked_certificate_sha256=revoked_certificate_sha256,
         )
@@ -704,7 +838,7 @@ class RecordingGenerator(SyntheticReachyPrivateMaterialGenerator):
         request: ReachyCommissioningRequestV1,
         generation: int,
         core_hmac_agreement_public_key_b64: str,
-    ) -> GeneratedReachyMaterialV1:
+    ) -> GeneratedReachyMaterialBundle:
         self.events.append(f"generator.generate.{generation}")
         return super().generate(
             request=request,
@@ -994,9 +1128,30 @@ def test_private_material_stays_behind_artifact_port_and_state_contains_only_com
         request1,
     )
     public_material = generator.generated_material[-1]
+    material = getattr(public_material, "public", public_material)
+    artifact_map = getattr(state, "artifact_map", None)
     state_bytes = canonical_bytes(state)
 
-    assert set(type(public_material).model_fields) == {
+    assert getattr(state, "legacy_key_id_format", None) is False
+    assert artifact_map is not None
+    assert artifact_map.generation == state.endpoint.generation
+    assert material.device_signing_key_id == "ed25519:reachy-device-sign:v1"
+    assert state.endpoint.server_key_id == "ed25519:reachy-server:v1"
+    assert state.endpoint.device_signing_key_id == material.device_signing_key_id
+    assert ":" in material.device_signing_key_id
+    assert ":" not in artifact_map.device_signing_private_key_handle
+    assert artifact_map.device_signing_private_key_handle != material.device_signing_key_id
+    assert artifact_map.client_tls_private_key_handle != material.client_tls_key_id
+    assert artifact_map.frame_hmac_root_handle != material.hmac_key_id
+
+    private_signing_key = key_store.read(artifact_map.device_signing_private_key_handle)
+    assert len(private_signing_key) == 32
+    Ed25519PrivateKey.from_private_bytes(private_signing_key)
+
+    with pytest.raises(ValueError, match="artifact identifier"):
+        key_store.read(material.device_signing_key_id)
+
+    assert set(type(material).model_fields) == {
         "schema_version",
         "generation",
         "client_tls_key_id",
@@ -1010,22 +1165,149 @@ def test_private_material_stays_behind_artifact_port_and_state_contains_only_com
         "hmac_agreement_public_key_sha256",
         "hmac_key_sha256",
     }
-    assert "private" not in public_material.model_dump_json().lower()
-    assert "symmetric" not in public_material.model_dump_json().lower()
+    assert "private" not in material.model_dump_json().lower()
+    assert "symmetric" not in material.model_dump_json().lower()
     assert b"PRIVATE KEY" not in state_bytes
-    assert key_store.read(state.endpoint.client_tls_key_id) not in state_bytes
-    assert key_store.read(state.endpoint.device_signing_key_id) not in state_bytes
-    assert key_store.read(state.endpoint.hmac_key_id) not in state_bytes
-    assert cert_store.read(state.endpoint.client_tls_key_id).startswith(
+    assert key_store.read(artifact_map.client_tls_private_key_handle) not in state_bytes
+    assert private_signing_key not in state_bytes
+    assert key_store.read(artifact_map.frame_hmac_root_handle) not in state_bytes
+    assert cert_store.read(artifact_map.client_certificate_handle).startswith(
         b"-----BEGIN CERTIFICATE-----"
     )
-    for key_id in (
-        state.endpoint.client_tls_key_id,
-        state.endpoint.device_signing_key_id,
-        state.endpoint.hmac_key_id,
+    for artifact_handle in (
+        artifact_map.client_tls_private_key_handle,
+        artifact_map.device_signing_private_key_handle,
+        artifact_map.frame_hmac_root_handle,
     ):
-        identity = os.stat(key_id, dir_fd=key_store.directory_fd, follow_symlinks=False)
+        identity = os.stat(artifact_handle, dir_fd=key_store.directory_fd, follow_symlinks=False)
         assert stat.S_IMODE(identity.st_mode) == 0o600
+
+
+def test_owner_only_artifact_store_rejects_public_ed25519_key_ids(tmp_path: Path) -> None:
+    store = OwnerOnlyArtifactStore(tmp_path / "artifacts")
+
+    for public_key_id in (
+        "ed25519:reachy-server:v1",
+        "ed25519:reachy-device-sign:v1",
+    ):
+        with pytest.raises(ValueError, match="artifact identifier"):
+            store.write(public_key_id, b"private")
+
+
+def test_commissioned_signing_ids_satisfy_secure_time_and_event_contracts(
+    tmp_path: Path,
+) -> None:
+    (
+        service,
+        _repository,
+        _generator,
+        _issuer,
+        _acceptance,
+        proof_issuer,
+        key_store,
+        _certs,
+        _issuer_store,
+        _events,
+    ) = _service_case(tmp_path)
+    request1 = _request(1)
+    state = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+    assert state.artifact_map is not None
+
+    CoreTimeProofV1(
+        schema_version="tuntun.core-time-proof.v1",
+        endpoint_generation=state.endpoint.generation,
+        time_sequence=1,
+        request_nonce_b64=base64.b64encode(bytes(32)).decode("ascii"),
+        core_utc=datetime(2026, 8, 27, tzinfo=UTC),
+        authority_health_generation=state.endpoint.generation,
+        signing_key_id=state.endpoint.server_key_id,
+        signature_b64=base64.b64encode(bytes(64)).decode("ascii"),
+    )
+    private_key = Ed25519PrivateKey.from_private_bytes(
+        key_store.read(state.artifact_map.device_signing_private_key_handle)
+    )
+    public_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    envelope = _event_envelope()
+    signature = private_key.sign(canonical_bytes(envelope))
+    SignedEventEnvelope(
+        envelope=envelope,
+        signing_key_id=state.endpoint.device_signing_key_id,
+        signature_b64=base64.b64encode(signature).decode("ascii"),
+    )
+    private_key.public_key().verify(signature, canonical_bytes(envelope))
+    assert hashlib.sha256(public_bytes).hexdigest() == (
+        state.endpoint.device_signing_public_key_sha256
+    )
+
+
+def test_legacy_colonless_commissioning_state_parses_but_is_not_runtime_usable(
+    tmp_path: Path,
+) -> None:
+    repository = CommissioningRepository(tmp_path / "commissioning")
+    _write_owner_file(repository.path, _legacy_state_bytes())
+
+    state = repository.require_current()
+
+    assert state.legacy_key_id_format is True
+    assert state.artifact_map is None
+    with pytest.raises(RuntimeError, match="legacy_recommission_required"):
+        repository.require_usable(state.endpoint)
+
+
+def test_legacy_colonless_commissioning_state_recommissions_with_original_digest_cas(
+    tmp_path: Path,
+) -> None:
+    repository = CommissioningRepository(tmp_path / "commissioning")
+    legacy_raw = _legacy_state_bytes()
+    _write_owner_file(repository.path, legacy_raw)
+    legacy = repository.require_current()
+    operator_repository = ReachyOperatorStateRepository(tmp_path / "operator-state")
+    operator_repository.replace_atomic(
+        ReachyOperatorStateV1(
+            schema_version="tuntun.reachy-operator-state.v1",
+            commissioning_generation=legacy.endpoint.generation,
+            commissioning_state_sha256=hashlib.sha256(legacy_raw).hexdigest(),
+            ssh_username="tuntunops",
+            reachy_ipv4="192.168.50.20",
+            core_ipv4=legacy.endpoint.core_ipv4,
+            pinned_ssh_host_key_sha256=_digest("ssh-host-key"),
+            dhcp_receipt_sha256=legacy.endpoint.dhcp_reservation_receipt_sha256,
+            accepted_capability=_accepted_capability(),
+        )
+    )
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    generator = SyntheticReachyPrivateMaterialGenerator(
+        key_store=key_store,
+        certificate_store=certificate_store,
+    )
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=ReachyOperatorAcceptancePublisher(operator_repository),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request2 = _request(2, core_ipv4="192.168.50.11")
+
+    recommissioned = service.recommission_local(
+        _proof_for(proof_issuer, operation="recommission", request=request2, current=legacy),
+        request2,
+    )
+
+    assert recommissioned.legacy_key_id_format is False
+    assert recommissioned.artifact_map is not None
+    assert set(recommissioned.revoked_key_ids) == set(_key_ids(legacy.endpoint))
+    assert operator_repository.require_current().accepted_capability is None
 
 
 def test_local_physical_proof_is_one_shot_and_request_generation_bound(
@@ -1419,15 +1701,15 @@ def test_ambiguous_publish_error_preserves_staged_material_for_recovery(
         )
 
     material = generator.generated_material[-1]
-    assert key_store.read(material.client_tls_key_id)
-    assert key_store.read(material.device_signing_key_id)
-    assert key_store.read(material.hmac_key_id)
-    assert certificate_store.read(material.client_tls_key_id).startswith(
+    assert key_store.read(material.artifacts.client_tls_private_key_handle)
+    assert key_store.read(material.artifacts.device_signing_private_key_handle)
+    assert key_store.read(material.artifacts.frame_hmac_root_handle)
+    assert certificate_store.read(material.artifacts.client_certificate_handle).startswith(
         b"-----BEGIN CERTIFICATE-----"
     )
-    assert material.generation in issuer.staged_generations
+    assert material.public.generation in issuer.staged_generations
     repository.fail_current_read_after_publish_error = False
-    assert repository.require_current().endpoint.generation == material.generation
+    assert repository.require_current().endpoint.generation == material.public.generation
 
 
 def test_operator_acceptance_clearer_persists_none_before_recommission_restart(

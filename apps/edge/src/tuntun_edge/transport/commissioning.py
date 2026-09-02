@@ -3,11 +3,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated, Literal, Protocol, Self, TypeVar, cast
 from uuid import uuid4
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import Field, StringConstraints, field_validator, model_validator
 from tuntun_contracts.base import (
     ContractModel,
@@ -18,14 +22,31 @@ from tuntun_contracts.base import (
 )
 
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
-KEY_ID_PATTERN = r"^[A-Za-z0-9_.-]{8,128}$"
+ARTIFACT_HANDLE_PATTERN = r"^[A-Za-z0-9_.-]{8,128}$"
+ED25519_KEY_ID_PATTERN = r"^ed25519:[a-z0-9][a-z0-9._-]{0,63}:v[1-9][0-9]{0,8}$"
+PUBLIC_KEY_ID_PATTERN = (
+    r"^(?:[A-Za-z0-9_.-]{8,128}|ed25519:[a-z0-9][a-z0-9._-]{0,63}:v[1-9][0-9]{0,8})$"
+)
 CANONICAL_UUID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 FRAME_HMAC_INFO = b"tuntun/reachy/frame-hmac/v1"
 SYNTHETIC_ISSUER_STATE_ID = "synthetic-core-issuer-state.v1"
 MAX_SYNTHETIC_ISSUER_STATE_BYTES = 16_384
 
 Sha256Hex = Annotated[str, Field(pattern=SHA256_PATTERN)]
-KeyId = Annotated[str, Field(min_length=8, max_length=128, pattern=KEY_ID_PATTERN)]
+ArtifactHandle = Annotated[
+    str,
+    Field(min_length=8, max_length=128, pattern=ARTIFACT_HANDLE_PATTERN),
+]
+Ed25519KeyId = Annotated[
+    str,
+    Field(min_length=12, max_length=83, pattern=ED25519_KEY_ID_PATTERN),
+]
+PublicKeyId = Annotated[
+    str,
+    Field(min_length=8, max_length=128, pattern=PUBLIC_KEY_ID_PATTERN),
+]
+ArtifactSafePublicKeyId = ArtifactHandle
+KeyId = ArtifactHandle
 MacAddress = Annotated[
     str,
     StringConstraints(strict=True, pattern=r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$"),
@@ -260,15 +281,15 @@ class ReachyCoreEndpointV1(ContractModel):
     port: Literal[7443]
     household_ca_sha256: Sha256Hex
     server_leaf_sha256: Sha256Hex
-    server_key_id: KeyId
+    server_key_id: PublicKeyId
     server_public_key_sha256: Sha256Hex
     server_ip_sans: tuple[str, ...]
     client_certificate_sha256: Sha256Hex
-    client_tls_key_id: KeyId
+    client_tls_key_id: ArtifactSafePublicKeyId
     client_tls_public_key_sha256: Sha256Hex
-    device_signing_key_id: KeyId
+    device_signing_key_id: PublicKeyId
     device_signing_public_key_sha256: Sha256Hex
-    hmac_key_id: KeyId
+    hmac_key_id: ArtifactSafePublicKeyId
     hmac_key_sha256: Sha256Hex
     hmac_agreement_public_key_sha256: Sha256Hex
     dhcp_reservation_receipt_sha256: Sha256Hex
@@ -314,11 +335,158 @@ class ReachyCoreEndpointV1(ContractModel):
         return self
 
 
+class ReachyCommissioningArtifactMapV1(ContractModel):
+    schema_version: Literal["tuntun.reachy-commissioning-artifact-map.v1"] = (
+        "tuntun.reachy-commissioning-artifact-map.v1"
+    )
+    generation: Annotated[int, Field(ge=1)]
+    client_tls_private_key_handle: ArtifactHandle
+    client_certificate_handle: ArtifactHandle
+    device_signing_private_key_handle: ArtifactHandle
+    frame_hmac_root_handle: ArtifactHandle
+
+    @model_validator(mode="after")
+    def artifact_handles_are_unique(self) -> Self:
+        handles = _artifact_map_handles(self)
+        if len(set(handles)) != len(handles):
+            raise ValueError("commissioning artifact handles must be unique")
+        return self
+
+
 class CommissioningStateV1(ContractModel):
     schema_version: Literal["tuntun.reachy-commissioning-state.v1"]
     status: Literal["active", "revoked"] = "active"
     endpoint: ReachyCoreEndpointV1
-    revoked_key_ids: Annotated[tuple[KeyId, ...], Field(max_length=4)] = ()
+    artifact_map: ReachyCommissioningArtifactMapV1 | None = None
+    legacy_key_id_format: bool = False
+    revoked_key_ids: Annotated[tuple[PublicKeyId, ...], Field(max_length=4)] = ()
+    revoked_certificate_sha256: Annotated[tuple[Sha256Hex, ...], Field(max_length=2)] = ()
+
+    @field_validator("revoked_key_ids")
+    @classmethod
+    def revoked_key_ids_are_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("revoked key identifiers must be unique")
+        return value
+
+    @field_validator("revoked_certificate_sha256")
+    @classmethod
+    def revoked_certificates_are_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("revoked certificate digests must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def validate_identity_split_and_revocation_inventory(self) -> Self:
+        if self.legacy_key_id_format:
+            if self.artifact_map is not None:
+                raise ValueError("legacy commissioning state must not include artifact_map")
+        else:
+            if self.artifact_map is None:
+                raise ValueError("commissioning artifact_map is required")
+            if self.artifact_map.generation != self.endpoint.generation:
+                raise ValueError("artifact_map generation must match endpoint generation")
+            if not _is_ed25519_key_id(self.endpoint.server_key_id) or not _is_ed25519_key_id(
+                self.endpoint.device_signing_key_id
+            ):
+                raise ValueError(
+                    "server_key_id and device_signing_key_id must be public ed25519 ids"
+                )
+            private_handles = set(_artifact_map_handles(self.artifact_map))
+            if private_handles & set(_endpoint_key_ids(self.endpoint)):
+                raise ValueError("private artifact handles must be distinct from public key ids")
+        if self.status == "active" and self.endpoint.generation == 1:
+            if self.revoked_key_ids or self.revoked_certificate_sha256:
+                raise ValueError("initial generation cannot revoke material")
+            return self
+        if self.status == "active":
+            if len(self.revoked_key_ids) != 4 or len(self.revoked_certificate_sha256) != 2:
+                raise ValueError(
+                    "active recommissioning state requires exactly four revoked key "
+                    "identifiers and two revoked certificate digests"
+                )
+            return self
+        if self.revoked_key_ids != _endpoint_key_ids(self.endpoint) or (
+            self.revoked_certificate_sha256 != _endpoint_certificate_digests(self.endpoint)
+        ):
+            raise ValueError("revoked state must bind exactly current endpoint material")
+        return self
+
+
+class LegacyReachyCoreEndpointV1(ContractModel):
+    schema_version: Literal["tuntun.reachy-core-endpoint.v1"]
+    commissioning_uuid: Annotated[str, Field(pattern=CANONICAL_UUID_PATTERN)]
+    generation: Annotated[int, Field(ge=1)]
+    certificate_generation: Annotated[int, Field(ge=1)]
+    server_key_generation: Annotated[int, Field(ge=1)]
+    trust_digest_generation: Annotated[int, Field(ge=1)]
+    client_tls_key_generation: Annotated[int, Field(ge=1)]
+    device_signing_key_generation: Annotated[int, Field(ge=1)]
+    hmac_key_generation: Annotated[int, Field(ge=1)]
+    core_ipv4: Annotated[str, Field(min_length=7, max_length=15)]
+    core_link_address: MacAddress
+    port: Literal[7443]
+    household_ca_sha256: Sha256Hex
+    server_leaf_sha256: Sha256Hex
+    server_key_id: ArtifactHandle
+    server_public_key_sha256: Sha256Hex
+    server_ip_sans: tuple[str, ...]
+    client_certificate_sha256: Sha256Hex
+    client_tls_key_id: ArtifactHandle
+    client_tls_public_key_sha256: Sha256Hex
+    device_signing_key_id: ArtifactHandle
+    device_signing_public_key_sha256: Sha256Hex
+    hmac_key_id: ArtifactHandle
+    hmac_key_sha256: Sha256Hex
+    hmac_agreement_public_key_sha256: Sha256Hex
+    dhcp_reservation_receipt_sha256: Sha256Hex
+    boot_identity_sha256: Sha256Hex
+    capability_evidence_sha256: Sha256Hex
+
+    @field_validator("core_ipv4")
+    @classmethod
+    def canonical_rfc1918_core_ipv4(cls, value: str) -> str:
+        return _canonical_rfc1918_ipv4(value, label="core endpoint")
+
+    @field_validator("core_link_address")
+    @classmethod
+    def canonical_unicast_link_address(cls, value: str) -> str:
+        return _canonical_unicast_mac(value, label="core link address")
+
+    @field_validator("server_ip_sans")
+    @classmethod
+    def canonical_numeric_ip_sans(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for address in value:
+            _canonical_rfc1918_ipv4(address, label="server certificate SAN")
+        return value
+
+    @model_validator(mode="after")
+    def exact_endpoint_binding(self) -> Self:
+        if self.server_ip_sans != (self.core_ipv4,):
+            raise ValueError("server certificate requires sole exact numeric Mac IP SAN")
+        generations = {
+            self.generation,
+            self.certificate_generation,
+            self.server_key_generation,
+            self.trust_digest_generation,
+            self.client_tls_key_generation,
+            self.device_signing_key_generation,
+            self.hmac_key_generation,
+        }
+        if len(generations) != 1:
+            raise ValueError("commissioning endpoint contains mixed generations")
+        if len(set(_legacy_endpoint_key_ids(self))) != 4:
+            raise ValueError("commissioning endpoint key identifiers must be unique")
+        if self.server_leaf_sha256 == self.client_certificate_sha256:
+            raise ValueError("commissioning endpoint certificate digests must be distinct")
+        return self
+
+
+class LegacyCommissioningStateV1(ContractModel):
+    schema_version: Literal["tuntun.reachy-commissioning-state.v1"]
+    status: Literal["active", "revoked"] = "active"
+    endpoint: LegacyReachyCoreEndpointV1
+    revoked_key_ids: Annotated[tuple[ArtifactHandle, ...], Field(max_length=4)] = ()
     revoked_certificate_sha256: Annotated[tuple[Sha256Hex, ...], Field(max_length=2)] = ()
 
     @field_validator("revoked_key_ids")
@@ -348,8 +516,8 @@ class CommissioningStateV1(ContractModel):
                     "identifiers and two revoked certificate digests"
                 )
             return self
-        if self.revoked_key_ids != _endpoint_key_ids(self.endpoint) or (
-            self.revoked_certificate_sha256 != _endpoint_certificate_digests(self.endpoint)
+        if self.revoked_key_ids != _legacy_endpoint_key_ids(self.endpoint) or (
+            self.revoked_certificate_sha256 != _legacy_endpoint_certificate_digests(self.endpoint)
         ):
             raise ValueError("revoked state must bind exactly current endpoint material")
         return self
@@ -428,13 +596,13 @@ def _commissioning_assurance_kind(
 class GeneratedReachyMaterialV1(ContractModel):
     schema_version: Literal["tuntun.reachy-generated-public-material.v1"]
     generation: Annotated[int, Field(ge=1)]
-    client_tls_key_id: KeyId
+    client_tls_key_id: ArtifactSafePublicKeyId
     client_tls_csr_pem: Annotated[str, Field(min_length=64, max_length=4096)]
     client_tls_public_key_sha256: Sha256Hex
-    device_signing_key_id: KeyId
+    device_signing_key_id: Ed25519KeyId
     device_signing_public_key_b64: Annotated[str, Field(min_length=44, max_length=44)]
     device_signing_public_key_sha256: Sha256Hex
-    hmac_key_id: KeyId
+    hmac_key_id: ArtifactSafePublicKeyId
     hmac_agreement_public_key_b64: Annotated[str, Field(min_length=44, max_length=44)]
     hmac_agreement_public_key_sha256: Sha256Hex
     hmac_key_sha256: Sha256Hex
@@ -456,6 +624,12 @@ class GeneratedReachyMaterialV1(ContractModel):
         return value
 
 
+@dataclass(frozen=True, slots=True)
+class GeneratedReachyMaterialBundle:
+    public: GeneratedReachyMaterialV1
+    artifacts: ReachyCommissioningArtifactMapV1
+
+
 class PreparedCoreMaterialV1(ContractModel):
     schema_version: Literal["tuntun.core-prepared-commissioning-material.v1"]
     generation: Annotated[int, Field(ge=1)]
@@ -471,7 +645,7 @@ class PreparedCoreMaterialV1(ContractModel):
     server_key_generation: Annotated[int, Field(ge=1)]
     trust_digest_generation: Annotated[int, Field(ge=1)]
     server_leaf_sha256: Sha256Hex
-    server_key_id: KeyId
+    server_key_id: Ed25519KeyId
     server_public_key_sha256: Sha256Hex
     core_hmac_agreement_public_key_b64: Annotated[str, Field(min_length=44, max_length=44)]
     core_hmac_agreement_public_key_sha256: Sha256Hex
@@ -583,16 +757,16 @@ class ReachyPrivateMaterialGeneratorPort(Protocol):
         request: ReachyCommissioningRequestV1,
         generation: int,
         core_hmac_agreement_public_key_b64: str,
-    ) -> GeneratedReachyMaterialV1: ...
+    ) -> GeneratedReachyMaterialBundle: ...
 
     def install_client_certificate(
         self,
         *,
-        material: GeneratedReachyMaterialV1,
+        material: GeneratedReachyMaterialBundle,
         certificate_pem: str,
     ) -> None: ...
 
-    def discard(self, material: GeneratedReachyMaterialV1) -> None: ...
+    def discard(self, material: GeneratedReachyMaterialBundle) -> None: ...
 
 
 class CoreCommissioningIssuerPort(Protocol):
@@ -655,7 +829,7 @@ class SyntheticReachyPrivateMaterialGenerator:
     ) -> None:
         self._key_store = key_store
         self._certificate_store = certificate_store
-        self.generated_material: list[GeneratedReachyMaterialV1] = []
+        self.generated_material: list[GeneratedReachyMaterialBundle] = []
 
     def generate(
         self,
@@ -663,15 +837,39 @@ class SyntheticReachyPrivateMaterialGenerator:
         request: ReachyCommissioningRequestV1,
         generation: int,
         core_hmac_agreement_public_key_b64: str,
-    ) -> GeneratedReachyMaterialV1:
+    ) -> GeneratedReachyMaterialBundle:
         if generation < 1:
             raise ValueError("commissioning generation must be positive")
         suffix = secrets.token_hex(8)
-        client_tls_key_id = f"reachy-client-tls-g{generation}-{suffix}"
-        device_signing_key_id = f"reachy-device-sign-g{generation}-{suffix}"
-        hmac_key_id = f"reachy-frame-hmac-g{generation}-{suffix}"
+        client_tls_key_id = _artifact_handle("reachy-client-tls-id", generation, suffix)
+        device_signing_key_id = _public_ed25519_key_id("reachy-device-sign", generation)
+        hmac_key_id = _artifact_handle("reachy-frame-hmac-id", generation, suffix)
+        artifacts = ReachyCommissioningArtifactMapV1(
+            generation=generation,
+            client_tls_private_key_handle=_artifact_handle(
+                "reachy-client-tls",
+                generation,
+                suffix,
+            ),
+            client_certificate_handle=_artifact_handle("reachy-client-cert", generation, suffix),
+            device_signing_private_key_handle=_artifact_handle(
+                "reachy-device-sign",
+                generation,
+                suffix,
+            ),
+            frame_hmac_root_handle=_artifact_handle("reachy-frame-hmac", generation, suffix),
+        )
         client_public = _synthetic_public_bytes("client-tls", generation, suffix)
-        device_public = _synthetic_public_bytes("device-signing", generation, suffix)
+        device_private_key = Ed25519PrivateKey.generate()
+        device_private = device_private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        device_public = device_private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
         hmac_public = _synthetic_public_bytes("hmac-agreement", generation, suffix)
         hmac_root = _derive_synthetic_frame_hmac_root(
             request=request,
@@ -692,17 +890,14 @@ class SyntheticReachyPrivateMaterialGenerator:
         written: list[str] = []
         try:
             self._key_store.write(
-                client_tls_key_id,
+                artifacts.client_tls_private_key_handle,
                 _pem("PRIVATE KEY", b"synthetic-client-tls-" + client_public).encode("ascii"),
             )
-            written.append(client_tls_key_id)
-            self._key_store.write(
-                device_signing_key_id,
-                _pem("PRIVATE KEY", b"synthetic-device-signing-" + device_public).encode("ascii"),
-            )
-            written.append(device_signing_key_id)
-            self._key_store.write(hmac_key_id, hmac_root)
-            written.append(hmac_key_id)
+            written.append(artifacts.client_tls_private_key_handle)
+            self._key_store.write(artifacts.device_signing_private_key_handle, device_private)
+            written.append(artifacts.device_signing_private_key_handle)
+            self._key_store.write(artifacts.frame_hmac_root_handle, hmac_root)
+            written.append(artifacts.frame_hmac_root_handle)
         except BaseException:
             for identifier in written:
                 self._key_store.delete(identifier)
@@ -721,24 +916,28 @@ class SyntheticReachyPrivateMaterialGenerator:
             hmac_agreement_public_key_sha256=hashlib.sha256(hmac_public).hexdigest(),
             hmac_key_sha256=hashlib.sha256(hmac_root).hexdigest(),
         )
-        self.generated_material.append(material)
-        return material
+        bundle = GeneratedReachyMaterialBundle(public=material, artifacts=artifacts)
+        self.generated_material.append(bundle)
+        return bundle
 
     def install_client_certificate(
         self,
         *,
-        material: GeneratedReachyMaterialV1,
+        material: GeneratedReachyMaterialBundle,
         certificate_pem: str,
     ) -> None:
-        if material.generation < 1:
+        if material.public.generation < 1:
             raise ValueError("commissioning generation must be positive")
-        self._certificate_store.write(material.client_tls_key_id, certificate_pem.encode("ascii"))
+        self._certificate_store.write(
+            material.artifacts.client_certificate_handle,
+            certificate_pem.encode("ascii"),
+        )
 
-    def discard(self, material: GeneratedReachyMaterialV1) -> None:
-        self._key_store.delete(material.client_tls_key_id)
-        self._key_store.delete(material.device_signing_key_id)
-        self._key_store.delete(material.hmac_key_id)
-        self._certificate_store.delete(material.client_tls_key_id)
+    def discard(self, material: GeneratedReachyMaterialBundle) -> None:
+        self._key_store.delete(material.artifacts.client_tls_private_key_handle)
+        self._key_store.delete(material.artifacts.device_signing_private_key_handle)
+        self._key_store.delete(material.artifacts.frame_hmac_root_handle)
+        self._certificate_store.delete(material.artifacts.client_certificate_handle)
 
 
 class SyntheticCoreCommissioningIssuer:
@@ -774,7 +973,7 @@ class SyntheticCoreCommissioningIssuer:
             server_key_generation=generation,
             trust_digest_generation=generation,
             server_leaf_sha256=_digest_hex("server-leaf", generation, suffix),
-            server_key_id=f"reachy-server-g{generation}-{suffix}",
+            server_key_id=_public_ed25519_key_id("reachy-server", generation),
             server_public_key_sha256=_digest_hex("server-public", generation, suffix),
             core_hmac_agreement_public_key_b64=_b64(core_public),
             core_hmac_agreement_public_key_sha256=hashlib.sha256(core_public).hexdigest(),
@@ -942,7 +1141,7 @@ class ReachyCommissioningService:
             if self._repository.has_current():
                 raise PermissionError("already_commissioned_use_recommission")
             prepared: PreparedCoreMaterialV1 | None = None
-            material: GeneratedReachyMaterialV1 | None = None
+            material: GeneratedReachyMaterialBundle | None = None
             state: CommissioningStateV1 | None = None
             try:
                 prepared = self._issuer.begin_generation(request=selected, generation=generation)
@@ -953,7 +1152,7 @@ class ReachyCommissioningService:
                 )
                 issued = self._issuer.complete_generation(
                     prepared=prepared,
-                    reachy_material=material,
+                    reachy_material=material.public,
                 )
                 self._generator.install_client_certificate(
                     material=material,
@@ -962,13 +1161,15 @@ class ReachyCommissioningService:
                 endpoint = _endpoint_from_material(
                     request=selected,
                     prepared=prepared,
-                    reachy_material=material,
+                    reachy_material=material.public,
                     issued=issued,
                 )
                 state = CommissioningStateV1(
                     schema_version="tuntun.reachy-commissioning-state.v1",
                     status="active",
                     endpoint=endpoint,
+                    artifact_map=material.artifacts,
+                    legacy_key_id_format=False,
                     revoked_key_ids=(),
                     revoked_certificate_sha256=(),
                 )
@@ -1007,7 +1208,7 @@ class ReachyCommissioningService:
         def transition() -> CommissioningStateV1:
             self._require_acceptance_publisher().clear_before_recommission(current)
             prepared: PreparedCoreMaterialV1 | None = None
-            material: GeneratedReachyMaterialV1 | None = None
+            material: GeneratedReachyMaterialBundle | None = None
             state: CommissioningStateV1 | None = None
             try:
                 prepared = self._issuer.begin_generation(request=selected, generation=generation)
@@ -1018,7 +1219,7 @@ class ReachyCommissioningService:
                 )
                 issued = self._issuer.complete_generation(
                     prepared=prepared,
-                    reachy_material=material,
+                    reachy_material=material.public,
                 )
                 self._generator.install_client_certificate(
                     material=material,
@@ -1027,13 +1228,15 @@ class ReachyCommissioningService:
                 endpoint = _endpoint_from_material(
                     request=selected,
                     prepared=prepared,
-                    reachy_material=material,
+                    reachy_material=material.public,
                     issued=issued,
                 )
                 state = CommissioningStateV1(
                     schema_version="tuntun.reachy-commissioning-state.v1",
                     status="active",
                     endpoint=endpoint,
+                    artifact_map=material.artifacts,
+                    legacy_key_id_format=False,
                     revoked_key_ids=_endpoint_key_ids(current.endpoint),
                     revoked_certificate_sha256=_endpoint_certificate_digests(current.endpoint),
                 )
@@ -1072,6 +1275,8 @@ class ReachyCommissioningService:
                 schema_version="tuntun.reachy-commissioning-state.v1",
                 status="revoked",
                 endpoint=current.endpoint,
+                artifact_map=current.artifact_map,
+                legacy_key_id_format=current.legacy_key_id_format,
                 revoked_key_ids=_endpoint_key_ids(current.endpoint),
                 revoked_certificate_sha256=_endpoint_certificate_digests(current.endpoint),
             )
@@ -1246,6 +1451,39 @@ def _canonical_unicast_mac(value: str, *, label: str) -> str:
     return value
 
 
+def _is_ed25519_key_id(identifier: str) -> bool:
+    return type(identifier) is str and re.fullmatch(ED25519_KEY_ID_PATTERN, identifier) is not None
+
+
+def _public_ed25519_key_id(name: str, generation: int) -> Ed25519KeyId:
+    identifier = f"ed25519:{name}:v{generation}"
+    if generation < 1 or not _is_ed25519_key_id(identifier):
+        raise ValueError("public Ed25519 key identifier invalid")
+    return identifier
+
+
+def _artifact_handle(kind: str, generation: int, suffix: str) -> ArtifactHandle:
+    identifier = f"{kind}-g{generation}-{suffix}"
+    if (
+        generation < 1
+        or type(suffix) is not str
+        or re.fullmatch(ARTIFACT_HANDLE_PATTERN, identifier) is None
+    ):
+        raise ValueError("commissioning artifact handle invalid")
+    return identifier
+
+
+def _artifact_map_handles(
+    artifact_map: ReachyCommissioningArtifactMapV1,
+) -> tuple[str, str, str, str]:
+    return (
+        artifact_map.client_tls_private_key_handle,
+        artifact_map.client_certificate_handle,
+        artifact_map.device_signing_private_key_handle,
+        artifact_map.frame_hmac_root_handle,
+    )
+
+
 def _endpoint_key_ids(endpoint: ReachyCoreEndpointV1) -> tuple[str, str, str, str]:
     return (
         endpoint.server_key_id,
@@ -1257,6 +1495,50 @@ def _endpoint_key_ids(endpoint: ReachyCoreEndpointV1) -> tuple[str, str, str, st
 
 def _endpoint_certificate_digests(endpoint: ReachyCoreEndpointV1) -> tuple[str, str]:
     return (endpoint.server_leaf_sha256, endpoint.client_certificate_sha256)
+
+
+def _legacy_endpoint_key_ids(endpoint: LegacyReachyCoreEndpointV1) -> tuple[str, str, str, str]:
+    return (
+        endpoint.server_key_id,
+        endpoint.client_tls_key_id,
+        endpoint.device_signing_key_id,
+        endpoint.hmac_key_id,
+    )
+
+
+def _legacy_endpoint_certificate_digests(
+    endpoint: LegacyReachyCoreEndpointV1,
+) -> tuple[str, str]:
+    return (endpoint.server_leaf_sha256, endpoint.client_certificate_sha256)
+
+
+def _commissioning_state_from_legacy(
+    legacy: LegacyCommissioningStateV1,
+) -> CommissioningStateV1:
+    return CommissioningStateV1(
+        schema_version="tuntun.reachy-commissioning-state.v1",
+        status=legacy.status,
+        endpoint=ReachyCoreEndpointV1.model_validate(legacy.endpoint.model_dump(mode="python")),
+        artifact_map=None,
+        legacy_key_id_format=True,
+        revoked_key_ids=legacy.revoked_key_ids,
+        revoked_certificate_sha256=legacy.revoked_certificate_sha256,
+    )
+
+
+def _commissioning_state_storage_sha256(state: CommissioningStateV1) -> str:
+    if state.legacy_key_id_format:
+        legacy = LegacyCommissioningStateV1(
+            schema_version="tuntun.reachy-commissioning-state.v1",
+            status=state.status,
+            endpoint=LegacyReachyCoreEndpointV1.model_validate(
+                state.endpoint.model_dump(mode="python")
+            ),
+            revoked_key_ids=state.revoked_key_ids,
+            revoked_certificate_sha256=state.revoked_certificate_sha256,
+        )
+        return hashlib.sha256(canonical_bytes(legacy)).hexdigest()
+    return hashlib.sha256(canonical_bytes(state)).hexdigest()
 
 
 def _synthetic_public_bytes(purpose: str, generation: int, suffix: str) -> bytes:
