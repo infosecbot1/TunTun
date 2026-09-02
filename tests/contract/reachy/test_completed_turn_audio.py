@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+# The import split below deliberately bootstraps the uninstalled root namespace.
+# ruff: noqa: E402
 import asyncio
+import sys
 import traceback as traceback_module
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
+
+# The root project is not an installed package; preserve package-import coverage
+# without changing workspace metadata or adding a suite-wide import side effect.
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import pytest
 import tuntun_core.adapters.reachy.completed_audio as completed_audio_module
