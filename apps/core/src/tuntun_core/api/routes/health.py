@@ -8,8 +8,7 @@ def register_health_route(app: FastAPI, dependencies: SimulatedGuestAppDependenc
     async def ready(response: Response) -> dict[str, str]:
         response.headers["Cache-Control"] = "no-store"
         try:
-            for dependency in dependencies.readiness_dependencies:
-                dependency.require_ready()
+            dependencies.require_ready()
         except BaseException:
             response.status_code = 503
             return {"status": "unavailable"}

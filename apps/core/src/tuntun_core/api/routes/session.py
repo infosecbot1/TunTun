@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from tuntun_contracts.ports import TurnInput
@@ -24,13 +24,13 @@ def _no_store_json(content: dict[str, str], *, status_code: int) -> JSONResponse
 
 def register_session_route(app: FastAPI, dependencies: SimulatedGuestAppDependencies) -> None:
     async def simulated_turn(
-        request: Request,
         payload: SimulatedTurnRequest,
     ) -> JSONResponse:
         del payload
-        client = request.client
-        if client is None or client.host != dependencies.loopback_host:
-            return _no_store_json({"status": "forbidden"}, status_code=403)
+        try:
+            dependencies.require_ready()
+        except BaseException:
+            return _no_store_json({"status": "unavailable"}, status_code=503)
         turn_id = uuid4()
         try:
             admission = await dependencies.session_manager.open(

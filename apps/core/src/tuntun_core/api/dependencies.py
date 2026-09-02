@@ -41,3 +41,7 @@ class SimulatedGuestAppDependencies:
             raise ValueError("loopback host must be loopback")
         if type(self.readiness_dependencies) is not tuple:
             raise TypeError("readiness dependencies must be a tuple")
+
+    def require_ready(self) -> None:
+        for dependency in self.readiness_dependencies:
+            dependency.require_ready()

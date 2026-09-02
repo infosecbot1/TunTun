@@ -6,6 +6,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+import tuntun_core.adapters.reachy.completed_audio as completed_audio_module
 from tuntun_contracts.ports import TurnInput
 from tuntun_core.adapters.reachy.completed_audio import (
     BoundedCompletedTurnAudio,
@@ -60,6 +61,38 @@ class _BlockingChunks:
         yield b"unreachable"
 
 
+class _NoopClaims:
+    async def claim_once(self, turn: TurnInput) -> None:
+        del turn
+
+
+class _FailingCloseSource(_CompletedAudioSource):
+    async def close_completed(self, stream: CompletedAudioStream) -> None:
+        self.closed.append(stream)
+        self.open_streams -= 1
+        raise RuntimeError("private-close-sentinel")
+
+
+class _GatedCloseSource(_CompletedAudioSource):
+    def __init__(self, stream: CompletedAudioStream) -> None:
+        super().__init__(stream)
+        self.close_entered = asyncio.Event()
+        self.close_release = asyncio.Event()
+        self.close_finished = False
+        self.close_cancel_count = 0
+
+    async def close_completed(self, stream: CompletedAudioStream) -> None:
+        self.closed.append(stream)
+        self.open_streams -= 1
+        self.close_entered.set()
+        while not self.close_release.is_set():
+            try:
+                await self.close_release.wait()
+            except asyncio.CancelledError:
+                self.close_cancel_count += 1
+        self.close_finished = True
+
+
 def _turn() -> TurnInput:
     return TurnInput(turn_id=uuid4(), household_id=uuid4(), device_id=uuid4())
 
@@ -76,6 +109,21 @@ def _stream(turn: TurnInput, chunks: object, *, duration_ms: int = 40) -> Comple
 
 def _claims(route_uow_factory, route_clock) -> PersistentTurnAudioClaims:
     return PersistentTurnAudioClaims(route_uow_factory, route_clock)
+
+
+def _track_completed_audio_buffers(monkeypatch: pytest.MonkeyPatch) -> list[bytearray]:
+    buffers: list[bytearray] = []
+    real_bytearray = bytearray
+
+    class TrackingBuffer(bytearray):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            buffers.append(self)
+
+    monkeypatch.setattr(completed_audio_module, "bytearray", TrackingBuffer, raising=False)
+    assert completed_audio_module.bytearray is TrackingBuffer
+    assert real_bytearray is not TrackingBuffer
+    return buffers
 
 
 @pytest.mark.asyncio
@@ -174,3 +222,52 @@ async def test_cancellation_during_chunk_read_closes_stream_and_consumes_claim(
     assert source.open_streams == 0
     with pytest.raises(PermissionError, match="completed_turn_audio_already_consumed"):
         await adapter.consume_once(turn)
+
+
+@pytest.mark.asyncio
+async def test_close_failure_still_wipes_completed_audio_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buffers = _track_completed_audio_buffers(monkeypatch)
+    turn = _turn()
+    source = _FailingCloseSource(_stream(turn, _Chunks((b"private-audio-sentinel",))))
+    adapter = BoundedCompletedTurnAudio(source, _NoopClaims())  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError) as captured:
+        await adapter.consume_once(turn)
+
+    assert str(captured.value) == "completed_turn_audio_close_failed"
+    assert "private-close-sentinel" not in str(captured.value)
+    assert source.closed == [source.stream]
+    assert source.open_streams == 0
+    assert len(buffers) == 1
+    assert bytes(buffers[0]) == b""
+
+
+@pytest.mark.asyncio
+async def test_close_is_shielded_through_repeated_caller_cancellation_and_wipes_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buffers = _track_completed_audio_buffers(monkeypatch)
+    turn = _turn()
+    source = _GatedCloseSource(_stream(turn, _Chunks((b"private-audio-sentinel",))))
+    adapter = BoundedCompletedTurnAudio(source, _NoopClaims())  # type: ignore[arg-type]
+    task = asyncio.create_task(adapter.consume_once(turn))
+    await asyncio.wait_for(source.close_entered.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    source.close_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert source.closed == [source.stream]
+    assert source.close_cancel_count == 0
+    assert source.close_finished is True
+    assert source.open_streams == 0
+    assert len(buffers) == 1
+    assert bytes(buffers[0]) == b""

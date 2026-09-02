@@ -78,3 +78,86 @@ async def test_late_result_gate_prevents_playback_and_clears_content() -> None:
     assert "reachy.play" not in scenario.events
     assert scenario.events[-1] == "turn.clear"
     assert workflow.ephemeral.contains(turn_id) is False
+
+
+class _StageGatePorts:
+    def __init__(self, *, initially_accepting: bool, revoke_after: str | None) -> None:
+        self.accepting = initially_accepting
+        self.revoke_after = revoke_after
+        self.events: list[str] = []
+
+    def _record(self, stage: str) -> None:
+        self.events.append(stage)
+        if self.revoke_after == stage:
+            self.accepting = False
+
+    async def start(self, turn_id: UUID) -> None:
+        del turn_id
+        self._record("start")
+
+    async def transcribe(self, wav_bytes: bytes) -> str:
+        assert wav_bytes == b"synthetic-wav"
+        self._record("transcribe")
+        return "private transcript"
+
+    async def guest_identity(self) -> str:
+        self._record("identity")
+        return "Guest"
+
+    async def generate(self, transcript: str, identity: str) -> str:
+        assert (transcript, identity) == ("private transcript", "Guest")
+        self._record("generate")
+        return "private answer"
+
+    async def synthesize(self, answer: str) -> bytes:
+        assert answer == "private answer"
+        self._record("synthesize")
+        return b"pcm"
+
+    async def play(self, turn_id: UUID, pcm: bytes) -> None:
+        del turn_id
+        assert pcm == b"pcm"
+        self._record("play")
+
+    async def finish(self, turn_id: UUID) -> None:
+        del turn_id
+        self._record("finish")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initially_accepting", "revoke_after", "expected_events"),
+    (
+        (False, None, ["start", "finish"]),
+        (True, "transcribe", ["start", "transcribe", "finish"]),
+        (True, "identity", ["start", "transcribe", "identity", "finish"]),
+        (True, "generate", ["start", "transcribe", "identity", "generate", "finish"]),
+        (
+            True,
+            "synthesize",
+            ["start", "transcribe", "identity", "generate", "synthesize", "finish"],
+        ),
+    ),
+)
+async def test_acceptance_gate_runs_before_each_downstream_content_stage(
+    initially_accepting: bool,
+    revoke_after: str | None,
+    expected_events: list[str],
+) -> None:
+    turn_id = uuid4()
+    ports = _StageGatePorts(
+        initially_accepting=initially_accepting,
+        revoke_after=revoke_after,
+    )
+    workflow = LinearConversationEngine(
+        ports,
+        accepts_results=lambda active_turn_id: (
+            active_turn_id == turn_id and ports.accepting
+        ),
+    )
+
+    outcome = await workflow.run(TurnRequest(turn_id=turn_id, wav_bytes=b"synthetic-wav"))
+
+    assert outcome.spoken is False
+    assert ports.events == expected_events
+    assert workflow.ephemeral.contains(turn_id) is False

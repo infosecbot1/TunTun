@@ -64,6 +64,9 @@ class LinearConversationEngine:
         self.ephemeral: EphemeralTurnContext[dict[str, object]] = EphemeralTurnContext()
         self.cleanup_reason_codes: list[str] = []
 
+    def _accepts_turn_results(self, turn_id: UUID) -> bool:
+        return self._accepts_results(turn_id)
+
     async def run(self, turn: TurnRequest) -> TurnOutcome:
         if type(turn) is not TurnRequest:
             raise TypeError("turn must be an exact TurnRequest")
@@ -73,13 +76,21 @@ class LinearConversationEngine:
         try:
             start_attempted = True
             await self._ports.start(turn.turn_id)
+            if not self._accepts_turn_results(turn.turn_id):
+                return TurnOutcome(spoken=False)
             transcript = await self._ports.transcribe(turn.wav_bytes)
+            if not self._accepts_turn_results(turn.turn_id):
+                return TurnOutcome(spoken=False)
             self.ephemeral.put(turn.turn_id, {"transcript": transcript})
             identity = await self._ports.guest_identity()
+            if not self._accepts_turn_results(turn.turn_id):
+                return TurnOutcome(spoken=False)
             answer = await self._ports.generate(transcript, identity)
+            if not self._accepts_turn_results(turn.turn_id):
+                return TurnOutcome(spoken=False)
             self.ephemeral.put(turn.turn_id, {"answer": answer})
             pcm = await self._ports.synthesize(answer)
-            if not self._accepts_results(turn.turn_id):
+            if not self._accepts_turn_results(turn.turn_id):
                 return TurnOutcome(spoken=False)
             await self._ports.play(turn.turn_id, pcm)
             return TurnOutcome(spoken=True)

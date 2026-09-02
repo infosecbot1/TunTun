@@ -45,3 +45,56 @@ def test_read_synthetic_wav_enforces_nonempty_turn_cap(tmp_path: Path) -> None:
         handle.write(b"x")
     with pytest.raises(ValueError, match="synthetic WAV outside turn bounds"):
         read_synthetic_wav(oversized)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        Path("missing.wav"),
+        Path("missing-parent") / "turn.wav",
+    ),
+)
+def test_read_synthetic_wav_rejects_missing_paths_without_path_content(
+    tmp_path: Path,
+    relative: Path,
+) -> None:
+    requested = tmp_path / relative
+
+    with pytest.raises(PermissionError) as captured:
+        read_synthetic_wav(requested)
+
+    assert str(captured.value) == "unsafe synthetic WAV"
+    assert "missing" not in str(captured.value)
+    assert "turn.wav" not in str(captured.value)
+
+
+def test_read_synthetic_wav_rejects_symlink_parent_without_following(
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    (real_parent / "turn.wav").write_bytes(b"RIFFprivate")
+    symlink_parent = tmp_path / "symlink-parent"
+    symlink_parent.symlink_to(real_parent, target_is_directory=True)
+
+    with pytest.raises(PermissionError) as captured:
+        read_synthetic_wav(symlink_parent / "turn.wav")
+
+    assert str(captured.value) == "unsafe synthetic WAV"
+
+
+def test_read_synthetic_wav_rejects_inaccessible_parent_without_path_content(
+    tmp_path: Path,
+) -> None:
+    inaccessible = tmp_path / "private-parent"
+    inaccessible.mkdir()
+    (inaccessible / "turn.wav").write_bytes(b"RIFFprivate")
+    inaccessible.chmod(0)
+    try:
+        with pytest.raises(PermissionError) as captured:
+            read_synthetic_wav(inaccessible / "turn.wav")
+    finally:
+        inaccessible.chmod(0o700)
+
+    assert str(captured.value) == "unsafe synthetic WAV"
+    assert "private-parent" not in str(captured.value)
