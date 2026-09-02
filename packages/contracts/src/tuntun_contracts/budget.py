@@ -1,7 +1,8 @@
 # packages/contracts/src/tuntun_contracts/budget.py
 from __future__ import annotations
 
-from typing import Annotated, Literal, Self, TypeAlias
+from collections.abc import Mapping
+from typing import Annotated, Any, Literal, Self, TypeAlias
 from uuid import UUID
 
 from pydantic import AwareDatetime, Field, field_validator, model_validator
@@ -63,6 +64,20 @@ class BudgetReservationRequest(ContractModel):
     category: Literal["stt", "llm", "tts", "web_search"]
     usage_ceiling: UsageUnits
     month_key: Annotated[str, Field(pattern=r"^[0-9]{4}-(?:0[1-9]|1[0-2])$")]
+
+    @model_validator(mode="before")
+    @classmethod
+    def forbid_caller_supplied_amounts(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            forbidden = {
+                "worst_case_micros_sgd",
+                "charged_micros_sgd",
+                "amount_micros_sgd",
+            }
+            present = sorted(forbidden.intersection(value))
+            if present:
+                raise ValueError(f"{present[0]} is server-derived")
+        return value
 
     @model_validator(mode="after")
     def exact_pricing_purpose(self) -> Self:

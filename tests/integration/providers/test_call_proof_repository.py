@@ -1,17 +1,10 @@
 # tests/integration/providers/test_call_proof_repository.py
-from datetime import UTC, datetime
-
 import pytest
 from sqlalchemy.exc import IntegrityError
 from tuntun_core.services.providers.call_repository import ProviderCallRepository
+from tuntun_core.services.storage_time import utc_storage
 
 pytest_plugins = ("tests.fixtures.provider_egress",)
-
-
-def _utc_storage(value: datetime) -> str:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise TypeError("stored timestamp must be timezone-aware")
-    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 # Test-only BudgetPort seam. Task 05 replaces this with BudgetGuard; keeping the
@@ -19,7 +12,7 @@ def _utc_storage(value: datetime) -> str:
 @pytest.fixture
 def task04_sql_mark_sent(async_uow_factory, clock):
     async def mark_sent(reservation_id, attempt_id):
-        now = _utc_storage(clock.now())
+        now = utc_storage(clock.now())
 
         def mark(db):
             call = db.exec_driver_sql(
@@ -218,3 +211,19 @@ async def test_finish_requires_and_atomically_closes_both_proof_halves(
     assert reservation[2] == call[2] == "finished"
     assert call[3] == "failed"
     assert case.provider_call_finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_finish_exact_retry_is_idempotent_but_changed_outcome_conflicts(
+    call_repository_fault_case,
+) -> None:
+    case = call_repository_fault_case(None)
+    call_id = await case.begin()
+    await case.mark_sent()
+    await case.finish(call_id, "failed")
+    terminal = await case.persisted_proof_rows()
+    await case.finish(call_id, "failed")
+    assert await case.persisted_proof_rows() == terminal
+    with pytest.raises(PermissionError, match="provider_call_finish_conflict"):
+        await case.finish(call_id, "ambiguous")
+    assert await case.persisted_proof_rows() == terminal

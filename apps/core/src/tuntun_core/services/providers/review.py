@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, Protocol
 
 from pydantic import AwareDatetime, Field, field_validator
 from tuntun_contracts.base import (
+    JCS_MAX_SAFE_INTEGER,
     ContractModel,
     ContractParseError,
     canonical_mapping_bytes,
@@ -27,6 +29,9 @@ _OPENAI_ROUTES = frozenset(
 _OPENAI_MODELS = frozenset(model for _, model in _OPENAI_ROUTES)
 _REVIEW_MAX_AGE = timedelta(days=90)
 _STORAGE_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+_OPENAI_PROJECT_ID = re.compile(r"^proj_[A-Za-z0-9_-]{1,123}$")
+_CENTS_TO_MICROS_USD = 10_000
+_MAX_PROVIDER_LIMIT_MICROS_USD = 100_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +43,18 @@ class RuntimeProviderIdentity:
 
 class RuntimeProviderIdentityReader(Protocol):
     def require_current(self, provider: str) -> RuntimeProviderIdentity: ...
+
+
+class _OpenAIHardLimitEnforcementV1(ContractModel):
+    status: Literal["enforcing"]
+
+
+class _OpenAIProjectSpendLimitV1(ContractModel):
+    object: Literal["project.spend_limit"]
+    threshold_amount: Annotated[int, Field(ge=1, le=JCS_MAX_SAFE_INTEGER)]
+    currency: Literal["USD"]
+    interval: Literal["month"]
+    enforcement: _OpenAIHardLimitEnforcementV1
 
 
 class OpenAIProviderHardLimitV1(ContractModel):
@@ -60,6 +77,65 @@ class OpenAIProviderHardLimitV1(ContractModel):
             "enforcement_status": self.enforcement_status,
             "dashboard_evidence_sha256": self.dashboard_evidence_sha256,
         }
+
+
+def commission_openai_provider_hard_limit(
+    raw: bytes,
+    *,
+    observed_project_id: str,
+    runtime_identity: RuntimeProviderIdentity,
+) -> OpenAIProviderHardLimitV1:
+    """Fail-closed normalization of the raw admin API response."""
+    try:
+        payload = parse_contract_json(
+            _OpenAIProjectSpendLimitV1,
+            raw,
+            max_bytes=2_048,
+            require_canonical=False,
+        )
+    except (ContractParseError, TypeError, UnicodeError, ValueError):
+        raise PermissionError("provider_hard_limit_commissioning_failed") from None
+    if (
+        type(observed_project_id) is not str
+        or _OPENAI_PROJECT_ID.fullmatch(observed_project_id) is None
+        or type(runtime_identity) is not RuntimeProviderIdentity
+        or type(runtime_identity.project_id_commitment_sha256) is not str
+        or re.fullmatch(_HEX_SHA256_PATTERN, runtime_identity.project_id_commitment_sha256) is None
+        or runtime_identity.credential_kind != "project_service_account"
+        or runtime_identity.admin_key_present is not False
+    ):
+        raise PermissionError("provider_hard_limit_commissioning_failed") from None
+    project_commitment = hashlib.sha256(observed_project_id.encode("ascii")).hexdigest()
+    if not hmac.compare_digest(
+        project_commitment,
+        runtime_identity.project_id_commitment_sha256,
+    ):
+        raise PermissionError("provider_hard_limit_commissioning_failed") from None
+    cents = payload.threshold_amount
+    if cents > JCS_MAX_SAFE_INTEGER // _CENTS_TO_MICROS_USD:
+        raise PermissionError("provider_hard_limit_commissioning_failed") from None
+    threshold_micros_usd = cents * _CENTS_TO_MICROS_USD
+    if threshold_micros_usd > _MAX_PROVIDER_LIMIT_MICROS_USD:
+        raise PermissionError("provider_hard_limit_commissioning_failed") from None
+    committed: dict[str, object] = {
+        "project_id_commitment_sha256": project_commitment,
+        "threshold_micros_usd": threshold_micros_usd,
+        "currency": "USD",
+        "interval": "provider_month",
+        "enforcement_status": "enforcing",
+        "dashboard_evidence_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    return OpenAIProviderHardLimitV1.model_validate(
+        committed
+        | {
+            "settings_commitment_sha256": hashlib.sha256(
+                canonical_mapping_bytes(committed),
+            ).hexdigest(),
+            "runtime_credential_kind": "project_service_account",
+            "runtime_admin_key_present": False,
+        },
+        strict=True,
+    )
 
 
 class ProviderReviewV1(ContractModel):
@@ -215,3 +291,23 @@ class ProviderReviewStore:
         ):
             raise PermissionError("provider_review_not_current")
         return review
+
+
+class SqlcipherCurrentProviderReviews:
+    def __init__(self, runtime_identities: RuntimeProviderIdentityReader) -> None:
+        self._runtime_identities = runtime_identities
+
+    def require_current(
+        self,
+        uow: UnitOfWorkProtocol,
+        provider: str,
+        model: str,
+        purpose: str,
+        now: datetime,
+    ) -> object:
+        return ProviderReviewStore(uow, self._runtime_identities).require_current(
+            provider,
+            model,
+            purpose,
+            now,
+        )

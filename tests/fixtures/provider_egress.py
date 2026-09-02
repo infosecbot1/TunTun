@@ -1,16 +1,28 @@
 # tests/fixtures/provider_egress.py
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from tuntun_contracts.base import Commitment, Sensitivity, canonical_mapping_bytes
+from tuntun_contracts.audit import AuditReceipt
+from tuntun_contracts.base import Commitment, Sensitivity, canonical_bytes, canonical_mapping_bytes
+from tuntun_contracts.budget import (
+    BudgetReservationRequest,
+    BudgetSettlementRequest,
+    LlmUsageUnits,
+    ProviderUsageReceiptV1,
+)
 from tuntun_contracts.commitments import commit_private
 from tuntun_contracts.provider import (
     RedactionReceipt,
@@ -18,9 +30,15 @@ from tuntun_contracts.provider import (
     RouteAuthorizationRequest,
     RouteConsumption,
 )
+from tuntun_contracts.reachy import SafetyReceipt
 from tuntun_core.bootstrap.container import CoreContainer
+from tuntun_core.services.budget.catalog import PriceCatalog
+from tuntun_core.services.budget.guard import BudgetGuard
+from tuntun_core.services.budget.month import singapore_month_key
+from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
 from tuntun_core.services.providers.call_repository import ProviderCallRepository
-from tuntun_core.services.providers.gateway import ProviderGateway
+from tuntun_core.services.providers.defaults import load_provider_defaults
+from tuntun_core.services.providers.gateway import ProviderGateway, ProviderUsageObservation
 from tuntun_core.services.providers.reasoning_wire import (
     build_openai_reasoning_wire_request,
 )
@@ -29,15 +47,18 @@ from tuntun_core.services.providers.redaction_repository import (
     RedactionReceiptRepository,
 )
 from tuntun_core.services.providers.redactor import Redactor
+from tuntun_core.services.providers.route_authorization import RouteAuthorizationEnvelopeV1
 from tuntun_core.services.providers.route_verifier import authorization_from_request
+from tuntun_core.services.storage_time import utc_storage
 from tuntun_testing.fake_clock import FakeClock
 
 from tests.fixtures.provider_routes import RouteDatabase
 
-pytest_plugins = ("tests.fixtures.provider_routes",)
+pytest_plugins = ("tests.fixtures.provider_routes", "tests.fixtures.budget")
 
 _ROOT = b"k" * 32
 _KEY_ID = "route-hmac-v1"
+_PROVIDER_DEFAULTS_PATH = Path(__file__).parents[2] / "config/providers/default.yaml"
 _PURPOSES = frozenset({"cloud_stt", "cloud_reasoning", "cloud_tts"})
 _RECEIPT_MUTATIONS = frozenset(
     {
@@ -71,10 +92,11 @@ _BOUNDARY_MUTATIONS = frozenset(
 )
 
 
-def _utc_storage(value: datetime) -> str:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise TypeError("stored timestamp must be timezone-aware")
-    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+def _copy_provider_defaults_to_private_path(directory: Path) -> Path:
+    target = directory / "provider-defaults.yaml"
+    shutil.copyfile(_PROVIDER_DEFAULTS_PATH, target)
+    target.chmod(0o600)
+    return target
 
 
 def _other_commitment(label: str) -> Commitment:
@@ -188,8 +210,8 @@ async def _seed_reservation(
         "reserved",
         1,
         "not_claimed",
-        _utc_storage(now),
-        _utc_storage(now + timedelta(minutes=5)),
+        utc_storage(now),
+        utc_storage(now + timedelta(minutes=5)),
     )
     async with factory() as uow:
 
@@ -299,7 +321,7 @@ class SqlBudgetPortFake:
         self._clock = clock
 
     async def mark_sent(self, reservation_id: UUID, attempt_id: UUID) -> None:
-        now = _utc_storage(self._clock.now())
+        now = utc_storage(self._clock.now())
 
         def mark(db) -> None:
             call_count = db.exec_driver_sql(
@@ -346,9 +368,15 @@ class SqlBudgetPortFake:
 
 
 class GatewayCase:
-    def __init__(self, context: ProviderContext, mark_sent_error: BaseException | None) -> None:
+    def __init__(
+        self,
+        context: ProviderContext,
+        mark_sent_error: BaseException | None,
+        clock: FakeClock,
+    ) -> None:
         self.context = context
         self.mark_sent_error = mark_sent_error
+        self.clock = clock
         self.events: list[str] = []
         self.finish_calls: list[str] = []
 
@@ -367,6 +395,16 @@ class GatewayCase:
                 if case.mark_sent_error is not None:
                     raise case.mark_sent_error
 
+            async def require_accounting_context(self, route, consumption):
+                del route, consumption
+                case.events.append("accounting")
+                return SimpleNamespace(
+                    category="llm",
+                    usage_ceiling=LlmUsageUnits(category="llm", input_tokens=2, output_tokens=2),
+                    primary_accounting_basis="provider_reported_exact",
+                    missing_evidence_policy="freeze_unknown_overage",
+                )
+
         class Calls:
             async def begin(self, route, supplied, receipt_id):
                 del route, supplied, receipt_id
@@ -377,21 +415,33 @@ class GatewayCase:
                 del call_id
                 case.events.append("network_starting")
 
-            async def finish(self, call_id, outcome):
+            async def finish(self, call_id, outcome, route, receipt=None):
                 del call_id
+                del route, receipt
                 case.events.append(outcome)
                 case.finish_calls.append(outcome)
+
+        class Evidence:
+            def attest_provider_usage(self, **_values):
+                return SimpleNamespace(receipt_id=uuid4())
 
         async def invoke() -> str:
             case.events.append("network")
             return "ok"
 
-        gateway = ProviderGateway(Authorizer(), Budget(), Calls())  # type: ignore[arg-type]
+        async def observe(_result):
+            return ProviderUsageObservation(
+                LlmUsageUnits(category="llm", input_tokens=1, output_tokens=1),
+                "gateway_case_resp_1",
+            )
+
+        gateway = ProviderGateway(Authorizer(), Budget(), Calls(), Evidence(), self.clock)
         return await gateway.send(
             self.context.route,
             self.context.consumption,
             self.context.receipt.receipt_id if self.context.receipt else None,
             invoke,
+            observe,
         )
 
 
@@ -610,13 +660,16 @@ class CallRepositoryFaultCase:
             await self._drop_trigger(name)
 
     async def finish(self, call_id: UUID, outcome: str) -> None:
+        assert self.context is not None
         name = (
             await self._trigger(self._fault)
             if self._fault in {"after_call_finish", "reservation_finish_cas_lost"}
             else None
         )
         try:
-            await self._harness.provider_call_repository.finish(call_id, outcome)
+            await self._harness.provider_call_repository.finish(
+                call_id, outcome, self.context.route, None
+            )
         finally:
             await self._drop_trigger(name)
         async with self._harness.factory() as uow:
@@ -699,27 +752,30 @@ class ProviderBoundaryCase:
             policy_version="provider-redaction-v1",
             maximum_sensitivity=Sensitivity.PERSONAL,
         )
-        await self._harness.redaction_receipt_repository.record(receipt)
-        context = await _create_context(
+        context, _reservation, guard = await _create_production_context(
             self._harness.factory,
-            self._harness.redaction_receipt_repository,
             self._harness.clock,
-            "cloud_reasoning",
-            receipt=receipt,
-            canonical_body=body,
-            input_units=units,
-            persist_receipt=False,
-            request_id=self.request_id,
+            self._harness.catalog,
+            self._harness.provider_reviews,
+            self._harness.budget_evidence,
+            seed_response_scope=False,
+            supplied_receipt=receipt,
+            supplied_body=body,
+            supplied_units=units,
+            supplied_request_id=self.request_id,
         )
         calls = ProviderCallRepository(
             self._harness.factory,
             self._harness.clock,
             self._harness.redaction_receipt_repository,
+            self._harness.budget_evidence,
         )
         gateway = ProviderGateway(
             BoundAuthorizerFake(context),
-            SqlBudgetPortFake(self._harness.factory, self._harness.clock),
+            guard,
             calls,
+            self._harness.budget_evidence,
+            self._harness.clock,
         )
 
         async def capture() -> str:
@@ -727,7 +783,13 @@ class ProviderBoundaryCase:
             self.captured_provider_body = body
             return "ok"
 
-        await gateway.send(context.route, context.consumption, receipt.receipt_id, capture)
+        async def observe(_result):
+            return ProviderUsageObservation(
+                LlmUsageUnits(category="llm", input_tokens=2, output_tokens=2),
+                "boundary_resp_1",
+            )
+
+        await gateway.send(context.route, context.consumption, receipt.receipt_id, capture, observe)
 
     async def _count(self, table: str, column: str, value: UUID) -> int:
         if (table, column) not in {("redaction_receipts", "id"), ("provider_calls", "request_id")}:
@@ -765,15 +827,745 @@ class ProviderBoundaryCase:
         return json.dumps(rows, sort_keys=True)
 
 
+async def _seed_response_scope(
+    factory: AsyncUnitOfWorkFactory, route: RouteAuthorization, clock: FakeClock
+) -> None:
+    device_id = uuid4()
+    now = utc_storage(clock.now())
+    envelope = RouteAuthorizationEnvelopeV1(
+        route=route,
+        subject_authority_generation=(7 if route.subject_id is not None else None),
+    )
+    async with factory() as uow:
+
+        def seed(transaction) -> None:
+            transaction.exec_driver_sql(
+                "INSERT INTO households"
+                "(id,display_label_ciphertext,timezone,created_at) "
+                "VALUES(?,?,?,?)",
+                (
+                    str(route.household_id),
+                    b"test-household",
+                    "Asia/Singapore",
+                    now,
+                ),
+            )
+            transaction.exec_driver_sql(
+                "INSERT INTO devices"
+                "(id,household_id,kind,certificate_fingerprint,"
+                "signing_public_key,signing_key_id,last_sequence,paired_at) "
+                "VALUES(?,?,?,?,?,?,0,?)",
+                (
+                    str(device_id),
+                    str(route.household_id),
+                    "reachy",
+                    f"test-{device_id}",
+                    b"x" * 32,
+                    "test-signing-v1",
+                    now,
+                ),
+            )
+            transaction.exec_driver_sql(
+                "INSERT INTO sessions"
+                "(id,household_id,device_id,state,speaker_subject_id,"
+                "opened_at,last_activity_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    str(route.session_id),
+                    str(route.household_id),
+                    str(device_id),
+                    "open",
+                    None if route.subject_id is None else str(route.subject_id),
+                    now,
+                    now,
+                ),
+            )
+            transaction.exec_driver_sql(
+                "INSERT INTO runtime_settings(key,value_json,version,updated_at) VALUES(?,?,1,?)",
+                (
+                    f"route.authorization.{route.authorization_id}",
+                    canonical_bytes(envelope).decode("utf-8"),
+                    now,
+                ),
+            )
+
+        await uow.run_sync(seed)
+        await uow.commit()
+
+
+async def _create_production_context(
+    factory: AsyncUnitOfWorkFactory,
+    clock: FakeClock,
+    catalog: PriceCatalog,
+    provider_reviews,
+    budget_evidence,
+    *,
+    seed_response_scope: bool,
+    supplied_receipt: RedactionReceipt | None = None,
+    supplied_body: bytes | None = None,
+    supplied_units: int | None = None,
+    supplied_request_id: UUID | None = None,
+    usage_ceiling=None,
+    hard_limit: int = 150_000_000,
+    soft_limit: int = 100_000_000,
+):
+    receipt_repository = RedactionReceiptRepository(factory, clock)
+    guard = BudgetGuard(
+        factory,
+        clock,
+        catalog,
+        provider_reviews,
+        budget_evidence,
+        hard_limit=hard_limit,
+        soft_limit=soft_limit,
+    )
+    generated_receipt, generated_body, generated_units = _artifact("cloud_reasoning")
+    receipt = generated_receipt if supplied_receipt is None else supplied_receipt
+    body = generated_body if supplied_body is None else supplied_body
+    units = generated_units if supplied_units is None else supplied_units
+    assert receipt is not None
+    await receipt_repository.record(receipt)
+    request_id = supplied_request_id or uuid4()
+    attempt_id = uuid4()
+    household_id, subject_id, session_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
+    usage = (
+        LlmUsageUnits(category="llm", input_tokens=2, output_tokens=2)
+        if usage_ceiling is None
+        else usage_ceiling
+    )
+    reservation = await guard.reserve(
+        BudgetReservationRequest(
+            household_id=household_id,
+            turn_id=turn_id,
+            request_id=request_id,
+            attempt_id=attempt_id,
+            provider="openai",
+            model="gpt-5.6-sol",
+            category="llm",
+            usage_ceiling=usage,
+            month_key=singapore_month_key(clock.now()),
+        )
+    )
+    if reservation.outcome not in {"allow", "allow_soft_warning"}:
+        raise RuntimeError("production gateway fixture reservation denied")
+    request = RouteAuthorizationRequest(
+        request_id=request_id,
+        attempt_id=attempt_id,
+        purpose="cloud_reasoning",
+        household_id=household_id,
+        subject_id=subject_id,
+        session_id=session_id,
+        turn_id=turn_id,
+        provider="openai",
+        model="gpt-5.6-sol",
+        request_commitment=receipt.output_commitment,
+        max_input_bytes=len(body),
+        max_input_units=max(units, 1),
+        privacy_receipt_id=uuid4(),
+        consent_receipt_ids=(uuid4(),),
+        budget_reservation_id=reservation.reservation_id,
+        maximum_sensitivity=Sensitivity.PERSONAL,
+    )
+    route = authorization_from_request(
+        request,
+        authorization_id=uuid4(),
+        expires_at=clock.now() + timedelta(seconds=30),
+    )
+    consumption = RouteConsumption(
+        request_id=route.request_id,
+        attempt_id=route.attempt_id,
+        purpose=route.purpose,
+        household_id=route.household_id,
+        subject_id=route.subject_id,
+        session_id=route.session_id,
+        turn_id=route.turn_id,
+        provider=route.provider,
+        model=route.model,
+        request_commitment=route.request_commitment,
+        input_bytes=len(body),
+        input_units=units,
+        consumed_at=clock.now(),
+    )
+    if seed_response_scope:
+        await _seed_response_scope(factory, route, clock)
+    return ProviderContext(route, consumption, receipt, body), reservation, guard
+
+
+class TransactionalAuditPort:
+    """Test audit port whose effect commits or rolls back with the receipt."""
+
+    def __init__(self, factory: AsyncUnitOfWorkFactory, root: bytes, key_id: str) -> None:
+        self._factory, self._root, self._key_id = factory, root, key_id
+
+    async def append(self, uow, draft):
+        def append_locked(transaction):
+            previous = transaction.exec_driver_sql(
+                "SELECT ordinal,public_hash_hex FROM audit_receipts ORDER BY ordinal DESC LIMIT 1",
+            ).fetchone()
+            ordinal = 1 if previous is None else int(previous[0]) + 1
+            previous_hash = None if previous is None else previous[1]
+            body = canonical_bytes(draft)
+            public_hash = hashlib.sha256(
+                (b"" if previous_hash is None else previous_hash.encode("ascii")) + body
+            ).hexdigest()
+            signature = commit_private(
+                self._root,
+                self._key_id,
+                "audit.test-transactional",
+                canonical_mapping_bytes(
+                    {
+                        "ordinal": ordinal,
+                        "previous_public_hash_hex": previous_hash,
+                        "public_hash_hex": public_hash,
+                        "draft": draft.model_dump(mode="json"),
+                    }
+                ),
+            )
+            receipt_id = uuid4()
+            transaction.exec_driver_sql(
+                "INSERT INTO audit_receipts"
+                "(id,ordinal,previous_public_hash_hex,public_hash_hex,"
+                "hmac_key_id,hmac_b64,canonical_body_json,occurred_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    str(receipt_id),
+                    ordinal,
+                    previous_hash,
+                    public_hash,
+                    signature.key_id,
+                    signature.value_b64,
+                    body.decode("utf-8"),
+                    utc_storage(draft.occurred_at),
+                ),
+            )
+            return AuditReceipt(
+                receipt_id=receipt_id,
+                ordinal=ordinal,
+                public_hash_hex=public_hash,
+                hmac_key_id=signature.key_id,
+                hmac_b64=signature.value_b64,
+                occurred_at=draft.occurred_at,
+            )
+
+        return await uow.run_sync(append_locked)
+
+    async def count(self, action_code: str) -> int:
+        async with self._factory() as uow:
+            bodies = await uow.run_sync(
+                lambda transaction: (
+                    transaction.exec_driver_sql(
+                        "SELECT canonical_body_json FROM audit_receipts",
+                    )
+                    .scalars()
+                    .all()
+                )
+            )
+            await uow.rollback()
+        return sum(json.loads(body).get("action_code") == action_code for body in bodies)
+
+
+class _RecordingProviderCallRepository(ProviderCallRepository):
+    def __init__(self, *args, owner, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._owner = owner
+
+    async def finish(self, call_id, outcome, route, receipt=None) -> None:
+        await super().finish(call_id, outcome, route, receipt)
+        self._owner.provider_terminal_count += 1
+        if receipt is not None:
+            self._owner._receipts[receipt.receipt_id] = receipt
+            self._owner.receipt_commitment = receipt.receipt_commitment
+            self._owner.usage_receipt_count += 1
+            self._owner.events.append("usage_receipt_committed")
+
+
+class ProductionProviderGatewayCase:
+    def __init__(
+        self,
+        *,
+        factory: AsyncUnitOfWorkFactory,
+        clock: FakeClock,
+        catalog: PriceCatalog,
+        provider_reviews,
+        evidence,
+        context: ProviderContext,
+        reservation,
+        guard: BudgetGuard,
+        valid_usage: bool,
+        reported_usage,
+        provider_response_identifier,
+        hard_limit: int,
+        soft_limit: int,
+    ) -> None:
+        self.factory, self.clock, self.catalog = factory, clock, catalog
+        self.provider_reviews, self.evidence = provider_reviews, evidence
+        self.context = context
+        self.route, self.consumption = context.route, context.consumption
+        assert context.receipt is not None
+        self.redaction_receipt_id = context.receipt.receipt_id
+        self.budget_guard = guard
+        self.settlement_request = BudgetSettlementRequest(
+            reservation_id=self.route.budget_reservation_id,
+            attempt_id=self.route.attempt_id,
+        )
+        self.exact_snapshot_price = reservation.amount_micros_sgd
+        self.valid_usage = valid_usage
+        self.reported_usage = reported_usage
+        self.provider_response_identifier = provider_response_identifier
+        self.hard_limit, self.soft_limit = hard_limit, soft_limit
+        self.call_id = None
+        self.events: list[str] = []
+        self._receipts: dict[UUID, ProviderUsageReceiptV1] = {}
+        self.provider_terminal_count = 0
+        self.usage_receipt_count = 0
+        self.cloud_egress_frozen = False
+        self.freeze_receipt = None
+        self.receipt_commitment = None
+        self.redaction_receipt_repository = RedactionReceiptRepository(factory, clock)
+        self.provider_call_repository = _RecordingProviderCallRepository(
+            factory,
+            clock,
+            self.redaction_receipt_repository,
+            evidence,
+            owner=self,
+        )
+        self.gateway = ProviderGateway(
+            BoundAuthorizerFake(context),
+            guard,
+            self.provider_call_repository,
+            evidence,
+            clock,
+        )
+
+    async def invoke(self):
+        async def invoke_network():
+            self.events.append("network_invoked")
+            return "ok"
+
+        async def observe(_result):
+            usage = self.reported_usage
+            if usage is None and self.valid_usage:
+                usage = LlmUsageUnits(category="llm", input_tokens=2, output_tokens=2)
+            return ProviderUsageObservation(usage, self.provider_response_identifier)
+
+        result = await self.gateway.send(
+            self.route,
+            self.consumption,
+            self.redaction_receipt_id,
+            invoke_network,
+            observe,
+        )
+        self.events.append("gateway_result_returned")
+        return result
+
+    async def begin_claim(self):
+        if self.call_id is None:
+            self.call_id = await self.provider_call_repository.begin(
+                self.route,
+                self.consumption,
+                self.redaction_receipt_id,
+            )
+        return self.call_id
+
+    async def mark_sent(self) -> None:
+        await self.begin_claim()
+        await self.budget_guard.mark_sent(
+            self.route.budget_reservation_id,
+            self.route.attempt_id,
+        )
+
+    async def mark_network_invocation_starting(self) -> None:
+        await self.mark_sent()
+        await self.provider_call_repository.mark_network_invocation_starting(self.call_id)
+
+    async def finish(self, outcome, receipt=None) -> None:
+        if self.call_id is None:
+            raise AssertionError("provider call must be claimed before finish")
+        await self.provider_call_repository.finish(self.call_id, outcome, self.route, receipt)
+
+    async def expire(self) -> None:
+        self.clock.advance(timedelta(seconds=901))
+
+    async def reconcile_expired(self) -> int:
+        return await ExpiredBudgetReconciler(
+            self.factory,
+            self.clock,
+            self.budget_guard,
+        ).reconcile_batch()
+
+    async def reconcile_restart(self, cutoff=None) -> int:
+        return await ExpiredBudgetReconciler(
+            self.factory,
+            self.clock,
+            self.budget_guard,
+        ).reconcile_restart_batch(cutoff or self.clock.now())
+
+    async def reservation_row(self):
+        async with self.factory() as uow:
+
+            def load(transaction):
+                return dict(
+                    transaction.exec_driver_sql(
+                        "SELECT * FROM budget_reservations WHERE id=?",
+                        (str(self.route.budget_reservation_id),),
+                    )
+                    .mappings()
+                    .one()
+                )
+
+            row = await uow.run_sync(load)
+            await uow.rollback()
+        return SimpleNamespace(**row)
+
+    async def ledger_row(self):
+        async with self.factory() as uow:
+
+            def load(transaction):
+                row = (
+                    transaction.exec_driver_sql(
+                        "SELECT * FROM cost_ledger WHERE reservation_id=?",
+                        (str(self.route.budget_reservation_id),),
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                return None if row is None else dict(row)
+
+            row = await uow.run_sync(load)
+            await uow.rollback()
+        return None if row is None else SimpleNamespace(**row)
+
+    async def ledger_count(self) -> int:
+        return (await self.proof_rows())[2]
+
+    async def owner_alert_count(self) -> int:
+        async with self.factory() as uow:
+            count = await uow.run_sync(
+                lambda transaction: transaction.exec_driver_sql(
+                    "SELECT count(*) FROM runtime_settings WHERE key LIKE 'budget.owner_alert.%'",
+                ).scalar_one()
+            )
+            await uow.rollback()
+        return int(count)
+
+    async def budget_marker_counts(self) -> tuple[int, int]:
+        async with self.factory() as uow:
+
+            def load(transaction) -> tuple[int, int]:
+                freezes = transaction.exec_driver_sql(
+                    "SELECT count(*) FROM runtime_settings "
+                    "WHERE key LIKE 'budget.cloud_egress_freeze.%'",
+                ).scalar_one()
+                alerts = transaction.exec_driver_sql(
+                    "SELECT count(*) FROM runtime_settings WHERE key LIKE 'budget.owner_alert.%'",
+                ).scalar_one()
+                return int(freezes), int(alerts)
+
+            counts = await uow.run_sync(load)
+            await uow.rollback()
+        return counts
+
+    async def tamper_pricing_source_digest(self) -> None:
+        async with self.factory() as uow:
+            await uow.run_sync(
+                lambda transaction: (
+                    transaction.exec_driver_sql(
+                        "UPDATE budget_reservations SET price_source_sha256=? WHERE id=?",
+                        ("f" * 64, str(self.route.budget_reservation_id)),
+                    ).rowcount
+                )
+            )
+            await uow.commit()
+
+    async def tamper_pricing_evidence(self, fault) -> None:
+        column, value = {
+            "snapshot": ("price_snapshot_json", "{}"),
+            "hmac": ("pricing_commitment_hmac_b64", _other_commitment("pricing-hmac").value_b64),
+            "policy": ("pricing_version", "openai-substituted"),
+        }[fault]
+        async with self.factory() as uow:
+            await uow.run_sync(
+                lambda transaction: (
+                    transaction.exec_driver_sql(
+                        f"UPDATE budget_reservations SET {column}=? WHERE id=?",
+                        (value, str(self.route.budget_reservation_id)),
+                    ).rowcount
+                )
+            )
+            await uow.commit()
+
+    async def tamper_transport_phase_mismatch(self) -> None:
+        await self.begin_claim()
+        async with self.factory() as uow:
+            await uow.run_sync(
+                lambda transaction: (
+                    transaction.exec_driver_sql(
+                        "UPDATE provider_calls SET transport_phase='marked_sent' WHERE id=?",
+                        (str(self.call_id),),
+                    ).rowcount
+                )
+            )
+            await uow.commit()
+
+    async def install_ledger_ignore_trigger(self) -> str:
+        name = f"test_budget_ledger_ignore_{self.route.attempt_id.hex}"
+        async with self.factory() as uow:
+            await uow.run_sync(
+                lambda transaction: (
+                    transaction.exec_driver_sql(
+                        f"CREATE TRIGGER {name} BEFORE INSERT ON cost_ledger "
+                        "BEGIN SELECT RAISE(IGNORE); END",
+                    ).rowcount
+                )
+            )
+            await uow.commit()
+        return name
+
+    async def install_budget_marker_ignore_trigger(
+        self,
+        marker: Literal["freeze", "owner_alert"],
+    ) -> str:
+        reservation = await self.reservation_row()
+        key = (
+            f"budget.cloud_egress_freeze.{reservation.month_key}"
+            if marker == "freeze"
+            else f"budget.owner_alert.{reservation.month_key}.{self.route.budget_reservation_id}"
+        )
+        name = f"test_budget_{marker}_ignore_{self.route.attempt_id.hex}"
+        async with self.factory() as uow:
+
+            def install_trigger(transaction) -> None:
+                transaction.exec_driver_sql(
+                    f"CREATE TRIGGER {name} BEFORE INSERT ON runtime_settings "
+                    f"WHEN NEW.key='{key}' "
+                    "BEGIN SELECT RAISE(IGNORE); END",
+                )
+
+            await uow.run_sync(install_trigger)
+            await uow.commit()
+        return name
+
+    async def drop_trigger(self, name) -> None:
+        async with self.factory() as uow:
+            await uow.run_sync(
+                lambda transaction: (
+                    transaction.exec_driver_sql(f"DROP TRIGGER IF EXISTS {name}").rowcount
+                )
+            )
+            await uow.commit()
+
+    async def drop_live_catalog_after_reserve(self) -> None:
+        self.budget_guard = await self.restart_budget_guard(PriceCatalog(prices=(), fx=None))
+
+    async def provider_call_row(self):
+        async with self.factory() as uow:
+
+            def load(transaction):
+                return dict(
+                    transaction.exec_driver_sql(
+                        "SELECT * FROM provider_calls WHERE attempt_id=?",
+                        (str(self.route.attempt_id),),
+                    )
+                    .mappings()
+                    .one()
+                )
+
+            row = await uow.run_sync(load)
+            await uow.rollback()
+        return SimpleNamespace(**row)
+
+    def receipt(self, receipt_id):
+        return self._receipts[receipt_id]
+
+    async def restart_budget_guard(self, catalog=None):
+        return BudgetGuard(
+            self.factory,
+            self.clock,
+            self.catalog if catalog is None else catalog,
+            self.provider_reviews,
+            self.evidence,
+            hard_limit=self.hard_limit,
+            soft_limit=self.soft_limit,
+        )
+
+    async def settle(self):
+        try:
+            return await self.budget_guard.settle(self.settlement_request)
+        finally:
+            await self._refresh_freeze()
+
+    async def proof_rows(self):
+        async with self.factory() as uow:
+
+            def load(transaction):
+                reservation = transaction.exec_driver_sql(
+                    "SELECT state,transport_phase,charged_micros_sgd "
+                    "FROM budget_reservations WHERE id=?",
+                    (str(self.route.budget_reservation_id),),
+                ).fetchone()
+                call = transaction.exec_driver_sql(
+                    "SELECT outcome,transport_phase,finished_at IS NOT NULL FROM provider_calls "
+                    "WHERE attempt_id=?",
+                    (str(self.route.attempt_id),),
+                ).fetchone()
+                ledger_count = transaction.exec_driver_sql(
+                    "SELECT count(*) FROM cost_ledger WHERE reservation_id=?",
+                    (str(self.route.budget_reservation_id),),
+                ).scalar_one()
+                return (
+                    None if reservation is None else tuple(reservation),
+                    None if call is None else tuple(call),
+                    int(ledger_count),
+                )
+
+            reservation, call, ledger_count = await uow.run_sync(load)
+            await uow.rollback()
+        return reservation, call, ledger_count
+
+    async def tamper_receipt(self, fault) -> None:
+        row = await self.provider_call_row()
+        receipt = ProviderUsageReceiptV1.model_validate_json(row.provider_usage_json)
+        raw = row.provider_usage_json
+        key = row.provider_usage_receipt_key_id
+        mac = row.provider_usage_receipt_hmac_b64
+        if fault == "receipt_json":
+            raw = '{"schema_version":"tuntun.provider-usage-receipt.v1"}'
+        elif fault == "outer_key":
+            key = "budget-evidence-other"
+        elif fault == "outer_hmac":
+            mac = _other_commitment("outer-hmac").value_b64
+        else:
+            updates = {
+                "attempt": {"attempt_id": uuid4()},
+                "provider": {"provider": "qwen"},
+                "model": {"model": "other-model"},
+            }[fault]
+            raw = self.evidence.canonical_receipt(receipt.model_copy(update=updates))
+        async with self.factory() as uow:
+            await uow.run_sync(
+                lambda transaction: (
+                    transaction.exec_driver_sql(
+                        "UPDATE provider_calls SET provider_usage_json=?,"
+                        "provider_usage_receipt_key_id=?,provider_usage_receipt_hmac_b64=? "
+                        "WHERE attempt_id=?",
+                        (raw, key, mac, str(self.route.attempt_id)),
+                    ).rowcount
+                )
+            )
+            await uow.commit()
+
+    async def _refresh_freeze(self) -> None:
+        async with self.factory() as uow:
+            value = await uow.run_sync(
+                lambda transaction: transaction.exec_driver_sql(
+                    "SELECT value_json FROM runtime_settings "
+                    "WHERE key LIKE 'budget.cloud_egress_freeze.%'",
+                ).scalar_one_or_none()
+            )
+            await uow.rollback()
+        if value is not None:
+            self.cloud_egress_frozen = True
+            self.freeze_receipt = SimpleNamespace(**json.loads(value))
+
+    async def assert_unknown_overage_freezes_without_ledger(self) -> None:
+        with pytest.raises(PermissionError, match="unknown_overage"):
+            await self.settle()
+        assert self.cloud_egress_frozen
+        assert self.freeze_receipt.overage_known is False
+        assert (await self.proof_rows())[2] == 0
+
+
+class _FakeStream:
+    def __init__(self) -> None:
+        self._chunks = iter((b"hello", b""))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        chunk = next(self._chunks, None)
+        if chunk is None:
+            raise StopAsyncIteration
+        return chunk
+
+
+class ProductionStreamGatewayCase:
+    def __init__(self, base: ProductionProviderGatewayCase) -> None:
+        self._base = base
+        self.gateway = base.gateway
+        self.route = base.route
+        self.consumption = base.consumption
+        self.redaction_receipt_id = base.redaction_receipt_id
+        self.events = base.events
+        self.ledger_rows_for_attempt = 0
+
+    @property
+    def provider_terminal_count(self):
+        return self._base.provider_terminal_count
+
+    @property
+    def usage_receipt_count(self):
+        return self._base.usage_receipt_count
+
+    @asynccontextmanager
+    async def open_response(self):
+        yield _FakeStream()
+
+    async def observe(self, _response):
+        return ProviderUsageObservation(
+            LlmUsageUnits(category="llm", input_tokens=2, output_tokens=2),
+            "stream_resp_1",
+        )
+
+    async def consume_to_eof(self, response) -> None:
+        async for _chunk in response:
+            pass
+
+    async def restart_and_reconcile(self) -> None:
+        await self._base.settle()
+        self.ledger_rows_for_attempt = (await self._base.proof_rows())[2]
+
+
+class _ProductionReachySafety:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def stop_all(self, turn_id):
+        self.calls.append(turn_id)
+        if turn_id is not None:
+            raise AssertionError("global startup safety requires turn_id=None")
+        return SafetyReceipt(
+            turn_id=None,
+            playback_stopped=True,
+            motion_stopped=True,
+            buffers_cleared=True,
+        )
+
+
+class _ProductionContainerCase:
+    def __init__(self, container, context, reachy) -> None:
+        self.container = container
+        self.context = context
+        self.reachy = reachy
+
+    def __getattr__(self, name):
+        return getattr(self.container, name)
+
+
 class ProviderEgressHarness:
     def __init__(
         self,
         factory: AsyncUnitOfWorkFactory,
         clock: FakeClock,
         context: ProviderContext,
+        catalog: PriceCatalog,
+        provider_reviews,
+        budget_evidence,
     ) -> None:
         self.factory = factory
         self.clock = clock
+        self.catalog = catalog
+        self.provider_reviews = provider_reviews
+        self.budget_evidence = budget_evidence
         self.route = context.route
         self.consumption = context.consumption
         assert context.receipt is not None
@@ -785,12 +1577,6 @@ class ProviderEgressHarness:
             self.redaction_receipt_repository,
         )
         self.budget_port_fake = SqlBudgetPortFake(factory, clock)
-        self.core_container = CoreContainer(
-            sqlcipher_uow_factory=factory,
-            clock=clock,
-            route_authorizer=BoundAuthorizerFake(context),
-        )
-        self.provider_gateway = self.core_container.build_provider_gateway(self.budget_port_fake)
 
     @classmethod
     async def create(
@@ -798,6 +1584,9 @@ class ProviderEgressHarness:
         route_database: RouteDatabase,
         factory: AsyncUnitOfWorkFactory,
         clock: FakeClock,
+        catalog: PriceCatalog,
+        provider_reviews,
+        budget_evidence,
     ) -> ProviderEgressHarness:
         del route_database
         repository = RedactionReceiptRepository(factory, clock)
@@ -807,7 +1596,7 @@ class ProviderEgressHarness:
             clock,
             "cloud_reasoning",
         )
-        return cls(factory, clock, context)
+        return cls(factory, clock, context, catalog, provider_reviews, budget_evidence)
 
     async def aclose(self) -> None:
         # Per-case triggers are dropped in `finally`; DB/UOW ownership remains
@@ -818,7 +1607,7 @@ class ProviderEgressHarness:
         context = ProviderContext(
             self.route, self.consumption, self.finalized_redaction_receipt, b"{}"
         )
-        return GatewayCase(context, mark_sent_error)
+        return GatewayCase(context, mark_sent_error, self.clock)
 
     def provider_call_binding_case(
         self,
@@ -850,11 +1639,17 @@ async def provider_egress_harness(
     route_database: RouteDatabase,
     async_uow_factory,
     clock,
+    catalog,
+    provider_reviews,
+    budget_evidence,
 ) -> AsyncIterator[ProviderEgressHarness]:
     harness = await ProviderEgressHarness.create(
         route_database,
         async_uow_factory,
         clock,
+        catalog,
+        provider_reviews,
+        budget_evidence,
     )
     try:
         yield harness
@@ -904,7 +1699,7 @@ def call_repository_fault_case(provider_egress_harness):
 
 @pytest.fixture
 def core_container(provider_egress_harness):
-    return provider_egress_harness.core_container
+    raise RuntimeError("core_container fixture was replaced by production_core_container")
 
 
 @pytest.fixture
@@ -919,4 +1714,134 @@ def provider_boundary_case(provider_egress_harness):
 
 @pytest.fixture
 def provider_gateway(provider_egress_harness):
-    return provider_egress_harness.provider_gateway
+    raise RuntimeError(
+        "provider_gateway fixture was replaced by production_core_container.provider_gateway"
+    )
+
+
+@pytest_asyncio.fixture
+async def production_core_container(
+    async_uow_factory,
+    clock,
+    catalog,
+    provider_reviews,
+    budget_evidence,
+    tmp_path,
+):
+    context, _reservation, _guard = await _create_production_context(
+        async_uow_factory,
+        clock,
+        catalog,
+        provider_reviews,
+        budget_evidence,
+        seed_response_scope=False,
+    )
+    return CoreContainer(
+        sqlcipher_uow_factory=async_uow_factory,
+        clock=clock,
+        route_authorizer=BoundAuthorizerFake(context),
+        price_catalog=catalog,
+        provider_reviews=provider_reviews,
+        budget_evidence=budget_evidence,
+        provider_defaults=load_provider_defaults(_copy_provider_defaults_to_private_path(tmp_path)),
+    )
+
+
+@pytest_asyncio.fixture
+async def production_container(
+    async_uow_factory,
+    clock,
+    catalog,
+    provider_reviews,
+    runtime_provider_identities,
+    budget_evidence,
+    tmp_path,
+):
+    from tuntun_core.bootstrap.container import ProductionContainer
+
+    context, _reservation, _guard = await _create_production_context(
+        async_uow_factory,
+        clock,
+        catalog,
+        provider_reviews,
+        budget_evidence,
+        seed_response_scope=True,
+    )
+    state_root = tmp_path / "production-state"
+    state_root.mkdir(mode=0o700)
+    state_root.chmod(0o700)
+    provider_defaults_path = _copy_provider_defaults_to_private_path(tmp_path)
+    reachy = _ProductionReachySafety()
+    container = ProductionContainer.build(
+        configured_state_root=state_root,
+        reachy=reachy,
+        sqlcipher_uow_factory=async_uow_factory,
+        clock=clock,
+        route_authorizer=BoundAuthorizerFake(context),
+        price_catalog=catalog,
+        runtime_provider_identities=runtime_provider_identities,
+        budget_evidence=budget_evidence,
+        provider_defaults_path=provider_defaults_path,
+    )
+    try:
+        yield _ProductionContainerCase(container, context, reachy)
+    finally:
+        container.core_process_lease.release_after_shutdown()
+
+
+@pytest.fixture
+def production_provider_gateway_case(
+    async_uow_factory,
+    clock,
+    catalog,
+    provider_reviews,
+    budget_evidence,
+):
+    async def create(
+        *,
+        valid_usage: bool = True,
+        reported_usage=None,
+        provider_response_identifier="resp_1",
+        seed_response_scope: bool = False,
+        usage_ceiling=None,
+        hard_limit: int = 150_000_000,
+        soft_limit: int = 100_000_000,
+    ):
+        context, reservation, guard = await _create_production_context(
+            async_uow_factory,
+            clock,
+            catalog,
+            provider_reviews,
+            budget_evidence,
+            seed_response_scope=seed_response_scope,
+            usage_ceiling=usage_ceiling,
+            hard_limit=hard_limit,
+            soft_limit=soft_limit,
+        )
+        return ProductionProviderGatewayCase(
+            factory=async_uow_factory,
+            clock=clock,
+            catalog=catalog,
+            provider_reviews=provider_reviews,
+            evidence=budget_evidence,
+            context=context,
+            reservation=reservation,
+            guard=guard,
+            valid_usage=valid_usage,
+            reported_usage=reported_usage,
+            provider_response_identifier=provider_response_identifier,
+            hard_limit=hard_limit,
+            soft_limit=soft_limit,
+        )
+
+    return create
+
+
+@pytest.fixture
+def production_stream_gateway_case(production_provider_gateway_case):
+    async def create():
+        return ProductionStreamGatewayCase(
+            await production_provider_gateway_case(valid_usage=True),
+        )
+
+    return create

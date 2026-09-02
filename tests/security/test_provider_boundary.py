@@ -36,7 +36,7 @@ async def test_prohibited_secret_or_second_pass_failure_creates_zero_egress_proo
         assert await case.provider_call_count() == 0
 
 
-def test_search_categories_are_not_registered_in_task04(provider_gateway) -> None:
-    assert provider_gateway.supported_purposes == frozenset(
+def test_search_categories_are_not_registered_in_task05(production_core_container) -> None:
+    assert production_core_container.provider_gateway.supported_purposes == frozenset(
         {"cloud_stt", "cloud_reasoning", "cloud_tts"}
     )
