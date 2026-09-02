@@ -160,12 +160,17 @@ def _owned_route_names(app) -> set[str]:
     return {route.name for route in app.router.routes if isinstance(route, APIRoute)}
 
 
+_PRIVATE_INVALID_BODY = b'{"audio":"private"}'
+_MAX_ASGI_BODY_BYTES = 4096
+
+
 async def _asgi_exchange(
     app,
     *,
     client_host: str,
     headers: tuple[tuple[bytes, bytes], ...],
     messages: tuple[dict[str, object], ...],
+    raw_headers: object | None = None,
 ) -> tuple[int, dict[bytes, bytes], bytes, int]:
     sent: list[dict[str, object]] = []
     receive_calls = 0
@@ -191,7 +196,7 @@ async def _asgi_exchange(
             "path": "/session/simulated-turn",
             "raw_path": b"/session/simulated-turn",
             "query_string": b"",
-            "headers": list(headers),
+            "headers": raw_headers if raw_headers is not None else list(headers),
             "client": (client_host, 42_000),
             "server": ("testserver", 80),
         },
@@ -313,13 +318,14 @@ async def test_oversized_empty_request_is_rejected_before_fastapi_body_parsing()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("headers", "messages", "expected_status", "expected_body"),
+    ("headers", "messages", "expected_status", "expected_body", "expected_receive_calls"),
     (
         (
             (),
-            ({"type": "http.request", "body": b'{"audio":"private"}'},),
+            ({"type": "http.request", "body": _PRIVATE_INVALID_BODY},),
             422,
             b'{"status":"invalid"}',
+            1,
         ),
         (
             ((b"transfer-encoding", b"chunked"),),
@@ -329,24 +335,24 @@ async def test_oversized_empty_request_is_rejected_before_fastapi_body_parsing()
             ),
             422,
             b'{"status":"invalid"}',
+            2,
         ),
         (
-            ((b"content-length", b"5001"),),
-            ({"type": "http.request", "body": b"x" * 5001},),
+            ((b"content-length", str(_MAX_ASGI_BODY_BYTES).encode("ascii")),),
+            ({"type": "http.request", "body": b"x" * _MAX_ASGI_BODY_BYTES},),
+            422,
+            b'{"status":"invalid"}',
+            1,
+        ),
+        (
+            (),
+            (
+                {"type": "http.request", "body": b"x" * _MAX_ASGI_BODY_BYTES, "more_body": True},
+                {"type": "http.request", "body": b"y", "more_body": False},
+            ),
             413,
             b'{"status":"too_large"}',
-        ),
-        (
-            ((b"content-length", b"not-an-integer"),),
-            ({"type": "http.request", "body": b'{"audio":"private"}'},),
-            422,
-            b'{"status":"invalid"}',
-        ),
-        (
-            ((b"content-length", b"-1"),),
-            ({"type": "http.request", "body": b'{"audio":"private"}'},),
-            422,
-            b'{"status":"invalid"}',
+            2,
         ),
         (
             ((b"content-length", b"2"),),
@@ -356,12 +362,20 @@ async def test_oversized_empty_request_is_rejected_before_fastapi_body_parsing()
             ),
             413,
             b'{"status":"too_large"}',
+            2,
         ),
         (
-            ((b"content-length", b"999999"),),
-            ({"type": "http.request", "body": b'{"audio":"private"}'},),
+            (
+                (b"CoNtEnT-LeNgTh", str(len(_PRIVATE_INVALID_BODY)).encode("ascii")),
+                (
+                    b"content-length",
+                    str(len(_PRIVATE_INVALID_BODY)).zfill(3).encode("ascii"),
+                ),
+            ),
+            ({"type": "http.request", "body": _PRIVATE_INVALID_BODY},),
             422,
             b'{"status":"invalid"}',
+            1,
         ),
     ),
 )
@@ -370,10 +384,11 @@ async def test_asgi_boundary_counts_actual_received_body_bytes_before_validation
     messages: tuple[dict[str, object], ...],
     expected_status: int,
     expected_body: bytes,
+    expected_receive_calls: int,
 ) -> None:
     deps, session, workflow, _readiness = _dependencies()
 
-    status, response_headers, body, _receive_calls = await _asgi_exchange(
+    status, response_headers, body, receive_calls = await _asgi_exchange(
         create_app(deps),
         client_host="127.0.0.1",
         headers=((b"content-type", b"application/json"), *headers),
@@ -384,8 +399,105 @@ async def test_asgi_boundary_counts_actual_received_body_bytes_before_validation
     assert response_headers[b"cache-control"] == b"no-store"
     assert body == expected_body
     assert b"private" not in body
+    assert receive_calls == expected_receive_calls
     assert session.opens == []
     assert workflow.turns == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_length_headers",
+    (
+        ((b"content-length", b""),),
+        ((b"content-length", b"not-an-integer"),),
+        ((b"content-length", b"+2"),),
+        ((b"content-length", b"-1"),),
+        ((b"content-length", b"2 0"),),
+        ((b"content-length", b"2,"),),
+        ((b"content-length", b",2"),),
+        ((b"content-length", b"2,,2"),),
+        ((b"content-length", b"2,3"),),
+        ((b"Content-Length", b"2"), (b"content-length", b"3")),
+        ((b"content-length", str(_MAX_ASGI_BODY_BYTES + 1).encode("ascii")),),
+        ((b"content-length", b"\t4097 "),),
+        ((b"content-length", b"9" * 128),),
+    ),
+)
+async def test_content_length_declaration_rejections_happen_before_body_read(
+    content_length_headers: tuple[tuple[bytes, bytes], ...],
+) -> None:
+    deps, session, workflow, _readiness = _dependencies()
+
+    status, response_headers, body, receive_calls = await _asgi_exchange(
+        create_app(deps),
+        client_host="127.0.0.1",
+        headers=((b"content-type", b"application/json"), *content_length_headers),
+        messages=({"type": "http.request", "body": _PRIVATE_INVALID_BODY},),
+    )
+
+    assert status == 413
+    assert response_headers[b"cache-control"] == b"no-store"
+    assert body == b'{"status":"too_large"}'
+    assert b"private" not in body
+    assert receive_calls == 0
+    assert session.opens == []
+    assert workflow.turns == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_headers",
+    (
+        ((b"content-length", b"2"),),
+        [(b"content-length",)],
+        [(b"content-length", "2")],
+    ),
+)
+async def test_malformed_asgi_headers_fail_closed_before_body_read(raw_headers: object) -> None:
+    deps, session, workflow, _readiness = _dependencies()
+
+    status, response_headers, body, receive_calls = await _asgi_exchange(
+        create_app(deps),
+        client_host="127.0.0.1",
+        headers=(),
+        raw_headers=raw_headers,
+        messages=({"type": "http.request", "body": _PRIVATE_INVALID_BODY},),
+    )
+
+    assert status == 413
+    assert response_headers[b"cache-control"] == b"no-store"
+    assert body == b'{"status":"too_large"}'
+    assert receive_calls == 0
+    assert session.opens == []
+    assert workflow.turns == []
+
+
+@pytest.mark.asyncio
+async def test_content_length_allows_equal_numeric_duplicates_and_sp_htab_ows() -> None:
+    deps, session, workflow, _readiness = _dependencies()
+    body_bytes = b"{}"
+
+    status, response_headers, body, receive_calls = await _asgi_exchange(
+        create_app(deps),
+        client_host="127.0.0.1",
+        headers=(
+            (b"content-type", b"application/json"),
+            (b"CoNtEnT-LeNgTh", b" 2,\t002 "),
+            (b"content-length", b"2"),
+        ),
+        messages=({"type": "http.request", "body": body_bytes},),
+    )
+
+    assert status == 200
+    assert response_headers[b"cache-control"] == b"no-store"
+    expected_body = (
+        b'{"turn_id":"'
+        + str(workflow.turns[0].turn_id).encode("ascii")
+        + b'","outcome":"completed"}'
+    )
+    assert body == expected_body
+    assert receive_calls == 1
+    assert session.opens == [(deps.household_id, workflow.turns[0].turn_id)]
 
 
 @pytest.mark.asyncio
@@ -394,7 +506,7 @@ async def test_non_loopback_asgi_boundary_rejects_before_any_body_read() -> None
     status, response_headers, body, receive_calls = await _asgi_exchange(
         create_app(deps),
         client_host="192.0.2.10",
-        headers=((b"content-type", b"application/json"),),
+        headers=((b"content-type", b"application/json"), (b"content-length", b"2,3")),
         messages=({"type": "http.request", "body": b'{"audio":"private"}'},),
     )
 

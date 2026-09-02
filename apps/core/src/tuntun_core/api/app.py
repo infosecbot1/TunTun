@@ -40,6 +40,12 @@ class SimulatedGuestFastAPI(FastAPI):
         if peer != self._loopback_host:
             await self._send_static_json(send, status=403, body=_FORBIDDEN_BODY)
             return
+        if not _declared_content_length_within_bound(
+            scope.get("headers", []),
+            self._max_body_bytes,
+        ):
+            await self._send_static_json(send, status=413, body=_TOO_LARGE_BODY)
+            return
         replay_messages = await _read_bounded_request(receive, self._max_body_bytes)
         if replay_messages is None:
             await self._send_static_json(send, status=413, body=_TOO_LARGE_BODY)
@@ -80,6 +86,44 @@ class SimulatedGuestFastAPI(FastAPI):
             }
         )
         await send({"type": "http.response.body", "body": body})
+
+
+def _declared_content_length_within_bound(headers: Any, max_body_bytes: int) -> bool:
+    declared_length: bytes | None = None
+    max_length = str(max_body_bytes).encode("ascii")
+    if not isinstance(headers, list):
+        return False
+    for header in headers:
+        if not isinstance(header, tuple) or len(header) != 2:
+            return False
+        name, value = header
+        if type(name) is not bytes or type(value) is not bytes:
+            return False
+        if name.lower() != b"content-length":
+            continue
+        for part in value.split(b","):
+            normalized = _normalize_content_length(part, max_length)
+            if normalized is None:
+                return False
+            if declared_length is None:
+                declared_length = normalized
+            elif normalized != declared_length:
+                return False
+    return True
+
+
+def _normalize_content_length(value: bytes, max_length: bytes) -> bytes | None:
+    stripped = value.strip(b" \t")
+    if not stripped:
+        return None
+    if not all(ord("0") <= octet <= ord("9") for octet in stripped):
+        return None
+    normalized = stripped.lstrip(b"0") or b"0"
+    if len(normalized) > len(max_length):
+        return None
+    if len(normalized) == len(max_length) and normalized > max_length:
+        return None
+    return normalized
 
 
 async def _read_bounded_request(

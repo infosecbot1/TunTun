@@ -110,6 +110,9 @@ class BoundedCompletedTurnAudio:
         stream = await self._source.open_completed(turn)
         buffer = bytearray()
         primary_error: BaseException | None = None
+        primary_was_cancellation = False
+        cleanup_close_error_type: str | None = None
+        cleanup_cancellation_type: str | None = None
         try:
             self._require_stream_binding(turn, stream)
             await self._claims.claim_once(turn)
@@ -125,20 +128,36 @@ class BoundedCompletedTurnAudio:
             if not buffer:
                 raise ValueError("completed audio is empty")
             return bytes(buffer)
+        except asyncio.CancelledError as error:
+            primary_was_cancellation = True
+            del error
         except BaseException as error:
             primary_error = error
             raise
         finally:
-            await self._close_and_wipe(stream, buffer, primary_error)
+            cleanup_close_error_type, cleanup_cancellation_type = await self._close_and_wipe(
+                stream,
+                buffer,
+                primary_error,
+                primary_was_cancellation,
+            )
+        if primary_was_cancellation:
+            self._raise_sanitized_cancellation(
+                cleanup_close_error_type,
+                cleanup_cancellation_type,
+            )
+        raise RuntimeError("completed audio cancellation state invalid")
 
     async def _close_and_wipe(
         self,
         stream: CompletedAudioStream,
         buffer: bytearray,
         primary_error: BaseException | None,
-    ) -> None:
-        close_error: BaseException | None = None
-        cancellation: asyncio.CancelledError | None = None
+        primary_was_cancellation: bool,
+    ) -> tuple[str | None, str | None]:
+        close_error_type: str | None = None
+        cancellation_type: str | None = None
+        close_task: asyncio.Task[None] | None = None
         try:
             close_task = asyncio.create_task(
                 self._source.close_completed(stream),
@@ -148,43 +167,71 @@ class BoundedCompletedTurnAudio:
                 try:
                     await asyncio.shield(close_task)
                 except asyncio.CancelledError as error:
-                    if cancellation is None:
-                        cancellation = error
+                    if cancellation_type is None:
+                        cancellation_type = type(error).__name__
+                    del error
                 except BaseException:
                     pass
             try:
                 close_task.result()
             except BaseException as error:
-                close_error = error
+                close_error_type = type(error).__name__
+                del error
         except BaseException as error:
-            close_error = error
+            close_error_type = type(error).__name__
+            del error
         finally:
+            close_task = None
             try:
                 buffer[:] = b"\x00" * len(buffer)
                 buffer.clear()
             finally:
-                self._raise_cleanup_error(primary_error, close_error, cancellation)
+                self._raise_cleanup_error(
+                    primary_error,
+                    primary_was_cancellation,
+                    close_error_type,
+                    cancellation_type,
+                )
+        return close_error_type, cancellation_type
+
+    @staticmethod
+    def _raise_sanitized_cancellation(
+        close_error_type: str | None,
+        cancellation_type: str | None,
+    ) -> None:
+        sanitized_cancellation = asyncio.CancelledError()
+        if close_error_type is not None:
+            sanitized_cancellation.add_note(f"{_CLEANUP_NOTE} (close): {close_error_type}")
+        if cancellation_type is not None:
+            sanitized_cancellation.add_note(
+                f"{_CLEANUP_NOTE} (cancellation): {cancellation_type}"
+            )
+        raise sanitized_cancellation from None
 
     @staticmethod
     def _raise_cleanup_error(
         primary_error: BaseException | None,
-        close_error: BaseException | None,
-        cancellation: asyncio.CancelledError | None,
+        primary_was_cancellation: bool,
+        close_error_type: str | None,
+        cancellation_type: str | None,
     ) -> None:
-        if primary_error is not None:
-            if close_error is not None:
-                primary_error.add_note(f"{_CLEANUP_NOTE} (close): {type(close_error).__name__}")
-            if cancellation is not None:
-                primary_error.add_note(
-                    f"{_CLEANUP_NOTE} (cancellation): {type(cancellation).__name__}"
-                )
+        if primary_was_cancellation:
             return
-        if cancellation is not None:
-            if close_error is not None:
-                cancellation.add_note(f"{_CLEANUP_NOTE} (close): {type(close_error).__name__}")
-            raise cancellation
-        if close_error is not None:
-            raise RuntimeError("completed_turn_audio_close_failed") from close_error
+        if primary_error is not None:
+            if close_error_type is not None:
+                primary_error.add_note(f"{_CLEANUP_NOTE} (close): {close_error_type}")
+            if cancellation_type is not None:
+                primary_error.add_note(f"{_CLEANUP_NOTE} (cancellation): {cancellation_type}")
+            return
+        if cancellation_type is not None:
+            BoundedCompletedTurnAudio._raise_sanitized_cancellation(
+                close_error_type,
+                None,
+            )
+        if close_error_type is not None:
+            close_failure = RuntimeError("completed_turn_audio_close_failed")
+            close_failure.add_note(f"{_CLEANUP_NOTE} (close): {close_error_type}")
+            raise close_failure from None
 
     @staticmethod
     def _require_stream_binding(turn: TurnInput, stream: CompletedAudioStream) -> None:

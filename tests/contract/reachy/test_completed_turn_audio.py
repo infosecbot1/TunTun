@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback as traceback_module
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from uuid import uuid4
@@ -93,6 +94,12 @@ class _GatedCloseSource(_CompletedAudioSource):
         self.close_finished = True
 
 
+class _FailingGatedCloseSource(_GatedCloseSource):
+    async def close_completed(self, stream: CompletedAudioStream) -> None:
+        await super().close_completed(stream)
+        raise RuntimeError("private-close-sentinel")
+
+
 def _turn() -> TurnInput:
     return TurnInput(turn_id=uuid4(), household_id=uuid4(), device_id=uuid4())
 
@@ -124,6 +131,49 @@ def _track_completed_audio_buffers(monkeypatch: pytest.MonkeyPatch) -> list[byte
     assert completed_audio_module.bytearray is TrackingBuffer
     assert real_bytearray is not TrackingBuffer
     return buffers
+
+
+def _assert_exception_has_no_private_chain(
+    error: BaseException,
+    *,
+    sentinels: tuple[str, ...],
+    expected_note_fragments: tuple[str, ...] = (),
+) -> None:
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert error.__suppress_context__ is True
+    notes = tuple(getattr(error, "__notes__", ()))
+    assert all(fragment in " ".join(notes) for fragment in expected_note_fragments)
+    formatted = "".join(traceback_module.format_exception(error))
+    inspected = (
+        str(error),
+        repr(error.__cause__),
+        repr(error.__context__),
+        repr(notes),
+        formatted,
+    )
+    for sentinel in sentinels:
+        assert all(sentinel not in candidate for candidate in inspected)
+
+
+def _assert_completed_audio_frames_do_not_retain(
+    error: BaseException,
+    *,
+    sentinels: tuple[str, ...],
+) -> None:
+    frames = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_code.co_filename.endswith("completed_audio.py"):
+            frames.append(frame)
+        traceback = traceback.tb_next
+
+    assert frames
+    for frame in frames:
+        for name, value in frame.f_locals.items():
+            rendered = repr(value)
+            assert all(sentinel not in rendered for sentinel in sentinels), name
 
 
 @pytest.mark.asyncio
@@ -225,23 +275,84 @@ async def test_cancellation_during_chunk_read_closes_stream_and_consumes_claim(
 
 
 @pytest.mark.asyncio
+async def test_primary_cancellation_message_during_chunk_read_is_sanitized() -> None:
+    private_cancel = "private-cancel-sentinel"
+    turn = _turn()
+    chunks = _BlockingChunks()
+    source = _CompletedAudioSource(_stream(turn, chunks))
+    adapter = BoundedCompletedTurnAudio(source, _NoopClaims())  # type: ignore[arg-type]
+    task = asyncio.create_task(adapter.consume_once(turn))
+    await asyncio.wait_for(chunks.entered.wait(), timeout=15)
+
+    task.cancel(private_cancel)
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await task
+
+    _assert_exception_has_no_private_chain(
+        captured.value,
+        sentinels=(private_cancel,),
+    )
+    _assert_completed_audio_frames_do_not_retain(
+        captured.value,
+        sentinels=(private_cancel,),
+    )
+    assert chunks.cancelled is True
+    assert source.closed == [source.stream]
+    assert source.open_streams == 0
+
+
+@pytest.mark.asyncio
 async def test_close_failure_still_wipes_completed_audio_buffer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    private_audio = "private-audio-sentinel"
+    private_close = "private-close-sentinel"
     buffers = _track_completed_audio_buffers(monkeypatch)
     turn = _turn()
-    source = _FailingCloseSource(_stream(turn, _Chunks((b"private-audio-sentinel",))))
+    source = _FailingCloseSource(_stream(turn, _Chunks((private_audio.encode("ascii"),))))
     adapter = BoundedCompletedTurnAudio(source, _NoopClaims())  # type: ignore[arg-type]
 
     with pytest.raises(RuntimeError) as captured:
         await adapter.consume_once(turn)
 
     assert str(captured.value) == "completed_turn_audio_close_failed"
-    assert "private-close-sentinel" not in str(captured.value)
+    _assert_exception_has_no_private_chain(
+        captured.value,
+        sentinels=(private_audio, private_close),
+    )
+    _assert_completed_audio_frames_do_not_retain(
+        captured.value,
+        sentinels=(private_audio, private_close),
+    )
     assert source.closed == [source.stream]
     assert source.open_streams == 0
     assert len(buffers) == 1
     assert bytes(buffers[0]) == b""
+
+
+@pytest.mark.asyncio
+async def test_primary_error_precedence_hides_close_failure_details() -> None:
+    private_audio = "private-audio-sentinel"
+    private_close = "private-close-sentinel"
+    turn = _turn()
+    source = _FailingCloseSource(
+        _stream(turn, _Chunks((private_audio.encode("ascii"), b"")))
+    )
+    adapter = BoundedCompletedTurnAudio(source, _NoopClaims())  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="completed audio chunk outside bound") as captured:
+        await adapter.consume_once(turn)
+
+    assert str(captured.value) == "completed audio chunk outside bound"
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert "RuntimeError" in " ".join(getattr(captured.value, "__notes__", ()))
+    formatted = "".join(traceback_module.format_exception(captured.value))
+    assert private_close not in formatted
+    _assert_completed_audio_frames_do_not_retain(
+        captured.value,
+        sentinels=(private_audio, private_close),
+    )
 
 
 @pytest.mark.asyncio
@@ -289,6 +400,82 @@ async def test_close_is_shielded_through_repeated_caller_cancellation_and_wipes_
 
     assert source.closed == [source.stream]
     assert source.close_cancel_count == 0
+    assert source.close_finished is True
+    assert source.open_streams == 0
+    assert len(buffers) == 1
+    assert bytes(buffers[0]) == b""
+
+
+@pytest.mark.asyncio
+async def test_cancellation_message_is_sanitized_after_shielded_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_audio = "private-audio-sentinel"
+    private_cancel = "private-cancel-sentinel"
+    buffers = _track_completed_audio_buffers(monkeypatch)
+    turn = _turn()
+    source = _GatedCloseSource(_stream(turn, _Chunks((private_audio.encode("ascii"),))))
+    adapter = BoundedCompletedTurnAudio(source, _NoopClaims())  # type: ignore[arg-type]
+    task = asyncio.create_task(adapter.consume_once(turn))
+    await asyncio.wait_for(source.close_entered.wait(), timeout=1)
+
+    task.cancel(private_cancel)
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    source.close_release.set()
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await asyncio.wait_for(task, timeout=1)
+
+    _assert_exception_has_no_private_chain(
+        captured.value,
+        sentinels=(private_audio, private_cancel),
+    )
+    _assert_completed_audio_frames_do_not_retain(
+        captured.value,
+        sentinels=(private_audio, private_cancel),
+    )
+    assert source.closed == [source.stream]
+    assert source.close_finished is True
+    assert source.open_streams == 0
+    assert len(buffers) == 1
+    assert bytes(buffers[0]) == b""
+
+
+@pytest.mark.asyncio
+async def test_cancellation_message_and_close_failure_are_both_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_audio = "private-audio-sentinel"
+    private_cancel = "private-cancel-sentinel"
+    private_close = "private-close-sentinel"
+    buffers = _track_completed_audio_buffers(monkeypatch)
+    turn = _turn()
+    source = _FailingGatedCloseSource(
+        _stream(turn, _Chunks((private_audio.encode("ascii"),)))
+    )
+    adapter = BoundedCompletedTurnAudio(source, _NoopClaims())  # type: ignore[arg-type]
+    task = asyncio.create_task(adapter.consume_once(turn))
+    await asyncio.wait_for(source.close_entered.wait(), timeout=1)
+
+    task.cancel(private_cancel)
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    source.close_release.set()
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await asyncio.wait_for(task, timeout=1)
+
+    _assert_exception_has_no_private_chain(
+        captured.value,
+        sentinels=(private_audio, private_cancel, private_close),
+        expected_note_fragments=("RuntimeError",),
+    )
+    _assert_completed_audio_frames_do_not_retain(
+        captured.value,
+        sentinels=(private_audio, private_cancel, private_close),
+    )
+    assert source.closed == [source.stream]
     assert source.close_finished is True
     assert source.open_streams == 0
     assert len(buffers) == 1
