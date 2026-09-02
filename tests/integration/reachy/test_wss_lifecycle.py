@@ -4257,6 +4257,7 @@ class ServeFactory:
 class TlsMaterials:
     server_context: ssl.SSLContext
     client_context: ssl.SSLContext
+    ca_path: Path
     server_der_sha256: str
     client_der_sha256: str
 
@@ -4330,6 +4331,119 @@ async def test_websockets_dependency_pin_for_live_wss(tmp_path: Path) -> None:
         "tls_version": "TLSv1.3",
         "client_der_sha256": materials.client_der_sha256,
     }
+
+
+@pytest.mark.parametrize(
+    "client_auth_failure",
+    ("missing_client_certificate", "wrong_client_ca"),
+)
+@pytest.mark.asyncio
+async def test_reachy_client_run_latches_live_websockets_client_auth_failure(
+    tmp_path: Path,
+    client_auth_failure: str,
+) -> None:
+    from tuntun_edge.transport.websocket import (
+        APP_PATH,
+        APP_SUBPROTOCOL,
+        MAX_WSS_MESSAGE_BYTES,
+        ReachyWssClient,
+    )
+    from websockets import exceptions as ws_exceptions
+    from websockets.asyncio import client as ws_client
+    from websockets.asyncio import server as ws_server
+
+    materials = _write_ed25519_mtls_materials(tmp_path)
+    if client_auth_failure == "missing_client_certificate":
+        client_context = _client_context_without_certificate(materials.ca_path)
+    else:
+        client_context = _client_context_with_wrong_client_ca_certificate(
+            tmp_path,
+            materials.ca_path,
+        )
+    application_dispatches = 0
+
+    async def fail_if_application_dispatches(socket: Any) -> None:
+        nonlocal application_dispatches
+        application_dispatches += 1
+        await socket.close(code=1011, reason="unexpected_application_dispatch")
+
+    server = await ws_server.serve(
+        fail_if_application_dispatches,
+        host="127.0.0.1",
+        port=0,
+        ssl=materials.server_context,
+        subprotocols=[APP_SUBPROTOCOL],
+        compression=None,
+        ping_interval=None,
+        max_size=MAX_WSS_MESSAGE_BYTES,
+        max_queue=16,
+        open_timeout=5,
+        close_timeout=2,
+    )
+    sockets = getattr(server, "sockets", None)
+    assert sockets
+    port = sockets[0].getsockname()[1]
+    state = FakeState()
+    safety = FakeSafety()
+    readiness = FakeReadiness()
+    handler = FakeHandler()
+    sleeps: list[float] = []
+    stop = asyncio.Event()
+    connect_attempts = 0
+
+    async def connect_factory(_uri: str, **kwargs: object) -> Any:
+        nonlocal connect_attempts
+        connect_attempts += 1
+        return await ws_client.connect(
+            f"wss://127.0.0.1:{port}{APP_PATH}",
+            ssl=client_context,
+            server_hostname="127.0.0.1",
+            subprotocols=kwargs["subprotocols"],
+            compression=kwargs["compression"],
+            ping_interval=kwargs["ping_interval"],
+            proxy=kwargs["proxy"],
+            open_timeout=kwargs["open_timeout"],
+            close_timeout=kwargs["close_timeout"],
+            max_size=kwargs["max_size"],
+            max_queue=kwargs["max_queue"],
+        )
+
+    async def fail_if_retried(delay: float) -> None:
+        sleeps.append(delay)
+        raise AssertionError("terminal live WebSockets mTLS failure retried")
+
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(Ed25519PrivateKey.generate()),
+        state=state,
+        safety=safety,
+        handler=handler,
+        readiness=readiness,
+        clock=Clock(),
+        connect_factory=connect_factory,
+        sleeper=fail_if_retried,
+    )
+
+    try:
+        with pytest.raises(ws_exceptions.InvalidMessage) as raised:
+            await asyncio.wait_for(client.run(stop), timeout=2.0)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert any(isinstance(error, EOFError) for error in _test_exception_chain(raised.value))
+    assert application_dispatches == 0
+    assert handler.control_calls == []
+    assert handler.media_calls == []
+    assert connect_attempts == 1
+    assert safety.latched == ["transport_disconnect"]
+    assert state.abandoned == ["disconnect"]
+    assert sleeps == []
+    assert readiness.disconnect_degraded_codes == (
+        "reachy_recommission_required:reachy_wss_commissioning_protocol_mismatch",
+    )
+    assert readiness.restart_required is True
 
 
 def _write_ed25519_mtls_materials(tmp_path: Path) -> TlsMaterials:
@@ -4417,6 +4531,81 @@ def _write_ed25519_mtls_materials(tmp_path: Path) -> TlsMaterials:
     return TlsMaterials(
         server_context=server_context,
         client_context=client_context,
+        ca_path=ca_path,
         server_der_sha256=hashlib.sha256(server_cert.public_bytes(Encoding.DER)).hexdigest(),
         client_der_sha256=hashlib.sha256(client_cert.public_bytes(Encoding.DER)).hexdigest(),
     )
+
+
+def _client_context_without_certificate(ca_path: Path) -> ssl.SSLContext:
+    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=str(ca_path))
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.maximum_version = ssl.TLSVersion.TLSv1_3
+    return context
+
+
+def _client_context_with_wrong_client_ca_certificate(
+    tmp_path: Path,
+    trusted_server_ca_path: Path,
+) -> ssl.SSLContext:
+    ca_key = Ed25519PrivateKey.generate()
+    client_key = Ed25519PrivateKey.generate()
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Rogue Reachy Test CA")])
+    client_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Rogue Reachy Test Client")])
+    now = datetime.now(UTC)
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(ca_key, algorithm=None)
+    )
+    client_cert = (
+        x509.CertificateBuilder()
+        .subject_name(client_name)
+        .issuer_name(ca_name)
+        .public_key(client_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=False,
+        )
+        .sign(ca_key, algorithm=None)
+    )
+    ca_path = tmp_path / "rogue-ca.pem"
+    client_cert_path = tmp_path / "rogue-client.pem"
+    client_key_path = tmp_path / "rogue-client-key.pem"
+    ca_path.write_bytes(ca_cert.public_bytes(Encoding.PEM))
+    client_cert_path.write_bytes(client_cert.public_bytes(Encoding.PEM))
+    client_key_path.write_bytes(
+        client_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+    )
+    context = _client_context_without_certificate(trusted_server_ca_path)
+    context.load_cert_chain(str(client_cert_path), str(client_key_path))
+    return context
+
+
+def _test_exception_chain(error: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    stack: list[BaseException] = [error]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        chain.append(current)
+        context = current.__context__ if not current.__suppress_context__ else None
+        if context is not None:
+            stack.append(context)
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+    return chain

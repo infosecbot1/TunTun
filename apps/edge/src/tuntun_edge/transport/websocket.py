@@ -69,6 +69,13 @@ _TERMINAL_TLS_AUTH_REASONS: Final[frozenset[str]] = frozenset(
         "WRONG_VERSION_NUMBER",
     }
 )
+_TERMINAL_WEBSOCKETS_COMMISSIONING_EXCEPTION_NAMES: Final[tuple[str, ...]] = (
+    "InvalidMessage",
+    "InvalidHeader",
+    "InvalidUpgrade",
+    "NegotiationError",
+    "SecurityError",
+)
 _CleanupResult = TypeVar("_CleanupResult")
 
 
@@ -767,10 +774,13 @@ class ReachyWssClient:
                     raise asyncio.CancelledError from error
                 if not isinstance(error, Exception):
                     raise
-                terminal_tls_code = _terminal_tls_commissioning_code(error)
-                if terminal_tls_code is not None:
+                terminal_commissioning_code = _terminal_commissioning_code(
+                    error,
+                    setup_complete=setup_complete,
+                )
+                if terminal_commissioning_code is not None:
                     self._readiness.latch_disconnect_degraded(
-                        (f"reachy_recommission_required:{terminal_tls_code}",),
+                        (f"reachy_recommission_required:{terminal_commissioning_code}",),
                         restart_required=True,
                     )
                     raise
@@ -1064,12 +1074,14 @@ def _terminal_commissioning_from(error: PermissionError) -> _TerminalCommissioni
     return _TerminalCommissioningError(code)
 
 
-def _terminal_tls_commissioning_code(error: Exception) -> str | None:
+def _terminal_commissioning_code(error: Exception, *, setup_complete: bool) -> str | None:
     for candidate in _iter_exception_chain(error):
         if isinstance(candidate, ssl.SSLCertVerificationError):
             return "reachy_tls_certificate_verification"
         if isinstance(candidate, ssl.SSLError) and _is_terminal_tls_auth_error(candidate):
             return "reachy_tls_authentication"
+        if not setup_complete and _is_terminal_websockets_commissioning_error(candidate):
+            return "reachy_wss_commissioning_protocol_mismatch"
     return None
 
 
@@ -1093,6 +1105,24 @@ def _iter_exception_chain(error: BaseException) -> Iterator[BaseException]:
 def _is_terminal_tls_auth_error(error: ssl.SSLError) -> bool:
     reason = getattr(error, "reason", None)
     return type(reason) is str and reason in _TERMINAL_TLS_AUTH_REASONS
+
+
+def _is_terminal_websockets_commissioning_error(error: BaseException) -> bool:
+    terminal_types = _terminal_websockets_commissioning_exception_types()
+    return bool(terminal_types) and isinstance(error, terminal_types)
+
+
+def _terminal_websockets_commissioning_exception_types() -> tuple[type[BaseException], ...]:
+    try:
+        exceptions_module = importlib.import_module("websockets.exceptions")
+    except ModuleNotFoundError:
+        return ()
+    terminal_types: list[type[BaseException]] = []
+    for name in _TERMINAL_WEBSOCKETS_COMMISSIONING_EXCEPTION_NAMES:
+        candidate = getattr(exceptions_module, name, None)
+        if isinstance(candidate, type) and issubclass(candidate, BaseException):
+            terminal_types.append(candidate)
+    return tuple(terminal_types)
 
 
 def _is_transient_reconnect_error(error: Exception, *, setup_complete: bool) -> bool:
