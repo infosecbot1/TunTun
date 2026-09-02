@@ -1,0 +1,20 @@
+{
+  "schema_version": "tts-bilingual-quality-v1",
+  "utterances": [
+    {
+      "language": "en",
+      "text": "Please start the kitchen timer.",
+      "expected_intelligible": true
+    },
+    {
+      "language": "hi",
+      "text": "कृपया रसोई का टाइमर शुरू करो।",
+      "expected_intelligible": true
+    },
+    {
+      "language": "hinglish",
+      "text": "Kitchen ka timer start kar do.",
+      "expected_intelligible": true
+    }
+  ]
+}

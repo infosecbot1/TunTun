@@ -133,6 +133,31 @@ class BudgetSettlement(ContractModel):
     cloud_egress_frozen: bool
 
 
+class BudgetAccountingContext(ContractModel):
+    category: Literal["stt", "llm", "tts", "web_search"]
+    usage_ceiling: UsageUnits
+    primary_accounting_basis: Literal[
+        "provider_reported_exact",
+        "request_bound_exact",
+        "conservative_full_reservation",
+    ]
+    missing_evidence_policy: Literal[
+        "freeze_unknown_overage",
+        "conservative_full_reservation",
+    ]
+
+    @model_validator(mode="after")
+    def exact_usage_category(self) -> Self:
+        if self.usage_ceiling.category != self.category or usage_total(self.usage_ceiling) <= 0:
+            raise ValueError("budget_accounting_context_usage_invalid")
+        if (
+            isinstance(self.usage_ceiling, WebSearchUsageUnits)
+            and self.usage_ceiling.web_search_calls != 1
+        ):
+            raise ValueError("web_search_accounting_context_requires_exactly_one_call")
+        return self
+
+
 class ProviderUsageReceiptV1(ContractModel):
     schema_version: Literal["tuntun.provider-usage-receipt.v1"]
     receipt_id: UUID

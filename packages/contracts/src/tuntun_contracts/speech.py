@@ -1,10 +1,12 @@
 # packages/contracts/src/tuntun_contracts/speech.py
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Literal, Self
+from unicodedata import normalize
 from uuid import UUID
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ModelWrapValidatorHandler, field_validator, model_validator
 
 from .base import Commitment, ContractModel
 from .provider import RouteAuthorization
@@ -58,6 +60,33 @@ class TranscriptResult(ContractModel):
     text: Annotated[str, Field(min_length=1, max_length=32_000)]
     language: Literal["en", "hi", "hinglish", "unknown"]
     duration_ms: Annotated[int, Field(ge=0, le=90_000)]
+
+
+class OfflineSynthesisRequest(ContractModel):
+    request_id: UUID
+    turn_id: UUID
+    text: Annotated[str, Field(min_length=1, max_length=4_096)]
+    language: Literal["en", "hi", "hinglish"]
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def raw_text_must_be_nfc(
+        cls,
+        value: object,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        if isinstance(value, Mapping):
+            text = value.get("text")
+            if type(text) is str and text != normalize("NFC", text):
+                raise ValueError("offline_tts_text_must_be_bounded_nfc")
+        return handler(value)
+
+    @field_validator("text")
+    @classmethod
+    def bounded_nfc_text(cls, value: str) -> str:
+        if value != normalize("NFC", value) or len(value.encode("utf-8")) > 4_096:
+            raise ValueError("offline_tts_text_must_be_bounded_nfc")
+        return value
 
 
 class AuthorizedSynthesisRequest(ContractModel):

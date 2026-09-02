@@ -5095,6 +5095,138 @@ components:
       - value_b64
       title: Commitment
       type: object
+    tuntun_contracts.budget.BudgetAccountingContext:
+      $defs:
+        LlmUsageUnits:
+          additionalProperties: false
+          properties:
+            category:
+              const: llm
+              title: Category
+              type: string
+            input_tokens:
+              maximum: 10000000
+              minimum: 0
+              title: Input Tokens
+              type: integer
+            output_tokens:
+              maximum: 10000000
+              minimum: 0
+              title: Output Tokens
+              type: integer
+          required:
+          - category
+          - input_tokens
+          - output_tokens
+          title: LlmUsageUnits
+          type: object
+        SttUsageUnits:
+          additionalProperties: false
+          properties:
+            category:
+              const: stt
+              title: Category
+              type: string
+            audio_millis:
+              maximum: 3600000
+              minimum: 0
+              title: Audio Millis
+              type: integer
+          required:
+          - category
+          - audio_millis
+          title: SttUsageUnits
+          type: object
+        TtsUsageUnits:
+          additionalProperties: false
+          properties:
+            category:
+              const: tts
+              title: Category
+              type: string
+            characters:
+              maximum: 4096
+              minimum: 0
+              title: Characters
+              type: integer
+          required:
+          - category
+          - characters
+          title: TtsUsageUnits
+          type: object
+        WebSearchUsageUnits:
+          additionalProperties: false
+          properties:
+            category:
+              const: web_search
+              title: Category
+              type: string
+            input_tokens:
+              maximum: 10000000
+              minimum: 0
+              title: Input Tokens
+              type: integer
+            output_tokens:
+              maximum: 10000000
+              minimum: 0
+              title: Output Tokens
+              type: integer
+            web_search_calls:
+              maximum: 16
+              minimum: 0
+              title: Web Search Calls
+              type: integer
+          required:
+          - category
+          - input_tokens
+          - output_tokens
+          - web_search_calls
+          title: WebSearchUsageUnits
+          type: object
+      additionalProperties: false
+      properties:
+        category:
+          enum:
+          - stt
+          - llm
+          - tts
+          - web_search
+          title: Category
+          type: string
+        usage_ceiling:
+          discriminator:
+            mapping:
+              llm: '#/components/schemas/tuntun_contracts.budget.BudgetAccountingContext/$defs/LlmUsageUnits'
+              stt: '#/components/schemas/tuntun_contracts.budget.BudgetAccountingContext/$defs/SttUsageUnits'
+              tts: '#/components/schemas/tuntun_contracts.budget.BudgetAccountingContext/$defs/TtsUsageUnits'
+              web_search: '#/components/schemas/tuntun_contracts.budget.BudgetAccountingContext/$defs/WebSearchUsageUnits'
+            propertyName: category
+          oneOf:
+          - $ref: '#/components/schemas/tuntun_contracts.budget.BudgetAccountingContext/$defs/LlmUsageUnits'
+          - $ref: '#/components/schemas/tuntun_contracts.budget.BudgetAccountingContext/$defs/SttUsageUnits'
+          - $ref: '#/components/schemas/tuntun_contracts.budget.BudgetAccountingContext/$defs/TtsUsageUnits'
+          - $ref: '#/components/schemas/tuntun_contracts.budget.BudgetAccountingContext/$defs/WebSearchUsageUnits'
+          title: Usage Ceiling
+        primary_accounting_basis:
+          enum:
+          - provider_reported_exact
+          - request_bound_exact
+          - conservative_full_reservation
+          title: Primary Accounting Basis
+          type: string
+        missing_evidence_policy:
+          enum:
+          - freeze_unknown_overage
+          - conservative_full_reservation
+          title: Missing Evidence Policy
+          type: string
+      required:
+      - category
+      - usage_ceiling
+      - primary_accounting_basis
+      - missing_evidence_policy
+      title: BudgetAccountingContext
+      type: object
     tuntun_contracts.budget.BudgetReconciliationRequest:
       $defs:
         TransportProof:
@@ -11219,7 +11351,7 @@ components:
           title: Request Id
           type: string
         text:
-          maxLength: 8000
+          maxLength: 32000
           minLength: 1
           title: Text
           type: string
@@ -12920,6 +13052,36 @@ components:
       - language_hints
       - route
       title: AuthorizedTranscriptionRequest
+      type: object
+    tuntun_contracts.speech.OfflineSynthesisRequest:
+      additionalProperties: false
+      properties:
+        request_id:
+          format: uuid
+          title: Request Id
+          type: string
+        turn_id:
+          format: uuid
+          title: Turn Id
+          type: string
+        text:
+          maxLength: 4096
+          minLength: 1
+          title: Text
+          type: string
+        language:
+          enum:
+          - en
+          - hi
+          - hinglish
+          title: Language
+          type: string
+      required:
+      - request_id
+      - turn_id
+      - text
+      - language
+      title: OfflineSynthesisRequest
       type: object
     tuntun_contracts.speech.SpeechChunk:
       additionalProperties: false

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -15,6 +14,7 @@ from tuntun_contracts.base import (
 )
 from tuntun_contracts.budget import (
     MAX_CHARGE_MICROS_SGD,
+    BudgetAccountingContext,
     BudgetReconciliationRequest,
     BudgetReservation,
     BudgetReservationRequest,
@@ -59,14 +59,6 @@ class BudgetTurnBindingV1(ContractModel):
     turn_id: UUID
     request_id: UUID
     attempt_id: UUID
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetAccountingContext:
-    category: str
-    usage_ceiling: UsageUnits
-    primary_accounting_basis: str
-    missing_evidence_policy: str
 
 
 class BudgetGuard:

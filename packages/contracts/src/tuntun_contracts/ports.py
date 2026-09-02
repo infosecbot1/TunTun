@@ -11,6 +11,7 @@ from .actions import ActionBinding, ActionReceipt, ValidatedActionProposal
 from .audit import AuditDraft, AuditReceipt
 from .base import ContractModel
 from .budget import (
+    BudgetAccountingContext,
     BudgetReconciliationRequest,
     BudgetReservation,
     BudgetReservationRequest,
@@ -221,6 +222,12 @@ class BudgetPort(Protocol):
     async def reserve(self, request: BudgetReservationRequest) -> BudgetReservation: ...
 
     async def mark_sent(self, reservation_id: UUID, attempt_id: UUID) -> None: ...
+
+    async def require_accounting_context(
+        self,
+        route: RouteAuthorization,
+        consumption: RouteConsumption,
+    ) -> BudgetAccountingContext: ...
 
     async def settle(self, request: BudgetSettlementRequest) -> BudgetSettlement: ...
 
