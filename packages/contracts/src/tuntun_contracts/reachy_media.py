@@ -249,6 +249,17 @@ class CameraWindow:
         issued_at_utc: datetime,
         expires_at_utc: datetime,
     ) -> None:
+        del grant, snapshot, issued_at_utc, expires_at_utc
+        raise TypeError("use CameraWindow.open")
+
+    def _initialize(
+        self,
+        *,
+        grant: CameraWindowGrant,
+        snapshot: _CameraGrantSnapshot,
+        issued_at_utc: datetime,
+        expires_at_utc: datetime,
+    ) -> None:
         if getattr(self, "_initialized", False):
             raise RuntimeError("camera window already initialized")
         object.__setattr__(self, "_lock", Lock())
@@ -307,6 +318,8 @@ class CameraWindow:
         hmac_root: bytes,
         now: datetime,
     ) -> CameraWindow:
+        if cls is not CameraWindow:
+            raise TypeError("camera window type must be exact")
         if type(grant) is not CameraWindowGrant:
             raise TypeError("camera grant must be exactly CameraWindowGrant")
         root = _validate_hmac_root(hmac_root)
@@ -321,12 +334,14 @@ class CameraWindow:
             raise PermissionError("camera_window_not_yet_valid")
         if now_utc > expires_at:
             raise PermissionError("camera_window_expired")
-        return cls(
+        window = object.__new__(CameraWindow)
+        window._initialize(
             grant=grant,
             snapshot=snapshot,
             issued_at_utc=issued_at,
             expires_at_utc=expires_at,
         )
+        return window
 
     def consume(
         self,

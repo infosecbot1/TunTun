@@ -22,6 +22,10 @@ class _CameraGrantSubclass(CameraWindowGrant):
     pass
 
 
+class _CameraWindowSubclass(CameraWindow):
+    pass
+
+
 class _AlwaysEqual:
     def __eq__(self, other: object) -> bool:
         return True
@@ -164,6 +168,22 @@ def test_camera_window_requires_exact_grant_type() -> None:
 
     with pytest.raises(TypeError, match="camera grant must be exactly CameraWindowGrant"):
         CameraWindow.open(grant, ROOT, NOW)
+
+
+def test_camera_window_cannot_bypass_commitment_with_direct_construction() -> None:
+    grant = _grant()
+    opened = CameraWindow.open(grant, ROOT, NOW)
+
+    with pytest.raises(TypeError, match=r"use CameraWindow\.open"):
+        CameraWindow(
+            grant=grant,
+            snapshot=cast(Any, opened._snapshot),
+            issued_at_utc=NOW,
+            expires_at_utc=grant.expires_at,
+        )
+
+    with pytest.raises(TypeError, match="camera window type must be exact"):
+        _CameraWindowSubclass.open(grant, ROOT, NOW)
 
 
 def test_camera_window_rejects_stateful_or_custom_timezone_inputs() -> None:
