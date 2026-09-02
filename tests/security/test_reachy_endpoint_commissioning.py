@@ -1113,6 +1113,26 @@ def test_raw_mutation_entrypoints_are_internal_only() -> None:
     assert not hasattr(ReachyCommissioningService, "revoke_current")
 
 
+def test_service_instance_exposes_no_proofless_unverified_mutation_helpers(
+    tmp_path: Path,
+) -> None:
+    service, *_ = _service_case(tmp_path)
+    forbidden = {
+        "_commission_unverified",
+        "_recommission_unverified",
+        "_revoke_current_unverified",
+    }
+
+    for name in forbidden:
+        assert not hasattr(service, name)
+    assert not [
+        name
+        for name in dir(service)
+        if name.endswith("_unverified")
+        and any(operation in name for operation in ("commission", "recommission", "revoke"))
+    ]
+
+
 def test_synthetic_commissioning_material_is_not_runtime_usable(
     tmp_path: Path,
 ) -> None:

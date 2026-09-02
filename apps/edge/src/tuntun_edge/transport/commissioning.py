@@ -890,38 +890,6 @@ class ReachyCommissioningService:
         self._request_factory = request_factory
         self._local_proof_verifier = local_proof_verifier
 
-    def _commission_unverified(self, request: ReachyCommissioningRequestV1) -> CommissioningStateV1:
-        if self._repository.has_current():
-            raise PermissionError("already_commissioned_use_recommission")
-        return self._replace(current=None, request=request)
-
-    def _recommission_unverified(
-        self,
-        request: ReachyCommissioningRequestV1,
-    ) -> CommissioningStateV1:
-        current = self._repository.require_current()
-        self._require_acceptance_publisher().clear_before_recommission(current)
-        return self._replace(current=current, request=request)
-
-    def _revoke_current_unverified(self) -> CommissioningStateV1:
-        current = self._repository.require_current()
-        if current.status == "revoked":
-            return current
-        self._require_acceptance_publisher().clear_before_revoke(current)
-        revoked = CommissioningStateV1(
-            schema_version="tuntun.reachy-commissioning-state.v1",
-            status="revoked",
-            endpoint=current.endpoint,
-            revoked_key_ids=_endpoint_key_ids(current.endpoint),
-            revoked_certificate_sha256=_endpoint_certificate_digests(current.endpoint),
-        )
-        self._repository.replace_atomic(
-            revoked,
-            expected_current=current,
-        )
-        self._issuer.revoke_generation(endpoint=current.endpoint)
-        return revoked
-
     def resume_current_activation(self) -> CommissioningStateV1:
         state = self._repository.require_current()
         if state.status != "active":
@@ -954,7 +922,9 @@ class ReachyCommissioningService:
             request=selected,
             current=None,
         )
-        return self._commission_unverified(selected)
+        if self._repository.has_current():
+            raise PermissionError("already_commissioned_use_recommission")
+        return self._replace(current=None, request=selected)
 
     def recommission_local(
         self,
