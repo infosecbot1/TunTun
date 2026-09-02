@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 import pytest
 import tuntun_edge.transport as transport_exports
+import tuntun_edge.transport.commissioning as commissioning_module
 from pydantic import ValidationError
 from tuntun_contracts.base import ContractModel, ContractParseError, canonical_bytes
 from tuntun_contracts.reachy_operator import ReachyAcceptedCapabilityV1, ReachyOperatorStateV1
@@ -1111,6 +1112,84 @@ def test_raw_mutation_entrypoints_are_internal_only() -> None:
     assert not hasattr(ReachyCommissioningService, "commission")
     assert not hasattr(ReachyCommissioningService, "recommission")
     assert not hasattr(ReachyCommissioningService, "revoke_current")
+
+
+def test_service_instance_has_no_direct_commissioning_transition_callable(
+    tmp_path: Path,
+) -> None:
+    (
+        service,
+        repository,
+        _generator,
+        _issuer,
+        _acceptance,
+        _proof_issuer,
+        _keys,
+        _certs,
+        _issuer_store,
+        events,
+    ) = _service_case(tmp_path)
+
+    with pytest.raises(AttributeError):
+        direct_transition: Any = object.__getattribute__(service, "_replace")
+        direct_transition(current=None, request=_request(1))
+
+    assert not repository.has_current()
+    assert events == []
+
+
+def test_forged_transition_authorization_cannot_publish_generation(
+    tmp_path: Path,
+) -> None:
+    (
+        _service,
+        repository,
+        generator,
+        issuer,
+        _acceptance,
+        _proof_issuer,
+        _keys,
+        _certs,
+        _issuer_store,
+        events,
+    ) = _service_case(tmp_path)
+    request = _request(1)
+
+    class ForgedTransitionAuthorization:
+        operation = "commission"
+        proof_id = _uuid(1)
+        request_sha256 = hashlib.sha256(canonical_bytes(request)).hexdigest()
+        current_state_sha256 = None
+        current_generation = None
+        target_generation = 1
+
+    authorization_type: Any = commissioning_module._LocalPhysicalTransitionAuthorization
+    forged_internal = authorization_type.__new__(authorization_type)
+    forged_internal.proof_id = _uuid(1)
+    forged_internal.operation = "commission"
+    forged_internal.request_sha256 = hashlib.sha256(canonical_bytes(request)).hexdigest()
+    forged_internal.current_state_sha256 = None
+    forged_internal.current_generation = None
+    forged_internal.target_generation = 1
+    forged_internal._marker = commissioning_module._LOCAL_TRANSITION_AUTHORIZATION_MARKER
+    forged_internal._consumed = False
+
+    for authorization in (ForgedTransitionAuthorization(), forged_internal):
+        with pytest.raises(
+            PermissionError,
+            match="local_physical_transition_authorization_required",
+        ):
+            commissioning_module._replace_commissioning_state(
+                repository=repository,
+                generator=generator,
+                issuer=issuer,
+                current=None,
+                request=request,
+                authorization=authorization,
+            )
+
+    assert not repository.has_current()
+    assert events == []
 
 
 def test_service_instance_exposes_no_proofless_unverified_mutation_helpers(
