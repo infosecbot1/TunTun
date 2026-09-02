@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -315,11 +316,15 @@ class RecordingSendGateway:
         self.receipt_id = receipt_id or uuid4()
         self.calls = 0
         self.observation: ProviderUsageObservation | None = None
+        self.observe_attempted = False
+        self.observed_value: Any | None = None
 
     async def send(self, route, consumption, redaction_receipt_id, invoke, observe):
         del route, consumption, redaction_receipt_id
         self.calls += 1
         value = await invoke()
+        self.observed_value = value
+        self.observe_attempted = True
         try:
             self.observation = await observe(value)
         except Exception as error:

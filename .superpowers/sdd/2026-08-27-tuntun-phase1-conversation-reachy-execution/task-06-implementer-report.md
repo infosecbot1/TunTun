@@ -833,3 +833,305 @@ Resolved 71 packages in 12ms
   resolution, or provenance attachment.
 - Cloud/offline activation evidence now has explicit accepted fields and exact
   contract checks; cloud `character_limit` is exact, not a lower bound.
+
+## Final whole-branch review fix wave
+
+### Implementation summary
+
+- Moved invalid/oversized STT provider response-body evidence across the
+  adapter/gateway boundary as a bounded `_TranscriptionEnvelope` with
+  `body_error`. The gateway now sees the provider response as returned, then
+  the STT `observe()` path fails accounting evidence, so provider calls
+  terminalize as `succeeded` with null usage receipt and BudgetGuard freezes on
+  unknown overage. Declared oversized bodies read zero chunks; chunked overflow
+  clears the partial buffer before returning a body-free invalid envelope.
+- Changed cloud and offline TTS text limits from UTF-8 bytes to NFC character
+  counts, while retaining a separate cloud TTS serialized-body byte cap against
+  the route authorization.
+- Reworked macOS `say` WAV ingestion to reject non-regular/oversized output by
+  no-follow stat/open/fstat checks before bounded chunked reads, then validate
+  exact WAV PCM format and bounded container overhead.
+- Made macOS process kill/reap cleanup cancellation-safe by shielding the
+  `process.wait()` drain and preserving the original cancellation.
+- Removed optimistic default construction from cloud/offline TTS readiness
+  evidence. Both branches now require explicit reviewed/provenance UUIDs,
+  timezone-aware measurement time, freshness, and the existing exact cloud or
+  offline capability dimensions.
+- Closed provider-facing proposal references at the `AssistantTurn` schema
+  boundary with anchored `subject:...`, `memory:...`, and `timer:...` resolver
+  patterns.
+- Added a narrow source typing fix in `BudgetGuard.require_accounting_context`
+  discovered by the source-focused mypy gate.
+
+### Files changed
+
+- `apps/core/src/tuntun_core/adapters/openai/transcribe.py`
+- `apps/core/src/tuntun_core/adapters/openai/tts.py`
+- `apps/core/src/tuntun_core/adapters/tts/macos_say.py`
+- `apps/core/src/tuntun_core/services/budget/guard.py`
+- `apps/core/src/tuntun_core/services/providers/output_validator.py`
+- `apps/core/src/tuntun_core/services/providers/tts_activation.py`
+- `packages/contracts/src/tuntun_contracts/speech.py`
+- `tests/contract/openai/conftest.py`
+- `tests/contract/openai/test_transcribe_request.py`
+- `tests/contract/openai/test_tts_request.py`
+- `tests/contract/tts/test_macos_say_offline.py`
+- `tests/integration/providers/test_tts_activation.py`
+- `tests/integration/providers/test_usage_receipt_repository.py`
+- `tests/unit/providers/test_output_validator.py`
+
+### RED evidence
+
+STT response-body boundary:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  tests/contract/openai/test_transcribe_request.py::test_transcription_transport_is_bounded_before_json_projection \
+  -q
+```
+
+Result:
+
+```text
+2 failed in 0.16s
+E       assert False is True
+E        +  where False = <conftest.RecordingSendGateway object ...>.observe_attempted
+```
+
+TTS readiness explicit evidence:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  tests/integration/providers/test_tts_activation.py::test_tts_readiness_evidence_requires_explicit_reviewed_provenance \
+  tests/integration/providers/test_tts_activation.py::test_family_voice_requires_one_verified_branch \
+  -q
+```
+
+Result:
+
+```text
+ERROR tests/integration/providers/test_tts_activation.py
+TypeError: CloudRequestBoundTtsEvidence.__init__() got an unexpected keyword argument 'review_receipt_id'
+```
+
+Remaining regression slice:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  tests/contract/openai/test_tts_request.py::test_tts_accepts_4096_multibyte_nfc_characters \
+  tests/contract/openai/test_tts_request.py::test_tts_rejects_4097_characters_before_network \
+  tests/contract/tts/test_macos_say_offline.py::test_offline_synthesis_request_is_frozen_bounded_nfc_contract \
+  tests/contract/tts/test_macos_say_offline.py::test_offline_tts_rejects_oversized_wav_before_unbounded_read \
+  tests/contract/tts/test_macos_say_offline.py::test_process_cleanup_wait_is_shielded_from_repeated_cancellation \
+  tests/unit/providers/test_output_validator.py::test_provider_memory_refs_accept_only_resolver_prefixes \
+  tests/unit/providers/test_output_validator.py::test_provider_memory_refs_reject_unanchored_or_unregistered_shapes \
+  tests/unit/providers/test_output_validator.py::test_provider_timer_refs_accept_resolver_prefix \
+  tests/unit/providers/test_output_validator.py::test_provider_timer_refs_reject_unanchored_or_unregistered_shapes \
+  tests/integration/providers/test_usage_receipt_repository.py::test_observe_body_validation_failure_is_succeeded_null_usage_then_freezes \
+  -q
+```
+
+Result:
+
+```text
+13 failed, 7 passed, 1 warning in 0.96s
+```
+
+Top failures matched the review findings: 4096 Hindi TTS rejected by byte count,
+offline 4096 Hindi rejected by byte count, oversized WAV called
+`Path.read_bytes()`, cancellation escaped before wait completion, and invalid
+provider refs did not raise `ValidationError`.
+
+### GREEN and verification evidence
+
+Focused final-review regression slice:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  tests/contract/openai/test_transcribe_request.py::test_transcription_transport_is_bounded_before_json_projection \
+  tests/contract/openai/test_tts_request.py::test_tts_accepts_4096_multibyte_nfc_characters \
+  tests/contract/openai/test_tts_request.py::test_tts_rejects_4097_characters_before_network \
+  tests/contract/tts/test_macos_say_offline.py::test_offline_synthesis_request_is_frozen_bounded_nfc_contract \
+  tests/contract/tts/test_macos_say_offline.py::test_offline_tts_rejects_oversized_wav_before_unbounded_read \
+  tests/contract/tts/test_macos_say_offline.py::test_process_cleanup_wait_is_shielded_from_repeated_cancellation \
+  tests/integration/providers/test_tts_activation.py::test_tts_readiness_evidence_requires_explicit_reviewed_provenance \
+  tests/integration/providers/test_tts_activation.py::test_family_voice_requires_one_verified_branch \
+  tests/integration/providers/test_tts_activation.py::test_cloud_tts_evidence_requires_reviewed_current_provenance \
+  tests/integration/providers/test_tts_activation.py::test_unproved_cloud_and_bad_offline_voice_block_stage_one \
+  tests/unit/providers/test_output_validator.py::test_provider_memory_refs_accept_only_resolver_prefixes \
+  tests/unit/providers/test_output_validator.py::test_provider_memory_refs_reject_unanchored_or_unregistered_shapes \
+  tests/unit/providers/test_output_validator.py::test_provider_timer_refs_accept_resolver_prefix \
+  tests/unit/providers/test_output_validator.py::test_provider_timer_refs_reject_unanchored_or_unregistered_shapes \
+  tests/integration/providers/test_usage_receipt_repository.py::test_observe_body_validation_failure_is_succeeded_null_usage_then_freezes \
+  -q
+```
+
+Result:
+
+```text
+57 passed, 1 warning in 4.32s
+```
+
+Amended Task 06 suite:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  tests/integration/providers/test_attempt_runner.py \
+  tests/unit/providers/test_output_validator.py \
+  tests/unit/providers/test_openai_error_translation.py \
+  tests/integration/providers/test_output_pipeline.py \
+  tests/integration/providers/test_response_receipts.py \
+  tests/integration/providers/test_usage_receipt_repository.py \
+  tests/contract/openai/test_authorized_signatures.py \
+  tests/contract/openai/test_transcribe_request.py \
+  tests/contract/openai/test_responses_request.py \
+  tests/contract/openai/test_tts_request.py \
+  tests/contract/tts/test_macos_say_offline.py \
+  tests/integration/providers/test_tts_activation.py \
+  tests/evals/tts/test_bilingual_quality.py \
+  tests/security/test_openai_local_non_retention.py \
+  tests/security/test_no_external_telemetry.py \
+  -q
+```
+
+Result:
+
+```text
+208 passed, 1 warning in 53.21s
+```
+
+Affected Task03-05/provider/budget regression gate:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  tests/contract \
+  tests/unit/providers \
+  tests/integration/providers \
+  tests/unit/budget \
+  tests/integration/budget \
+  tests/security/test_model_governance.py \
+  tests/unit/poc/test_voice_turn.py \
+  -q
+```
+
+Result:
+
+```text
+1056 passed, 3 skipped in 247.75s (0:04:07)
+```
+
+Static/generated/lock/diff gates:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run ruff check .
+```
+
+Result:
+
+```text
+All checks passed!
+```
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run mypy \
+  apps/core/src/tuntun_core/adapters/openai \
+  apps/core/src/tuntun_core/adapters/tts \
+  apps/core/src/tuntun_core/services/providers \
+  apps/core/src/tuntun_core/services/budget \
+  packages/contracts/src/tuntun_contracts \
+  packages/testing/src/tuntun_testing
+```
+
+Result:
+
+```text
+Success: no issues found in 52 source files
+```
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python scripts/generate_contract_fixtures.py --check
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python scripts/generate_schemas.py --check
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python scripts/generate_openapi.py --check
+git diff --check
+```
+
+Result: all exited 0.
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv lock --check
+```
+
+Result:
+
+```text
+Resolved 71 packages in 32ms
+```
+
+Full non-live attempt:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest -m 'not live_cloud and not reachy_hardware' -q
+```
+
+Result:
+
+```text
+68 failed, 3205 passed, 8 skipped in 480.27s (0:08:00)
+```
+
+Observed failure buckets were environment/tooling-only for this fix wave:
+missing `apps/admin/node_modules`/Playwright binaries, macOS sandbox denial for
+UNIX-domain socket tests, and scenario isolated-child guard tests reporting
+`scenario-gate: failed`. The required focused, Task06, affected
+provider/budget, static, generated, lock, and diff gates all passed.
+
+### Final-wave self-review
+
+- STT invalid/oversized body handling is localized to the adapter boundary and
+  still preserves true SDK/network invocation exceptions as gateway-ambiguous.
+- No STT or TTS path transiently buffers beyond its configured cap before
+  rejecting; oversized STT declared lengths read no chunks, and macOS WAV output
+  is stat-capped before file reads.
+- Gateway/budget terminal ordering remains foundation-owned; the production
+  observe-failure regression proves `succeeded`/null usage, no cost ledger row,
+  and unknown-overage freeze.
+- TTS text validation now uses NFC character count for both cloud and offline
+  contracts, while cloud body bytes remain separately route-bound.
+- TTS readiness can no longer pass from synthetic default construction; every
+  accepted branch now carries explicit review/provenance/currentness evidence.
+- Provider-facing refs are closed to the resolver formats named in the plan and
+  do not add broader syntax.
+- Process cleanup shields only the reap/drain and re-raises the original
+  cancellation after the child has been waited.
+
+### Concerns
+
+- Full non-live suite is not clean on this host due to the environment/tooling
+  buckets listed above. I did not install Node dependencies or broaden this
+  wave into unrelated scenario/sandbox work.

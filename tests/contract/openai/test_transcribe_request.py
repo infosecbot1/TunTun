@@ -162,4 +162,8 @@ async def test_transcription_transport_is_bounded_before_json_projection(
     with pytest.raises(ProviderUsageUnknownError, match="unknown_overage"):
         await case.invoke()
 
+    assert case.gateway.observe_attempted is True
+    assert case.gateway.observed_value is not None
+    assert case.gateway.observed_value.body == b""
+    assert case.gateway.observed_value.body_error is not None
     assert case.stream_iter_bytes_calls <= 1

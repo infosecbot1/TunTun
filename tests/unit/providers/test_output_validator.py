@@ -79,6 +79,158 @@ def test_assistant_turn_contract_is_strict_closed_frozen_and_bounded() -> None:
             AssistantTurn.model_validate(base | mutation)
 
 
+@pytest.mark.parametrize(
+    "proposal",
+    (
+        {
+            "kind": "remember_preference",
+            "subject_ref": "subject:guest_1",
+            "category": "synthetic",
+            "key": "format",
+            "value": "brief",
+            "confidence_micros": 900_000,
+            "reason": "asked",
+        },
+        {
+            "kind": "forget_memory",
+            "subject_ref": "subject:kid-1",
+            "memory_ref": "memory:pref_2",
+            "confidence_micros": 900_000,
+            "reason": "asked",
+        },
+    ),
+)
+def test_provider_memory_refs_accept_only_resolver_prefixes(proposal) -> None:
+    turn = AssistantTurn.model_validate(
+        {
+            "answer_text": "Okay",
+            "answer_language": "en",
+            "memory_proposals": [proposal],
+            "action_proposals": [],
+            "uncertainty_micros": 10_000,
+        }
+    )
+    assert turn.memory_proposals
+
+
+@pytest.mark.parametrize(
+    ("proposal", "field", "bad_ref"),
+    (
+        (
+            {
+                "kind": "remember_preference",
+                "subject_ref": "subject:guest",
+                "category": "synthetic",
+                "key": "format",
+                "value": "brief",
+                "confidence_micros": 900_000,
+                "reason": "asked",
+            },
+            "subject_ref",
+            "subject:",
+        ),
+        (
+            {
+                "kind": "remember_preference",
+                "subject_ref": "subject:guest",
+                "category": "synthetic",
+                "key": "format",
+                "value": "brief",
+                "confidence_micros": 900_000,
+                "reason": "asked",
+            },
+            "subject_ref",
+            "subject:Guest",
+        ),
+        (
+            {
+                "kind": "forget_memory",
+                "subject_ref": "subject:guest",
+                "memory_ref": "memory:pref",
+                "confidence_micros": 900_000,
+                "reason": "asked",
+            },
+            "memory_ref",
+            "memory:pref/1",
+        ),
+        (
+            {
+                "kind": "forget_memory",
+                "subject_ref": "subject:guest",
+                "memory_ref": "memory:pref",
+                "confidence_micros": 900_000,
+                "reason": "asked",
+            },
+            "memory_ref",
+            "subject:pref",
+        ),
+    ),
+)
+def test_provider_memory_refs_reject_unanchored_or_unregistered_shapes(
+    proposal,
+    field: str,
+    bad_ref: str,
+) -> None:
+    proposal[field] = bad_ref
+    with pytest.raises(ValidationError):
+        AssistantTurn.model_validate(
+            {
+                "answer_text": "Okay",
+                "answer_language": "en",
+                "memory_proposals": [proposal],
+                "action_proposals": [],
+                "uncertainty_micros": 10_000,
+            }
+        )
+
+
+@pytest.mark.parametrize("timer_ref", ("timer:synthetic", "timer:tea-1", "timer:kitchen_2"))
+def test_provider_timer_refs_accept_resolver_prefix(timer_ref: str) -> None:
+    turn = AssistantTurn.model_validate(
+        {
+            "answer_text": "Okay",
+            "answer_language": "en",
+            "memory_proposals": [],
+            "action_proposals": [
+                {
+                    "kind": "timer_cancel",
+                    "timer_ref": timer_ref,
+                    "confidence_micros": 900_000,
+                    "reason": "asked",
+                }
+            ],
+            "uncertainty_micros": 10_000,
+        }
+    )
+    assert turn.action_proposals
+
+
+@pytest.mark.parametrize(
+    "timer_ref",
+    ("timer:", "timer:Tea", "timer:../tea", "memory:tea", "timer:tea time"),
+)
+def test_provider_timer_refs_reject_unanchored_or_unregistered_shapes(
+    timer_ref: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        AssistantTurn.model_validate(
+            {
+                "answer_text": "Okay",
+                "answer_language": "en",
+                "memory_proposals": [],
+                "action_proposals": [
+                    {
+                        "kind": "timer_cancel",
+                        "timer_ref": timer_ref,
+                        "confidence_micros": 900_000,
+                        "reason": "asked",
+                    }
+                ],
+                "uncertainty_micros": 10_000,
+            }
+        )
+
+
 def test_assistant_turn_provider_json_rejects_duplicates_nonfinite_and_oversize() -> None:
     valid = (
         b'{"answer_text":"Okay","answer_language":"en","memory_proposals":[],'

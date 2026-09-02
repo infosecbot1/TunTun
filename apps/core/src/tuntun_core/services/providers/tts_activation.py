@@ -2,45 +2,54 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
+from uuid import UUID
 
 
 @dataclass(frozen=True, slots=True)
 class CloudRequestBoundTtsEvidence:
-    provider: Literal["openai"] = "openai"
-    model: Literal["tts-1"] = "tts-1"
-    accounting_basis: Literal["request_bound_exact"] = "request_bound_exact"
-    binary_response_has_usage: bool = False
-    character_limit: int = 4_096
+    review_receipt_id: UUID
+    provenance_receipt_id: UUID
+    measured_at: datetime
+    is_current: bool
+    evidence_age_seconds: int
+    max_age_seconds: int
+    provider: Literal["openai"]
+    model: Literal["tts-1"]
+    accounting_basis: Literal["request_bound_exact"]
+    binary_response_has_usage: bool
+    character_limit: int
 
 
 @dataclass(frozen=True, slots=True)
 class OfflineMacOSSayEvidence:
-    schema_version: Literal["tuntun.offline-macos-say-tts-readiness.v1"] = (
-        "tuntun.offline-macos-say-tts-readiness.v1"
-    )
-    say_path: str = "/usr/bin/say"
-    afconvert_path: str = "/usr/bin/afconvert"
-    owner_license_accepted: bool = True
-    say_binary_sha256_b64: str = "A" * 43 + "="
-    afconvert_binary_sha256_b64: str = "B" * 43 + "="
-    fixed_binary_hashes_match: bool = True
-    english_voice_id: str = "Aman"
-    hindi_voice_id: str = "Lekha"
-    pcm_sample_format: Literal["s16le"] = "s16le"
-    pcm_sample_rate_hz: int = 24_000
-    pcm_channels: int = 1
-    pcm_interleaved: bool = True
-    pcm_container: Literal["raw"] = "raw"
-    bilingual_quality_passed: bool = True
-    hinglish_quality_passed: bool = True
-    no_network_observed: bool = True
-    cold_restart_voice_presence_passed: bool = True
-    p95_first_audio_ms: int = 1_000
-    p95_total_ms: int = 3_000
-    is_current: bool = True
-    evidence_age_seconds: int = 0
-    max_age_seconds: int = 86_400
+    review_receipt_id: UUID
+    provenance_receipt_id: UUID
+    measured_at: datetime
+    schema_version: Literal["tuntun.offline-macos-say-tts-readiness.v1"]
+    say_path: str
+    afconvert_path: str
+    owner_license_accepted: bool
+    say_binary_sha256_b64: str
+    afconvert_binary_sha256_b64: str
+    fixed_binary_hashes_match: bool
+    english_voice_id: str
+    hindi_voice_id: str
+    pcm_sample_format: Literal["s16le"]
+    pcm_sample_rate_hz: int
+    pcm_channels: int
+    pcm_interleaved: bool
+    pcm_container: Literal["raw"]
+    bilingual_quality_passed: bool
+    hinglish_quality_passed: bool
+    no_network_observed: bool
+    cold_restart_voice_presence_passed: bool
+    p95_first_audio_ms: int
+    p95_total_ms: int
+    is_current: bool
+    evidence_age_seconds: int
+    max_age_seconds: int
 
 
 class TtsActivationGate:
@@ -71,6 +80,8 @@ def _cloud_ready(value: object) -> bool:
         and value.binary_response_has_usage is False
         and type(value.character_limit) is int
         and value.character_limit == 4_096
+        and _reviewed_provenance(value)
+        and _current_fresh(value)
     )
 
 
@@ -79,6 +90,7 @@ def _offline_ready(value: object) -> bool:
         return False
     return (
         value.schema_version == "tuntun.offline-macos-say-tts-readiness.v1"
+        and _reviewed_provenance(value)
         and value.say_path == "/usr/bin/say"
         and value.afconvert_path == "/usr/bin/afconvert"
         and value.owner_license_accepted is True
@@ -101,7 +113,25 @@ def _offline_ready(value: object) -> bool:
         and value.p95_first_audio_ms <= 1_000
         and type(value.p95_total_ms) is int
         and value.p95_total_ms <= 3_000
-        and value.is_current is True
+        and _current_fresh(value)
+    )
+
+
+def _reviewed_provenance(value: Any) -> bool:
+    return (
+        type(value.review_receipt_id) is UUID
+        and value.review_receipt_id.int != 0
+        and type(value.provenance_receipt_id) is UUID
+        and value.provenance_receipt_id.int != 0
+        and type(value.measured_at) is datetime
+        and value.measured_at.tzinfo is not None
+        and value.measured_at.utcoffset() is not None
+    )
+
+
+def _current_fresh(value: Any) -> bool:
+    return (
+        value.is_current is True
         and type(value.evidence_age_seconds) is int
         and type(value.max_age_seconds) is int
         and 0 <= value.evidence_age_seconds <= value.max_age_seconds <= 86_400

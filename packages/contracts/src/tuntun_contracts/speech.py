@@ -84,7 +84,7 @@ class OfflineSynthesisRequest(ContractModel):
     @field_validator("text")
     @classmethod
     def bounded_nfc_text(cls, value: str) -> str:
-        if value != normalize("NFC", value) or len(value.encode("utf-8")) > 4_096:
+        if value != normalize("NFC", value) or not 1 <= len(value) <= 4_096:
             raise ValueError("offline_tts_text_must_be_bounded_nfc")
         return value
 
@@ -99,6 +99,26 @@ class AuthorizedSynthesisRequest(ContractModel):
     language: Literal["en", "hi", "hinglish"]
     dlp_receipt_id: UUID
     route: RouteAuthorization
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def raw_text_must_be_nfc(
+        cls,
+        value: object,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        if isinstance(value, Mapping):
+            text = value.get("text")
+            if type(text) is str and text != normalize("NFC", text):
+                raise ValueError("tts_text_must_be_bounded_nfc")
+        return handler(value)
+
+    @field_validator("text")
+    @classmethod
+    def bounded_nfc_text(cls, value: str) -> str:
+        if value != normalize("NFC", value) or not 1 <= len(value) <= 4_096:
+            raise ValueError("tts_text_must_be_bounded_nfc")
+        return value
 
     @model_validator(mode="after")
     def exact_synthesis_route(self) -> Self:

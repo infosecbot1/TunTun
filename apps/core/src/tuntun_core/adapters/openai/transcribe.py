@@ -15,10 +15,7 @@ from tuntun_contracts.provider import RouteConsumption
 from tuntun_contracts.speech import AuthorizedTranscriptionRequest, TranscriptResult
 from tuntun_core.adapters.openai.errors import translate_openai_error
 from tuntun_core.services.providers.attempts import TransientProviderError
-from tuntun_core.services.providers.gateway import (
-    ProviderUsageObservation,
-    ProviderUsageUnknownError,
-)
+from tuntun_core.services.providers.gateway import ProviderUsageObservation
 
 from openai import OpenAIError
 
@@ -32,6 +29,13 @@ class _TranscriptionEnvelope:
     body: bytes
     headers: dict[str, str]
     request_id: str | None
+    body_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundedProviderBody:
+    body: bytes
+    error: str | None = None
 
 
 def _normalize_transcription_languages(value: object) -> _TranscriptLanguage:
@@ -117,7 +121,7 @@ def _parse_transcription_json(raw: bytes) -> dict[str, JSONValue]:
     return value
 
 
-async def _read_bounded_provider_body(response: Any) -> bytes:
+async def _read_bounded_provider_body(response: Any) -> _BoundedProviderBody:
     headers = getattr(response, "headers", {})
     declared = None
     if isinstance(headers, dict):
@@ -126,19 +130,24 @@ async def _read_bounded_provider_body(response: Any) -> bytes:
         declared = getattr(headers, "get", lambda _key, _default=None: None)("content-length")
     if declared is not None:
         try:
-            if int(declared) > _MAX_TRANSCRIPTION_RESPONSE_BYTES:
-                raise ValueError("transcription response invalid")
-        except ValueError as error:
-            raise ValueError("transcription response invalid") from error
+            declared_size = int(declared)
+        except (TypeError, ValueError):
+            return _BoundedProviderBody(b"", "transcription response invalid")
+        if not 0 <= declared_size <= _MAX_TRANSCRIPTION_RESPONSE_BYTES:
+            return _BoundedProviderBody(b"", "transcription response invalid")
     body = bytearray()
     async for chunk in response.iter_bytes():
         if type(chunk) is not bytes:
-            raise TypeError("transcription response chunk invalid")
+            body[:] = b"\x00" * len(body)
+            body.clear()
+            return _BoundedProviderBody(b"", "transcription response chunk invalid")
         remaining = _MAX_TRANSCRIPTION_RESPONSE_BYTES - len(body)
         if len(chunk) > remaining:
-            raise ValueError("transcription response invalid")
+            body[:] = b"\x00" * len(body)
+            body.clear()
+            return _BoundedProviderBody(b"", "transcription response invalid")
         body.extend(chunk)
-    return bytes(body)
+    return _BoundedProviderBody(bytes(body))
 
 
 class OpenAITranscriber:
@@ -203,17 +212,19 @@ class OpenAITranscriber:
                 languages=list(request.language_hints),
                 response_format="json",
             ) as response:
-                try:
-                    body = await _read_bounded_provider_body(response)
-                except (TypeError, ValueError) as error:
-                    raise ProviderUsageUnknownError(
-                        "provider_usage_invalid_unknown_overage"
-                    ) from error
+                provider_body = await _read_bounded_provider_body(response)
                 headers = dict(getattr(response, "headers", {}) or {})
                 request_id = getattr(response, "request_id", None) or headers.get("x-request-id")
-                return _TranscriptionEnvelope(body=body, headers=headers, request_id=request_id)
+                return _TranscriptionEnvelope(
+                    body=provider_body.body,
+                    headers=headers,
+                    request_id=request_id,
+                    body_error=provider_body.error,
+                )
 
         async def observe(envelope: _TranscriptionEnvelope) -> ProviderUsageObservation:
+            if envelope.body_error is not None:
+                raise ValueError(envelope.body_error)
             payload = _parse_transcription_json(envelope.body)
             usage = payload["usage"]
             if type(usage) is not dict:

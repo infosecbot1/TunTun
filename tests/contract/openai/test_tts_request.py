@@ -45,6 +45,39 @@ async def test_tts_character_under_reservation_denies_before_network(tts_account
 
 
 @pytest.mark.asyncio
+async def test_tts_accepts_4096_multibyte_nfc_characters(tts_accounting_case) -> None:
+    text = "ठ" * 4_096
+    case = await tts_accounting_case(text=text, binary_chunks=(b"pcm",))
+
+    chunks = [chunk async for chunk in case.adapter.synthesize(case.request)]
+
+    assert case.sent_body["input"] == text
+    assert chunks[-1].final is True
+    assert case.receipt.billable_usage.characters == 4_096
+
+
+@pytest.mark.asyncio
+async def test_tts_rejects_4097_characters_before_network(tts_accounting_case) -> None:
+    case = await tts_accounting_case(text="ठ" * 4_096)
+    request = AuthorizedSynthesisRequest.model_construct(
+        request_id=case.request.request_id,
+        turn_id=case.request.turn_id,
+        text="ठ" * 4_097,
+        text_commitment=case.request.text_commitment,
+        segment_index=case.request.segment_index,
+        segment_count=case.request.segment_count,
+        language=case.request.language,
+        dlp_receipt_id=case.request.dlp_receipt_id,
+        route=case.route,
+    )
+
+    with pytest.raises(ValueError, match="tts_text_must_be_bounded_nfc"):
+        _ = [chunk async for chunk in case.adapter.synthesize(request)]
+
+    assert case.sent_body == {}
+
+
+@pytest.mark.asyncio
 async def test_tts_rejects_non_tts_1_model_before_gateway(tts_accounting_case) -> None:
     case = await tts_accounting_case()
     wrong_route = RouteAuthorization.model_validate(

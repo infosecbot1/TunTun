@@ -23,7 +23,6 @@ from tuntun_contracts.budget import (
     ProviderUsageReceiptV1,
     TransportProof,
     TtsUsageUnits,
-    UsageUnits,
 )
 from tuntun_core.services.budget.evidence import (
     BudgetEvidenceQuarantined,
@@ -272,11 +271,14 @@ class BudgetGuard:
                     .mappings()
                     .one_or_none()
                 )
-                expected_category = {
-                    "cloud_stt": "stt",
-                    "cloud_reasoning": "llm",
-                    "cloud_tts": "tts",
-                }.get(route.purpose)
+                expected_category = cast(
+                    Literal["stt", "llm", "tts"] | None,
+                    {
+                        "cloud_stt": "stt",
+                        "cloud_reasoning": "llm",
+                        "cloud_tts": "tts",
+                    }.get(route.purpose),
+                )
                 if row is None or expected_category is None:
                     raise PermissionError("budget_accounting_context_missing")
                 if (

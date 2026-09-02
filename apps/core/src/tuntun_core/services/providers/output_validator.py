@@ -20,6 +20,10 @@ from tuntun_contracts.memory import (
     PreferenceContent,
 )
 
+_SUBJECT_REF_PATTERN = r"^subject:[a-z0-9_-]{1,64}$"
+_MEMORY_REF_PATTERN = r"^memory:[a-z0-9_-]{1,64}$"
+_TIMER_REF_PATTERN = r"^timer:[a-z0-9_-]{1,64}$"
+
 
 class _IntentBase(ContractModel):
     confidence_micros: Annotated[int, Field(ge=0, le=1_000_000)]
@@ -28,7 +32,7 @@ class _IntentBase(ContractModel):
 
 class RememberPreferenceIntent(_IntentBase):
     kind: Literal["remember_preference"]
-    subject_ref: Annotated[str, Field(min_length=1, max_length=128)]
+    subject_ref: Annotated[str, Field(pattern=_SUBJECT_REF_PATTERN)]
     category: Annotated[str, Field(min_length=1, max_length=128)]
     key: Annotated[str, Field(min_length=1, max_length=128)]
     value: Annotated[str, Field(min_length=1, max_length=2_000)]
@@ -36,8 +40,8 @@ class RememberPreferenceIntent(_IntentBase):
 
 class ForgetMemoryIntent(_IntentBase):
     kind: Literal["forget_memory"]
-    subject_ref: Annotated[str, Field(min_length=1, max_length=128)]
-    memory_ref: Annotated[str, Field(min_length=1, max_length=128)]
+    subject_ref: Annotated[str, Field(pattern=_SUBJECT_REF_PATTERN)]
+    memory_ref: Annotated[str, Field(pattern=_MEMORY_REF_PATTERN)]
 
 
 class TimerCreateIntent(_IntentBase):
@@ -48,7 +52,7 @@ class TimerCreateIntent(_IntentBase):
 
 class TimerCancelIntent(_IntentBase):
     kind: Literal["timer_cancel"]
-    timer_ref: Annotated[str, Field(min_length=1, max_length=128)]
+    timer_ref: Annotated[str, Field(pattern=_TIMER_REF_PATTERN)]
 
 
 ProviderMemoryIntent = Annotated[  # noqa: UP040 -- runtime Pydantic alias.

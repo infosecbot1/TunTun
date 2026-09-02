@@ -44,7 +44,7 @@ class OpenAITTS:
             raise PermissionError("openai_tts_route_required")
         if (
             request.text != unicodedata.normalize("NFC", request.text)
-            or not 1 <= len(request.text.encode("utf-8")) <= 4_096
+            or not 1 <= len(request.text) <= 4_096
         ):
             raise ValueError("tts_text_must_be_bounded_nfc")
         if len(request.text) != request.route.max_input_units:
@@ -58,6 +58,8 @@ class OpenAITTS:
                 "voice": _VOICE,
             }
         )
+        if len(body) > request.route.max_input_bytes:
+            raise PermissionError("tts_request_byte_binding_mismatch")
         expected = commit_private(
             self._root,
             request.text_commitment.key_id,
