@@ -6,6 +6,7 @@ dependencies = [
   "cryptography>=45,<46",
   "tuntun-contracts==0.1.0.dev0",
   "typer>=0.16,<1",
+  "websockets==15.0.1",
 ]
 
 [project.scripts]
