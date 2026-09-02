@@ -1003,12 +1003,14 @@ name = "tuntun-edge"
 version = "0.1.0.dev0"
 source = { editable = "apps/edge" }
 dependencies = [
+    { name = "cryptography" },
     { name = "tuntun-contracts" },
     { name = "typer" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=45,<46" },
     { name = "tuntun-contracts", editable = "packages/contracts" },
     { name = "typer", specifier = ">=0.16,<1" },
 ]
