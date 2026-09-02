@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Annotated, Final, Literal, Self
+from uuid import uuid4
 
 from pydantic import Field, StringConstraints, field_validator, model_validator
 from tuntun_contracts.base import (
@@ -60,6 +61,7 @@ _EXPECTED_IMPORT_CLOSURE: Final = (
 _MAX_DESCRIPTOR_BYTES: Final = 32_768
 _MAX_DHCP_BYTES: Final = 16_384
 _MAX_PINNED_HOST_KEY_BYTES: Final = 128
+_MAX_ONE_TIME_CODE_RECEIPT_BYTES: Final = 512
 _READ_CHUNK_BYTES: Final = 4096
 _CLOEXEC: Final = getattr(os, "O_CLOEXEC", 0)
 _NOFOLLOW: Final = getattr(os, "O_NOFOLLOW", 0)
@@ -67,6 +69,7 @@ _NONBLOCK: Final = getattr(os, "O_NONBLOCK", 0)
 _DIRECTORY: Final = getattr(os, "O_DIRECTORY", 0)
 _READ_FLAGS: Final = os.O_RDONLY | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 _DIRECTORY_FLAGS: Final = os.O_RDONLY | _DIRECTORY | _CLOEXEC | _NOFOLLOW
+_WRITE_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _CLOEXEC | _NOFOLLOW
 OS_MODULE: Final = os
 
 Sha256Hex = Annotated[str, Field(pattern=SHA256_PATTERN)]
@@ -459,6 +462,111 @@ class ReachyLocalProofAuthority:
         )
 
 
+class OneTimeCodeConsumptionReceiptV1(ContractModel):
+    schema_version: Literal["tuntun.reachy-one-time-code-consumption.v1"]
+    receipt_id: Sha256Hex
+
+
+class ReachyOneTimeCodeReceiptRepository:
+    def __init__(self, root: Path, *, expected_owner_uid: int) -> None:
+        self.root = _absolute_lexical_path(root)
+        self.expected_owner_uid = expected_owner_uid
+        self._fd = _open_or_create_private_directory(
+            self.root,
+            expected_owner_uid=expected_owner_uid,
+        )
+        self.identity = _DirectoryIdentity.from_stat(OS_MODULE.fstat(self._fd))
+
+    @property
+    def fd(self) -> int:
+        if self._fd < 0:
+            raise OSError("closed Reachy local ceremony one-time-code receipt directory")
+        return self._fd
+
+    def close(self) -> None:
+        descriptor = self._fd
+        self._fd = -1
+        if descriptor >= 0:
+            OS_MODULE.close(descriptor)
+
+    def consume_once(self, one_time_code_sha256: str) -> None:
+        receipt_id = _one_time_code_receipt_id(one_time_code_sha256)
+        target_name = f"receipt-{receipt_id}.json"
+        if not _safe_receipt_name(target_name):
+            raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+        payload = canonical_bytes(
+            OneTimeCodeConsumptionReceiptV1(
+                schema_version="tuntun.reachy-one-time-code-consumption.v1",
+                receipt_id=receipt_id,
+            )
+        )
+        temp_name = f".one-time-code-receipt.{OS_MODULE.getpid()}.{uuid4().hex}.tmp"
+        descriptor = -1
+        temp_identity: _FileIdentity | None = None
+        published = False
+        try:
+            descriptor = OS_MODULE.open(temp_name, _WRITE_FLAGS, 0o600, dir_fd=self.fd)
+            OS_MODULE.fchmod(descriptor, 0o600)
+            _write_all(descriptor, payload)
+            written = OS_MODULE.fstat(descriptor)
+            _require_owner_regular(
+                written,
+                expected_owner_uid=self.expected_owner_uid,
+                expected_mode=0o600,
+                max_bytes=_MAX_ONE_TIME_CODE_RECEIPT_BYTES,
+                directory_device=self.identity.device,
+            )
+            if written.st_size != len(payload):
+                raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+            OS_MODULE.fsync(descriptor)
+            temp_identity = _FileIdentity.from_stat(written)
+            OS_MODULE.close(descriptor)
+            descriptor = -1
+            named_temp = OS_MODULE.stat(temp_name, dir_fd=self.fd, follow_symlinks=False)
+            if not temp_identity.same_file_and_size(named_temp):
+                raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+            try:
+                OS_MODULE.link(temp_name, target_name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+            except FileExistsError as error:
+                raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR) from error
+            published = True
+            OS_MODULE.fsync(self.fd)
+        finally:
+            if descriptor >= 0 and temp_identity is None:
+                with contextlib.suppress(OSError):
+                    temp_identity = _FileIdentity.from_stat(OS_MODULE.fstat(descriptor))
+            if descriptor >= 0:
+                OS_MODULE.close(descriptor)
+            if temp_identity is not None:
+                with contextlib.suppress(OSError):
+                    OS_MODULE.unlink(temp_name, dir_fd=self.fd)
+                if published:
+                    with contextlib.suppress(OSError):
+                        OS_MODULE.fsync(self.fd)
+        if published:
+            published_identity = OS_MODULE.stat(
+                target_name,
+                dir_fd=self.fd,
+                follow_symlinks=False,
+            )
+            _require_owner_regular(
+                published_identity,
+                expected_owner_uid=self.expected_owner_uid,
+                expected_mode=0o600,
+                max_bytes=_MAX_ONE_TIME_CODE_RECEIPT_BYTES,
+                directory_device=self.identity.device,
+            )
+            if (
+                _read_owner_file(
+                    self.root / target_name,
+                    expected_owner_uid=self.expected_owner_uid,
+                    max_bytes=_MAX_ONE_TIME_CODE_RECEIPT_BYTES,
+                )
+                != payload
+            ):
+                raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+
+
 class ReachyLocalCeremony:
     def __init__(
         self,
@@ -466,11 +574,13 @@ class ReachyLocalCeremony:
         descriptor: ReachyLocalCeremonyDescriptor,
         pinned_host_key_sha256: str,
         dhcp_reservations: ReachyDhcpReservationsV1,
+        one_time_code_receipts: ReachyOneTimeCodeReceiptRepository,
         proof_authority: ReachyLocalProofAuthority | None = None,
     ) -> None:
         self._descriptor = descriptor
         self._pinned_host_key_sha256 = pinned_host_key_sha256
         self._dhcp_reservations = dhcp_reservations
+        self._one_time_code_receipts = one_time_code_receipts
         self._proof_authority = (
             ReachyLocalProofAuthority() if proof_authority is None else proof_authority
         )
@@ -526,6 +636,7 @@ class ReachyLocalCeremony:
             self._descriptor.one_time_code_sha256,
         ):
             raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+        self._one_time_code_receipts.consume_once(self._descriptor.one_time_code_sha256)
         return _SyntheticLocalPhysicalEvidence(
             local_tty=True,
             ssh_host_key_verified=True,
@@ -588,6 +699,7 @@ def load_reachy_local_ceremony(
     paths: ReachyLocalCeremonyInputPaths,
     *,
     expected_owner_uid: int,
+    one_time_code_receipts: ReachyOneTimeCodeReceiptRepository,
     proof_authority: ReachyLocalProofAuthority | None = None,
 ) -> ReachyLocalCeremony:
     try:
@@ -623,6 +735,7 @@ def load_reachy_local_ceremony(
             descriptor=descriptor,
             pinned_host_key_sha256=pinned_host_key_sha256,
             dhcp_reservations=dhcp_reservations,
+            one_time_code_receipts=one_time_code_receipts,
             proof_authority=proof_authority,
         )
         return ceremony
@@ -710,14 +823,55 @@ def _read_owner_file(path: Path, *, expected_owner_uid: int, max_bytes: int) -> 
 
 def _absolute_lexical_path(path: Path) -> Path:
     raw = os.fspath(path)
-    if type(raw) is not str or raw == "" or "\x00" in raw:
+    if (
+        type(raw) is not str
+        or raw == ""
+        or "\x00" in raw
+        or not raw.startswith(os.sep)
+        or raw.startswith(os.sep * 2)
+        or os.sep * 2 in raw
+    ):
         raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
-    if any(part in {"", ".", ".."} for part in raw.split(os.sep) if part != ""):
+    if any(part in {"", ".", ".."} for part in raw.split(os.sep)[1:]):
         raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
     absolute = Path(os.path.abspath(raw))
     if absolute == Path("/") or any(part in {".", ".."} for part in absolute.parts):
         raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
     return absolute
+
+
+def _open_or_create_private_directory(path: Path, *, expected_owner_uid: int) -> int:
+    absolute = _absolute_lexical_path(path)
+    parts = absolute.parts
+    descriptor = OS_MODULE.open("/", _DIRECTORY_FLAGS & ~_NOFOLLOW)
+    try:
+        for index, component in enumerate(parts[1:]):
+            if not _safe_component(component):
+                raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+            final = index == len(parts[1:]) - 1
+            if final:
+                with contextlib.suppress(FileExistsError):
+                    OS_MODULE.mkdir(component, 0o700, dir_fd=descriptor)
+            named = OS_MODULE.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISDIR(named.st_mode):
+                raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+            child = OS_MODULE.open(component, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            try:
+                opened = OS_MODULE.fstat(child)
+                if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                    raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+                if final:
+                    _require_private_directory(opened, expected_owner_uid=expected_owner_uid)
+            except BaseException:
+                OS_MODULE.close(child)
+                raise
+            OS_MODULE.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        with contextlib.suppress(OSError):
+            OS_MODULE.close(descriptor)
+        raise
 
 
 def _open_private_directory(path: Path, *, expected_owner_uid: int) -> int:
@@ -789,6 +943,39 @@ def _require_owner_regular(
         raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
     if not 1 <= identity.st_size <= max_bytes:
         raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+
+
+def _one_time_code_receipt_id(one_time_code_sha256: str) -> str:
+    if (
+        type(one_time_code_sha256) is not str
+        or re.fullmatch(
+            SHA256_PATTERN,
+            one_time_code_sha256,
+        )
+        is None
+    ):
+        raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+    return hashlib.sha256(
+        canonical_mapping_bytes(
+            {
+                "one_time_code_sha256": one_time_code_sha256,
+                "schema_version": "tuntun.reachy-one-time-code-consumption-key.v1",
+            }
+        )
+    ).hexdigest()
+
+
+def _safe_receipt_name(value: str) -> bool:
+    return re.fullmatch(r"receipt-[0-9a-f]{64}[.]json", value) is not None
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = OS_MODULE.write(descriptor, remaining)
+        if written <= 0:
+            raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+        remaining = remaining[written:]
 
 
 def _same_subnet(left: str, right: str, prefix_length: int) -> bool:

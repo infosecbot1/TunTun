@@ -22,6 +22,8 @@ from tuntun_edge.transport.reachy_local_ceremony import (
     ReachyLocalCeremony,
     ReachyLocalCeremonyInputPaths,
     ReachyLocalProofAuthority,
+    ReachyOneTimeCodeReceiptRepository,
+    _absolute_lexical_path,
     load_reachy_local_ceremony,
 )
 
@@ -36,6 +38,7 @@ class ReachyCommissioningRoots:
     certificate_root: Path
     issuer_state_root: Path
     operator_state_root: Path
+    one_time_code_receipt_root: Path
 
     def input_paths(self) -> ReachyLocalCeremonyInputPaths:
         return ReachyLocalCeremonyInputPaths(
@@ -54,11 +57,14 @@ PRODUCTION_ROOTS = ReachyCommissioningRoots(
     certificate_root=Path("/var/lib/tuntun/reachy/certificates"),
     issuer_state_root=Path("/var/lib/tuntun/reachy/issuer-state"),
     operator_state_root=Path("/var/lib/tuntun/reachy/operator-state"),
+    one_time_code_receipt_root=Path("/private/var/lib/tuntun/reachy/one-time-code-receipts"),
 )
+
+_PRODUCTION_OPERATOR_STATE_REPOSITORY_ROOT = Path("/private/var/lib/tuntun/reachy")
 
 
 def explicit_test_roots(root: Path) -> ReachyCommissioningRoots:
-    base = root / "tuntun-reachy"
+    base = _absolute_lexical_path(root) / "tuntun-reachy"
     return ReachyCommissioningRoots(
         input_descriptor_path=base / "etc" / "tuntun" / "reachy" / "commissioning.json",
         pinned_host_key_path=base / "etc" / "tuntun" / "reachy" / "pinned-host-key.sha256",
@@ -67,7 +73,10 @@ def explicit_test_roots(root: Path) -> ReachyCommissioningRoots:
         private_material_root=base / "var" / "lib" / "tuntun" / "reachy" / "private",
         certificate_root=base / "var" / "lib" / "tuntun" / "reachy" / "certificates",
         issuer_state_root=base / "var" / "lib" / "tuntun" / "reachy" / "issuer-state",
-        operator_state_root=base / "var" / "lib" / "tuntun" / "reachy" / "operator-state",
+        operator_state_root=base / "var" / "lib" / "tuntun" / "reachy",
+        one_time_code_receipt_root=(
+            base / "var" / "lib" / "tuntun" / "reachy" / "one-time-code-receipts"
+        ),
     )
 
 
@@ -93,14 +102,20 @@ class _MissingOperatorProjectionOkPublisher:
 
 class ReachyCommissioningComposition:
     def __init__(self, *, roots: ReachyCommissioningRoots, expected_input_owner_uid: int) -> None:
-        self.roots = roots
+        self.roots = _validated_roots(roots)
         self._expected_input_owner_uid = expected_input_owner_uid
         self._proof_authority = ReachyLocalProofAuthority()
-        self.repository = CommissioningRepository(roots.state_root)
-        self.key_store = OwnerOnlyArtifactStore(roots.private_material_root)
-        self.certificate_store = OwnerOnlyArtifactStore(roots.certificate_root)
-        self.issuer_state_store = OwnerOnlyArtifactStore(roots.issuer_state_root)
-        self.operator_state_repository = ReachyOperatorStateRepository(roots.operator_state_root)
+        self.one_time_code_receipts = ReachyOneTimeCodeReceiptRepository(
+            self.roots.one_time_code_receipt_root,
+            expected_owner_uid=expected_input_owner_uid,
+        )
+        self.repository = CommissioningRepository(self.roots.state_root)
+        self.key_store = OwnerOnlyArtifactStore(self.roots.private_material_root)
+        self.certificate_store = OwnerOnlyArtifactStore(self.roots.certificate_root)
+        self.issuer_state_store = OwnerOnlyArtifactStore(self.roots.issuer_state_root)
+        self.operator_state_repository = ReachyOperatorStateRepository(
+            _operator_state_repository_root(self.roots)
+        )
         self.generator = SyntheticReachyPrivateMaterialGenerator(
             key_store=self.key_store,
             certificate_store=self.certificate_store,
@@ -161,6 +176,7 @@ class ReachyCommissioningComposition:
         return load_reachy_local_ceremony(
             self.roots.input_paths(),
             expected_owner_uid=self._expected_input_owner_uid,
+            one_time_code_receipts=self.one_time_code_receipts,
             proof_authority=self._proof_authority,
         )
 
@@ -176,7 +192,7 @@ class ReachyCommissioningComposition:
 
 
 def build_production_commissioning() -> ReachyCommissioningComposition:
-    return ReachyCommissioningComposition(roots=PRODUCTION_ROOTS, expected_input_owner_uid=0)
+    raise RuntimeError("Reachy local ceremony unavailable")
 
 
 def build_commissioning_for_test_roots(root: Path) -> ReachyCommissioningComposition:
@@ -184,3 +200,23 @@ def build_commissioning_for_test_roots(root: Path) -> ReachyCommissioningComposi
         roots=explicit_test_roots(root),
         expected_input_owner_uid=os.geteuid(),
     )
+
+
+def _validated_roots(roots: ReachyCommissioningRoots) -> ReachyCommissioningRoots:
+    return ReachyCommissioningRoots(
+        input_descriptor_path=_absolute_lexical_path(roots.input_descriptor_path),
+        pinned_host_key_path=_absolute_lexical_path(roots.pinned_host_key_path),
+        dhcp_reservations_path=_absolute_lexical_path(roots.dhcp_reservations_path),
+        state_root=_absolute_lexical_path(roots.state_root),
+        private_material_root=_absolute_lexical_path(roots.private_material_root),
+        certificate_root=_absolute_lexical_path(roots.certificate_root),
+        issuer_state_root=_absolute_lexical_path(roots.issuer_state_root),
+        operator_state_root=_absolute_lexical_path(roots.operator_state_root),
+        one_time_code_receipt_root=_absolute_lexical_path(roots.one_time_code_receipt_root),
+    )
+
+
+def _operator_state_repository_root(roots: ReachyCommissioningRoots) -> Path:
+    if roots == PRODUCTION_ROOTS:
+        return _PRODUCTION_OPERATOR_STATE_REPOSITORY_ROOT
+    return roots.operator_state_root
