@@ -17,6 +17,20 @@ RuleText = Annotated[str, Field(min_length=1, max_length=512)]
 _PROMPT_READ_FLAGS = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
 _PROMPT_MAX_BYTES = 65_536
 _VERSION_MAX_BYTES = 8_192
+_SYSTEM_PROMPT_MAX_BYTES = 32_768
+_SAFE_PROJECTION_MATRIX = frozenset(
+    {
+        ("owner", "general", "neutral", "brief", "none"),
+        ("owner", "technical_security", "precise", "detailed", "none"),
+        ("owner", "household_practical", "practical", "standard", "none"),
+        ("adult", "general", "neutral", "brief", "none"),
+        ("adult", "technical_security", "precise", "detailed", "none"),
+        ("adult", "household_practical", "practical", "standard", "none"),
+        ("k2", "early_learning", "warm", "brief", "k2"),
+        ("n1", "early_learning", "warm", "brief", "n1"),
+        ("guest", "general", "neutral", "brief", "none"),
+    }
+)
 
 
 class RoleRulesV1(ContractModel):
@@ -170,6 +184,9 @@ class PersonaBuilder:
     def build(self, persona: PersonaProjection, language: str) -> str:
         if type(persona) is not PersonaProjection:
             raise TypeError("persona must be an exact PersonaProjection")
+        _require_safe_projection(persona)
+        if type(language) is not str:
+            raise TypeError("language must be an exact str")
         if language not in {"en", "hi", "hi_romanized", "hinglish"}:
             raise ValueError("unknown language mode")
         rules = (
@@ -185,8 +202,22 @@ class PersonaBuilder:
             "hi_romanized": "Reply in Romanized Hindi without switching to Devanagari.",
             "hinglish": "Follow the speaker's Hindi-English mixing naturally.",
         }[cast(Literal["en", "hi", "hi_romanized", "hinglish"], language)]
-        return (
+        prompt = (
             f"{self._base}\n"
             f"Prompt bundle SHA-256: {self.prompt_bundle_sha256}\n"
             f"{' '.join(rules)} {language_rule}"
         )
+        if len(prompt.encode("utf-8")) > _SYSTEM_PROMPT_MAX_BYTES:
+            raise ValueError("system prompt outside provider bounds")
+        return prompt
+
+
+def _require_safe_projection(persona: PersonaProjection) -> None:
+    if (
+        persona.role,
+        persona.context,
+        persona.tone,
+        persona.depth,
+        persona.learning_level,
+    ) not in _SAFE_PROJECTION_MATRIX:
+        raise ValueError("unsafe persona projection")

@@ -7,11 +7,13 @@ import httpx
 import pytest
 from fastapi.routing import APIRoute
 from tuntun_contracts.budget import BudgetReconciliationRequest
+from tuntun_contracts.identity import IdentityDecision, IdentityStatus, PersonaProjection
 from tuntun_contracts.ports import TurnInput, TurnOutput
 from tuntun_contracts.reachy import SafetyReceipt
 from tuntun_core.api.app import create_app
 from tuntun_core.api.dependencies import SimulatedGuestAppDependencies
 from tuntun_core.bootstrap.container import ProductionContainer
+from tuntun_core.services.personalized_turn_context import ProviderTurnContext, TranscribedTurn
 from tuntun_core.services.sessions.manager import SessionAdmission, SessionRejected
 from tuntun_core.services.sessions.manager import SessionManager as RealSessionManager
 from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
@@ -94,17 +96,17 @@ class _Ports:
         del turn_id
         self.events.append("ports.start")
 
-    async def transcribe(self, wav_bytes: bytes) -> str:
+    async def transcribe(self, wav_bytes: bytes) -> TranscribedTurn:
         assert wav_bytes == b"RIFFsynthetic"
         self.events.append("ports.transcribe")
-        return "namaste"
+        return TranscribedTurn(text="namaste", stt_language="hi")
 
     async def guest_identity(self) -> str:
-        self.events.append("ports.identity")
-        return "Guest"
+        raise AssertionError("production route must not use legacy guest identity")
 
-    async def generate(self, transcript: str, identity: str) -> str:
-        assert (transcript, identity) == ("namaste", "Guest")
+    async def generate(self, context: ProviderTurnContext) -> str:
+        assert "Reply in Romanized Hindi" in context.messages[0]["content"]
+        assert context.messages[1]["content"] == "namaste"
         self.events.append("ports.generate")
         return "namaste ji"
 
@@ -126,6 +128,44 @@ class _Ports:
 class _Startup:
     def __init__(self, process_lease: object) -> None:
         self.process_lease = process_lease
+
+
+class _Core:
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+
+
+class _Identity:
+    def __init__(self, subject_id: UUID) -> None:
+        self.subject_id = subject_id
+
+    async def require_current_for_turn(self, turn_id: UUID) -> IdentityDecision:
+        del turn_id
+        return IdentityDecision(
+            status=IdentityStatus.VERIFIED,
+            subject_id=self.subject_id,
+            reason_code="test-verified",
+            expires_at=datetime(2026, 8, 27, 0, 5, tzinfo=UTC),
+        )
+
+
+class _Profiles:
+    async def get_persona_projection(
+        self,
+        household_id: UUID,
+        subject_id: UUID | None,
+        observed_at: datetime,
+    ) -> PersonaProjection:
+        assert type(household_id) is UUID
+        assert type(subject_id) is UUID
+        assert observed_at == datetime(2026, 8, 27, tzinfo=UTC)
+        return PersonaProjection(
+            role="guest",
+            context="general",
+            tone="neutral",
+            depth="brief",
+            learning_level="none",
+        )
 
 
 class _Lifecycle:
@@ -205,9 +245,7 @@ async def _asgi_exchange(
     )
     start = next(message for message in sent if message["type"] == "http.response.start")
     body = b"".join(
-        message.get("body", b"")
-        for message in sent
-        if message["type"] == "http.response.body"
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
     )
     return int(start["status"]), dict(start["headers"]), body, receive_calls
 
@@ -633,10 +671,11 @@ async def test_simulated_turn_maps_admission_rejections_to_content_free_bodies(
 @pytest.mark.asyncio
 async def test_production_container_installs_single_guest_app_with_existing_roots() -> None:
     reachy = _Reachy()
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
     coordinator = TurnCoordinator(
         budget=_Budget(),
         reachy=reachy,
-        clock=FakeClock(datetime(2026, 8, 27, tzinfo=UTC)),
+        clock=clock,
     )
     session_manager = RealSessionManager(coordinator)
     process_lease = object()
@@ -644,7 +683,7 @@ async def test_production_container_installs_single_guest_app_with_existing_root
     reconciler = object()
     lifecycle = _Lifecycle(reconciler, startup)
     container = ProductionContainer(
-        core=object(),  # type: ignore[arg-type]
+        core=_Core(clock),  # type: ignore[arg-type]
         core_process_lease=process_lease,  # type: ignore[arg-type]
         budget_reconciler=reconciler,  # type: ignore[arg-type]
         startup_turn_recovery=startup,  # type: ignore[arg-type]
@@ -659,9 +698,18 @@ async def test_production_container_installs_single_guest_app_with_existing_root
         household_id=uuid4(),
         device_id=uuid4(),
         loopback_host="127.0.0.1",
+        identity=_Identity(uuid4()),
+        profiles=_Profiles(),
     )
 
     assert installed.composition.workflow is installed.composition.dependencies.workflow
+    assert installed.composition.context_provider is not None
+    assert installed.composition.linear_engine is not None
+    assert (
+        installed.composition.linear_engine.context_provider
+        is installed.composition.context_provider
+    )
+    assert not hasattr(installed.composition, "langgraph_engine")
     assert installed.coordinator is coordinator
     assert installed.session_manager is session_manager
     assert installed.readiness_dependencies == (lifecycle,)
@@ -684,7 +732,6 @@ async def test_production_container_installs_single_guest_app_with_existing_root
     assert ports.events == [
         "ports.start",
         "ports.transcribe",
-        "ports.identity",
         "ports.generate",
         "ports.synthesize",
         "ports.play",
@@ -697,4 +744,6 @@ async def test_production_container_installs_single_guest_app_with_existing_root
             household_id=uuid4(),
             device_id=uuid4(),
             loopback_host="127.0.0.1",
+            identity=_Identity(uuid4()),
+            profiles=_Profiles(),
         )

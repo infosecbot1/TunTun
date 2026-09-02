@@ -36,11 +36,71 @@ def test_projection_is_exact_and_contains_no_identifier_or_free_form_trait() -> 
         learning_level="none",
     )
 
-    assert tuple(persona.model_fields) == ("role", "context", "tone", "depth", "learning_level")
+    assert tuple(PersonaProjection.model_fields) == (
+        "role",
+        "context",
+        "tone",
+        "depth",
+        "learning_level",
+    )
     prompt = PersonaBuilder.from_directory(Path("prompts")).build(persona=persona, language="en")
 
     assert "security architecture" in prompt.lower()
     assert "detailed" in prompt.lower()
+
+
+@pytest.mark.parametrize(
+    "persona",
+    (
+        PersonaProjection(
+            role="k2",
+            context="technical_security",
+            tone="precise",
+            depth="detailed",
+            learning_level="k2",
+        ),
+        PersonaProjection(
+            role="n1",
+            context="household_practical",
+            tone="practical",
+            depth="standard",
+            learning_level="n1",
+        ),
+        PersonaProjection(
+            role="guest",
+            context="technical_security",
+            tone="precise",
+            depth="detailed",
+            learning_level="none",
+        ),
+    ),
+)
+def test_persona_projection_matrix_rejects_child_or_guest_adult_traits(
+    persona: PersonaProjection,
+) -> None:
+    with pytest.raises(ValueError, match="unsafe persona projection"):
+        PersonaBuilder.from_directory(Path("prompts")).build(persona=persona, language="en")
+
+
+def test_built_system_prompt_is_bounded_before_provider_context_construction(
+    tmp_path: Path,
+) -> None:
+    prompt_root = tmp_path / "prompts"
+    shutil.copytree("prompts", prompt_root)
+    (prompt_root / "conversation/base.md").write_text("x" * 32_769, encoding="utf-8")
+    builder = PersonaBuilder.from_directory(prompt_root)
+
+    with pytest.raises(ValueError, match="system prompt"):
+        builder.build(
+            PersonaProjection(
+                role="guest",
+                context="general",
+                tone="neutral",
+                depth="brief",
+                learning_level="none",
+            ),
+            language="en",
+        )
 
 
 def test_family_examples_exist_only_as_synthetic_configuration() -> None:

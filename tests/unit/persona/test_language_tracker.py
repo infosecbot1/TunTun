@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from tuntun_core.services.language_tracker import LanguageTracker, ReplyMode, SttLanguage
 from tuntun_core.services.personalized_turn_context import (
     SessionLanguageRegistry,
@@ -104,3 +105,47 @@ def test_ambiguous_turns_do_not_refresh_the_last_evidence_forever() -> None:
     assert registry.detect(session_id, TranscribedTurn(text="hmm", stt_language="unknown")) == "hi"
     assert registry.detect(session_id, TranscribedTurn(text="okay", stt_language="unknown")) == "hi"
     assert registry.detect(session_id, TranscribedTurn(text="hmm", stt_language="unknown")) == "en"
+
+
+def test_bool_prior_age_and_oversized_transcripts_are_rejected() -> None:
+    tracker = LanguageTracker()
+
+    with pytest.raises(TypeError, match="prior_age_turns"):
+        tracker.detect(
+            "hmm",
+            stt_language="unknown",
+            prior_language="hi",
+            prior_age_turns=True,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="transcript"):
+        TranscribedTurn(text="a" * 4_097, stt_language="en")
+    with pytest.raises(ValueError, match="transcript"):
+        TranscribedTurn(text="é" * 2_049, stt_language="en")
+
+
+def test_language_metadata_requires_exact_strings_not_string_subclasses() -> None:
+    class SttString(str):
+        pass
+
+    class ReplyString(str):
+        pass
+
+    tracker = LanguageTracker()
+
+    with pytest.raises(TypeError, match="stt_language"):
+        tracker.detect("hello", stt_language=SttString("en"))  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="explicit_reply_language"):
+        tracker.detect(
+            "hello",
+            stt_language="en",
+            explicit_reply_language=ReplyString("hi"),  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError, match="prior_language"):
+        tracker.detect(
+            "hmm",
+            stt_language="unknown",
+            prior_language=ReplyString("hi"),  # type: ignore[arg-type]
+            prior_age_turns=1,
+        )
+    with pytest.raises(TypeError, match="stt_language"):
+        TranscribedTurn(text="hello", stt_language=SttString("en"))  # type: ignore[arg-type]

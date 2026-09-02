@@ -163,6 +163,74 @@ async def test_manager_cancel_synchronizes_its_admission() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manager_finish_waits_for_active_context_lease_before_end_handlers() -> None:
+    manager = SessionManager(_coordinator())
+    admission = await manager.open(uuid4(), uuid4())
+    ended_sessions: list[UUID] = []
+
+    async def record_session_end(session_id: UUID) -> None:
+        ended_sessions.append(session_id)
+
+    manager.register_session_ended_handler(record_session_end)
+    async with manager.active_context_lease(admission.turn_id) as session:
+        assert session.id == admission.turn_id
+        assert session.household_id == admission.household_id
+        finishing = asyncio.create_task(manager.finish(admission.turn_id))
+        await asyncio.sleep(0)
+
+        assert finishing.done() is False
+        assert ended_sessions == []
+
+    assert await finishing is True
+    assert ended_sessions == [admission.turn_id]
+    assert manager.active is None
+
+
+@pytest.mark.asyncio
+async def test_manager_cancel_waits_for_lease_and_rejects_new_leases_after_end_begins() -> None:
+    manager = SessionManager(_coordinator())
+    admission = await manager.open(uuid4(), uuid4())
+    ended_sessions: list[UUID] = []
+
+    async def record_session_end(session_id: UUID) -> None:
+        ended_sessions.append(session_id)
+
+    manager.register_session_ended_handler(record_session_end)
+    async with manager.active_context_lease(admission.turn_id):
+        cancellation = asyncio.create_task(manager.cancel(admission.turn_id, "privacy"))
+        await asyncio.sleep(0)
+
+        assert cancellation.done() is False
+        with pytest.raises(RuntimeError, match="session_context_unavailable"):
+            async with manager.active_context_lease(admission.turn_id):
+                raise AssertionError("new context lease should be rejected")
+        assert ended_sessions == []
+
+    await cancellation
+    assert ended_sessions == [admission.turn_id]
+    assert manager.active is None
+
+
+@pytest.mark.asyncio
+async def test_manager_end_alias_uses_the_same_lease_and_handler_barrier() -> None:
+    manager = SessionManager(_coordinator())
+    admission = await manager.open(uuid4(), uuid4())
+    ended_sessions: list[UUID] = []
+
+    async def record_session_end(session_id: UUID) -> None:
+        ended_sessions.append(session_id)
+
+    manager.register_session_ended_handler(record_session_end)
+    async with manager.active_context_lease(admission.turn_id):
+        ending = asyncio.create_task(manager.end(admission.turn_id))
+        await asyncio.sleep(0)
+        assert ending.done() is False
+
+    assert await ending is True
+    assert ended_sessions == [admission.turn_id]
+
+
+@pytest.mark.asyncio
 async def test_speaking_wake_is_admitted_only_after_prior_safe_idle() -> None:
     reachy = _ReachyFake()
     coordinator = _coordinator(reachy)
@@ -399,8 +467,7 @@ async def test_cancel_storm_coalesces_to_one_owned_manager_operation() -> None:
     active = await manager.open(uuid4(), uuid4())
 
     callers = tuple(
-        asyncio.create_task(manager.cancel(active.turn_id, "physical_stop"))
-        for _ in range(64)
+        asyncio.create_task(manager.cancel(active.turn_id, "physical_stop")) for _ in range(64)
     )
     await asyncio.wait_for(reachy.entered.wait(), timeout=1)
     await asyncio.sleep(0)
@@ -475,9 +542,9 @@ async def test_stale_turn_storm_creates_no_manager_operations() -> None:
     manager = SessionManager(_coordinator())
     stale_turns = tuple(uuid4() for _ in range(64))
 
-    assert await asyncio.gather(*(manager.finish(turn_id) for turn_id in stale_turns)) == [
-        False
-    ] * 64
+    assert (
+        await asyncio.gather(*(manager.finish(turn_id) for turn_id in stale_turns)) == [False] * 64
+    )
     await asyncio.gather(*(manager.cancel(turn_id, "cancel") for turn_id in stale_turns))
     assert manager.inflight_operation_count == 0
 

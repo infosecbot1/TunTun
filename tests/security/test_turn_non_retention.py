@@ -70,7 +70,10 @@ async def test_linear_engine_drops_ephemeral_audio_transcript_and_answer_sentine
     turn_id = uuid4()
     transcript = "synthetic-private-transcript-sentinel"
     answer = "synthetic-private-answer-sentinel"
-    engine = LinearConversationEngine(_SentinelPorts(transcript, answer))
+    engine = LinearConversationEngine(
+        _SentinelPorts(transcript, answer),
+        allow_legacy_guest_identity=True,
+    )
 
     await engine.run(TurnRequest(turn_id=turn_id, wav_bytes=b"private-audio-sentinel"))
 

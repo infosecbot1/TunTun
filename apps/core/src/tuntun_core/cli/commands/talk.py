@@ -22,7 +22,7 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLL
 def run_synthetic_turn(
     ports: WorkflowPorts | ContextWorkflowPorts,
     turn: TurnRequest,
-    context_provider: object | None = None,
+    context_provider: object,
 ) -> bool:
     return asyncio.run(
         LinearConversationEngine(ports, context_provider=context_provider).run(turn)

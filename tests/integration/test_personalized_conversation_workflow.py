@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
 import pytest
-from tuntun_contracts.identity import PersonaProjection
+from tuntun_contracts.identity import IdentityDecision, IdentityStatus, PersonaProjection
 from tuntun_core.services.context_builder import ContextBuilder
 from tuntun_core.services.language_tracker import ReplyMode, SttLanguage
 from tuntun_core.services.persona_builder import PersonaBuilder
@@ -25,10 +25,12 @@ from tuntun_core.workflows.conversation import LinearConversationEngine, TurnReq
 
 pytestmark = pytest.mark.asyncio
 
+_NOW = datetime(2026, 8, 27, tzinfo=UTC)
+
 
 class _Clock:
     def now(self) -> datetime:
-        return datetime(2026, 8, 27, tzinfo=UTC)
+        return _NOW
 
 
 class _LeasedSessions:
@@ -68,12 +70,34 @@ class _LeasedSessions:
 
 
 class _Identity:
-    def __init__(self, subject_id: UUID | None) -> None:
+    def __init__(self, state: str, subject_id: UUID | None) -> None:
+        self.state = state
         self.subject_id = subject_id
 
     async def require_current_for_turn(self, turn_id: UUID) -> object:
         del turn_id
-        return SimpleNamespace(subject_id=self.subject_id)
+        if self.state == "malformed":
+            return SimpleNamespace(subject_id=self.subject_id)
+        if self.state == "stale":
+            return IdentityDecision(
+                status=IdentityStatus.VERIFIED,
+                subject_id=self.subject_id,
+                reason_code="stale",
+                expires_at=_NOW - timedelta(seconds=1),
+            )
+        status = {
+            "verified": IdentityStatus.VERIFIED,
+            "uncertain": IdentityStatus.AMBIGUOUS,
+            "ambiguous": IdentityStatus.AMBIGUOUS,
+            "conflict": IdentityStatus.CONFLICT,
+            "unknown": IdentityStatus.UNKNOWN,
+        }[self.state]
+        return IdentityDecision(
+            status=status,
+            subject_id=self.subject_id if status is IdentityStatus.VERIFIED else None,
+            reason_code=self.state,
+            expires_at=_NOW + timedelta(minutes=5),
+        )
 
 
 class _Profiles:
@@ -94,6 +118,8 @@ class _Profiles:
             self.entered.set()
             await self.release.wait()
         case.profile_calls += 1
+        if case.raw_private_profile is not None:
+            case.raw_private_trait_was_loaded = True
         if case.consent_revoked or subject_id is None:
             case.reloaded_after_revocation = case.consent_revoked
             projection = PersonaProjection(
@@ -167,7 +193,6 @@ class _PersonalizedWorkflowCase:
         ] = "general",
         hold_projection: bool = False,
     ) -> None:
-        del seed_adult_private_traits
         self.session_id = uuid4()
         self.household_id = uuid4()
         self.sessions = _LeasedSessions(self.session_id, self.household_id)
@@ -189,8 +214,26 @@ class _PersonalizedWorkflowCase:
             Literal["adult", "guest", "k2", "n1"],
             "adult" if profile in {"adult", "owner"} else profile,
         )
-        subject_id = uuid4() if identity_state == "verified" else None
-        self.identity = _Identity(subject_id)
+        self.subject_id = uuid4() if identity_state in {"verified", "stale", "malformed"} else None
+        self.profile_name = "raw-name-sentinel"
+        self.profession = "raw-profession-security-architect-sentinel"
+        self.child_identifier = "raw-child-n1-identifier-sentinel"
+        self.raw_private_profile: dict[str, object] | None = (
+            {
+                "subject_id": str(self.subject_id),
+                "name": self.profile_name,
+                "profession": self.profession,
+                "child_identifier": self.child_identifier,
+                "traits": {
+                    "private_note": self.adult_private_sentinel,
+                    "free_form_trait": "raw-free-form-trait-sentinel",
+                },
+            }
+            if seed_adult_private_traits
+            else None
+        )
+        self.raw_private_trait_was_loaded = False
+        self.identity = _Identity(identity_state, self.subject_id)
         self.custom_context = custom_context
         self.profiles = _Profiles(self)
         self.projection_entered = self.profiles.entered
@@ -205,10 +248,6 @@ class _PersonalizedWorkflowCase:
         )
         self.ports = _Ports(self)
         self.linear_engine = LinearConversationEngine(
-            self.ports,
-            context_provider=self.production_context_provider,
-        )
-        self.langgraph_engine = LinearConversationEngine(
             self.ports,
             context_provider=self.production_context_provider,
         )
@@ -302,7 +341,7 @@ async def test_production_workflow_follows_english_hindi_romanized_and_mixed_swi
     assert case.production_context_provider_calls == len(turns)
     assert case.shadow_prompt_calls == 0
     assert case.linear_engine.context_provider is case.production_context_provider
-    assert case.langgraph_engine.context_provider is case.production_context_provider
+    assert not hasattr(case, "langgraph_engine")
 
 
 async def test_guest_and_revoked_personalization_use_current_safe_projection(
@@ -359,3 +398,104 @@ async def test_session_end_racing_context_build_clears_after_the_last_lease(
     assert case.ended_session_id is not None
     assert not case.language_registry.contains(case.ended_session_id)
     assert case.provider_calls_after_session_end == 0
+
+
+@pytest.mark.parametrize(
+    "identity_state",
+    ("ambiguous", "conflict", "unknown", "stale", "malformed"),
+)
+async def test_unsafe_identity_decisions_use_guest_without_profile_lookup(
+    personalized_workflow_case: Callable[..., _PersonalizedWorkflowCase],
+    identity_state: str,
+) -> None:
+    case = personalized_workflow_case(
+        profile="adult",
+        identity_state=identity_state,
+        custom_context="technical_security",
+        seed_adult_private_traits=True,
+    )
+
+    await case.run_turn(text="help me", stt_language="en")
+
+    assert case.profile_calls == 0
+    assert "general help" in case.system_prompt.casefold()
+    assert "security architecture" not in case.system_prompt.casefold()
+    assert case.raw_private_trait_was_loaded is False
+
+
+async def test_private_profile_sentinels_are_loaded_but_never_provider_visible(
+    personalized_workflow_case: Callable[..., _PersonalizedWorkflowCase],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    case = personalized_workflow_case(
+        profile="adult",
+        custom_context="technical_security",
+        seed_adult_private_traits=True,
+    )
+
+    await case.run_turn(text="explain the design", stt_language="en")
+
+    assert case.raw_private_trait_was_loaded is True
+    assert case.subject_id is not None
+    provider_surface = (
+        case.provider_capture_bytes
+        + repr(case.provider_captures).encode("utf-8")
+        + case.provider_captures[-1].prompt_bundle_sha256.encode("utf-8")
+        + caplog.text.encode("utf-8")
+    )
+    for sentinel in (
+        case.profile_name,
+        str(case.subject_id),
+        case.profession,
+        case.child_identifier,
+        case.adult_private_sentinel,
+        "raw-free-form-trait-sentinel",
+    ):
+        assert sentinel.encode("utf-8") not in provider_surface
+
+
+async def test_provider_turn_context_is_immutable_and_hash_commits_visible_body(
+    personalized_workflow_case: Callable[..., _PersonalizedWorkflowCase],
+) -> None:
+    case = personalized_workflow_case(profile="guest")
+    await case.run_turn(text="hello", stt_language="en")
+    context = case.provider_captures[-1]
+
+    with pytest.raises(TypeError):
+        context.messages[0]["content"] = "mutated"
+
+    tampered_system = dict(context.messages[0])
+    tampered_user = dict(context.messages[1])
+    tampered_system["content"] += " changed"
+    with pytest.raises(ValueError, match="prompt hash"):
+        ProviderTurnContext(
+            messages=(tampered_system, tampered_user),
+            reply_mode=context.reply_mode,
+            prompt_bundle_sha256=context.prompt_bundle_sha256,
+        )
+
+    with pytest.raises(ValueError, match="provider message"):
+        ProviderTurnContext(
+            messages=({"role": "assistant", "content": "no"},),
+            reply_mode="en",
+            prompt_bundle_sha256=context.prompt_bundle_sha256,
+        )
+
+
+async def test_provider_context_rejects_total_body_over_turn_limit_before_construction(
+    personalized_workflow_case: Callable[..., _PersonalizedWorkflowCase],
+) -> None:
+    case = personalized_workflow_case(profile="guest")
+
+    with pytest.raises(ValueError, match="provider context"):
+        case.context_builder.messages(
+            PersonaProjection(
+                role="guest",
+                context="general",
+                tone="neutral",
+                depth="brief",
+                learning_level="none",
+            ),
+            "en",
+            "a" * 4_097,
+        )

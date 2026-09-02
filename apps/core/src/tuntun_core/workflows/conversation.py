@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
+from tuntun_core.services.personalized_turn_context import ProviderTurnContext, TranscribedTurn
 from tuntun_core.workflows.ephemeral_turn_context import EphemeralTurnContext
 
 
@@ -32,11 +33,9 @@ class TurnOutcome:
 class WorkflowPorts(Protocol):
     async def start(self, turn_id: UUID) -> None: ...
 
-    async def transcribe(self, wav_bytes: bytes) -> object: ...
+    async def transcribe(self, wav_bytes: bytes) -> TranscribedTurn: ...
 
-    async def guest_identity(self) -> str: ...
-
-    async def generate(self, transcript: Any, identity: str) -> str: ...
+    async def generate(self, context: ProviderTurnContext) -> str: ...
 
     async def synthesize(self, answer: str) -> bytes: ...
 
@@ -61,6 +60,22 @@ class ContextWorkflowPorts(Protocol):
     async def finish(self, turn_id: UUID) -> None: ...
 
 
+class LegacyWorkflowPorts(Protocol):
+    async def start(self, turn_id: UUID) -> None: ...
+
+    async def transcribe(self, wav_bytes: bytes) -> object: ...
+
+    async def guest_identity(self) -> str: ...
+
+    async def generate(self, transcript: Any, identity: str) -> str: ...
+
+    async def synthesize(self, answer: str) -> bytes: ...
+
+    async def play(self, turn_id: UUID, pcm: bytes) -> None: ...
+
+    async def finish(self, turn_id: UUID) -> None: ...
+
+
 def _always_accepts_results(turn_id: UUID) -> bool:
     del turn_id
     return True
@@ -74,10 +89,14 @@ class LinearConversationEngine:
         ports: Any,
         *,
         context_provider: Any | None = None,
+        allow_legacy_guest_identity: bool = False,
         accepts_results: Callable[[UUID], bool] = _always_accepts_results,
     ) -> None:
+        if context_provider is None and allow_legacy_guest_identity is not True:
+            raise TypeError("personalized context_provider required")
         self._ports = ports
         self._context_provider = context_provider
+        self._allow_legacy_guest_identity = allow_legacy_guest_identity
         self._accepts_results = accepts_results
         self.ephemeral: EphemeralTurnContext[dict[str, object]] = EphemeralTurnContext()
         self.cleanup_reason_codes: list[str] = []
@@ -105,6 +124,8 @@ class LinearConversationEngine:
                 return TurnOutcome(spoken=False)
             self.ephemeral.put(turn.turn_id, {"transcript": transcript})
             if self._context_provider is None:
+                if self._allow_legacy_guest_identity is not True:
+                    raise RuntimeError("personalized context_provider required")
                 identity = await self._ports.guest_identity()
                 if not self._accepts_turn_results(turn.turn_id):
                     return TurnOutcome(spoken=False)

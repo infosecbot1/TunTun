@@ -21,6 +21,14 @@ from tuntun_core.services.budget.catalog import PriceCatalog
 from tuntun_core.services.budget.evidence import BudgetEvidenceService
 from tuntun_core.services.budget.guard import BudgetGuard
 from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
+from tuntun_core.services.context_builder import ContextBuilder
+from tuntun_core.services.persona_builder import PersonaBuilder
+from tuntun_core.services.personalized_turn_context import (
+    IdentityContextPort,
+    PersonalizedTurnContextProvider,
+    ProfileProjectionPort,
+    SessionLanguageRegistry,
+)
 from tuntun_core.services.providers.call_repository import ProviderCallRepository
 from tuntun_core.services.providers.defaults import (
     ProviderDefaultsDocumentV1,
@@ -130,8 +138,7 @@ class SimulatedGuestComposition:
     workflow: ContractConversationWorkflow
     dependencies: SimulatedGuestAppDependencies
     linear_engine: LinearConversationEngine | None = None
-    langgraph_engine: LinearConversationEngine | None = None
-    context_provider: object | None = None
+    context_provider: PersonalizedTurnContextProvider | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,21 +273,32 @@ class ProductionContainer:
         household_id: UUID,
         device_id: UUID,
         loopback_host: str,
-        context_provider: object | None = None,
+        identity: IdentityContextPort | None = None,
+        profiles: ProfileProjectionPort | None = None,
+        prompt_root: Path = Path("prompts"),
+        context_provider: PersonalizedTurnContextProvider | None = None,
     ) -> InstalledSimulatedGuestApp:
         if self.simulated_guest_app is not None:
             raise RuntimeError("simulated_guest_app_already_installed")
         if self.turn_coordinator is None or self.session_manager is None:
             raise RuntimeError("simulated_guest_roots_unavailable")
+        if context_provider is None:
+            if identity is None or profiles is None:
+                raise TypeError("personalized identity and profile ports required")
+            context_builder = ContextBuilder(PersonaBuilder.from_directory(prompt_root))
+            context_provider = PersonalizedTurnContextProvider(
+                self.session_manager,
+                identity,
+                profiles,
+                SessionLanguageRegistry(),
+                context_builder,
+                self.core.clock,
+            )
+        self.session_manager.register_session_ended_handler(context_provider.on_session_ended)
         linear_engine = LinearConversationEngine(
             ports,
             context_provider=context_provider,
-            accepts_results=self.turn_coordinator.accepts_results,
-        )
-        langgraph_engine = LinearConversationEngine(
-            ports,
-            context_provider=context_provider,
-            accepts_results=self.turn_coordinator.accepts_results,
+            accepts_results=self.session_manager.accepts_results,
         )
         workflow = build_workflow(
             ports,
@@ -288,6 +306,7 @@ class ProductionContainer:
             self.turn_coordinator,
             context_provider=context_provider,
             engine=linear_engine,
+            session_manager=self.session_manager,
         )
         dependencies = SimulatedGuestAppDependencies(
             session_manager=self.session_manager,
@@ -311,7 +330,6 @@ class ProductionContainer:
                 workflow=workflow,
                 dependencies=dependencies,
                 linear_engine=linear_engine,
-                langgraph_engine=langgraph_engine,
                 context_provider=context_provider,
             ),
             coordinator=self.turn_coordinator,
@@ -333,18 +351,20 @@ def build_workflow(
     completed_audio: CompletedTurnAudioPort,
     coordinator: TurnCoordinator,
     *,
-    context_provider: object | None = None,
+    context_provider: PersonalizedTurnContextProvider | None = None,
     engine: LinearConversationEngine | None = None,
+    session_manager: SessionManager | None = None,
 ) -> ContractConversationWorkflow:
+    cleanup = coordinator if session_manager is None else session_manager
     if engine is None:
         engine = LinearConversationEngine(
             ports,
             context_provider=context_provider,
-            accepts_results=coordinator.accepts_results,
+            accepts_results=cleanup.accepts_results,
         )
     elif engine.context_provider is not context_provider:
         raise TypeError("workflow engine context provider mismatch")
-    return ContractConversationWorkflow(completed_audio, engine, coordinator)
+    return ContractConversationWorkflow(completed_audio, engine, cleanup)
 
 
 def _duplicate_route_ids(route_ids: tuple[str, ...]) -> tuple[str, ...]:
