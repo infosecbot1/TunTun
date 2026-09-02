@@ -125,10 +125,11 @@ def test_edge_package_exposes_only_frozen_runtime_dependencies_and_script() -> N
     edge_project = tomllib.loads(Path("apps/edge/pyproject.toml").read_text(encoding="utf-8"))
 
     assert edge_project["project"]["dependencies"] == [
+        "cryptography>=45,<46",
         "tuntun-contracts==0.1.0.dev0",
         "typer>=0.16,<1",
     ]
-    assert edge_project["project"]["scripts"] == {"tuntun-edge": "tuntun_edge.cli.main:app"}
+    assert edge_project["project"]["scripts"] == {"tuntun-edge": "tuntun_edge.cli.main:main"}
     assert edge_project["tool"]["uv"]["sources"] == {"tuntun-contracts": {"workspace": True}}
 
 

@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tuntun-edge = "tuntun_edge.cli.main:app"
+tuntun-edge = "tuntun_edge.cli.main:main"
 
 [tool.uv.sources]
 tuntun-contracts = { workspace = true }
