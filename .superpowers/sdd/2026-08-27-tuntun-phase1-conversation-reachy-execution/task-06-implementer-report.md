@@ -1135,3 +1135,261 @@ provider/budget, static, generated, lock, and diff gates all passed.
 - Full non-live suite is not clean on this host due to the environment/tooling
   buckets listed above. I did not install Node dependencies or broaden this
   wave into unrelated scenario/sandbox work.
+
+## CI repair
+
+### Scope and root cause
+
+PR 18 CI failed in the scenario typecheck guard because
+`packages/testing/src/tuntun_testing/fake_providers.py` `FakeBudget` no longer
+satisfied the frozen `BudgetPort` protocol after Task06 added
+`require_accounting_context`. `RecordingBudget` already implemented the method;
+the scripted fake had reserve/mark_sent/settle/release/reconcile only.
+
+Implementation was intentionally narrow:
+
+- Added `FakeBudget.require_accounting_context(route, consumption)` using the
+  existing `_ScriptedFake._take(...)` convention.
+- Locked the operation name and argument tuple as
+  `budget.require_accounting_context`, `(route, consumption)`.
+- Added a focused behavior regression while keeping the static
+  `_accept_exact_ports(...)` gate.
+
+### RED evidence
+
+Initial scenario guard reproduction:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  'tests/security/test_scenario_guard.py::test_make_scenario_gate_uses_offline_no_sync_isolated_python[scenario-typecheck]' \
+  tests/security/test_scenario_guard.py::test_isolated_launcher_owns_mypy_path_instead_of_trusting_the_caller \
+  -q
+```
+
+Result:
+
+```text
+2 failed in 2.22s
+test_make_scenario_gate_uses_offline_no_sync_isolated_python[scenario-typecheck]:
+  make: *** [scenario-typecheck] Error 97
+test_isolated_launcher_owns_mypy_path_instead_of_trusting_the_caller:
+  FileNotFoundError: .../.venv/bin/python
+```
+
+The local second failure was the worktree harness layout: `.venv/bin/python`
+was absent while this work used `UV_PROJECT_ENVIRONMENT=/private/tmp/...`.
+The exact mypy slice exposed the CI root cause directly:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run mypy tests/unit/testing/test_scenario.py \
+  packages/testing/src/tuntun_testing/fake_providers.py \
+  packages/contracts/src/tuntun_contracts/ports.py
+```
+
+Result:
+
+```text
+tests/unit/testing/test_scenario.py:120: error: Argument 12 to "_accept_exact_ports" has incompatible type "FakeBudget"; expected "BudgetPort"  [arg-type]
+tests/unit/testing/test_scenario.py:120: note: "FakeBudget" is missing following "BudgetPort" protocol member:
+tests/unit/testing/test_scenario.py:120: note:     require_accounting_context
+Found 1 error in 1 file (checked 3 source files)
+```
+
+New focused behavior regression before implementation:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  tests/unit/testing/test_scenario.py::test_fake_budget_scripts_accounting_context \
+  -q
+```
+
+Result:
+
+```text
+1 failed in 2.22s
+AttributeError: 'FakeBudget' object has no attribute 'require_accounting_context'
+```
+
+### GREEN evidence
+
+Focused behavior/static/guard verification:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  tests/unit/testing/test_scenario.py::test_scripted_fake_checks_arguments_faults_and_exhaustion \
+  tests/unit/testing/test_scenario.py::test_fake_budget_scripts_accounting_context \
+  tests/unit/testing/test_scenario.py::test_all_fakes_satisfy_the_frozen_task_5_ports \
+  -q
+```
+
+Result:
+
+```text
+3 passed in 0.88s
+```
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run mypy tests/unit/testing/test_scenario.py \
+  packages/testing/src/tuntun_testing/fake_providers.py \
+  packages/contracts/src/tuntun_contracts/ports.py
+```
+
+Result:
+
+```text
+Success: no issues found in 3 source files
+```
+
+For the security guard nodes, I temporarily restored the expected local wrapper
+layout with `.venv -> /private/tmp/tuntun-task06-venv`, ran with
+`UV_PROJECT_ENVIRONMENT` unset so `sys.executable` was under `.venv/bin`, then
+removed the untracked symlink before staging.
+
+```bash
+env -u UV_PROJECT_ENVIRONMENT \
+  UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+  uv run python -m pytest \
+  'tests/security/test_scenario_guard.py::test_make_scenario_gate_uses_offline_no_sync_isolated_python[scenario-typecheck]' \
+  tests/security/test_scenario_guard.py::test_isolated_launcher_owns_mypy_path_instead_of_trusting_the_caller \
+  -q
+```
+
+Result:
+
+```text
+2 passed in 27.97s
+```
+
+Relevant fake/unit tests:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest tests/unit/testing/test_scenario.py -q
+```
+
+Result:
+
+```text
+19 passed in 0.62s
+```
+
+Amended Task06 suite:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest \
+  tests/integration/providers/test_attempt_runner.py \
+  tests/unit/providers/test_output_validator.py \
+  tests/unit/providers/test_openai_error_translation.py \
+  tests/integration/providers/test_output_pipeline.py \
+  tests/integration/providers/test_response_receipts.py \
+  tests/integration/providers/test_usage_receipt_repository.py \
+  tests/contract/openai/test_authorized_signatures.py \
+  tests/contract/openai/test_transcribe_request.py \
+  tests/contract/openai/test_responses_request.py \
+  tests/contract/openai/test_tts_request.py \
+  tests/contract/tts/test_macos_say_offline.py \
+  tests/integration/providers/test_tts_activation.py \
+  tests/evals/tts/test_bilingual_quality.py \
+  tests/security/test_openai_local_non_retention.py \
+  tests/security/test_no_external_telemetry.py \
+  -q
+```
+
+Result:
+
+```text
+208 passed, 1 warning in 50.15s
+```
+
+Affected provider/budget regression slice:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python -m pytest tests/contract tests/unit/providers \
+  tests/integration/providers tests/unit/budget tests/integration/budget \
+  tests/security/test_model_governance.py tests/unit/poc/test_voice_turn.py \
+  -q
+```
+
+Result:
+
+```text
+1056 passed, 3 skipped in 168.07s (0:02:48)
+```
+
+Static and artifact gates:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run ruff check .
+```
+
+Result:
+
+```text
+All checks passed!
+```
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run mypy apps/core/src apps/edge/src packages/contracts/src \
+  packages/testing/src tests/unit/testing/test_scenario.py
+```
+
+Result:
+
+```text
+Success: no issues found in 100 source files
+```
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python scripts/generate_contract_fixtures.py --check
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python scripts/generate_schemas.py --check
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python scripts/generate_openapi.py --check
+git diff --check
+```
+
+Result: all exited 0.
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv lock --check
+```
+
+Result:
+
+```text
+Resolved 71 packages in 9ms
+```
+
+### CI-repair self-review
+
+- The production budget ports and semantics are untouched.
+- `FakeBudget` now matches the Task06 `BudgetPort` surface and remains purely
+  scripted; it does not synthesize accounting contexts.
+- The new regression fails if the method disappears, records the wrong
+  operation name, or passes a different argument tuple.
+- The static scenario port gate now includes `FakeBudget` successfully.

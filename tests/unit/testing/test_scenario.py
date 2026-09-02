@@ -8,6 +8,7 @@ from typing import Literal, cast
 from uuid import UUID
 
 import pytest
+from tuntun_contracts.budget import BudgetAccountingContext
 from tuntun_contracts.identity import IdentityDecision, IdentityRequest, IdentityStatus
 from tuntun_contracts.ports import (
     ActionProviderPort,
@@ -26,6 +27,7 @@ from tuntun_contracts.ports import (
     SpeechToTextPort,
     TextToSpeechPort,
 )
+from tuntun_contracts.provider import RouteAuthorization, RouteConsumption
 from tuntun_contracts.speech import AuthorizedSynthesisRequest, SpeechChunk
 from tuntun_testing.fake_clock import FakeClock
 from tuntun_testing.fake_providers import (
@@ -193,6 +195,28 @@ async def test_scripted_fake_checks_arguments_faults_and_exhaustion() -> None:
     with pytest.raises(ScriptExhaustionError, match="script-not-exhausted"):
         pending.assert_exhausted()
     assert "request" not in repr(pending)
+
+
+@pytest.mark.asyncio
+async def test_fake_budget_scripts_accounting_context() -> None:
+    route = cast(RouteAuthorization, object())
+    consumption = cast(RouteConsumption, object())
+    context = cast(BudgetAccountingContext, object())
+    fake = FakeBudget(
+        (
+            ExpectedCall(
+                "budget.require_accounting_context",
+                (route, consumption),
+                ReturnValue(context),
+            ),
+        )
+    )
+
+    assert await fake.require_accounting_context(route, consumption) is context
+    fake.assert_exhausted()
+    assert fake.calls == (
+        ObservedCall("budget.require_accounting_context", (route, consumption)),
+    )
 
 
 @pytest.mark.asyncio

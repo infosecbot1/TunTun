@@ -305,6 +305,16 @@ class FakeBudget(_ScriptedFake):
         if result is not None:
             raise TypeError("invalid-void-outcome")
 
+    async def require_accounting_context(
+        self,
+        route: RouteAuthorization,
+        consumption: RouteConsumption,
+    ) -> BudgetAccountingContext:
+        return cast(
+            BudgetAccountingContext,
+            self._take("budget.require_accounting_context", (route, consumption)),
+        )
+
     async def settle(self, request: BudgetSettlementRequest) -> BudgetSettlement:
         return cast(BudgetSettlement, self._take("budget.settle", (request,)))
 
