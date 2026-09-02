@@ -136,8 +136,8 @@ class InstalledSimulatedGuestApp:
     device_id: UUID
     loopback_host: str
     readiness_dependencies: tuple[ReadinessDependency, ...]
-    route_ids: tuple[str, ...]
-    duplicate_route_ids: frozenset[str]
+    route_ids: set[str]
+    duplicate_route_ids: tuple[str, ...]
     listener_bindings: frozenset[str]
 
 
@@ -274,10 +274,11 @@ class ProductionContainer:
             readiness_dependencies=self.readiness_dependencies,
         )
         app = create_app(dependencies)
-        route_ids = tuple(
+        route_id_sequence = tuple(
             route.name for route in app.router.routes if isinstance(route, APIRoute)
         )
-        duplicate_route_ids = _duplicate_route_ids(route_ids)
+        duplicate_route_ids = _duplicate_route_ids(route_id_sequence)
+        route_ids = set(route_id_sequence)
         if frozenset(route_ids) != _SIMULATED_GUEST_ROUTE_NAMES or duplicate_route_ids:
             raise RuntimeError("simulated_guest_route_inventory_mismatch")
         installed = InstalledSimulatedGuestApp(
@@ -309,11 +310,11 @@ def build_workflow(
     return ContractConversationWorkflow(completed_audio, engine, coordinator)
 
 
-def _duplicate_route_ids(route_ids: tuple[str, ...]) -> frozenset[str]:
+def _duplicate_route_ids(route_ids: tuple[str, ...]) -> tuple[str, ...]:
     seen: set[str] = set()
     duplicates: set[str] = set()
     for route_id in route_ids:
         if route_id in seen:
             duplicates.add(route_id)
         seen.add(route_id)
-    return frozenset(duplicates)
+    return tuple(sorted(duplicates))

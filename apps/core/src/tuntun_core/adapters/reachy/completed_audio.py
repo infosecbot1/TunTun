@@ -114,11 +114,14 @@ class BoundedCompletedTurnAudio:
             self._require_stream_binding(turn, stream)
             await self._claims.claim_once(turn)
             async for chunk in stream.chunks:
-                if type(chunk) is not bytes or not chunk or len(chunk) > _MAX_CHUNK_BYTES:
-                    raise ValueError("completed audio chunk outside bound")
-                if len(chunk) > _MAX_TURN_BYTES - len(buffer):
-                    raise ValueError("completed audio turn outside bound")
-                buffer.extend(chunk)
+                try:
+                    if type(chunk) is not bytes or not chunk or len(chunk) > _MAX_CHUNK_BYTES:
+                        raise ValueError("completed audio chunk outside bound")
+                    if len(chunk) > _MAX_TURN_BYTES - len(buffer):
+                        raise ValueError("completed audio turn outside bound")
+                    buffer.extend(chunk)
+                finally:
+                    del chunk
             if not buffer:
                 raise ValueError("completed audio is empty")
             return bytes(buffer)

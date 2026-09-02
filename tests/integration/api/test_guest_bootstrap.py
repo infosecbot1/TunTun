@@ -71,9 +71,12 @@ class _Workflow:
     def __init__(self) -> None:
         self.turns: list[TurnInput] = []
         self.outcome = "completed"
+        self.error: BaseException | None = None
 
     async def run(self, turn: TurnInput) -> TurnOutput:
         self.turns.append(turn)
+        if self.error is not None:
+            raise self.error
         return TurnOutput(turn_id=turn.turn_id, outcome=self.outcome)
 
 
@@ -155,6 +158,53 @@ def _dependencies() -> tuple[SimulatedGuestAppDependencies, _SessionManager, _Wo
 
 def _owned_route_names(app) -> set[str]:
     return {route.name for route in app.router.routes if isinstance(route, APIRoute)}
+
+
+async def _asgi_exchange(
+    app,
+    *,
+    client_host: str,
+    headers: tuple[tuple[bytes, bytes], ...],
+    messages: tuple[dict[str, object], ...],
+) -> tuple[int, dict[bytes, bytes], bytes, int]:
+    sent: list[dict[str, object]] = []
+    receive_calls = 0
+    pending = list(messages)
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_calls
+        receive_calls += 1
+        if pending:
+            return pending.pop(0)
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    await app(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/session/simulated-turn",
+            "raw_path": b"/session/simulated-turn",
+            "query_string": b"",
+            "headers": list(headers),
+            "client": (client_host, 42_000),
+            "server": ("testserver", 80),
+        },
+        receive,
+        send,
+    )
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    return int(start["status"]), dict(start["headers"]), body, receive_calls
 
 
 @pytest.mark.asyncio
@@ -259,6 +309,119 @@ async def test_oversized_empty_request_is_rejected_before_fastapi_body_parsing()
     assert private not in response.text
     assert session.opens == []
     assert workflow.turns == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "messages", "expected_status", "expected_body"),
+    (
+        (
+            (),
+            ({"type": "http.request", "body": b'{"audio":"private"}'},),
+            422,
+            b'{"status":"invalid"}',
+        ),
+        (
+            ((b"transfer-encoding", b"chunked"),),
+            (
+                {"type": "http.request", "body": b'{"audio":"pri', "more_body": True},
+                {"type": "http.request", "body": b'vate"}', "more_body": False},
+            ),
+            422,
+            b'{"status":"invalid"}',
+        ),
+        (
+            ((b"content-length", b"5001"),),
+            ({"type": "http.request", "body": b"x" * 5001},),
+            413,
+            b'{"status":"too_large"}',
+        ),
+        (
+            ((b"content-length", b"not-an-integer"),),
+            ({"type": "http.request", "body": b'{"audio":"private"}'},),
+            422,
+            b'{"status":"invalid"}',
+        ),
+        (
+            ((b"content-length", b"-1"),),
+            ({"type": "http.request", "body": b'{"audio":"private"}'},),
+            422,
+            b'{"status":"invalid"}',
+        ),
+        (
+            ((b"content-length", b"2"),),
+            (
+                {"type": "http.request", "body": b"x" * 2048, "more_body": True},
+                {"type": "http.request", "body": b"y" * 2049, "more_body": False},
+            ),
+            413,
+            b'{"status":"too_large"}',
+        ),
+        (
+            ((b"content-length", b"999999"),),
+            ({"type": "http.request", "body": b'{"audio":"private"}'},),
+            422,
+            b'{"status":"invalid"}',
+        ),
+    ),
+)
+async def test_asgi_boundary_counts_actual_received_body_bytes_before_validation(
+    headers: tuple[tuple[bytes, bytes], ...],
+    messages: tuple[dict[str, object], ...],
+    expected_status: int,
+    expected_body: bytes,
+) -> None:
+    deps, session, workflow, _readiness = _dependencies()
+
+    status, response_headers, body, _receive_calls = await _asgi_exchange(
+        create_app(deps),
+        client_host="127.0.0.1",
+        headers=((b"content-type", b"application/json"), *headers),
+        messages=messages,
+    )
+
+    assert status == expected_status
+    assert response_headers[b"cache-control"] == b"no-store"
+    assert body == expected_body
+    assert b"private" not in body
+    assert session.opens == []
+    assert workflow.turns == []
+
+
+@pytest.mark.asyncio
+async def test_non_loopback_asgi_boundary_rejects_before_any_body_read() -> None:
+    deps, session, workflow, readiness = _dependencies()
+    status, response_headers, body, receive_calls = await _asgi_exchange(
+        create_app(deps),
+        client_host="192.0.2.10",
+        headers=((b"content-type", b"application/json"),),
+        messages=({"type": "http.request", "body": b'{"audio":"private"}'},),
+    )
+
+    assert status == 403
+    assert response_headers[b"cache-control"] == b"no-store"
+    assert body == b'{"status":"forbidden"}'
+    assert receive_calls == 0
+    assert readiness.calls == 0
+    assert session.opens == []
+    assert workflow.turns == []
+
+
+@pytest.mark.asyncio
+async def test_unexpected_workflow_failure_is_bounded_no_store_500() -> None:
+    deps, _session, workflow, _readiness = _dependencies()
+    workflow.error = RuntimeError("private workflow failure sentinel")
+    transport = httpx.ASGITransport(
+        app=create_app(deps),
+        client=("127.0.0.1", 42_000),
+        raise_app_exceptions=False,
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/session/simulated-turn", json={})
+
+    assert response.status_code == 500
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "private workflow failure sentinel" not in response.text
 
 
 @pytest.mark.asyncio
@@ -390,8 +553,10 @@ async def test_production_container_installs_single_guest_app_with_existing_root
     assert installed.coordinator is coordinator
     assert installed.session_manager is session_manager
     assert installed.readiness_dependencies == (lifecycle,)
-    assert installed.route_ids == ("health.ready", "session.simulated_turn")
-    assert installed.duplicate_route_ids == frozenset()
+    assert type(installed.route_ids) is set
+    assert installed.route_ids == {"health.ready", "session.simulated_turn"}
+    assert type(installed.duplicate_route_ids) is tuple
+    assert installed.duplicate_route_ids == ()
     assert installed.listener_bindings == frozenset({"loopback"})
 
     transport = httpx.ASGITransport(

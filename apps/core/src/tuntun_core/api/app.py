@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 from tuntun_core.api.dependencies import SimulatedGuestAppDependencies
 from tuntun_core.api.routes.health import register_health_route
 from tuntun_core.api.routes.session import register_session_route
@@ -13,45 +13,59 @@ from tuntun_core.api.routes.session import register_session_route
 _NO_STORE_HEADER = (b"cache-control", b"no-store")
 _FORBIDDEN_BODY = b'{"status":"forbidden"}'
 _TOO_LARGE_BODY = b'{"status":"too_large"}'
+_UNEXPECTED_ERROR_BODY = b'{"status":"error"}'
 _MAX_REQUEST_BODY_BYTES = 4096
 
 
-class LoopbackNoStoreBoundary:
+class SimulatedGuestFastAPI(FastAPI):
     """Pure ASGI boundary for local-only simulated Guest traffic."""
 
     def __init__(
         self,
-        app: ASGIApp,
         *,
         loopback_host: str,
         max_body_bytes: int = _MAX_REQUEST_BODY_BYTES,
+        **kwargs: Any,
     ) -> None:
-        self._app = app
+        super().__init__(**kwargs)
         self._loopback_host = loopback_host
         self._max_body_bytes = max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
-            await self._app(scope, receive, send)
+            await super().__call__(scope, receive, send)
             return
         client = scope.get("client")
         peer = client[0] if isinstance(client, tuple) and client else None
         if peer != self._loopback_host:
             await self._send_static_json(send, status=403, body=_FORBIDDEN_BODY)
             return
-        if _declared_content_length(scope) > self._max_body_bytes:
+        replay_messages = await _read_bounded_request(receive, self._max_body_bytes)
+        if replay_messages is None:
             await self._send_static_json(send, status=413, body=_TOO_LARGE_BODY)
             return
+        replay_receive = _replay_receive(replay_messages)
+        response_started = False
 
         async def no_store_send(message: Message) -> None:
+            nonlocal response_started
             if message["type"] == "http.response.start":
+                response_started = True
                 updated = dict(message)
                 updated["headers"] = _with_no_store(updated.get("headers", []))
                 await send(updated)
                 return
             await send(message)
 
-        await self._app(scope, receive, no_store_send)
+        try:
+            await super().__call__(scope, replay_receive, no_store_send)
+        except Exception:
+            if not response_started:
+                await self._send_static_json(
+                    send,
+                    status=500,
+                    body=_UNEXPECTED_ERROR_BODY,
+                )
 
     async def _send_static_json(self, send: Send, *, status: int, body: bytes) -> None:
         await send(
@@ -68,19 +82,38 @@ class LoopbackNoStoreBoundary:
         await send({"type": "http.response.body", "body": body})
 
 
-def _declared_content_length(scope: Scope) -> int:
-    headers = scope.get("headers", [])
-    if not isinstance(headers, list):
-        return 0
-    for name, value in headers:
-        if name.lower() != b"content-length":
-            continue
+async def _read_bounded_request(
+    receive: Receive,
+    max_body_bytes: int,
+) -> list[Message] | None:
+    total = 0
+    messages: list[Message] = []
+    while True:
+        message = await receive()
+        if message["type"] != "http.request":
+            messages.append(message)
+            return messages
+        body = message.get("body", b"")
+        if type(body) is not bytes:
+            return None
+        total += len(body)
+        if total > max_body_bytes:
+            return None
+        messages.append(message)
+        if not message.get("more_body", False):
+            return messages
+
+
+def _replay_receive(messages: list[Message]) -> Receive:
+    pending = iter(messages)
+
+    async def receive() -> Message:
         try:
-            declared = int(value)
-        except ValueError:
-            return _MAX_REQUEST_BODY_BYTES + 1
-        return max(declared, 0)
-    return 0
+            return next(pending)
+        except StopIteration:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+    return receive
 
 
 def _with_no_store(headers: Any) -> list[tuple[bytes, bytes]]:
@@ -108,14 +141,15 @@ async def _validation_error_handler(
 
 
 def create_app(dependencies: SimulatedGuestAppDependencies) -> FastAPI:
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-    app.router.redirect_slashes = False
-    app.add_exception_handler(RequestValidationError, _validation_error_handler)
-    app.add_middleware(
-        LoopbackNoStoreBoundary,
+    app = SimulatedGuestFastAPI(
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
         loopback_host=dependencies.loopback_host,
         max_body_bytes=_MAX_REQUEST_BODY_BYTES,
     )
+    app.router.redirect_slashes = False
+    app.add_exception_handler(RequestValidationError, _validation_error_handler)
     register_health_route(app, dependencies)
     register_session_route(app, dependencies)
     return app

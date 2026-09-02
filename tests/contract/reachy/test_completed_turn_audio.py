@@ -245,6 +245,28 @@ async def test_close_failure_still_wipes_completed_audio_buffer(
 
 
 @pytest.mark.asyncio
+async def test_close_failure_traceback_does_not_retain_last_immutable_chunk() -> None:
+    private_chunk = b"private-immutable-chunk-sentinel"
+    turn = _turn()
+    source = _FailingCloseSource(_stream(turn, _Chunks((private_chunk,))))
+    adapter = BoundedCompletedTurnAudio(source, _NoopClaims())  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError) as captured:
+        await adapter.consume_once(turn)
+
+    production_frames = []
+    traceback = captured.value.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if frame.f_code.co_filename.endswith("completed_audio.py"):
+            production_frames.append(frame)
+        traceback = traceback.tb_next
+
+    assert production_frames
+    assert all(frame.f_locals.get("chunk") is not private_chunk for frame in production_frames)
+
+
+@pytest.mark.asyncio
 async def test_close_is_shielded_through_repeated_caller_cancellation_and_wipes_buffer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
