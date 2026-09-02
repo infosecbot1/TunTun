@@ -27,6 +27,7 @@ from tuntun_contracts.reachy_time import CoreTimeProofV1, CoreTimeRequestV1
 
 MAX_SECURE_TIME_STATE_BYTES: Final = 16_384
 MAX_CORE_TIME_PROOF_BYTES: Final = 8_192
+MAX_CANONICAL_PROOF_B64_LENGTH: Final = ((MAX_CORE_TIME_PROOF_BYTES + 2) // 3) * 4
 SECURE_TIME_BOOT_DEADLINE_SECONDS: Final = 2.0
 SECURE_TIME_STATE_NAME: Final = "secure-time-state.json"
 SECURE_TIME_LOCK_NAME: Final = ".secure-time-state.lock"
@@ -205,12 +206,38 @@ class SecureTimeStateV1(ContractModel):
             pattern=r"^[a-f0-9]{64}$",
         ),
     ]
+    canonical_proof_sha256: Annotated[
+        str,
+        Field(
+            min_length=64,
+            max_length=64,
+            pattern=r"^[a-f0-9]{64}$",
+        ),
+    ]
+    canonical_proof_b64: Annotated[
+        str,
+        Field(
+            min_length=4,
+            max_length=MAX_CANONICAL_PROOF_B64_LENGTH,
+            pattern=r"^[A-Za-z0-9+/]+={0,2}$",
+        ),
+    ]
 
     @field_validator("core_utc")
     @classmethod
     def require_utc_offset_zero(cls, value: datetime) -> datetime:
         if value.utcoffset() != timedelta(0):
             raise ValueError("core_utc must use UTC offset zero")
+        return value
+
+    @field_validator("canonical_proof_b64")
+    @classmethod
+    def require_canonical_proof_b64(cls, value: str) -> str:
+        _decode_base64_canonical_bounded(
+            value,
+            max_bytes=MAX_CORE_TIME_PROOF_BYTES,
+            label="canonical_proof",
+        )
         return value
 
 
@@ -247,6 +274,14 @@ class SecureTimeGate:
         _require_canonical_rfc1918_ipv4(endpoint.core_ipv4)
         if _report_has_hardware_qualified_rtc(self._report):
             return self._accept_qualified_rtc(endpoint, server_leaf_der, deadline_monotonic)
+        previous = self._state.require_previous()
+        if previous is not None:
+            return self._restore_committed_signed_time(
+                previous,
+                endpoint,
+                server_leaf_der,
+                deadline_monotonic,
+            )
         return await self._bootstrap_signed_core_time(
             endpoint,
             server_leaf_der,
@@ -279,6 +314,35 @@ class SecureTimeGate:
         )
         _require_deadline(self._monotonic, deadline_monotonic, "secure_time_qualified_rtc")
         return "qualified_rtc"
+
+    def _restore_committed_signed_time(
+        self,
+        state: SecureTimeStateV1,
+        endpoint: SecureTimeEndpoint,
+        server_leaf_der: bytes,
+        deadline_monotonic: float,
+    ) -> SecureTimeBootMode:
+        canonical_proof = _canonical_proof_bytes_from_state(state)
+        proof = _parse_canonical_proof(canonical_proof)
+        _require_state_matches_proof(state, proof, canonical_proof)
+        public_key_bytes = self._require_bound_leaf_public_key(
+            endpoint,
+            server_leaf_der,
+            deadline_monotonic,
+        )
+        self._verify_signed_proof(
+            proof,
+            endpoint=endpoint,
+            server_leaf_der=server_leaf_der,
+            public_key_bytes=public_key_bytes,
+            expected_nonce=None,
+            deadline_monotonic=deadline_monotonic,
+        )
+        _require_deadline(self._monotonic, deadline_monotonic, "secure_time_restore")
+        self._observe("restored_signed_time_verified")
+        self._system_clock.set_utc(proof.core_utc, deadline_monotonic=deadline_monotonic)
+        _require_deadline(self._monotonic, deadline_monotonic, "secure_time_restore_clock")
+        return "signed_core_bootstrap"
 
     async def _bootstrap_signed_core_time(
         self,
@@ -325,7 +389,7 @@ class SecureTimeGate:
                 endpoint=endpoint,
                 server_leaf_der=server_leaf_der,
                 public_key_bytes=public_key_bytes,
-                nonce=nonce,
+                expected_nonce=nonce,
                 deadline_monotonic=deadline_monotonic,
             )
             previous = self._state.require_previous()
@@ -394,14 +458,14 @@ class SecureTimeGate:
         endpoint: SecureTimeEndpoint,
         server_leaf_der: bytes,
         public_key_bytes: bytes,
-        nonce: bytes,
+        expected_nonce: bytes | None,
         deadline_monotonic: float,
     ) -> None:
         _require_endpoint_binding(proof, endpoint)
         proof_nonce = _decode_base64_exact(
             proof.request_nonce_b64, expected_bytes=32, label="nonce"
         )
-        if not hmac.compare_digest(proof_nonce, nonce):
+        if expected_nonce is not None and not hmac.compare_digest(proof_nonce, expected_nonce):
             raise PermissionError("secure_time_nonce_mismatch")
         signature = _decode_base64_exact(
             proof.signature_b64,
@@ -566,6 +630,8 @@ class SecureTimeStateRepository:
             time_sequence=proof.time_sequence,
             core_utc=proof.core_utc,
             proof_sha256=proof_sha256,
+            canonical_proof_sha256=hashlib.sha256(canonical_bytes(proof)).hexdigest(),
+            canonical_proof_b64=base64.b64encode(canonical_bytes(proof)).decode("ascii"),
         )
         payload = canonical_bytes(state)
         if not 1 <= len(payload) <= MAX_SECURE_TIME_STATE_BYTES:
@@ -749,6 +815,41 @@ def _parse_canonical_proof(raw: bytes) -> CoreTimeProofV1:
     )
 
 
+def _canonical_proof_bytes_from_state(state: SecureTimeStateV1) -> bytes:
+    canonical_proof = _decode_base64_canonical_bounded(
+        state.canonical_proof_b64,
+        max_bytes=MAX_CORE_TIME_PROOF_BYTES,
+        label="canonical_proof",
+    )
+    if not hmac.compare_digest(
+        hashlib.sha256(canonical_proof).hexdigest(),
+        state.canonical_proof_sha256,
+    ):
+        raise PermissionError("secure_time_canonical_proof_commitment_mismatch")
+    return canonical_proof
+
+
+def _require_state_matches_proof(
+    state: SecureTimeStateV1,
+    proof: CoreTimeProofV1,
+    canonical_proof: bytes,
+) -> None:
+    if canonical_bytes(proof) != canonical_proof:
+        raise PermissionError("secure_time_canonical_proof_mismatch")
+    if not hmac.compare_digest(
+        state.proof_sha256,
+        hashlib.sha256(proof.signing_payload()).hexdigest(),
+    ):
+        raise PermissionError("secure_time_proof_commitment_mismatch")
+    if (
+        state.endpoint_generation != proof.endpoint_generation
+        or state.authority_health_generation != proof.authority_health_generation
+        or state.time_sequence != proof.time_sequence
+        or state.core_utc != proof.core_utc
+    ):
+        raise PermissionError("secure_time_committed_proof_state_mismatch")
+
+
 def _require_endpoint_binding(proof: CoreTimeProofV1, endpoint: SecureTimeEndpoint) -> None:
     if proof.endpoint_generation != endpoint.generation:
         raise PermissionError("secure_time_endpoint_generation_mismatch")
@@ -794,6 +895,18 @@ def _require_exact_digest(expected_hex: str, value: bytes, message: str) -> None
 def _require_canonical_rfc1918_ipv4(value: str) -> None:
     if type(value) is not str or _CANONICAL_RFC1918_IPV4_PATTERN.fullmatch(value) is None:
         raise PermissionError("secure_time_numeric_rfc1918_ipv4_required")
+
+
+def _decode_base64_canonical_bounded(value: str, *, max_bytes: int, label: str) -> bytes:
+    if type(value) is not str:
+        raise ValueError(f"secure time {label} must be canonical base64")
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ValueError(f"secure time {label} must be canonical base64") from error
+    if not 1 <= len(decoded) <= max_bytes or base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError(f"secure time {label} must be bounded canonical base64")
+    return decoded
 
 
 def _decode_base64_exact(value: str, *, expected_bytes: int, label: str) -> bytes:

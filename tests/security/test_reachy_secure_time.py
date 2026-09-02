@@ -21,6 +21,7 @@ from tuntun_edge.reachy.probe import CapabilityReport
 from tuntun_edge.transport.secure_time import (
     MAX_SECURE_TIME_STATE_BYTES,
     SECURE_TIME_PUBLISH_FAULT_STAGES,
+    SECURE_TIME_STATE_NAME,
     SecureTimeBootLifecycle,
     SecureTimeEndpoint,
     SecureTimeGate,
@@ -270,12 +271,13 @@ class SecureTimeCase:
         failure: str | None = None,
         previous: CoreTimeProofV1 | None = None,
         cold_boot_utc: datetime = datetime(1970, 1, 1, tzinfo=UTC),
+        private_key: Ed25519PrivateKey | None = None,
     ) -> None:
         tmp_path.mkdir(parents=True, exist_ok=True)
         self.events: list[str] = []
         self.failure = failure
         self.monotonic = FakeMonotonic()
-        self.private_key = Ed25519PrivateKey.generate()
+        self.private_key = Ed25519PrivateKey.generate() if private_key is None else private_key
         self.public_key_bytes = self.private_key.public_key().public_bytes(
             Encoding.Raw,
             PublicFormat.Raw,
@@ -301,6 +303,8 @@ class SecureTimeCase:
         )
         self.report = capability_report(rtc_qualified=rtc_qualified, source=source)
         self.repository = SecureTimeStateRepository(tmp_path / "secure-time")
+        if failure == "crash_after_commit_before_strict":
+            self.repository.inject_crash_at("after_parent_fsync")
         if previous is not None:
             self.write_previous(previous)
         server_not_before = NOW - timedelta(minutes=1)
@@ -488,6 +492,7 @@ def secure_time_case(
     failure: str | None = None,
     previous: CoreTimeProofV1 | None = None,
     cold_boot_utc: datetime = datetime(1970, 1, 1, tzinfo=UTC),
+    private_key: Ed25519PrivateKey | None = None,
 ) -> SecureTimeCase:
     return SecureTimeCase(
         tmp_path,
@@ -496,7 +501,33 @@ def secure_time_case(
         failure=failure,
         previous=previous,
         cold_boot_utc=cold_boot_utc,
+        private_key=private_key,
     )
+
+
+def canonical_proof_b64(proof: CoreTimeProofV1) -> str:
+    return base64.b64encode(canonical_bytes(proof)).decode("ascii")
+
+
+def canonical_proof_sha256(proof: CoreTimeProofV1) -> str:
+    return hashlib.sha256(canonical_bytes(proof)).hexdigest()
+
+
+def proof_from_state(state: SecureTimeStateV1) -> CoreTimeProofV1:
+    return parse_contract_json(
+        CoreTimeProofV1,
+        base64.b64decode(state.canonical_proof_b64, validate=True),
+        max_bytes=8_192,
+        require_canonical=True,
+    )
+
+
+def overwrite_current_state(
+    repository: SecureTimeStateRepository, state: SecureTimeStateV1
+) -> None:
+    path = repository.root / SECURE_TIME_STATE_NAME
+    path.write_bytes(canonical_bytes(state))
+    path.chmod(0o600)
 
 
 @pytest.mark.asyncio
@@ -534,18 +565,17 @@ async def test_lost_clock_bootstraps_signed_core_time_before_strict_mtls(
     assert case.strict_mtls.bootstrap_was_closed_before_strict is True
     assert case.bootstrap.last_channel is not None
     assert case.bootstrap.last_channel.promoted is False
+    proof = case.proof_for_request(case.bootstrap.last_channel.time_requests[0])
     state = case.repository.require_previous()
     assert state is not None
     assert state.time_sequence == 11
     assert state.endpoint_generation == 7
     assert state.authority_health_generation == 5
     assert state.core_utc == NOW
-    assert (
-        state.proof_sha256
-        == hashlib.sha256(
-            case.proof_for_request(case.bootstrap.last_channel.time_requests[0]).signing_payload()
-        ).hexdigest()
-    )
+    assert state.proof_sha256 == hashlib.sha256(proof.signing_payload()).hexdigest()
+    assert state.canonical_proof_sha256 == canonical_proof_sha256(proof)
+    assert state.canonical_proof_sha256 != state.proof_sha256
+    assert proof_from_state(state) == proof
     deadlines = (
         case.route_neighbor.deadlines
         + case.leaf_verifier.deadlines
@@ -556,6 +586,146 @@ async def test_lost_clock_bootstraps_signed_core_time_before_strict_mtls(
     )
     assert deadlines
     assert set(deadlines) == {102.0}
+
+
+@pytest.mark.asyncio
+async def test_crash_after_commit_restores_canonical_proof_without_bootstrap(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    first = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="crash_after_commit_before_strict",
+        private_key=private_key,
+    )
+
+    with pytest.raises(OSError, match="after_parent_fsync"):
+        await first.boot()
+
+    committed = first.repository.require_previous()
+    assert committed is not None
+    committed_proof = proof_from_state(committed)
+    assert committed.proof_sha256 == hashlib.sha256(committed_proof.signing_payload()).hexdigest()
+    assert committed.canonical_proof_sha256 == canonical_proof_sha256(committed_proof)
+    assert first.strict_mtls.calls == 0
+
+    restarted = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        cold_boot_utc=datetime(1970, 1, 1, tzinfo=UTC),
+        private_key=private_key,
+    )
+
+    assert await restarted.boot() == "signed_core_bootstrap"
+    assert restarted.bootstrap.nonces == []
+    assert restarted.bootstrap.connections == 0
+    assert restarted.strict_mtls.calls == 1
+    assert restarted.clock.now_utc() == NOW
+    assert restarted.repository.require_previous() == committed
+    assert restarted.events == [
+        "emergency_firewall",
+        "leaf_pin_verified",
+        "restored_signed_time_verified",
+        "clock_set",
+        "strict_mtls_validity_verified",
+        "edge_ready",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_canonical_proof_commitment_tamper_without_bootstrap(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    first = secure_time_case(tmp_path, rtc_qualified=False, private_key=private_key)
+    await first.boot()
+    state = first.repository.require_previous()
+    assert state is not None
+    proof = proof_from_state(state)
+    tampered_proof = CoreTimeProofV1.model_validate(
+        proof.model_dump(mode="python")
+        | {"signature_b64": base64.b64encode(b"\x00" * 64).decode("ascii")}
+    )
+    overwrite_current_state(
+        first.repository,
+        state.model_copy(update={"canonical_proof_b64": canonical_proof_b64(tampered_proof)}),
+    )
+
+    restarted = secure_time_case(tmp_path, rtc_qualified=False, private_key=private_key)
+    with pytest.raises(PermissionError, match="canonical_proof"):
+        await restarted.boot()
+
+    assert restarted.bootstrap.nonces == []
+    assert restarted.bootstrap.connections == 0
+    assert restarted.strict_mtls.calls == 0
+    assert restarted.edge_ready is False
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_signature_tamper_even_when_canonical_commitment_matches(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    first = secure_time_case(tmp_path, rtc_qualified=False, private_key=private_key)
+    await first.boot()
+    state = first.repository.require_previous()
+    assert state is not None
+    proof = proof_from_state(state)
+    tampered_proof = CoreTimeProofV1.model_validate(
+        proof.model_dump(mode="python")
+        | {"signature_b64": base64.b64encode(b"\x00" * 64).decode("ascii")}
+    )
+    overwrite_current_state(
+        first.repository,
+        state.model_copy(
+            update={
+                "canonical_proof_b64": canonical_proof_b64(tampered_proof),
+                "canonical_proof_sha256": canonical_proof_sha256(tampered_proof),
+            }
+        ),
+    )
+
+    restarted = secure_time_case(tmp_path, rtc_qualified=False, private_key=private_key)
+    with pytest.raises(PermissionError, match="invalid_signature"):
+        await restarted.boot()
+
+    assert restarted.bootstrap.nonces == []
+    assert restarted.bootstrap.connections == 0
+    assert restarted.strict_mtls.calls == 0
+    assert restarted.edge_ready is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure,match",
+    (
+        (None, "invalid_signature"),
+        ("time_outside_server_leaf_validity", "server_leaf"),
+    ),
+)
+async def test_restore_rejects_endpoint_key_mismatch_or_expired_leaf_without_bootstrap(
+    tmp_path: Path,
+    failure: str | None,
+    match: str,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    first = secure_time_case(tmp_path, rtc_qualified=False, private_key=private_key)
+    await first.boot()
+
+    restarted = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure=failure,
+        private_key=Ed25519PrivateKey.generate() if failure is None else private_key,
+    )
+    with pytest.raises(PermissionError, match=match):
+        await restarted.boot()
+
+    assert restarted.bootstrap.nonces == []
+    assert restarted.bootstrap.connections == 0
+    assert restarted.strict_mtls.calls == 0
+    assert restarted.edge_ready is False
 
 
 @pytest.mark.asyncio
@@ -701,6 +871,8 @@ def test_state_repository_is_owner_only_canonical_atomic_and_cas_guarded(tmp_pat
         time_sequence=proof.time_sequence,
         core_utc=proof.core_utc,
         proof_sha256=proof_sha256,
+        canonical_proof_sha256=canonical_proof_sha256(proof),
+        canonical_proof_b64=canonical_proof_b64(proof),
     )
     assert path.read_bytes() == canonical_bytes(state)
 
@@ -838,6 +1010,8 @@ def test_secure_time_state_model_is_strict_closed_and_bounded() -> None:
         time_sequence=proof.time_sequence,
         core_utc=proof.core_utc,
         proof_sha256=hashlib.sha256(proof.signing_payload()).hexdigest(),
+        canonical_proof_sha256=canonical_proof_sha256(proof),
+        canonical_proof_b64=canonical_proof_b64(proof),
     )
     assert state.model_config["extra"] == "forbid"
     assert state.model_config["frozen"] is True
@@ -854,6 +1028,12 @@ def test_secure_time_state_model_is_strict_closed_and_bounded() -> None:
         SecureTimeStateV1.model_validate(state.model_dump() | {"extra": True})
     with pytest.raises(ValidationError):
         SecureTimeStateV1.model_validate(state.model_dump() | {"proof_sha256": "A" * 64})
+    with pytest.raises(ValidationError):
+        SecureTimeStateV1.model_validate(state.model_dump() | {"canonical_proof_sha256": "A" * 64})
+    with pytest.raises(ValidationError):
+        SecureTimeStateV1.model_validate(
+            state.model_dump() | {"canonical_proof_b64": canonical_proof_b64(proof) + "\n"}
+        )
     with pytest.raises(ValidationError):
         SecureTimeStateV1.model_validate(state.model_dump() | {"time_sequence": 0})
     with pytest.raises(ValidationError):
