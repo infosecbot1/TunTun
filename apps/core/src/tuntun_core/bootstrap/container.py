@@ -41,7 +41,11 @@ from tuntun_core.workflows.contract_workflow import (
     CompletedTurnAudioPort,
     ContractConversationWorkflow,
 )
-from tuntun_core.workflows.conversation import LinearConversationEngine, WorkflowPorts
+from tuntun_core.workflows.conversation import (
+    ContextWorkflowPorts,
+    LinearConversationEngine,
+    WorkflowPorts,
+)
 
 _SIMULATED_GUEST_ROUTE_NAMES = frozenset({"health.ready", "session.simulated_turn"})
 _LOOPBACK_LISTENER_BINDINGS = frozenset({"loopback"})
@@ -125,6 +129,9 @@ class SimulatedGuestComposition:
     app: FastAPI
     workflow: ContractConversationWorkflow
     dependencies: SimulatedGuestAppDependencies
+    linear_engine: LinearConversationEngine | None = None
+    langgraph_engine: LinearConversationEngine | None = None
+    context_provider: object | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,17 +261,34 @@ class ProductionContainer:
     def install_simulated_guest_app(
         self,
         *,
-        ports: WorkflowPorts,
+        ports: WorkflowPorts | ContextWorkflowPorts,
         completed_audio: CompletedTurnAudioPort,
         household_id: UUID,
         device_id: UUID,
         loopback_host: str,
+        context_provider: object | None = None,
     ) -> InstalledSimulatedGuestApp:
         if self.simulated_guest_app is not None:
             raise RuntimeError("simulated_guest_app_already_installed")
         if self.turn_coordinator is None or self.session_manager is None:
             raise RuntimeError("simulated_guest_roots_unavailable")
-        workflow = build_workflow(ports, completed_audio, self.turn_coordinator)
+        linear_engine = LinearConversationEngine(
+            ports,
+            context_provider=context_provider,
+            accepts_results=self.turn_coordinator.accepts_results,
+        )
+        langgraph_engine = LinearConversationEngine(
+            ports,
+            context_provider=context_provider,
+            accepts_results=self.turn_coordinator.accepts_results,
+        )
+        workflow = build_workflow(
+            ports,
+            completed_audio,
+            self.turn_coordinator,
+            context_provider=context_provider,
+            engine=linear_engine,
+        )
         dependencies = SimulatedGuestAppDependencies(
             session_manager=self.session_manager,
             workflow=workflow,
@@ -286,6 +310,9 @@ class ProductionContainer:
                 app=app,
                 workflow=workflow,
                 dependencies=dependencies,
+                linear_engine=linear_engine,
+                langgraph_engine=langgraph_engine,
+                context_provider=context_provider,
             ),
             coordinator=self.turn_coordinator,
             session_manager=self.session_manager,
@@ -302,11 +329,21 @@ class ProductionContainer:
 
 
 def build_workflow(
-    ports: WorkflowPorts,
+    ports: WorkflowPorts | ContextWorkflowPorts,
     completed_audio: CompletedTurnAudioPort,
     coordinator: TurnCoordinator,
+    *,
+    context_provider: object | None = None,
+    engine: LinearConversationEngine | None = None,
 ) -> ContractConversationWorkflow:
-    engine = LinearConversationEngine(ports, accepts_results=coordinator.accepts_results)
+    if engine is None:
+        engine = LinearConversationEngine(
+            ports,
+            context_provider=context_provider,
+            accepts_results=coordinator.accepts_results,
+        )
+    elif engine.context_provider is not context_provider:
+        raise TypeError("workflow engine context provider mismatch")
     return ContractConversationWorkflow(completed_audio, engine, coordinator)
 
 

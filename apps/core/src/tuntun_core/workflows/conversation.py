@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from tuntun_core.workflows.ephemeral_turn_context import EphemeralTurnContext
@@ -36,7 +36,23 @@ class WorkflowPorts(Protocol):
 
     async def guest_identity(self) -> str: ...
 
-    async def generate(self, transcript: object, identity: str) -> str: ...
+    async def generate(self, transcript: Any, identity: str) -> str: ...
+
+    async def synthesize(self, answer: str) -> bytes: ...
+
+    async def play(self, turn_id: UUID, pcm: bytes) -> None: ...
+
+    async def finish(self, turn_id: UUID) -> None: ...
+
+
+class ContextWorkflowPorts(Protocol):
+    async def start(self, turn_id: UUID) -> None: ...
+
+    async def transcribe(self, wav_bytes: bytes) -> object: ...
+
+    async def guest_identity(self) -> str: ...
+
+    async def generate(self, context: Any) -> str: ...
 
     async def synthesize(self, answer: str) -> bytes: ...
 
@@ -55,14 +71,20 @@ class LinearConversationEngine:
 
     def __init__(
         self,
-        ports: WorkflowPorts,
+        ports: Any,
         *,
+        context_provider: Any | None = None,
         accepts_results: Callable[[UUID], bool] = _always_accepts_results,
     ) -> None:
         self._ports = ports
+        self._context_provider = context_provider
         self._accepts_results = accepts_results
         self.ephemeral: EphemeralTurnContext[dict[str, object]] = EphemeralTurnContext()
         self.cleanup_reason_codes: list[str] = []
+
+    @property
+    def context_provider(self) -> Any | None:
+        return self._context_provider
 
     def _accepts_turn_results(self, turn_id: UUID) -> bool:
         return self._accepts_results(turn_id)
@@ -82,10 +104,16 @@ class LinearConversationEngine:
             if not self._accepts_turn_results(turn.turn_id):
                 return TurnOutcome(spoken=False)
             self.ephemeral.put(turn.turn_id, {"transcript": transcript})
-            identity = await self._ports.guest_identity()
-            if not self._accepts_turn_results(turn.turn_id):
-                return TurnOutcome(spoken=False)
-            answer = await self._ports.generate(transcript, identity)
+            if self._context_provider is None:
+                identity = await self._ports.guest_identity()
+                if not self._accepts_turn_results(turn.turn_id):
+                    return TurnOutcome(spoken=False)
+                answer = await self._ports.generate(transcript, identity)
+            else:
+                context = await self._context_provider.prepare(turn.turn_id, transcript)
+                if not self._accepts_turn_results(turn.turn_id):
+                    return TurnOutcome(spoken=False)
+                answer = await self._ports.generate(context)
             if not self._accepts_turn_results(turn.turn_id):
                 return TurnOutcome(spoken=False)
             self.ephemeral.put(turn.turn_id, {"answer": answer})

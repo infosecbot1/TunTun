@@ -7,15 +7,26 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from tuntun_core.workflows.conversation import LinearConversationEngine, TurnRequest, WorkflowPorts
+from tuntun_core.workflows.conversation import (
+    ContextWorkflowPorts,
+    LinearConversationEngine,
+    TurnRequest,
+    WorkflowPorts,
+)
 
 _MAX_SYNTHETIC_WAV_BYTES = 8_388_608
 _READ_FLAGS = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
 
 
-def run_synthetic_turn(ports: WorkflowPorts, turn: TurnRequest) -> bool:
-    return asyncio.run(LinearConversationEngine(ports).run(turn)).spoken
+def run_synthetic_turn(
+    ports: WorkflowPorts | ContextWorkflowPorts,
+    turn: TurnRequest,
+    context_provider: object | None = None,
+) -> bool:
+    return asyncio.run(
+        LinearConversationEngine(ports, context_provider=context_provider).run(turn)
+    ).spoken
 
 
 def read_synthetic_wav(path: Path) -> bytes:

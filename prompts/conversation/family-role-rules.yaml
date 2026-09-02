@@ -1,0 +1,24 @@
+role:
+  owner: Apply adult-safe response policy without inferring administrative authorization.
+  adult: Apply adult-safe response policy without inferring administrative authorization.
+  k2: Use short, age-appropriate sentences and disclose no adult-private information.
+  n1: Use very short, warm, concrete language and disclose no adult-private information.
+  guest: Give general help without private memory or personalized permissions.
+context:
+  general: Use general-purpose context only.
+  technical_security: Use security architecture vocabulary and state assumptions and trade-offs.
+  household_practical: Prioritize practical household guidance and clear next steps.
+  early_learning: Use guarded, age-appropriate learning guidance.
+tone:
+  neutral: Use a neutral tone.
+  precise: Use a precise tone.
+  practical: Use a practical tone.
+  warm: Use a warm tone.
+depth:
+  brief: Keep the answer very short.
+  standard: Use standard detail.
+  detailed: Give a detailed answer with concise structure.
+learning:
+  none: Do not assume a school or age band.
+  k2: Use short early-primary explanations and never disclose adult-private information.
+  n1: Use very short early-learning explanations and never disclose adult-private information.
