@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 import pytest
 from tuntun_contracts.base import canonical_mapping_bytes
@@ -182,6 +184,56 @@ def _bypass_key_identity_gap(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _secret_os_error(stage: str) -> OSError:
+    return OSError(
+        5,
+        f"secret {stage} failure errno=5 otp={ONE_TIME_CODE} digest={_digest(ONE_TIME_CODE)}",
+        f"/secret/reachy/{stage}",
+    )
+
+
+def _secret_os_failure(stage: str) -> Callable[..., NoReturn]:
+    def fail(*_args: object, **_kwargs: object) -> NoReturn:
+        raise _secret_os_error(stage)
+
+    return fail
+
+
+def _assert_sealed_local_ceremony_error(error: BaseException, *, stage: str) -> None:
+    assert type(error) is ceremony.ReachyLocalCeremonyError
+    assert error.args == ("unsafe Reachy local ceremony",)
+    assert str(error) == "unsafe Reachy local ceremony"
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    for rendered in (str(error), repr(error), repr(error.args)):
+        assert ONE_TIME_CODE not in rendered
+        assert _digest(ONE_TIME_CODE) not in rendered
+        assert "secret" not in rendered
+        assert "errno" not in rendered
+        assert "Errno" not in rendered
+        assert stage not in rendered
+
+
+def _expect_issue_proof_sealed_failure(
+    composition: bootstrap.ReachyCommissioningComposition,
+    *,
+    stage: str,
+) -> None:
+    with pytest.raises(ceremony.ReachyLocalCeremonyError) as caught:
+        composition.ceremony.issue_proof(
+            operation="commission",
+            request=_request_model(),
+            current=None,
+            one_time_code=ONE_TIME_CODE,
+        )
+
+    _assert_sealed_local_ceremony_error(caught.value, stage=stage)
+
+
+def _receipt_json_names(root: Path) -> list[str]:
+    return sorted(path.name for path in root.iterdir() if path.name.endswith(".json"))
+
+
 def test_production_operator_projection_targets_core_fixed_file_without_host_touch() -> None:
     production_operator_root = bootstrap._operator_state_repository_root(bootstrap.PRODUCTION_ROOTS)
 
@@ -280,6 +332,119 @@ def test_one_time_code_consumption_survives_failure_after_receipt(
             current=None,
             one_time_code=ONE_TIME_CODE,
         )
+
+
+def test_issue_proof_normalizes_closed_receipt_repository_fd_without_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _bypass_key_identity_gap(monkeypatch)
+    paths = _write_fixture(tmp_path)
+    composition = bootstrap.build_commissioning_for_test_roots(tmp_path)
+    composition.ceremony._one_time_code_receipts.close()
+
+    _expect_issue_proof_sealed_failure(composition, stage="closed-fd")
+
+    assert _receipt_json_names(paths.one_time_code_receipt_root) == []
+
+
+@pytest.mark.parametrize("stage", ("open", "fchmod", "write", "fstat", "fsync", "stat", "link"))
+def test_prepublication_receipt_os_failures_are_generic_and_do_not_consume_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    _bypass_key_identity_gap(monkeypatch)
+    paths = _write_fixture(tmp_path)
+    composition = bootstrap.build_commissioning_for_test_roots(tmp_path)
+
+    with monkeypatch.context() as faults:
+        faults.setattr(ceremony.OS_MODULE, stage, _secret_os_failure(stage))
+        _expect_issue_proof_sealed_failure(composition, stage=stage)
+
+    assert _receipt_json_names(paths.one_time_code_receipt_root) == []
+    fresh = bootstrap.build_commissioning_for_test_roots(tmp_path)
+    proof = fresh.ceremony.issue_proof(
+        operation="commission",
+        request=_request_model(),
+        current=None,
+        one_time_code=ONE_TIME_CODE,
+    )
+    assert proof.operation == "commission"
+
+
+@pytest.mark.parametrize("stage", ("fsync-after-link", "unlink", "stat-published", "read"))
+def test_postpublication_receipt_os_failures_are_generic_and_consume_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    _bypass_key_identity_gap(monkeypatch)
+    paths = _write_fixture(tmp_path)
+    composition = bootstrap.build_commissioning_for_test_roots(tmp_path)
+
+    with monkeypatch.context() as faults:
+        if stage == "fsync-after-link":
+            real_fsync = ceremony.OS_MODULE.fsync
+            fsync_calls = 0
+
+            def fsync_after_link_fault(descriptor: int) -> None:
+                nonlocal fsync_calls
+                fsync_calls += 1
+                if fsync_calls >= 2:
+                    raise _secret_os_error(stage)
+                real_fsync(descriptor)
+
+            faults.setattr(ceremony.OS_MODULE, "fsync", fsync_after_link_fault)
+        elif stage == "stat-published":
+            real_stat = cast(Callable[..., os.stat_result], ceremony.OS_MODULE.stat)
+
+            def stat_published_fault(
+                path: object,
+                *args: object,
+                **kwargs: object,
+            ) -> os.stat_result:
+                if isinstance(path, str) and path.startswith("receipt-"):
+                    raise _secret_os_error(stage)
+                return real_stat(path, *args, **kwargs)
+
+            faults.setattr(ceremony.OS_MODULE, "stat", stat_published_fault)
+        else:
+            faults.setattr(ceremony.OS_MODULE, stage, _secret_os_failure(stage))
+
+        _expect_issue_proof_sealed_failure(composition, stage=stage)
+
+    assert len(_receipt_json_names(paths.one_time_code_receipt_root)) == 1
+    fresh = bootstrap.build_commissioning_for_test_roots(tmp_path)
+    _expect_issue_proof_sealed_failure(fresh, stage="duplicate-receipt")
+
+
+@pytest.mark.parametrize(
+    "interrupt_type",
+    (KeyboardInterrupt, SystemExit, GeneratorExit),
+)
+def test_receipt_consumption_does_not_normalize_control_flow_interrupts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt_type: type[BaseException],
+) -> None:
+    _bypass_key_identity_gap(monkeypatch)
+    paths = _write_fixture(tmp_path)
+    composition = bootstrap.build_commissioning_for_test_roots(tmp_path)
+
+    def interrupting_write(*_args: object, **_kwargs: object) -> NoReturn:
+        raise interrupt_type(f"interrupt {ONE_TIME_CODE} {_digest(ONE_TIME_CODE)}")
+
+    monkeypatch.setattr(ceremony.OS_MODULE, "write", interrupting_write)
+    with pytest.raises(interrupt_type):
+        composition.ceremony.issue_proof(
+            operation="commission",
+            request=_request_model(),
+            current=None,
+            one_time_code=ONE_TIME_CODE,
+        )
+
+    assert _receipt_json_names(paths.one_time_code_receipt_root) == []
 
 
 def test_concurrent_reopened_compositions_consume_one_time_code_once(

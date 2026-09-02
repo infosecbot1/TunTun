@@ -6,6 +6,7 @@ import hmac
 import os
 import re
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -490,6 +491,17 @@ class ReachyOneTimeCodeReceiptRepository:
             OS_MODULE.close(descriptor)
 
     def consume_once(self, one_time_code_sha256: str) -> None:
+        os_failure = False
+        try:
+            self._consume_once(one_time_code_sha256)
+        except ReachyLocalCeremonyError:
+            raise
+        except OSError:
+            os_failure = True
+        if os_failure:
+            raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+
+    def _consume_once(self, one_time_code_sha256: str) -> None:
         receipt_id = _one_time_code_receipt_id(one_time_code_sha256)
         target_name = f"receipt-{receipt_id}.json"
         if not _safe_receipt_name(target_name):
@@ -525,24 +537,42 @@ class ReachyOneTimeCodeReceiptRepository:
             named_temp = OS_MODULE.stat(temp_name, dir_fd=self.fd, follow_symlinks=False)
             if not temp_identity.same_file_and_size(named_temp):
                 raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+            receipt_exists = False
             try:
                 OS_MODULE.link(temp_name, target_name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
-            except FileExistsError as error:
-                raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR) from error
+            except FileExistsError:
+                receipt_exists = True
+            if receipt_exists:
+                raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
             published = True
             OS_MODULE.fsync(self.fd)
         finally:
+            primary_failure = sys.exception()
+            cleanup_failure: OSError | None = None
             if descriptor >= 0 and temp_identity is None:
-                with contextlib.suppress(OSError):
+                try:
                     temp_identity = _FileIdentity.from_stat(OS_MODULE.fstat(descriptor))
+                except OSError as error:
+                    cleanup_failure = error
             if descriptor >= 0:
-                OS_MODULE.close(descriptor)
+                try:
+                    OS_MODULE.close(descriptor)
+                except OSError as error:
+                    if cleanup_failure is None:
+                        cleanup_failure = error
             if temp_identity is not None:
-                with contextlib.suppress(OSError):
+                try:
                     OS_MODULE.unlink(temp_name, dir_fd=self.fd)
+                except OSError as error:
+                    cleanup_failure = error
                 if published:
-                    with contextlib.suppress(OSError):
+                    try:
                         OS_MODULE.fsync(self.fd)
+                    except OSError as error:
+                        if cleanup_failure is None:
+                            cleanup_failure = error
+            if cleanup_failure is not None and primary_failure is None:
+                raise cleanup_failure
         if published:
             published_identity = OS_MODULE.stat(
                 target_name,
@@ -616,6 +646,7 @@ class ReachyLocalCeremony:
         current: CommissioningStateV1 | None,
         one_time_code: str,
     ) -> LocalPhysicalProof:
+        os_failure = False
         try:
             evidence = self._verified_evidence(one_time_code)
             return self._proof_authority.issue(
@@ -626,8 +657,13 @@ class ReachyLocalCeremony:
             )
         except ReachyLocalCeremonyError:
             raise
-        except (PermissionError, ValueError, ContractParseError) as error:
+        except OSError:
+            os_failure = True
+        except (ValueError, ContractParseError) as error:
             raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR) from error
+        if os_failure:
+            raise ReachyLocalCeremonyError(_LOCAL_CEREMONY_ERROR)
+        raise AssertionError("unreachable")
 
     def _verified_evidence(self, one_time_code: str) -> _SyntheticLocalPhysicalEvidence:
         self._verify_static_evidence()
