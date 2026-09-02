@@ -23,6 +23,7 @@ def read_synthetic_wav(path: Path) -> bytes:
     parent_fd: int | None = None
     fd: int | None = None
     primary: BaseException | None = None
+    buffer = bytearray()
     try:
         parent_fd, file_name = _open_parent_directory(requested)
         before_name = os.stat(file_name, dir_fd=parent_fd, follow_symlinks=False)
@@ -31,16 +32,18 @@ def read_synthetic_wav(path: Path) -> bytes:
         _require_safe_wav(before, before_name)
         if not 1 <= before.st_size <= _MAX_SYNTHETIC_WAV_BYTES:
             raise ValueError("synthetic WAV outside turn bounds")
-        chunks: list[bytes] = []
         total = 0
         while True:
             chunk = os.read(fd, min(65_536, _MAX_SYNTHETIC_WAV_BYTES + 1 - total))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > _MAX_SYNTHETIC_WAV_BYTES:
-                raise ValueError("synthetic WAV outside turn bounds")
-            chunks.append(chunk)
+            try:
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_SYNTHETIC_WAV_BYTES:
+                    raise ValueError("synthetic WAV outside turn bounds")
+                buffer.extend(chunk)
+            finally:
+                del chunk
         after = os.fstat(fd)
         after_name = os.stat(file_name, dir_fd=parent_fd, follow_symlinks=False)
         _require_safe_wav(after, after_name)
@@ -48,7 +51,7 @@ def read_synthetic_wav(path: Path) -> bytes:
             raise PermissionError("unsafe synthetic WAV")
         if (after.st_dev, after.st_ino) != (after_name.st_dev, after_name.st_ino):
             raise PermissionError("unsafe synthetic WAV")
-        return b"".join(chunks)
+        return bytes(buffer)
     except OSError:
         primary = PermissionError("unsafe synthetic WAV")
         raise primary from None
@@ -56,10 +59,11 @@ def read_synthetic_wav(path: Path) -> bytes:
         primary = error
         raise
     finally:
-        if fd is not None:
-            _close_fd(fd, primary)
-        if parent_fd is not None:
-            _close_fd(parent_fd, primary)
+        try:
+            buffer[:] = b"\x00" * len(buffer)
+            buffer.clear()
+        finally:
+            _close_descriptors(fd, parent_fd, primary)
 
 
 def _open_parent_directory(path: Path) -> tuple[int, str]:
@@ -120,13 +124,43 @@ def _identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+def _close_descriptors(
+    fd: int | None,
+    parent_fd: int | None,
+    primary: BaseException | None,
+) -> None:
+    close_primary = primary
+    deferred_close: BaseException | None = None
+    if fd is not None:
+        try:
+            _close_fd(fd, close_primary)
+        except BaseException as error:
+            deferred_close = error
+            close_primary = error
+            del error
+    if parent_fd is not None:
+        try:
+            _close_fd(parent_fd, close_primary)
+        except BaseException as error:
+            if deferred_close is None:
+                deferred_close = error
+            del error
+    if primary is None and deferred_close is not None:
+        raise deferred_close
+
+
 def _close_fd(fd: int, primary: BaseException | None) -> None:
+    close_error_type: str | None = None
     try:
         os.close(fd)
     except OSError as error:
-        if primary is None:
-            raise PermissionError("unsafe synthetic WAV") from error
-        primary.add_note(f"additional synthetic WAV cleanup failure: {type(error).__name__}")
+        close_error_type = type(error).__name__
+        del error
+    if close_error_type is None:
+        return
+    if primary is None:
+        raise PermissionError("unsafe synthetic WAV") from None
+    primary.add_note(f"additional synthetic WAV cleanup failure: {close_error_type}")
 
 
 def talk(
