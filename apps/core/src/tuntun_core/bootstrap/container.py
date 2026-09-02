@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import UUID
 
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
 from tuntun_contracts.ports import ClockPort, RouteAuthorizerPort
 from tuntun_core.adapters.sqlcipher.async_unit_of_work import AsyncUnitOfWorkFactory
+from tuntun_core.api.app import create_app
+from tuntun_core.api.dependencies import ReadinessDependency, SimulatedGuestAppDependencies
 from tuntun_core.bootstrap.lifecycle import (
     BudgetReconciliationSupervisor,
     CoreProcessLease,
@@ -28,7 +34,17 @@ from tuntun_core.services.providers.review import (
     RuntimeProviderIdentityReader,
     SqlcipherCurrentProviderReviews,
 )
+from tuntun_core.services.sessions.manager import SessionManager
+from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
 from tuntun_core.services.transactions.protocols import UnitOfWorkProtocol
+from tuntun_core.workflows.contract_workflow import (
+    CompletedTurnAudioPort,
+    ContractConversationWorkflow,
+)
+from tuntun_core.workflows.conversation import LinearConversationEngine, WorkflowPorts
+
+_SIMULATED_GUEST_ROUTE_NAMES = frozenset({"health.ready", "session.simulated_turn"})
+_LOOPBACK_LISTENER_BINDINGS = frozenset({"loopback"})
 
 
 class CurrentProviderReviews(Protocol):
@@ -104,16 +120,40 @@ class CoreContainer:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class SimulatedGuestComposition:
+    app: FastAPI
+    workflow: ContractConversationWorkflow
+    dependencies: SimulatedGuestAppDependencies
+
+
+@dataclass(frozen=True, slots=True)
+class InstalledSimulatedGuestApp:
+    composition: SimulatedGuestComposition
+    coordinator: TurnCoordinator
+    session_manager: SessionManager
+    household_id: UUID
+    device_id: UUID
+    loopback_host: str
+    readiness_dependencies: tuple[ReadinessDependency, ...]
+    route_ids: set[str]
+    duplicate_route_ids: tuple[str, ...]
+    listener_bindings: frozenset[str]
+
+
 class ProductionContainer:
     """Process-lifetime composition root; exactly one supervised reconciler."""
 
     __slots__ = (
         "core",
+        "turn_coordinator",
+        "session_manager",
         "core_process_lease",
         "budget_reconciler",
         "startup_turn_recovery",
         "budget_lifecycle",
         "readiness_dependencies",
+        "simulated_guest_app",
     )
 
     def __init__(
@@ -124,6 +164,8 @@ class ProductionContainer:
         budget_reconciler: ExpiredBudgetReconciler,
         startup_turn_recovery: StartupTurnRecovery,
         budget_lifecycle: BudgetReconciliationSupervisor,
+        turn_coordinator: TurnCoordinator | None = None,
+        session_manager: SessionManager | None = None,
     ) -> None:
         if budget_lifecycle.reconciler is not budget_reconciler:
             raise TypeError("production reconciler identity mismatch")
@@ -132,11 +174,14 @@ class ProductionContainer:
         if startup_turn_recovery.process_lease is not core_process_lease:
             raise TypeError("production process lease identity mismatch")
         self.core = core
+        self.turn_coordinator = turn_coordinator
+        self.session_manager = session_manager
         self.core_process_lease = core_process_lease
         self.budget_reconciler = budget_reconciler
         self.startup_turn_recovery = startup_turn_recovery
         self.budget_lifecycle = budget_lifecycle
         self.readiness_dependencies = (budget_lifecycle,)
+        self.simulated_guest_app: InstalledSimulatedGuestApp | None = None
 
     @classmethod
     def build(
@@ -187,8 +232,16 @@ class ProductionContainer:
                 reconciler,
                 startup_recovery,
             )
+            turn_coordinator = TurnCoordinator(
+                core.budget_guard,
+                reachy,
+                clock,
+            )
+            session_manager = SessionManager(turn_coordinator)
             return cls(
                 core=core,
+                turn_coordinator=turn_coordinator,
+                session_manager=session_manager,
                 core_process_lease=lease,
                 budget_reconciler=reconciler,
                 startup_turn_recovery=startup_recovery,
@@ -197,3 +250,71 @@ class ProductionContainer:
         except BaseException:
             lease.release_after_shutdown()
             raise
+
+    def install_simulated_guest_app(
+        self,
+        *,
+        ports: WorkflowPorts,
+        completed_audio: CompletedTurnAudioPort,
+        household_id: UUID,
+        device_id: UUID,
+        loopback_host: str,
+    ) -> InstalledSimulatedGuestApp:
+        if self.simulated_guest_app is not None:
+            raise RuntimeError("simulated_guest_app_already_installed")
+        if self.turn_coordinator is None or self.session_manager is None:
+            raise RuntimeError("simulated_guest_roots_unavailable")
+        workflow = build_workflow(ports, completed_audio, self.turn_coordinator)
+        dependencies = SimulatedGuestAppDependencies(
+            session_manager=self.session_manager,
+            workflow=workflow,
+            household_id=household_id,
+            device_id=device_id,
+            loopback_host=loopback_host,
+            readiness_dependencies=self.readiness_dependencies,
+        )
+        app = create_app(dependencies)
+        route_id_sequence = tuple(
+            route.name for route in app.router.routes if isinstance(route, APIRoute)
+        )
+        duplicate_route_ids = _duplicate_route_ids(route_id_sequence)
+        route_ids = set(route_id_sequence)
+        if frozenset(route_ids) != _SIMULATED_GUEST_ROUTE_NAMES or duplicate_route_ids:
+            raise RuntimeError("simulated_guest_route_inventory_mismatch")
+        installed = InstalledSimulatedGuestApp(
+            composition=SimulatedGuestComposition(
+                app=app,
+                workflow=workflow,
+                dependencies=dependencies,
+            ),
+            coordinator=self.turn_coordinator,
+            session_manager=self.session_manager,
+            household_id=household_id,
+            device_id=device_id,
+            loopback_host=loopback_host,
+            readiness_dependencies=self.readiness_dependencies,
+            route_ids=route_ids,
+            duplicate_route_ids=duplicate_route_ids,
+            listener_bindings=_LOOPBACK_LISTENER_BINDINGS,
+        )
+        self.simulated_guest_app = installed
+        return installed
+
+
+def build_workflow(
+    ports: WorkflowPorts,
+    completed_audio: CompletedTurnAudioPort,
+    coordinator: TurnCoordinator,
+) -> ContractConversationWorkflow:
+    engine = LinearConversationEngine(ports, accepts_results=coordinator.accepts_results)
+    return ContractConversationWorkflow(completed_audio, engine, coordinator)
+
+
+def _duplicate_route_ids(route_ids: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for route_id in route_ids:
+        if route_id in seen:
+            duplicates.add(route_id)
+        seen.add(route_id)
+    return tuple(sorted(duplicates))

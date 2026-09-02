@@ -2,6 +2,7 @@ import typer
 from tuntun_core.cli.commands.models import models_app
 from tuntun_core.cli.commands.simulate import simulate
 from tuntun_core.cli.commands.storage_probe import storage_app
+from tuntun_core.cli.commands.talk import talk
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -18,5 +19,6 @@ def version() -> None:
 
 
 app.command("simulate")(simulate)
+app.command("talk")(talk)
 app.add_typer(models_app, name="models")
 app.add_typer(storage_app, name="storage")
