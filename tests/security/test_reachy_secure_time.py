@@ -9,13 +9,14 @@ import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
+from uuid import UUID
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from pydantic import ValidationError
-from tuntun_contracts.base import canonical_bytes, parse_contract_json
+from pydantic import Field, ValidationError
+from tuntun_contracts.base import ContractModel, canonical_bytes, parse_contract_json
 from tuntun_contracts.reachy_time import CoreTimeProofV1, CoreTimeRequestV1
 from tuntun_edge.reachy.probe import CapabilityReport
 from tuntun_edge.transport.secure_time import (
@@ -30,6 +31,9 @@ from tuntun_edge.transport.secure_time import (
 )
 
 NOW = datetime(2026, 8, 27, 1, 2, 3, 4, tzinfo=UTC)
+BOOT_ATTEMPT_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+NEXT_BOOT_ATTEMPT_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+RESTORE_ATTEMPT_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,10 +276,12 @@ class SecureTimeCase:
         previous: CoreTimeProofV1 | None = None,
         cold_boot_utc: datetime = datetime(1970, 1, 1, tzinfo=UTC),
         private_key: Ed25519PrivateKey | None = None,
+        proof_time_sequence: int = 11,
     ) -> None:
         tmp_path.mkdir(parents=True, exist_ok=True)
         self.events: list[str] = []
         self.failure = failure
+        self.proof_time_sequence = proof_time_sequence
         self.monotonic = FakeMonotonic()
         self.private_key = Ed25519PrivateKey.generate() if private_key is None else private_key
         self.public_key_bytes = self.private_key.public_key().public_bytes(
@@ -394,7 +400,7 @@ class SecureTimeCase:
         )
         authority_generation = self.endpoint.trust_digest_generation
         core_utc = NOW
-        time_sequence = 11
+        time_sequence = self.proof_time_sequence
         if self.failure == "core_authority_rollback":
             authority_generation = 4
         if self.failure == "replayed_time_sequence":
@@ -417,10 +423,17 @@ class SecureTimeCase:
         )
 
     def write_previous(self, proof: CoreTimeProofV1) -> None:
-        self.repository.replace_atomic(
+        pending = self.repository.replace_atomic(
             proof,
             hashlib.sha256(proof.signing_payload()).hexdigest(),
             expected_previous=None,
+            deadline_monotonic=self.monotonic() + 2.0,
+            boot_attempt_id=BOOT_ATTEMPT_ID,
+            monotonic=self.monotonic,
+        )
+        self.repository.mark_strict_mtls_ready(
+            expected_current=pending,
+            boot_attempt_id=BOOT_ATTEMPT_ID,
             deadline_monotonic=self.monotonic() + 2.0,
             monotonic=self.monotonic,
         )
@@ -493,6 +506,7 @@ def secure_time_case(
     previous: CoreTimeProofV1 | None = None,
     cold_boot_utc: datetime = datetime(1970, 1, 1, tzinfo=UTC),
     private_key: Ed25519PrivateKey | None = None,
+    proof_time_sequence: int = 11,
 ) -> SecureTimeCase:
     return SecureTimeCase(
         tmp_path,
@@ -502,6 +516,7 @@ def secure_time_case(
         previous=previous,
         cold_boot_utc=cold_boot_utc,
         private_key=private_key,
+        proof_time_sequence=proof_time_sequence,
     )
 
 
@@ -511,6 +526,20 @@ def canonical_proof_b64(proof: CoreTimeProofV1) -> str:
 
 def canonical_proof_sha256(proof: CoreTimeProofV1) -> str:
     return hashlib.sha256(canonical_bytes(proof)).hexdigest()
+
+
+class LegacySecureTimeStateForTest(ContractModel):
+    schema_version: Literal["tuntun.reachy-secure-time-state.v1"]
+    endpoint_generation: Annotated[int, Field(ge=1)]
+    authority_health_generation: Annotated[int, Field(ge=1)]
+    time_sequence: Annotated[int, Field(ge=1)]
+    core_utc: datetime
+    proof_sha256: Annotated[str, Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")]
+    canonical_proof_sha256: Annotated[
+        str,
+        Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$"),
+    ]
+    canonical_proof_b64: Annotated[str, Field(min_length=4)]
 
 
 def proof_from_state(state: SecureTimeStateV1) -> CoreTimeProofV1:
@@ -528,6 +557,31 @@ def overwrite_current_state(
     path = repository.root / SECURE_TIME_STATE_NAME
     path.write_bytes(canonical_bytes(state))
     path.chmod(0o600)
+
+
+def write_legacy_current_state(
+    repository: SecureTimeStateRepository,
+    proof: CoreTimeProofV1,
+) -> None:
+    legacy = LegacySecureTimeStateForTest(
+        schema_version="tuntun.reachy-secure-time-state.v1",
+        endpoint_generation=proof.endpoint_generation,
+        authority_health_generation=proof.authority_health_generation,
+        time_sequence=proof.time_sequence,
+        core_utc=proof.core_utc,
+        proof_sha256=hashlib.sha256(proof.signing_payload()).hexdigest(),
+        canonical_proof_sha256=canonical_proof_sha256(proof),
+        canonical_proof_b64=canonical_proof_b64(proof),
+    )
+    path = repository.root / SECURE_TIME_STATE_NAME
+    path.write_bytes(canonical_bytes(legacy))
+    path.chmod(0o600)
+
+
+def assert_canonical_uuid(value: str | None) -> str:
+    assert isinstance(value, str)
+    assert str(UUID(value)) == value
+    return value
 
 
 @pytest.mark.asyncio
@@ -555,6 +609,7 @@ async def test_lost_clock_bootstraps_signed_core_time_before_strict_mtls(
         "time_state_fsynced",
         "bootstrap_closed",
         "strict_mtls_validity_verified",
+        "strict_mtls_ready",
         "edge_ready",
     ]
     assert case.bootstrap_application_frames == []
@@ -568,6 +623,9 @@ async def test_lost_clock_bootstraps_signed_core_time_before_strict_mtls(
     proof = case.proof_for_request(case.bootstrap.last_channel.time_requests[0])
     state = case.repository.require_previous()
     assert state is not None
+    assert state.restore_status == "strict_mtls_ready"
+    assert_canonical_uuid(state.boot_attempt_id)
+    assert state.restore_attempt_id is None
     assert state.time_sequence == 11
     assert state.endpoint_generation == 7
     assert state.authority_health_generation == 5
@@ -605,6 +663,9 @@ async def test_crash_after_commit_restores_canonical_proof_without_bootstrap(
 
     committed = first.repository.require_previous()
     assert committed is not None
+    assert committed.restore_status == "pending_strict_mtls"
+    committed_boot_attempt_id = assert_canonical_uuid(committed.boot_attempt_id)
+    assert committed.restore_attempt_id is None
     committed_proof = proof_from_state(committed)
     assert committed.proof_sha256 == hashlib.sha256(committed_proof.signing_payload()).hexdigest()
     assert committed.canonical_proof_sha256 == canonical_proof_sha256(committed_proof)
@@ -622,15 +683,272 @@ async def test_crash_after_commit_restores_canonical_proof_without_bootstrap(
     assert restarted.bootstrap.connections == 0
     assert restarted.strict_mtls.calls == 1
     assert restarted.clock.now_utc() == NOW
-    assert restarted.repository.require_previous() == committed
+    restored_state = restarted.repository.require_previous()
+    assert restored_state is not None
+    assert restored_state.restore_status == "strict_mtls_ready"
+    assert restored_state.boot_attempt_id != committed_boot_attempt_id
+    assert restored_state.restore_attempt_id is None
+    assert restored_state.canonical_proof_sha256 == committed.canonical_proof_sha256
+    assert restored_state.time_sequence == committed.time_sequence
     assert restarted.events == [
         "emergency_firewall",
+        "restore_consumed",
+        "route_neighbor_verified",
         "leaf_pin_verified",
-        "restored_signed_time_verified",
+        "restored_committed_proof",
         "clock_set",
         "strict_mtls_validity_verified",
+        "strict_mtls_ready",
         "edge_ready",
     ]
+
+
+@pytest.mark.asyncio
+async def test_clean_success_previous_state_fetches_new_proof_and_revalidates_route_neighbor(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    first = secure_time_case(tmp_path, rtc_qualified=False, private_key=private_key)
+    assert await first.boot() == "signed_core_bootstrap"
+    first_state = first.repository.require_previous()
+    assert first_state is not None
+    assert first_state.restore_status == "strict_mtls_ready"
+    assert first_state.time_sequence == 11
+
+    second = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        private_key=private_key,
+        proof_time_sequence=12,
+    )
+
+    assert await second.boot() == "signed_core_bootstrap"
+
+    assert "route_neighbor_verified" in second.events
+    assert "nonce_generated" in second.events
+    assert "pinned_time_channel" in second.events
+    assert "restored_committed_proof" not in second.events
+    second_state = second.repository.require_previous()
+    assert second_state is not None
+    assert second_state.restore_status == "strict_mtls_ready"
+    assert second_state.time_sequence == 12
+    assert second_state.canonical_proof_sha256 != first_state.canonical_proof_sha256
+
+
+@pytest.mark.asyncio
+async def test_qualified_rtc_terminalizes_pending_window_before_later_unqualified_boot(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    first = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="crash_after_commit_before_strict",
+        private_key=private_key,
+    )
+    with pytest.raises(OSError, match="after_parent_fsync"):
+        await first.boot()
+    pending = first.repository.require_previous()
+    assert pending is not None
+    assert pending.restore_status == "pending_strict_mtls"
+
+    qualified = secure_time_case(
+        tmp_path,
+        rtc_qualified=True,
+        cold_boot_utc=NOW,
+        private_key=private_key,
+    )
+    assert await qualified.boot() == "qualified_rtc"
+
+    assert qualified.bootstrap.connections == 0
+    assert "restored_committed_proof" not in qualified.events
+    assert "strict_mtls_ready" in qualified.events
+    terminal = qualified.repository.require_previous()
+    assert terminal is not None
+    assert terminal.restore_status == "strict_mtls_ready"
+    assert terminal.boot_attempt_id != pending.boot_attempt_id
+    assert terminal.restore_attempt_id is None
+    assert terminal.canonical_proof_sha256 == pending.canonical_proof_sha256
+
+    later = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        private_key=private_key,
+        proof_time_sequence=terminal.time_sequence + 1,
+    )
+    assert await later.boot() == "signed_core_bootstrap"
+
+    assert "restored_committed_proof" not in later.events
+    assert "nonce_generated" in later.events
+    assert "pinned_time_channel" in later.events
+    assert later.bootstrap.connections == 1
+    later_state = later.repository.require_previous()
+    assert later_state is not None
+    assert later_state.restore_status == "strict_mtls_ready"
+    assert later_state.time_sequence == terminal.time_sequence + 1
+
+
+@pytest.mark.asyncio
+async def test_restore_consumed_state_is_not_restored_again_after_restore_failure(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    first = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="crash_after_commit_before_strict",
+        private_key=private_key,
+    )
+    with pytest.raises(OSError, match="after_parent_fsync"):
+        await first.boot()
+    pending = first.repository.require_previous()
+    assert pending is not None
+    assert pending.restore_status == "pending_strict_mtls"
+
+    failed_restore = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="route_neighbor_failure",
+        private_key=private_key,
+    )
+    with pytest.raises(PermissionError, match="route_neighbor_not_verified"):
+        await failed_restore.boot()
+    consumed = failed_restore.repository.require_previous()
+    assert consumed is not None
+    assert consumed.restore_status == "restore_consumed"
+    assert consumed.restore_attempt_id is not None
+
+    final = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        private_key=private_key,
+        proof_time_sequence=consumed.time_sequence + 1,
+    )
+    assert await final.boot() == "signed_core_bootstrap"
+
+    assert "restored_committed_proof" not in final.events
+    assert "nonce_generated" in final.events
+    assert "pinned_time_channel" in final.events
+    final_state = final.repository.require_previous()
+    assert final_state is not None
+    assert final_state.time_sequence == consumed.time_sequence + 1
+
+
+@pytest.mark.asyncio
+async def test_restore_route_neighbor_drift_denies_before_clock_and_strict(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    first = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="crash_after_commit_before_strict",
+        private_key=private_key,
+    )
+    with pytest.raises(OSError, match="after_parent_fsync"):
+        await first.boot()
+
+    restarted = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="route_neighbor_failure",
+        private_key=private_key,
+    )
+    with pytest.raises(PermissionError, match="route_neighbor_not_verified"):
+        await restarted.boot()
+
+    assert "restore_consumed" in restarted.events
+    assert "route_neighbor_verified" not in restarted.events
+    assert "clock_set" not in restarted.events
+    assert "strict_mtls_validity_verified" not in restarted.events
+    assert restarted.edge_ready is False
+    state = restarted.repository.require_previous()
+    assert state is not None
+    assert state.restore_status == "restore_consumed"
+
+
+@pytest.mark.asyncio
+async def test_legacy_secure_time_state_is_clean_previous_and_forces_fresh_bootstrap(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    case = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        private_key=private_key,
+        proof_time_sequence=8,
+    )
+    legacy_proof = signed_proof(
+        private_key,
+        time_sequence=7,
+        core_utc=NOW - timedelta(seconds=1),
+    )
+    write_legacy_current_state(case.repository, legacy_proof)
+
+    assert await case.boot() == "signed_core_bootstrap"
+
+    assert "restored_committed_proof" not in case.events
+    assert "route_neighbor_verified" in case.events
+    assert "nonce_generated" in case.events
+    assert "pinned_time_channel" in case.events
+    state = case.repository.require_previous()
+    assert state is not None
+    assert state.restore_status == "strict_mtls_ready"
+    assert state.time_sequence == 8
+
+
+@pytest.mark.asyncio
+async def test_strict_mtls_failure_marks_failed_with_same_deadline_and_stays_fail_closed(
+    tmp_path: Path,
+) -> None:
+    case = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="strict_reconnect_validity_failure",
+    )
+
+    with pytest.raises(PermissionError, match="strict_reconnect_validity_failure"):
+        await case.boot()
+
+    assert case.edge_ready is False
+    assert case.installed_table_kind == "emergency_default_drop"
+    assert "edge_ready" not in case.events
+    assert "strict_mtls_failed" in case.events
+    state = case.repository.require_previous()
+    assert state is not None
+    assert state.restore_status == "strict_mtls_failed"
+    assert_canonical_uuid(state.boot_attempt_id)
+    assert state.restore_attempt_id is None
+    deadlines = (
+        case.route_neighbor.deadlines
+        + case.leaf_verifier.deadlines
+        + case.bootstrap.deadlines
+        + (case.bootstrap.last_channel.deadlines if case.bootstrap.last_channel else [])
+        + case.clock.deadlines
+        + case.strict_mtls.deadlines
+    )
+    assert set(deadlines) == {102.0}
+
+
+@pytest.mark.asyncio
+async def test_strict_mtls_failed_status_write_respects_elapsed_boot_deadline(
+    tmp_path: Path,
+) -> None:
+    case = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="strict_reconnect_deadline_exceeded",
+    )
+
+    with pytest.raises(TimeoutError, match="strict_mtls"):
+        await case.boot()
+
+    assert case.edge_ready is False
+    assert case.installed_table_kind == "emergency_default_drop"
+    assert "edge_ready" not in case.events
+    state = case.repository.require_previous()
+    assert state is not None
+    assert state.restore_status == "pending_strict_mtls"
 
 
 @pytest.mark.asyncio
@@ -638,10 +956,17 @@ async def test_restore_rejects_canonical_proof_commitment_tamper_without_bootstr
     tmp_path: Path,
 ) -> None:
     private_key = Ed25519PrivateKey.generate()
-    first = secure_time_case(tmp_path, rtc_qualified=False, private_key=private_key)
-    await first.boot()
+    first = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="crash_after_commit_before_strict",
+        private_key=private_key,
+    )
+    with pytest.raises(OSError, match="after_parent_fsync"):
+        await first.boot()
     state = first.repository.require_previous()
     assert state is not None
+    assert state.restore_status == "pending_strict_mtls"
     proof = proof_from_state(state)
     tampered_proof = CoreTimeProofV1.model_validate(
         proof.model_dump(mode="python")
@@ -667,10 +992,17 @@ async def test_restore_rejects_signature_tamper_even_when_canonical_commitment_m
     tmp_path: Path,
 ) -> None:
     private_key = Ed25519PrivateKey.generate()
-    first = secure_time_case(tmp_path, rtc_qualified=False, private_key=private_key)
-    await first.boot()
+    first = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="crash_after_commit_before_strict",
+        private_key=private_key,
+    )
+    with pytest.raises(OSError, match="after_parent_fsync"):
+        await first.boot()
     state = first.repository.require_previous()
     assert state is not None
+    assert state.restore_status == "pending_strict_mtls"
     proof = proof_from_state(state)
     tampered_proof = CoreTimeProofV1.model_validate(
         proof.model_dump(mode="python")
@@ -710,8 +1042,14 @@ async def test_restore_rejects_endpoint_key_mismatch_or_expired_leaf_without_boo
     match: str,
 ) -> None:
     private_key = Ed25519PrivateKey.generate()
-    first = secure_time_case(tmp_path, rtc_qualified=False, private_key=private_key)
-    await first.boot()
+    first = secure_time_case(
+        tmp_path,
+        rtc_qualified=False,
+        failure="crash_after_commit_before_strict",
+        private_key=private_key,
+    )
+    with pytest.raises(OSError, match="after_parent_fsync"):
+        await first.boot()
 
     restarted = secure_time_case(
         tmp_path,
@@ -857,6 +1195,7 @@ def test_state_repository_is_owner_only_canonical_atomic_and_cas_guarded(tmp_pat
         proof_sha256,
         expected_previous=None,
         deadline_monotonic=102.0,
+        boot_attempt_id=BOOT_ATTEMPT_ID,
         monotonic=lambda: 100.0,
     )
 
@@ -866,6 +1205,9 @@ def test_state_repository_is_owner_only_canonical_atomic_and_cas_guarded(tmp_pat
     state = repository.require_previous()
     assert state == SecureTimeStateV1(
         schema_version="tuntun.reachy-secure-time-state.v1",
+        restore_status="pending_strict_mtls",
+        boot_attempt_id=BOOT_ATTEMPT_ID,
+        restore_attempt_id=None,
         endpoint_generation=proof.endpoint_generation,
         authority_health_generation=proof.authority_health_generation,
         time_sequence=proof.time_sequence,
@@ -883,6 +1225,7 @@ def test_state_repository_is_owner_only_canonical_atomic_and_cas_guarded(tmp_pat
         hashlib.sha256(next_proof.signing_payload()).hexdigest(),
         expected_previous=stale,
         deadline_monotonic=102.0,
+        boot_attempt_id=NEXT_BOOT_ATTEMPT_ID,
         monotonic=lambda: 100.0,
     )
     with pytest.raises(PermissionError, match="cas"):
@@ -892,6 +1235,7 @@ def test_state_repository_is_owner_only_canonical_atomic_and_cas_guarded(tmp_pat
             hashlib.sha256(stale_reject_proof.signing_payload()).hexdigest(),
             expected_previous=stale,
             deadline_monotonic=102.0,
+            boot_attempt_id=RESTORE_ATTEMPT_ID,
             monotonic=lambda: 100.0,
         )
 
@@ -919,6 +1263,7 @@ def test_state_repository_crash_windows_are_fail_closed_and_reopenable(
             hashlib.sha256(proof.signing_payload()).hexdigest(),
             expected_previous=None,
             deadline_monotonic=102.0,
+            boot_attempt_id=BOOT_ATTEMPT_ID,
             monotonic=lambda: 100.0,
         )
 
@@ -958,6 +1303,7 @@ def test_state_repository_rejects_symlink_hardlink_oversize_and_noncanonical_sta
         hashlib.sha256(proof.signing_payload()).hexdigest(),
         expected_previous=None,
         deadline_monotonic=102.0,
+        boot_attempt_id=BOOT_ATTEMPT_ID,
         monotonic=lambda: 100.0,
     )
     os.link(current, root / "second-link.json")
@@ -995,6 +1341,7 @@ def test_state_repository_requires_exact_private_directory_and_deadline_lock(
                 hashlib.sha256(proof.signing_payload()).hexdigest(),
                 expected_previous=None,
                 deadline_monotonic=100.01,
+                boot_attempt_id=BOOT_ATTEMPT_ID,
                 monotonic=lock_monotonic,
             )
     finally:
@@ -1005,6 +1352,9 @@ def test_secure_time_state_model_is_strict_closed_and_bounded() -> None:
     proof = signed_proof(Ed25519PrivateKey.generate())
     state = SecureTimeStateV1(
         schema_version="tuntun.reachy-secure-time-state.v1",
+        restore_status="pending_strict_mtls",
+        boot_attempt_id=BOOT_ATTEMPT_ID,
+        restore_attempt_id=None,
         endpoint_generation=proof.endpoint_generation,
         authority_health_generation=proof.authority_health_generation,
         time_sequence=proof.time_sequence,
@@ -1036,6 +1386,42 @@ def test_secure_time_state_model_is_strict_closed_and_bounded() -> None:
         )
     with pytest.raises(ValidationError):
         SecureTimeStateV1.model_validate(state.model_dump() | {"time_sequence": 0})
+    with pytest.raises(ValidationError, match="boot_attempt_id is required"):
+        SecureTimeStateV1.model_validate(
+            state.model_dump()
+            | {
+                "restore_status": "pending_strict_mtls",
+                "boot_attempt_id": None,
+                "restore_attempt_id": None,
+            }
+        )
+    with pytest.raises(ValidationError, match="restore_attempt_id is required"):
+        SecureTimeStateV1.model_validate(
+            state.model_dump()
+            | {
+                "restore_status": "restore_consumed",
+                "boot_attempt_id": BOOT_ATTEMPT_ID,
+                "restore_attempt_id": None,
+            }
+        )
+    with pytest.raises(ValidationError, match="only allowed"):
+        SecureTimeStateV1.model_validate(
+            state.model_dump()
+            | {
+                "restore_status": "strict_mtls_ready",
+                "boot_attempt_id": BOOT_ATTEMPT_ID,
+                "restore_attempt_id": RESTORE_ATTEMPT_ID,
+            }
+        )
+    with pytest.raises(ValidationError, match="legacy_clean"):
+        SecureTimeStateV1.model_validate(
+            state.model_dump()
+            | {
+                "restore_status": "legacy_clean",
+                "boot_attempt_id": BOOT_ATTEMPT_ID,
+                "restore_attempt_id": None,
+            }
+        )
     with pytest.raises(ValidationError):
         SecureTimeStateV1.model_validate(
             state.model_dump()

@@ -21,8 +21,13 @@ from uuid import uuid4
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from pydantic import AwareDatetime, Field, field_validator
-from tuntun_contracts.base import ContractModel, canonical_bytes, parse_contract_json
+from pydantic import AwareDatetime, Field, field_validator, model_validator
+from tuntun_contracts.base import (
+    ContractModel,
+    ContractParseError,
+    canonical_bytes,
+    parse_contract_json,
+)
 from tuntun_contracts.reachy_time import CoreTimeProofV1, CoreTimeRequestV1
 
 MAX_SECURE_TIME_STATE_BYTES: Final = 16_384
@@ -63,6 +68,9 @@ _CANONICAL_RFC1918_IPV4_PATTERN: Final = re.compile(
     ")$"
 )
 _SIGNING_KEY_ID_PATTERN: Final = re.compile(r"^ed25519:[a-z0-9][a-z0-9._-]{0,63}:v[1-9][0-9]{0,8}$")
+SECURE_TIME_BOOT_ID_PATTERN: Final = (
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 _UTC_DATETIME_SCHEMA_EXTRA: Final = {
     "x-tuntun-field-safety": {
         "canonical_serialization_offset": "Z",
@@ -77,6 +85,17 @@ _ROLLBACK_SKEW_TOLERANCE: Final = timedelta(seconds=0)
 
 Monotonic = Callable[[], float]
 SecureTimeBootMode = Literal["qualified_rtc", "signed_core_bootstrap"]
+SecureTimeRestoreStatus = Literal[
+    "legacy_clean",
+    "pending_strict_mtls",
+    "restore_consumed",
+    "strict_mtls_ready",
+    "strict_mtls_failed",
+]
+SecureTimeBootAttemptId = Annotated[
+    str,
+    Field(min_length=36, max_length=36, pattern=SECURE_TIME_BOOT_ID_PATTERN),
+]
 
 
 class SecureTimeEndpoint(Protocol):
@@ -194,6 +213,73 @@ class SecureTimeFirewall(Protocol):
 
 class SecureTimeStateV1(ContractModel):
     schema_version: Literal["tuntun.reachy-secure-time-state.v1"]
+    restore_status: SecureTimeRestoreStatus
+    boot_attempt_id: SecureTimeBootAttemptId | None = None
+    restore_attempt_id: SecureTimeBootAttemptId | None = None
+    endpoint_generation: Annotated[int, Field(ge=1)]
+    authority_health_generation: Annotated[int, Field(ge=1)]
+    time_sequence: Annotated[int, Field(ge=1)]
+    core_utc: Annotated[AwareDatetime, Field(json_schema_extra=_UTC_DATETIME_SCHEMA_EXTRA)]
+    proof_sha256: Annotated[
+        str,
+        Field(
+            min_length=64,
+            max_length=64,
+            pattern=r"^[a-f0-9]{64}$",
+        ),
+    ]
+    canonical_proof_sha256: Annotated[
+        str,
+        Field(
+            min_length=64,
+            max_length=64,
+            pattern=r"^[a-f0-9]{64}$",
+        ),
+    ]
+    canonical_proof_b64: Annotated[
+        str,
+        Field(
+            min_length=4,
+            max_length=MAX_CANONICAL_PROOF_B64_LENGTH,
+            pattern=r"^[A-Za-z0-9+/]+={0,2}$",
+        ),
+    ]
+
+    @field_validator("core_utc")
+    @classmethod
+    def require_utc_offset_zero(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("core_utc must use UTC offset zero")
+        return value
+
+    @field_validator("canonical_proof_b64")
+    @classmethod
+    def require_canonical_proof_b64(cls, value: str) -> str:
+        _decode_base64_canonical_bounded(
+            value,
+            max_bytes=MAX_CORE_TIME_PROOF_BYTES,
+            label="canonical_proof",
+        )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_restore_status(self) -> Self:
+        if self.restore_status == "legacy_clean":
+            if self.boot_attempt_id is not None or self.restore_attempt_id is not None:
+                raise ValueError("legacy_clean state must not include attempt ids")
+            return self
+        if self.boot_attempt_id is None:
+            raise ValueError("boot_attempt_id is required for non-legacy state")
+        if self.restore_status == "restore_consumed":
+            if self.restore_attempt_id is None:
+                raise ValueError("restore_attempt_id is required when restore is consumed")
+        elif self.restore_attempt_id is not None:
+            raise ValueError("restore_attempt_id is only allowed when restore is consumed")
+        return self
+
+
+class LegacySecureTimeStateV1(ContractModel):
+    schema_version: Literal["tuntun.reachy-secure-time-state.v1"]
     endpoint_generation: Annotated[int, Field(ge=1)]
     authority_health_generation: Annotated[int, Field(ge=1)]
     time_sequence: Annotated[int, Field(ge=1)]
@@ -241,6 +327,12 @@ class SecureTimeStateV1(ContractModel):
         return value
 
 
+@dataclass(frozen=True, slots=True)
+class SecureTimeGateResult:
+    mode: SecureTimeBootMode
+    state_for_transport_readiness: SecureTimeStateV1 | None
+
+
 class SecureTimeGate:
     def __init__(
         self,
@@ -269,23 +361,50 @@ class SecureTimeGate:
         server_leaf_der: bytes,
         *,
         deadline_monotonic: float,
-    ) -> SecureTimeBootMode:
+        boot_attempt_id: SecureTimeBootAttemptId,
+    ) -> SecureTimeGateResult:
         _require_deadline(self._monotonic, deadline_monotonic, "secure_time_boot")
         _require_canonical_rfc1918_ipv4(endpoint.core_ipv4)
-        if _report_has_hardware_qualified_rtc(self._report):
-            return self._accept_qualified_rtc(endpoint, server_leaf_der, deadline_monotonic)
         previous = self._state.require_previous()
-        if previous is not None:
-            return self._restore_committed_signed_time(
-                previous,
+        if _report_has_hardware_qualified_rtc(self._report):
+            return SecureTimeGateResult(
+                mode=self._accept_qualified_rtc(endpoint, server_leaf_der, deadline_monotonic),
+                state_for_transport_readiness=previous
+                if previous is not None and previous.restore_status == "pending_strict_mtls"
+                else None,
+            )
+        if previous is not None and previous.restore_status == "pending_strict_mtls":
+            consumed_state = self._state.mark_restore_consumed(
+                expected_current=previous,
+                restore_attempt_id=boot_attempt_id,
+                deadline_monotonic=deadline_monotonic,
+                monotonic=self._monotonic,
+            )
+            self._observe("restore_consumed")
+            self._route_neighbor_verifier.require_current_route_neighbor(
+                endpoint,
+                deadline_monotonic=deadline_monotonic,
+            )
+            self._restore_committed_signed_time(
+                consumed_state,
                 endpoint,
                 server_leaf_der,
                 deadline_monotonic,
             )
-        return await self._bootstrap_signed_core_time(
+            return SecureTimeGateResult(
+                mode="signed_core_bootstrap",
+                state_for_transport_readiness=consumed_state,
+            )
+        pending_state = await self._bootstrap_signed_core_time(
             endpoint,
             server_leaf_der,
             deadline_monotonic,
+            previous=previous,
+            boot_attempt_id=boot_attempt_id,
+        )
+        return SecureTimeGateResult(
+            mode="signed_core_bootstrap",
+            state_for_transport_readiness=pending_state,
         )
 
     def _accept_qualified_rtc(
@@ -321,7 +440,7 @@ class SecureTimeGate:
         endpoint: SecureTimeEndpoint,
         server_leaf_der: bytes,
         deadline_monotonic: float,
-    ) -> SecureTimeBootMode:
+    ) -> None:
         canonical_proof = _canonical_proof_bytes_from_state(state)
         proof = _parse_canonical_proof(canonical_proof)
         _require_state_matches_proof(state, proof, canonical_proof)
@@ -339,17 +458,19 @@ class SecureTimeGate:
             deadline_monotonic=deadline_monotonic,
         )
         _require_deadline(self._monotonic, deadline_monotonic, "secure_time_restore")
-        self._observe("restored_signed_time_verified")
+        self._observe("restored_committed_proof")
         self._system_clock.set_utc(proof.core_utc, deadline_monotonic=deadline_monotonic)
         _require_deadline(self._monotonic, deadline_monotonic, "secure_time_restore_clock")
-        return "signed_core_bootstrap"
 
     async def _bootstrap_signed_core_time(
         self,
         endpoint: SecureTimeEndpoint,
         server_leaf_der: bytes,
         deadline_monotonic: float,
-    ) -> SecureTimeBootMode:
+        *,
+        previous: SecureTimeStateV1 | None,
+        boot_attempt_id: SecureTimeBootAttemptId,
+    ) -> SecureTimeStateV1:
         self._route_neighbor_verifier.require_current_route_neighbor(
             endpoint,
             deadline_monotonic=deadline_monotonic,
@@ -392,7 +513,6 @@ class SecureTimeGate:
                 expected_nonce=nonce,
                 deadline_monotonic=deadline_monotonic,
             )
-            previous = self._state.require_previous()
             _require_proof_freshness(proof, previous)
             self._leaf_verifier.require_time_within_commissioned_leafs(
                 proof.core_utc,
@@ -404,12 +524,13 @@ class SecureTimeGate:
             self._observe("signed_time_verified")
             self._system_clock.set_utc(proof.core_utc, deadline_monotonic=deadline_monotonic)
             _require_deadline(self._monotonic, deadline_monotonic, "secure_time_clock")
-            proof_sha256 = hashlib.sha256(proof.signing_payload()).hexdigest()
-            self._state.replace_atomic(
+            proof_sha256 = _proof_digest_for_legacy_compatibility(proof)
+            pending_state = self._state.replace_atomic(
                 proof,
                 proof_sha256,
                 expected_previous=previous,
                 deadline_monotonic=deadline_monotonic,
+                boot_attempt_id=boot_attempt_id,
                 monotonic=self._monotonic,
             )
             self._observe("time_state_fsynced")
@@ -420,7 +541,39 @@ class SecureTimeGate:
             with contextlib.suppress(BaseException):
                 await channel.close(deadline_monotonic=deadline_monotonic)
             raise
-        return "signed_core_bootstrap"
+        return pending_state
+
+    def mark_strict_mtls_ready(
+        self,
+        *,
+        expected_current: SecureTimeStateV1,
+        boot_attempt_id: SecureTimeBootAttemptId,
+        deadline_monotonic: float,
+    ) -> SecureTimeStateV1:
+        state = self._state.mark_strict_mtls_ready(
+            expected_current=expected_current,
+            boot_attempt_id=boot_attempt_id,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=self._monotonic,
+        )
+        self._observe("strict_mtls_ready")
+        return state
+
+    def mark_strict_mtls_failed(
+        self,
+        *,
+        expected_current: SecureTimeStateV1,
+        boot_attempt_id: SecureTimeBootAttemptId,
+        deadline_monotonic: float,
+    ) -> SecureTimeStateV1:
+        state = self._state.mark_strict_mtls_failed(
+            expected_current=expected_current,
+            boot_attempt_id=boot_attempt_id,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=self._monotonic,
+        )
+        self._observe("strict_mtls_failed")
+        return state
 
     def _require_bound_leaf_public_key(
         self,
@@ -527,28 +680,49 @@ class SecureTimeBootLifecycle:
     async def start_before_reachy_transport(self) -> None:
         self._ready = False
         self._mode = None
+        boot_attempt_id = str(uuid4())
         deadline_monotonic = self._monotonic() + SECURE_TIME_BOOT_DEADLINE_SECONDS
         self._firewall.install_emergency_table()
+        result: SecureTimeGateResult | None = None
         try:
             _require_deadline(self._monotonic, deadline_monotonic, "secure_time_start")
             server_leaf_der = self._leaf_store.require_server_leaf_der()
-            mode = await self._gate.establish_before_strict_tls(
+            result = await self._gate.establish_before_strict_tls(
                 self._endpoint,
                 server_leaf_der,
                 deadline_monotonic=deadline_monotonic,
+                boot_attempt_id=boot_attempt_id,
             )
-            _require_deadline(self._monotonic, deadline_monotonic, "secure_time_before_mtls")
-            await self._strict_tls_probe.verify_fresh_connection_and_close(
-                deadline_monotonic=deadline_monotonic,
-            )
-            _require_deadline(self._monotonic, deadline_monotonic, "secure_time_strict_mtls")
+            try:
+                _require_deadline(self._monotonic, deadline_monotonic, "secure_time_before_mtls")
+                await self._strict_tls_probe.verify_fresh_connection_and_close(
+                    deadline_monotonic=deadline_monotonic,
+                )
+                _require_deadline(self._monotonic, deadline_monotonic, "secure_time_strict_mtls")
+            except BaseException:
+                if result.state_for_transport_readiness is not None:
+                    with contextlib.suppress(BaseException):
+                        self._gate.mark_strict_mtls_failed(
+                            expected_current=result.state_for_transport_readiness,
+                            boot_attempt_id=boot_attempt_id,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+                raise
+            if result.state_for_transport_readiness is not None:
+                self._gate.mark_strict_mtls_ready(
+                    expected_current=result.state_for_transport_readiness,
+                    boot_attempt_id=boot_attempt_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
         except BaseException:
             self._ready = False
             self._mode = None
             with contextlib.suppress(BaseException):
                 self._firewall.install_emergency_table()
             raise
-        self._mode = mode
+        if result is None:
+            raise RuntimeError("secure_time_gate_result_missing")
+        self._mode = result.mode
         self._ready = True
         self._observe("edge_ready")
 
@@ -597,12 +771,36 @@ class SecureTimeStateRepository:
             )
         except FileNotFoundError:
             return None
-        return parse_contract_json(
-            SecureTimeStateV1,
-            raw,
-            max_bytes=MAX_SECURE_TIME_STATE_BYTES,
-            require_canonical=True,
-        )
+        try:
+            return parse_contract_json(
+                SecureTimeStateV1,
+                raw,
+                max_bytes=MAX_SECURE_TIME_STATE_BYTES,
+                require_canonical=True,
+            )
+        except ContractParseError as current_error:
+            try:
+                legacy = parse_contract_json(
+                    LegacySecureTimeStateV1,
+                    raw,
+                    max_bytes=MAX_SECURE_TIME_STATE_BYTES,
+                    require_canonical=True,
+                )
+            except ContractParseError:
+                raise current_error from None
+            return SecureTimeStateV1(
+                schema_version="tuntun.reachy-secure-time-state.v1",
+                restore_status="legacy_clean",
+                boot_attempt_id=None,
+                restore_attempt_id=None,
+                endpoint_generation=legacy.endpoint_generation,
+                authority_health_generation=legacy.authority_health_generation,
+                time_sequence=legacy.time_sequence,
+                core_utc=legacy.core_utc,
+                proof_sha256=legacy.proof_sha256,
+                canonical_proof_sha256=legacy.canonical_proof_sha256,
+                canonical_proof_b64=legacy.canonical_proof_b64,
+            )
 
     def require_rtc_not_rolled_back(self, current_utc: datetime) -> None:
         current_utc = _require_utc_datetime(current_utc, "secure_time_rtc")
@@ -617,22 +815,117 @@ class SecureTimeStateRepository:
         *,
         expected_previous: SecureTimeStateV1 | None,
         deadline_monotonic: float,
+        boot_attempt_id: SecureTimeBootAttemptId,
         monotonic: Monotonic = time.monotonic,
     ) -> SecureTimeStateV1:
-        if not hmac.compare_digest(
-            proof_sha256, hashlib.sha256(proof.signing_payload()).hexdigest()
-        ):
+        if not hmac.compare_digest(proof_sha256, _proof_digest_for_legacy_compatibility(proof)):
             raise ValueError("secure_time_proof_commitment_mismatch")
         state = SecureTimeStateV1(
             schema_version="tuntun.reachy-secure-time-state.v1",
+            restore_status="pending_strict_mtls",
+            boot_attempt_id=boot_attempt_id,
+            restore_attempt_id=None,
             endpoint_generation=proof.endpoint_generation,
             authority_health_generation=proof.authority_health_generation,
             time_sequence=proof.time_sequence,
             core_utc=proof.core_utc,
             proof_sha256=proof_sha256,
-            canonical_proof_sha256=hashlib.sha256(canonical_bytes(proof)).hexdigest(),
-            canonical_proof_b64=base64.b64encode(canonical_bytes(proof)).decode("ascii"),
+            canonical_proof_sha256=_canonical_proof_sha256(proof),
+            canonical_proof_b64=_canonical_proof_b64(proof),
         )
+        self._write_current_canonical_atomic(
+            state,
+            expected_previous=expected_previous,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+        )
+        return state
+
+    def mark_restore_consumed(
+        self,
+        *,
+        expected_current: SecureTimeStateV1,
+        restore_attempt_id: SecureTimeBootAttemptId,
+        deadline_monotonic: float,
+        monotonic: Monotonic = time.monotonic,
+    ) -> SecureTimeStateV1:
+        if expected_current.restore_status != "pending_strict_mtls":
+            raise RuntimeError("secure_time_restore_window_not_pending")
+        state = _state_with_updates(
+            expected_current,
+            restore_status="restore_consumed",
+            restore_attempt_id=restore_attempt_id,
+        )
+        self._write_current_canonical_atomic(
+            state,
+            expected_previous=expected_current,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+        )
+        return state
+
+    def mark_strict_mtls_ready(
+        self,
+        *,
+        expected_current: SecureTimeStateV1,
+        boot_attempt_id: SecureTimeBootAttemptId,
+        deadline_monotonic: float,
+        monotonic: Monotonic = time.monotonic,
+    ) -> SecureTimeStateV1:
+        if expected_current.restore_status not in {
+            "pending_strict_mtls",
+            "restore_consumed",
+        }:
+            raise RuntimeError("secure_time_not_pending_transport_readiness")
+        state = _state_with_updates(
+            expected_current,
+            restore_status="strict_mtls_ready",
+            boot_attempt_id=boot_attempt_id,
+            restore_attempt_id=None,
+        )
+        self._write_current_canonical_atomic(
+            state,
+            expected_previous=expected_current,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+        )
+        return state
+
+    def mark_strict_mtls_failed(
+        self,
+        *,
+        expected_current: SecureTimeStateV1,
+        boot_attempt_id: SecureTimeBootAttemptId,
+        deadline_monotonic: float,
+        monotonic: Monotonic = time.monotonic,
+    ) -> SecureTimeStateV1:
+        if expected_current.restore_status not in {
+            "pending_strict_mtls",
+            "restore_consumed",
+        }:
+            raise RuntimeError("secure_time_not_pending_transport_readiness")
+        state = _state_with_updates(
+            expected_current,
+            restore_status="strict_mtls_failed",
+            boot_attempt_id=boot_attempt_id,
+            restore_attempt_id=None,
+        )
+        self._write_current_canonical_atomic(
+            state,
+            expected_previous=expected_current,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+        )
+        return state
+
+    def _write_current_canonical_atomic(
+        self,
+        state: SecureTimeStateV1,
+        *,
+        expected_previous: SecureTimeStateV1 | None,
+        deadline_monotonic: float,
+        monotonic: Monotonic,
+    ) -> None:
         payload = canonical_bytes(state)
         if not 1 <= len(payload) <= MAX_SECURE_TIME_STATE_BYTES:
             raise ValueError("secure time state size invalid")
@@ -656,7 +949,6 @@ class SecureTimeStateRepository:
                 deadline_monotonic=deadline_monotonic,
                 monotonic=monotonic,
             )
-        return state
 
     def _atomic_write(
         self,
@@ -815,6 +1107,22 @@ def _parse_canonical_proof(raw: bytes) -> CoreTimeProofV1:
     )
 
 
+def _proof_digest_for_legacy_compatibility(proof: CoreTimeProofV1) -> str:
+    return hashlib.sha256(proof.signing_payload()).hexdigest()
+
+
+def _canonical_proof_sha256(proof: CoreTimeProofV1) -> str:
+    return hashlib.sha256(canonical_bytes(proof)).hexdigest()
+
+
+def _canonical_proof_b64(proof: CoreTimeProofV1) -> str:
+    return base64.b64encode(canonical_bytes(proof)).decode("ascii")
+
+
+def _state_with_updates(state: SecureTimeStateV1, **updates: object) -> SecureTimeStateV1:
+    return SecureTimeStateV1.model_validate(state.model_dump(mode="python") | updates)
+
+
 def _canonical_proof_bytes_from_state(state: SecureTimeStateV1) -> bytes:
     canonical_proof = _decode_base64_canonical_bounded(
         state.canonical_proof_b64,
@@ -838,7 +1146,7 @@ def _require_state_matches_proof(
         raise PermissionError("secure_time_canonical_proof_mismatch")
     if not hmac.compare_digest(
         state.proof_sha256,
-        hashlib.sha256(proof.signing_payload()).hexdigest(),
+        _proof_digest_for_legacy_compatibility(proof),
     ):
         raise PermissionError("secure_time_proof_commitment_mismatch")
     if (
