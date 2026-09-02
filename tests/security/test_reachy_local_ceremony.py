@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from tuntun_contracts.base import canonical_mapping_bytes
+from tuntun_contracts.base import canonical_bytes, canonical_mapping_bytes
+from tuntun_contracts.reachy_operator import ReachyAcceptedCapabilityV1, ReachyOperatorStateV1
 from tuntun_edge.bootstrap import commissioning as bootstrap
 from tuntun_edge.transport import reachy_local_ceremony as ceremony
 from tuntun_edge.transport.commissioning import ReachyCommissioningRequestV1
@@ -59,11 +60,11 @@ def _dhcp_reservations() -> dict[str, object]:
     }
 
 
-def _descriptor() -> dict[str, object]:
+def _descriptor(*, one_time_code: str = ONE_TIME_CODE) -> dict[str, object]:
     return {
         "schema_version": "tuntun.reachy-local-ceremony.v1",
         "request": _request(),
-        "one_time_code_sha256": _digest(ONE_TIME_CODE),
+        "one_time_code_sha256": _digest(one_time_code),
         "ssh": {
             "ssh_username": "tuntunops",
             "local_account_username": "tuntunops",
@@ -142,6 +143,67 @@ def _descriptor() -> dict[str, object]:
     }
 
 
+def _legacy_endpoint_values(generation: int = 1) -> dict[str, object]:
+    return {
+        "schema_version": "tuntun.reachy-core-endpoint.v1",
+        "commissioning_uuid": _uuid(generation),
+        "generation": generation,
+        "certificate_generation": generation,
+        "server_key_generation": generation,
+        "trust_digest_generation": generation,
+        "client_tls_key_generation": generation,
+        "device_signing_key_generation": generation,
+        "hmac_key_generation": generation,
+        "core_ipv4": "192.168.50.10",
+        "core_link_address": "02:00:5e:00:53:01",
+        "port": 7443,
+        "household_ca_sha256": _digest(f"ca-{generation}"),
+        "server_leaf_sha256": _digest(f"server-leaf-{generation}"),
+        "server_key_id": f"reachy-server-g{generation}",
+        "server_public_key_sha256": _digest(f"server-public-{generation}"),
+        "server_ip_sans": ("192.168.50.10",),
+        "client_certificate_sha256": _digest(f"client-cert-{generation}"),
+        "client_tls_key_id": f"reachy-client-tls-g{generation}",
+        "client_tls_public_key_sha256": _digest(f"client-public-{generation}"),
+        "device_signing_key_id": f"reachy-device-sign-g{generation}",
+        "device_signing_public_key_sha256": _digest(f"device-public-{generation}"),
+        "hmac_key_id": f"reachy-frame-hmac-g{generation}",
+        "hmac_key_sha256": _digest(f"hmac-root-{generation}"),
+        "hmac_agreement_public_key_sha256": _digest(f"hmac-public-{generation}"),
+        "dhcp_reservation_receipt_sha256": _digest(f"dhcp-{generation}"),
+        "boot_identity_sha256": _digest(f"boot-{generation}"),
+        "capability_evidence_sha256": _digest(f"capability-{generation}"),
+    }
+
+
+def _legacy_state_bytes(generation: int = 1) -> bytes:
+    return canonical_mapping_bytes(
+        {
+            "schema_version": "tuntun.reachy-commissioning-state.v1",
+            "status": "active",
+            "endpoint": _legacy_endpoint_values(generation),
+            "revoked_key_ids": [],
+            "revoked_certificate_sha256": [],
+        }
+    )
+
+
+def _accepted_capability(username: str = "tuntunops") -> ReachyAcceptedCapabilityV1:
+    return ReachyAcceptedCapabilityV1(
+        capability_report_sha256=_digest("capability-report"),
+        acceptance_receipt_sha256=_digest("acceptance-receipt"),
+        sdk_version="1.2.3",
+        daemon_version="4.5.6",
+        ssh_username=username,
+        python_executable="/venvs/apps_venv/bin/python3",
+        python_version="3.12",
+        python_abi="cp312",
+        selected_wheel_tag="py3-none-any",
+        target_tag_set_sha256=_digest("target-tags"),
+        runtime_inventory_sha256=_digest("runtime-inventory"),
+    )
+
+
 def _owner_write(path: Path, payload: bytes, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
@@ -208,8 +270,9 @@ def test_production_composition_has_fixed_paths_and_no_parameters() -> None:
     assert bootstrap.PRODUCTION_ROOTS.issuer_state_root == Path(
         "/var/lib/tuntun/reachy/issuer-state"
     )
-    assert bootstrap.PRODUCTION_ROOTS.operator_state_root == Path(
-        "/var/lib/tuntun/reachy/operator-state"
+    assert bootstrap.PRODUCTION_ROOTS.operator_state_root == Path("/private/var/lib/tuntun/reachy")
+    assert bootstrap._operator_state_repository_root(bootstrap.PRODUCTION_ROOTS) == (
+        bootstrap.PRODUCTION_ROOTS.operator_state_root
     )
     assert bootstrap.build_production_commissioning.__annotations__["return"] == (
         "ReachyCommissioningComposition"
@@ -507,10 +570,14 @@ def test_concrete_builder_commissions_reopens_recommissions_and_revokes_with_pub
     assert reopened.resume_current_activation() == first
     assert reopened.issuer.active_generation == first.endpoint.generation
 
-    descriptor = _descriptor()
+    with pytest.raises(ceremony.ReachyLocalCeremonyError, match="unsafe Reachy local ceremony"):
+        reopened.recommission(ONE_TIME_CODE)
+
+    recommission_code = "234567"
+    descriptor = _descriptor(one_time_code=recommission_code)
     descriptor["request"] = _request(2)
     _write_fixture(tmp_path, descriptor=descriptor)
-    second = reopened.recommission(ONE_TIME_CODE)
+    second = reopened.recommission(recommission_code)
     assert second.endpoint.generation == 2
     assert set(second.revoked_key_ids) == {
         first.endpoint.server_key_id,
@@ -522,7 +589,14 @@ def test_concrete_builder_commissions_reopens_recommissions_and_revokes_with_pub
 
     reopened_again = reopened.reopen()
     assert reopened_again.resume_current_activation() == second
-    revoked = reopened_again.revoke(ONE_TIME_CODE)
+    with pytest.raises(ceremony.ReachyLocalCeremonyError, match="unsafe Reachy local ceremony"):
+        reopened_again.revoke(recommission_code)
+
+    revoke_code = "345678"
+    descriptor = _descriptor(one_time_code=revoke_code)
+    descriptor["request"] = _request(2)
+    _write_fixture(tmp_path, descriptor=descriptor)
+    revoked = reopened_again.revoke(revoke_code)
 
     assert revoked.status == "revoked"
     assert set(revoked.revoked_key_ids) == {
@@ -533,6 +607,67 @@ def test_concrete_builder_commissions_reopens_recommissions_and_revokes_with_pub
     }
     with pytest.raises(PermissionError, match="commissioning_revoked"):
         reopened_again.resume_current_activation()
+
+
+@pytest.mark.parametrize("operation", ("recommission", "revoke"))
+def test_concrete_builder_clears_legacy_operator_projection_with_original_digest(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    paths = _write_fixture(tmp_path)
+    legacy_raw = _legacy_state_bytes()
+    _owner_write(paths.state_root / "commissioning-state.json", legacy_raw)
+    composition = _composition(tmp_path)
+    legacy = composition.repository.require_current()
+    legacy_digest = hashlib.sha256(legacy_raw).hexdigest()
+
+    assert legacy.legacy_key_id_format is True
+    assert legacy.artifact_map is None
+    assert legacy_digest != hashlib.sha256(canonical_bytes(legacy)).hexdigest()
+
+    composition.operator_state_repository.replace_atomic(
+        ReachyOperatorStateV1(
+            schema_version="tuntun.reachy-operator-state.v1",
+            commissioning_generation=legacy.endpoint.generation,
+            commissioning_state_sha256=legacy_digest,
+            ssh_username="tuntunops",
+            reachy_ipv4="192.168.50.20",
+            core_ipv4=legacy.endpoint.core_ipv4,
+            pinned_ssh_host_key_sha256=PINNED_HOST_KEY,
+            dhcp_receipt_sha256=legacy.endpoint.dhcp_reservation_receipt_sha256,
+            accepted_capability=_accepted_capability(),
+        )
+    )
+    one_time_code = "234567" if operation == "recommission" else "345678"
+    descriptor = _descriptor(one_time_code=one_time_code)
+    descriptor["request"] = _request(2)
+    _write_fixture(tmp_path, descriptor=descriptor)
+
+    if operation == "recommission":
+        recovered = composition.recommission(one_time_code)
+
+        assert recovered.endpoint.generation == 2
+        assert recovered.legacy_key_id_format is False
+        assert recovered.artifact_map is not None
+        assert set(recovered.revoked_key_ids) == {
+            legacy.endpoint.server_key_id,
+            legacy.endpoint.client_tls_key_id,
+            legacy.endpoint.device_signing_key_id,
+            legacy.endpoint.hmac_key_id,
+        }
+    else:
+        recovered = composition.revoke(one_time_code)
+
+        assert recovered.status == "revoked"
+        assert recovered.legacy_key_id_format is True
+        assert set(recovered.revoked_key_ids) == {
+            legacy.endpoint.server_key_id,
+            legacy.endpoint.client_tls_key_id,
+            legacy.endpoint.device_signing_key_id,
+            legacy.endpoint.hmac_key_id,
+        }
+
+    assert composition.operator_state_repository.require_current().accepted_capability is None
 
 
 def test_concrete_builder_uses_real_owner_only_repositories_for_state_and_artifacts(

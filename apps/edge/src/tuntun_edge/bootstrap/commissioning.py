@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
-
-from tuntun_contracts.base import canonical_bytes
 
 from tuntun_edge.transport.commissioning import (
     CommissioningStateV1,
     ReachyCommissioningService,
     SyntheticCoreCommissioningIssuer,
     SyntheticReachyPrivateMaterialGenerator,
+    _commissioning_state_storage_sha256,
 )
 from tuntun_edge.transport.commissioning_repository import (
     CommissioningRepository,
@@ -56,11 +54,9 @@ PRODUCTION_ROOTS = ReachyCommissioningRoots(
     private_material_root=Path("/var/lib/tuntun/reachy/private"),
     certificate_root=Path("/var/lib/tuntun/reachy/certificates"),
     issuer_state_root=Path("/var/lib/tuntun/reachy/issuer-state"),
-    operator_state_root=Path("/var/lib/tuntun/reachy/operator-state"),
+    operator_state_root=Path("/private/var/lib/tuntun/reachy"),
     one_time_code_receipt_root=Path("/private/var/lib/tuntun/reachy/one-time-code-receipts"),
 )
-
-_PRODUCTION_OPERATOR_STATE_REPOSITORY_ROOT = Path("/private/var/lib/tuntun/reachy")
 
 
 def explicit_test_roots(root: Path) -> ReachyCommissioningRoots:
@@ -94,7 +90,7 @@ class _MissingOperatorProjectionOkPublisher:
         try:
             self._repository.clear_accepted_capability(
                 commissioning_generation=state.endpoint.generation,
-                commissioning_state_sha256=hashlib.sha256(canonical_bytes(state)).hexdigest(),
+                commissioning_state_sha256=_commissioning_state_storage_sha256(state),
             )
         except FileNotFoundError:
             return
@@ -217,6 +213,4 @@ def _validated_roots(roots: ReachyCommissioningRoots) -> ReachyCommissioningRoot
 
 
 def _operator_state_repository_root(roots: ReachyCommissioningRoots) -> Path:
-    if roots == PRODUCTION_ROOTS:
-        return _PRODUCTION_OPERATOR_STATE_REPOSITORY_ROOT
     return roots.operator_state_root
