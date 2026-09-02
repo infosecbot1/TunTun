@@ -43,6 +43,7 @@ from .base import (
     registered_contract_models,
 )
 from .budget import (
+    BudgetAccountingContext,
     BudgetReconciliationRequest,
     BudgetReservation,
     BudgetReservationRequest,
@@ -154,6 +155,7 @@ from .speech import (
     AudioFormat,
     AuthorizedSynthesisRequest,
     AuthorizedTranscriptionRequest,
+    OfflineSynthesisRequest,
     SpeechChunk,
     TranscriptResult,
 )
@@ -187,6 +189,7 @@ _REGISTERED_CONTRACT_MODELS: Final[tuple[type[ContractModel], ...]] = (
     AuditDraft,
     AuditReceipt,
     Commitment,
+    BudgetAccountingContext,
     BudgetReconciliationRequest,
     BudgetReservation,
     BudgetReservationRequest,
@@ -252,6 +255,7 @@ _REGISTERED_CONTRACT_MODELS: Final[tuple[type[ContractModel], ...]] = (
     AudioFormat,
     AuthorizedSynthesisRequest,
     AuthorizedTranscriptionRequest,
+    OfflineSynthesisRequest,
     SpeechChunk,
     TranscriptResult,
 )
@@ -302,6 +306,7 @@ __all__ = (
     "ValidatedActionProposal",
     "AuditDraft",
     "AuditReceipt",
+    "BudgetAccountingContext",
     "BudgetReconciliationRequest",
     "BudgetReservation",
     "BudgetReservationRequest",
@@ -391,6 +396,7 @@ __all__ = (
     "AudioFormat",
     "AuthorizedSynthesisRequest",
     "AuthorizedTranscriptionRequest",
+    "OfflineSynthesisRequest",
     "SpeechChunk",
     "TranscriptResult",
 )

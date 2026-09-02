@@ -1,5 +1,6 @@
 {
   "canonical_examples": {
+    "BudgetAccountingContext": "{\"category\":\"llm\",\"missing_evidence_policy\":\"freeze_unknown_overage\",\"primary_accounting_basis\":\"provider_reported_exact\",\"usage_ceiling\":{\"category\":\"llm\",\"input_tokens\":1,\"output_tokens\":0}}",
     "BudgetReconciliationRequest": "{\"proofs\":[],\"turn_id\":\"00000000-0000-0000-0000-0000000000ed\"}",
     "BudgetReservation": "{\"amount_micros_sgd\":1,\"attempt_id\":\"00000000-0000-0000-0000-0000000000f0\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"outcome\":\"allow\",\"pricing_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-0000000000ef\",\"reservation_id\":\"00000000-0000-0000-0000-0000000000ee\"}",
     "BudgetReservationRequest": "{\"attempt_id\":\"00000000-0000-0000-0000-0000000000f4\",\"category\":\"llm\",\"household_id\":\"00000000-0000-0000-0000-0000000000f1\",\"model\":\"x\",\"month_key\":\"2026-08\",\"provider\":\"openai\",\"request_id\":\"00000000-0000-0000-0000-0000000000f3\",\"turn_id\":\"00000000-0000-0000-0000-0000000000f2\",\"usage_ceiling\":{\"category\":\"llm\",\"input_tokens\":1,\"output_tokens\":0}}",
@@ -13,6 +14,16 @@
     "WebSearchUsageUnits": "{\"category\":\"web_search\",\"input_tokens\":0,\"output_tokens\":0,\"web_search_calls\":0}"
   },
   "examples": {
+    "BudgetAccountingContext": {
+      "category": "llm",
+      "missing_evidence_policy": "freeze_unknown_overage",
+      "primary_accounting_basis": "provider_reported_exact",
+      "usage_ceiling": {
+        "category": "llm",
+        "input_tokens": 1,
+        "output_tokens": 0
+      }
+    },
     "BudgetReconciliationRequest": {
       "proofs": [],
       "turn_id": "00000000-0000-0000-0000-0000000000ed"

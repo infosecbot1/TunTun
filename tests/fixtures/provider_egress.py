@@ -39,6 +39,7 @@ from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
 from tuntun_core.services.providers.call_repository import ProviderCallRepository
 from tuntun_core.services.providers.defaults import load_provider_defaults
 from tuntun_core.services.providers.gateway import ProviderGateway, ProviderUsageObservation
+from tuntun_core.services.providers.output_validator import AssistantTurn
 from tuntun_core.services.providers.reasoning_wire import (
     build_openai_reasoning_wire_request,
 )
@@ -144,12 +145,7 @@ def _artifact(
             allowed_tools=(),
             max_output_tokens=512,
             store=False,
-            output_schema={
-                "type": "object",
-                "properties": {"answer": {"type": "string"}},
-                "required": ["answer"],
-                "additionalProperties": False,
-            },
+            output_schema=AssistantTurn.model_json_schema(),
         )
         units = sum(len(message.content.encode("utf-8")) for message in draft.provider_messages)
     else:
@@ -732,7 +728,7 @@ class ProviderBoundaryCase:
             allowed_tools=(),
             max_output_tokens=512,
             store=False,
-            output_schema={"type": "object", "additionalProperties": False},
+            output_schema=AssistantTurn.model_json_schema(),
         )
         units = sum(len(message.content.encode("utf-8")) for message in draft.provider_messages)
         injected = {
@@ -1135,6 +1131,9 @@ class ProductionProviderGatewayCase:
             evidence,
             clock,
         )
+
+    def transactional_audit(self) -> TransactionalAuditPort:
+        return TransactionalAuditPort(self.factory, _ROOT, _KEY_ID)
 
     async def invoke(self):
         async def invoke_network():

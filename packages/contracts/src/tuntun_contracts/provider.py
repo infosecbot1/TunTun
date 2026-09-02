@@ -1,11 +1,19 @@
 # packages/contracts/src/tuntun_contracts/provider.py
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Literal, Self
+from unicodedata import normalize
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    Field,
+    ModelWrapValidatorHandler,
+    field_validator,
+    model_validator,
+)
 
 from .base import Commitment, ContractModel, Sensitivity
 
@@ -138,9 +146,29 @@ class SanitizedProviderRequest(ContractModel):
 
 class ProviderResponse(ContractModel):
     request_id: UUID
-    text: Annotated[str, Field(min_length=1, max_length=8_000)]
+    text: Annotated[str, Field(min_length=1, max_length=32_000)]
     language: Literal["en", "hi", "hinglish"]
     provider_usage_receipt_id: UUID | None
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def raw_text_must_be_nfc(
+        cls,
+        value: object,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        if isinstance(value, Mapping):
+            text = value.get("text")
+            if type(text) is str and text != normalize("NFC", text):
+                raise ValueError("ProviderResponse text exceeds UTF-8 byte cap")
+        return handler(value)
+
+    @field_validator("text")
+    @classmethod
+    def bounded_nfc_utf8(cls, value: str) -> str:
+        if value != normalize("NFC", value) or len(value.encode("utf-8")) > 32_000:
+            raise ValueError("ProviderResponse text exceeds UTF-8 byte cap")
+        return value
 
 
 class RedactionReceipt(ContractModel):

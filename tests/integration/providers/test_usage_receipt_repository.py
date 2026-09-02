@@ -68,6 +68,36 @@ async def test_zero_reported_usage_is_unknown_and_never_persisted_as_exact(
 
 
 @pytest.mark.asyncio
+async def test_observe_body_validation_failure_is_succeeded_null_usage_then_freezes(
+    production_provider_gateway_case,
+) -> None:
+    case = await production_provider_gateway_case(valid_usage=True)
+
+    async def invoke_network() -> bytes:
+        case.events.append("network_invoked")
+        return b"bounded-invalid-provider-body"
+
+    async def observe(_result: bytes):
+        raise ValueError("transcription response invalid")
+
+    with pytest.raises(ProviderUsageUnknownError, match="unknown_overage"):
+        await case.gateway.send(
+            case.route,
+            case.consumption,
+            case.redaction_receipt_id,
+            invoke_network,
+            observe,
+        )
+
+    row = await case.provider_call_row()
+    assert row.outcome == "succeeded" and row.transport_phase == "finished"
+    assert row.provider_usage_json is None
+    assert row.provider_usage_receipt_key_id is None
+    assert row.provider_usage_receipt_hmac_b64 is None
+    await case.assert_unknown_overage_freezes_without_ledger()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fault", ("receipt_json", "outer_key", "outer_hmac", "attempt", "provider", "model")
 )

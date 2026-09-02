@@ -67,14 +67,14 @@ EXPECTED_GROUP_MODULES: Mapping[str, tuple[ModuleType, ...]] = {
 EXPECTED_GROUP_COUNTS = {
     "actions": 23,
     "audit": 2,
-    "budget": 11,
+    "budget": 12,
     "events": 7,
     "identity": 5,
     "memory": 14,
     "policy": 10,
     "provider": 9,
     "reachy": 7,
-    "speech": 5,
+    "speech": 6,
 }
 EXPECTED_SEMANTIC_MODELS = frozenset(
     {
@@ -125,6 +125,7 @@ EXPECTED_SEMANTIC_MODELS = frozenset(
         provider.RedactionReceipt,
         budget.BudgetReservationRequest,
         budget.BudgetReservation,
+        budget.BudgetAccountingContext,
         budget.ProviderUsageReceiptV1,
         budget.BudgetReconciliationRequest,
         reachy.ReachyCommand,
@@ -225,22 +226,22 @@ def _independent_fixture_registry() -> dict[str, dict[str, type[ContractModel]]]
     return dict(sorted(result.items()))
 
 
-def test_fixture_registry_matches_the_independent_93_model_oracle() -> None:
+def test_fixture_registry_matches_the_independent_95_model_oracle() -> None:
     preview = FixtureFactory.preview()
     assert preview.uuid_json() == "00000000-0000-0000-0000-000000000001"
     assert preview.time_json() == "2026-08-27T00:00:00+00:00"
     expected = _independent_fixture_registry()
     expected_models = {model_type for models in expected.values() for model_type in models.values()}
     assert {name: len(models) for name, models in expected.items()} == EXPECTED_GROUP_COUNTS
-    assert len(expected_models) == 93
+    assert len(expected_models) == 95
     assert expected_models == set(registered_contract_models())
     assert fixture_registry() == expected
     assert set(BUILDERS) == expected_models
 
 
 def test_semantic_partition_matches_an_independent_exact_oracle() -> None:
-    assert len(EXPECTED_SEMANTIC_MODELS) == 51
-    assert len(SCHEMA_ONLY_MODELS) == 42
+    assert len(EXPECTED_SEMANTIC_MODELS) == 52
+    assert len(SCHEMA_ONLY_MODELS) == 43
     assert set(semantic_specs()) == set(EXPECTED_SEMANTIC_MODELS)
     assert set(REQUIRED_SEMANTIC_MODELS) == set(EXPECTED_SEMANTIC_MODELS)
     assert not (set(REQUIRED_SEMANTIC_MODELS) & set(SCHEMA_ONLY_MODELS))
@@ -450,7 +451,7 @@ def test_semantic_misclassification_fails_before_output_creation(
     assert not output.exists()
 
 
-def test_all_93_schemas_use_the_exact_supported_keyword_and_format_matrix() -> None:
+def test_all_95_schemas_use_the_exact_supported_keyword_and_format_matrix() -> None:
     keywords: set[str] = set()
     schema_types: set[str] = set()
     formats: set[str] = set()

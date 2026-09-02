@@ -37,6 +37,7 @@ from tuntun_contracts.base import (
     registered_contract_models,
 )
 from tuntun_contracts.budget import (
+    BudgetAccountingContext,
     BudgetReconciliationRequest,
     BudgetReservation,
     BudgetReservationRequest,
@@ -107,6 +108,7 @@ from tuntun_contracts.speech import (
     AudioFormat,
     AuthorizedSynthesisRequest,
     AuthorizedTranscriptionRequest,
+    OfflineSynthesisRequest,
 )
 
 _T = TypeVar("_T")
@@ -254,8 +256,8 @@ def test_every_registered_contract_model_is_strict_closed_and_frozen() -> None:
 def test_root_exports_registry_and_public_type_families_are_exact() -> None:
     exports = tuntun_contracts.__all__
     assert type(exports) is tuple
-    assert len(exports) == len(set(exports)) == 136
-    assert len(registered_contract_models()) == 93
+    assert len(exports) == len(set(exports)) == 138
+    assert len(registered_contract_models()) == 95
 
     enum_names = {
         name
@@ -688,9 +690,13 @@ def test_provider_usage_receipt_is_closed_and_bound_to_the_exact_call() -> None:
 
 
 def test_provider_response_exposes_only_the_persisted_usage_receipt_identity() -> None:
+    turn_json = (
+        '{"answer_text":"synthetic","answer_language":"en",'
+        '"memory_proposals":[],"action_proposals":[],"uncertainty_micros":0}'
+    )
     response = ProviderResponse(
         request_id=UUID(int=76),
-        text="synthetic",
+        text=turn_json,
         language="en",
         provider_usage_receipt_id=UUID(int=77),
     )
@@ -703,12 +709,19 @@ def test_provider_response_exposes_only_the_persisted_usage_receipt_identity() -
     assert (
         ProviderResponse(
             request_id=UUID(int=78),
-            text="synthetic-without-usage",
+            text=turn_json,
             language="en",
             provider_usage_receipt_id=None,
         ).provider_usage_receipt_id
         is None
     )
+    with pytest.raises(ValidationError, match="UTF-8 byte cap"):
+        ProviderResponse(
+            request_id=UUID(int=79),
+            text="ठ" * 11_000,
+            language="hi",
+            provider_usage_receipt_id=UUID(int=80),
+        )
     with pytest.raises(ValidationError):
         ProviderResponse.model_validate(
             response.model_dump()
@@ -1111,6 +1124,22 @@ def test_route_authorization_is_attempt_and_purpose_specific() -> None:
     )
     assert {"text_commitment", "segment_index", "segment_count"} <= set(
         AuthorizedSynthesisRequest.model_fields
+    )
+    assert tuple(OfflineSynthesisRequest.model_fields) == (
+        "request_id",
+        "turn_id",
+        "text",
+        "language",
+    )
+
+
+def test_budget_port_exposes_gateway_accounting_context_protocol() -> None:
+    assert "require_accounting_context" in BudgetPort.__dict__
+    assert tuple(BudgetAccountingContext.model_fields) == (
+        "category",
+        "usage_ceiling",
+        "primary_accounting_basis",
+        "missing_evidence_policy",
     )
 
 

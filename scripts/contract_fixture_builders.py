@@ -1146,6 +1146,26 @@ def semantic_specs() -> dict[type[ContractModel], SemanticSpec]:
                 "pricing_commitment": _model_json(factory.build(Commitment)),
             },
         ),
+        budget.BudgetAccountingContext: SemanticSpec(
+            frozenset(
+                {
+                    "category",
+                    "usage_ceiling",
+                    "primary_accounting_basis",
+                    "missing_evidence_policy",
+                }
+            ),
+            lambda _factory: {
+                "category": "llm",
+                "usage_ceiling": {
+                    "category": "llm",
+                    "input_tokens": 1,
+                    "output_tokens": 0,
+                },
+                "primary_accounting_basis": "provider_reported_exact",
+                "missing_evidence_policy": "freeze_unknown_overage",
+            },
+        ),
         budget.ProviderUsageReceiptV1: SemanticSpec(
             frozenset({"category", "billable_usage"}),
             lambda _factory: {
@@ -1207,6 +1227,7 @@ SCHEMA_ONLY_MODELS: frozenset[type[ContractModel]] = frozenset(
         ports.TurnInput,
         ports.TurnOutput,
         speech.AudioFormat,
+        speech.OfflineSynthesisRequest,
         speech.TranscriptResult,
         speech.SpeechChunk,
         identity.PersonaTraits,

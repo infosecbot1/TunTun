@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
@@ -15,6 +14,7 @@ from tuntun_contracts.base import (
 )
 from tuntun_contracts.budget import (
     MAX_CHARGE_MICROS_SGD,
+    BudgetAccountingContext,
     BudgetReconciliationRequest,
     BudgetReservation,
     BudgetReservationRequest,
@@ -23,7 +23,6 @@ from tuntun_contracts.budget import (
     ProviderUsageReceiptV1,
     TransportProof,
     TtsUsageUnits,
-    UsageUnits,
 )
 from tuntun_core.services.budget.evidence import (
     BudgetEvidenceQuarantined,
@@ -59,14 +58,6 @@ class BudgetTurnBindingV1(ContractModel):
     turn_id: UUID
     request_id: UUID
     attempt_id: UUID
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetAccountingContext:
-    category: str
-    usage_ceiling: UsageUnits
-    primary_accounting_basis: str
-    missing_evidence_policy: str
 
 
 class BudgetGuard:
@@ -280,11 +271,14 @@ class BudgetGuard:
                     .mappings()
                     .one_or_none()
                 )
-                expected_category = {
-                    "cloud_stt": "stt",
-                    "cloud_reasoning": "llm",
-                    "cloud_tts": "tts",
-                }.get(route.purpose)
+                expected_category = cast(
+                    Literal["stt", "llm", "tts"] | None,
+                    {
+                        "cloud_stt": "stt",
+                        "cloud_reasoning": "llm",
+                        "cloud_tts": "tts",
+                    }.get(route.purpose),
+                )
                 if row is None or expected_category is None:
                     raise PermissionError("budget_accounting_context_missing")
                 if (

@@ -3,18 +3,24 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
-from typing import cast
+from datetime import timedelta
+from typing import Any, cast
 from uuid import UUID
 
 from tuntun_contracts.actions import ActionBinding, ActionReceipt, ValidatedActionProposal
 from tuntun_contracts.audit import AuditDraft, AuditReceipt
+from tuntun_contracts.base import Commitment
 from tuntun_contracts.budget import (
+    BudgetAccountingContext,
     BudgetReconciliationRequest,
     BudgetReservation,
     BudgetReservationRequest,
     BudgetSettlement,
     BudgetSettlementRequest,
+    LlmUsageUnits,
+    SttUsageUnits,
     TransportProof,
+    TtsUsageUnits,
 )
 from tuntun_contracts.identity import IdentityDecision, IdentityRequest
 from tuntun_contracts.memory import (
@@ -299,6 +305,16 @@ class FakeBudget(_ScriptedFake):
         if result is not None:
             raise TypeError("invalid-void-outcome")
 
+    async def require_accounting_context(
+        self,
+        route: RouteAuthorization,
+        consumption: RouteConsumption,
+    ) -> BudgetAccountingContext:
+        return cast(
+            BudgetAccountingContext,
+            self._take("budget.require_accounting_context", (route, consumption)),
+        )
+
     async def settle(self, request: BudgetSettlementRequest) -> BudgetSettlement:
         return cast(BudgetSettlement, self._take("budget.settle", (request,)))
 
@@ -339,3 +355,177 @@ class FakeRouteAuthorizer(_ScriptedFake):
 FakeIdentity = FakeIdentityFusion
 FakeMemory = FakeMemoryRepository
 FakePolicy = FakePolicyEngine
+
+
+_CATEGORY_BY_PURPOSE = {
+    "cloud_stt": "stt",
+    "cloud_reasoning": "llm",
+    "cloud_tts": "tts",
+}
+
+
+class RecordingBudget:
+    def __init__(self, clock: Any) -> None:
+        self.clock = clock
+        self.reservation_ids: list[UUID] = []
+        self.terminal_pairs: set[tuple[UUID, UUID]] = set()
+        self.released_pairs: set[tuple[UUID, UUID]] = set()
+        self.conservative_settlements: list[UUID] = []
+        self._attempt_to_reservation: dict[UUID, UUID] = {}
+        self._sent: set[tuple[UUID, UUID]] = set()
+        self._exact_usage: set[UUID] = set()
+
+    async def reserve(self, request: BudgetReservationRequest) -> BudgetReservation:
+        reservation_id = UUID(int=len(self.reservation_ids) + 10_001)
+        self.reservation_ids.append(reservation_id)
+        self._attempt_to_reservation[request.attempt_id] = reservation_id
+        return BudgetReservation(
+            reservation_id=reservation_id,
+            request_id=request.request_id,
+            attempt_id=request.attempt_id,
+            outcome="allow",
+            amount_micros_sgd=1,
+            pricing_commitment=Commitment(
+                algorithm="HMAC-SHA-256",
+                key_id="pricing-v1",
+                value_b64="A" * 43 + "=",
+            ),
+            expires_at=self.clock.now() + timedelta(seconds=30),
+        )
+
+    async def mark_sent(self, reservation_id: UUID, attempt_id: UUID) -> None:
+        self._sent.add((reservation_id, attempt_id))
+
+    async def require_accounting_context(
+        self,
+        route: RouteAuthorization,
+        consumption: RouteConsumption,
+    ) -> BudgetAccountingContext:
+        del consumption
+        if route.purpose == "cloud_stt":
+            return BudgetAccountingContext(
+                category="stt",
+                usage_ceiling=SttUsageUnits(category="stt", audio_millis=route.max_input_units),
+                primary_accounting_basis="provider_reported_exact",
+                missing_evidence_policy="freeze_unknown_overage",
+            )
+        if route.purpose == "cloud_tts":
+            return BudgetAccountingContext(
+                category="tts",
+                usage_ceiling=TtsUsageUnits(category="tts", characters=route.max_input_units),
+                primary_accounting_basis="request_bound_exact",
+                missing_evidence_policy="freeze_unknown_overage",
+            )
+        return BudgetAccountingContext(
+            category="llm",
+            usage_ceiling=LlmUsageUnits(category="llm", input_tokens=1, output_tokens=1),
+            primary_accounting_basis="provider_reported_exact",
+            missing_evidence_policy="freeze_unknown_overage",
+        )
+
+    async def settle(self, request: BudgetSettlementRequest) -> BudgetSettlement:
+        pair = (request.reservation_id, request.attempt_id)
+        self.terminal_pairs.add(pair)
+        conservative = request.attempt_id not in self._exact_usage
+        if conservative and request.reservation_id not in self.conservative_settlements:
+            self.conservative_settlements.append(request.reservation_id)
+        return BudgetSettlement(
+            reservation_id=request.reservation_id,
+            charged_micros_sgd=1,
+            conservative_estimate_used=conservative,
+            estimate_overrun=False,
+            cloud_egress_frozen=False,
+        )
+
+    async def release_unsent(
+        self,
+        reservation_id: UUID,
+        attempt_id: UUID,
+        proof: TransportProof,
+    ) -> None:
+        pair = (reservation_id, attempt_id)
+        if pair in self._sent or proof.disposition != "never_sent":
+            raise PermissionError("reservation_not_releasable")
+        self.released_pairs.add(pair)
+        self.terminal_pairs.add(pair)
+
+    async def reconcile_turn(
+        self,
+        request: BudgetReconciliationRequest,
+    ) -> tuple[BudgetSettlement, ...]:
+        return ()
+
+    def record_exact_usage(self, attempt_id: UUID) -> None:
+        self._exact_usage.add(attempt_id)
+
+
+class RecordingRouteAuthorizer:
+    def __init__(self, clock: Any) -> None:
+        self.clock = clock
+        self.attempt_ids: list[UUID] = []
+
+    async def authorize(self, request: RouteAuthorizationRequest) -> RouteAuthorization:
+        self.attempt_ids.append(request.attempt_id)
+        return RouteAuthorization(
+            authorization_id=UUID(int=len(self.attempt_ids) + 20_001),
+            request_id=request.request_id,
+            attempt_id=request.attempt_id,
+            purpose=request.purpose,
+            household_id=request.household_id,
+            subject_id=request.subject_id,
+            session_id=request.session_id,
+            turn_id=request.turn_id,
+            provider=request.provider,
+            model=request.model,
+            request_commitment=request.request_commitment,
+            max_input_bytes=request.max_input_bytes,
+            max_input_units=request.max_input_units,
+            privacy_receipt_id=request.privacy_receipt_id,
+            consent_receipt_ids=request.consent_receipt_ids,
+            budget_reservation_id=request.budget_reservation_id,
+            maximum_sensitivity=request.maximum_sensitivity,
+            expires_at=self.clock.now() + timedelta(seconds=30),
+        )
+
+    async def consume(
+        self,
+        authorization_id: UUID,
+        consumption: RouteConsumption,
+    ) -> None:
+        del authorization_id, consumption
+
+
+class RecordingTurnAttempts:
+    def __init__(self, budget: RecordingBudget) -> None:
+        self.budget = budget
+        self.tracked: list[tuple[UUID, UUID, UUID]] = []
+        self.completed: list[tuple[UUID, UUID, UUID]] = []
+
+    def track_reservation(
+        self,
+        turn_id: UUID,
+        reservation_id: UUID,
+        attempt_id: UUID,
+    ) -> None:
+        item = (turn_id, reservation_id, attempt_id)
+        if item in self.tracked:
+            raise RuntimeError("duplicate tracked reservation")
+        self.tracked.append(item)
+
+    def complete_reservation(
+        self,
+        turn_id: UUID,
+        reservation_id: UUID,
+        attempt_id: UUID,
+    ) -> None:
+        item = (turn_id, reservation_id, attempt_id)
+        if item not in self.tracked:
+            raise RuntimeError("unknown tracked reservation")
+        if item not in self.completed:
+            self.completed.append(item)
+
+    def all_completions_after_budget_commit(self, budget: RecordingBudget) -> bool:
+        return all(
+            (reservation_id, attempt_id) in budget.terminal_pairs
+            for _, reservation_id, attempt_id in self.completed
+        )
