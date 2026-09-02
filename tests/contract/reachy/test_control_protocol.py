@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from dataclasses import replace
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 from tuntun_contracts.base import ContractModel, Sensitivity, canonical_bytes
 from tuntun_contracts.commitments import commit_private
 from tuntun_contracts.events import (
@@ -44,6 +48,139 @@ HMAC_KEY_ID = "hmac:reachy-edge:v1"
 OTHER_HMAC_KEY_ID = "hmac:reachy-edge:v2"
 HMAC_ROOT = bytes(range(32))
 OTHER_HMAC_ROOT = bytes(reversed(range(32)))
+
+
+class AcceptAllPrivateKey:
+    def sign(self, data: bytes) -> bytes:
+        return bytes(64)
+
+
+class AcceptAllPublicKey:
+    def verify(self, signature: bytes, data: bytes) -> None:
+        return None
+
+
+class ForgingEd25519PrivateKey(Ed25519PrivateKey):
+    def __init__(self, private_key: Ed25519PrivateKey) -> None:
+        self._private_key = private_key
+
+    def sign(self, data: bytes) -> bytes:
+        return bytes(64)
+
+    def private_bytes(
+        self,
+        encoding: serialization.Encoding,
+        format: serialization.PrivateFormat,
+        encryption_algorithm: object,
+    ) -> bytes:
+        return self._private_key.private_bytes(
+            encoding,
+            format,
+            encryption_algorithm,
+        )
+
+    def private_bytes_raw(self) -> bytes:
+        return self._private_key.private_bytes_raw()
+
+    def public_key(self) -> Ed25519PublicKey:
+        return self._private_key.public_key()
+
+    def __copy__(self) -> Ed25519PrivateKey:
+        return self
+
+
+class AcceptAllEd25519PublicKey(Ed25519PublicKey):
+    def __init__(self, public_key: Ed25519PublicKey) -> None:
+        self._public_key = public_key
+
+    def verify(self, signature: bytes, data: bytes) -> None:
+        return None
+
+    def public_bytes(
+        self,
+        encoding: serialization.Encoding,
+        format: serialization.PublicFormat,
+    ) -> bytes:
+        return self._public_key.public_bytes(encoding, format)
+
+    def public_bytes_raw(self) -> bytes:
+        return self._public_key.public_bytes_raw()
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def __copy__(self) -> Ed25519PublicKey:
+        return self
+
+
+class ShortExportEd25519PrivateKey(ForgingEd25519PrivateKey):
+    def private_bytes(
+        self,
+        encoding: serialization.Encoding,
+        format: serialization.PrivateFormat,
+        encryption_algorithm: object,
+    ) -> bytes:
+        return b"short"
+
+    def private_bytes_raw(self) -> bytes:
+        return b"short"
+
+
+class ShortExportEd25519PublicKey(AcceptAllEd25519PublicKey):
+    def public_bytes(
+        self,
+        encoding: serialization.Encoding,
+        format: serialization.PublicFormat,
+    ) -> bytes:
+        return b"short"
+
+    def public_bytes_raw(self) -> bytes:
+        return b"short"
+
+
+class CallerControlledSignedEnvelope:
+    def __init__(
+        self,
+        *,
+        envelope: EventEnvelope,
+        signing_key_id: str,
+        signature_b64: str,
+        signing_bytes: bytes,
+    ) -> None:
+        self.envelope = envelope
+        self.signing_key_id = signing_key_id
+        self.signature_b64 = signature_b64
+        self._signing_bytes = signing_bytes
+
+    def signing_bytes(self) -> bytes:
+        return self._signing_bytes
+
+
+class EventEnvelopeSubclass(EventEnvelope):
+    pass
+
+
+class StatefulHmacKeyEpoch(HmacKeyEpoch):
+    __slots__ = ("_value_reads",)
+
+    def __init__(self) -> None:
+        super().__init__(
+            key_id=HMAC_KEY_ID,
+            generation=1,
+            sha256=hashlib.sha256(HMAC_ROOT).hexdigest(),
+            value=HMAC_ROOT,
+            active_from=NOW - timedelta(seconds=30),
+            accept_until=NOW + timedelta(seconds=30),
+        )
+        object.__setattr__(self, "_value_reads", 0)
+
+    @property
+    def value(self) -> bytes:
+        value_reads = self._value_reads
+        object.__setattr__(self, "_value_reads", value_reads + 1)
+        if value_reads == 0:
+            return HMAC_ROOT
+        return OTHER_HMAC_ROOT
 
 
 def _payload(source: str = "edge_keyword") -> StopRequestedPayload:
@@ -129,12 +266,106 @@ def test_sign_envelope_rejects_mismatched_payload_commitment_before_signing() ->
         sign_envelope(private_key, SIGNING_KEY_ID, HMAC_ROOT, tampered)
 
 
+def test_sign_envelope_rejects_duck_typed_private_key() -> None:
+    with pytest.raises(TypeError, match="Ed25519 private key required"):
+        sign_envelope(AcceptAllPrivateKey(), SIGNING_KEY_ID, HMAC_ROOT, _event())  # type: ignore[arg-type]
+
+
+def test_sign_envelope_reconstructs_trusted_private_key_before_signing() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    signed = sign_envelope(
+        ForgingEd25519PrivateKey(private_key),
+        SIGNING_KEY_ID,
+        HMAC_ROOT,
+        _event(),
+    )
+    signature = base64.b64decode(signed.signature_b64, validate=True)
+
+    assert signature != bytes(64)
+    private_key.public_key().verify(signature, signed.signing_bytes())
+
+
+def test_sign_envelope_rejects_malformed_private_key_raw_export() -> None:
+    private_key = Ed25519PrivateKey.generate()
+
+    with pytest.raises(ValueError, match="invalid Ed25519 private key"):
+        sign_envelope(
+            ShortExportEd25519PrivateKey(private_key),
+            SIGNING_KEY_ID,
+            HMAC_ROOT,
+            _event(),
+        )
+
+
 def test_verify_accepts_current_server_resolved_keys() -> None:
     private_key = Ed25519PrivateKey.generate()
     event = _event()
     signed = sign_envelope(private_key, SIGNING_KEY_ID, HMAC_ROOT, event)
 
     assert _verify(private_key.public_key(), signed) == event
+
+
+def test_verify_rejects_duck_typed_public_key_that_accepts_all_signatures() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    signed = sign_envelope(private_key, SIGNING_KEY_ID, HMAC_ROOT, _event())
+    forged = signed.model_copy(
+        update={"signature_b64": base64.b64encode(bytes(64)).decode("ascii")},
+    )
+
+    with pytest.raises(TypeError, match="Ed25519 public key required"):
+        _verify(AcceptAllPublicKey(), forged)
+
+
+def test_verify_reconstructs_trusted_public_key_before_verifying() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    signed = sign_envelope(private_key, SIGNING_KEY_ID, HMAC_ROOT, _event())
+    forged = signed.model_copy(
+        update={"signature_b64": base64.b64encode(bytes(64)).decode("ascii")},
+    )
+
+    with pytest.raises(ValueError, match="invalid envelope signature"):
+        _verify(AcceptAllEd25519PublicKey(private_key.public_key()), forged)
+
+
+def test_verify_rejects_malformed_public_key_raw_export() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    signed = sign_envelope(private_key, SIGNING_KEY_ID, HMAC_ROOT, _event())
+
+    with pytest.raises(ValueError, match="invalid Ed25519 public key"):
+        _verify(ShortExportEd25519PublicKey(private_key.public_key()), signed)
+
+
+def test_verify_rejects_caller_controlled_signed_envelope_signing_bytes() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    signed = sign_envelope(private_key, SIGNING_KEY_ID, HMAC_ROOT, _event())
+    tampered_envelope = _event(payload=_payload(source="owner_console"))
+    forged = CallerControlledSignedEnvelope(
+        envelope=tampered_envelope,
+        signing_key_id=signed.signing_key_id,
+        signature_b64=signed.signature_b64,
+        signing_bytes=signed.signing_bytes(),
+    )
+
+    with pytest.raises(TypeError, match="signed event envelope required"):
+        _verify(private_key.public_key(), forged)  # type: ignore[arg-type]
+
+
+def test_verify_rejects_non_exact_event_envelope() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    event = _event()
+    subclass_event = EventEnvelopeSubclass.model_validate(event.model_dump())
+    signature_b64 = base64.b64encode(private_key.sign(canonical_bytes(subclass_event))).decode(
+        "ascii",
+    )
+    signed = SignedEventEnvelope(
+        envelope=event,
+        signing_key_id=SIGNING_KEY_ID,
+        signature_b64=signature_b64,
+    )
+    object.__setattr__(signed, "envelope", subclass_event)
+
+    with pytest.raises(TypeError, match="event envelope required"):
+        _verify(private_key.public_key(), signed)
 
 
 def test_verify_rejects_wrong_hmac_purpose() -> None:
@@ -421,7 +652,7 @@ def test_rotation_keyring_normalizes_epoch_bounds_to_utc() -> None:
 
 def test_rotation_keyring_rejects_duplicate_key_ids_without_overwrite() -> None:
     current = _epoch()
-    duplicate = replace(current, generation=2, value=OTHER_HMAC_ROOT)
+    duplicate = _epoch(generation=2, root=OTHER_HMAC_ROOT)
 
     with pytest.raises(ValueError, match="duplicate HMAC key epoch id"):
         RotationKeyring((current, duplicate))
@@ -432,6 +663,55 @@ def test_rotation_keyring_verifies_digest_before_exposing_root() -> None:
 
     with pytest.raises(PermissionError, match="pairing_key_digest_mismatch"):
         RotationKeyring((_epoch(sha256=wrong_digest),))
+
+
+def test_rotation_keyring_rejects_epoch_reassignment_after_validation() -> None:
+    keyring = RotationKeyring((_epoch(),))
+
+    with pytest.raises(AttributeError, match="RotationKeyring is immutable"):
+        keyring._epochs = (_epoch(key_id=OTHER_HMAC_KEY_ID, root=OTHER_HMAC_ROOT),)  # type: ignore[attr-defined]
+
+
+def test_rotation_keyring_revalidates_epochs_before_exposing_roots() -> None:
+    keyring = RotationKeyring((_epoch(),))
+    bypassed_epoch = _epoch(
+        key_id=OTHER_HMAC_KEY_ID,
+        root=OTHER_HMAC_ROOT,
+        sha256=hashlib.sha256(HMAC_ROOT).hexdigest(),
+    )
+
+    object.__setattr__(keyring, "_epochs", (bypassed_epoch,))
+
+    with pytest.raises(PermissionError, match="pairing_key_digest_mismatch"):
+        keyring.accepted(NOW)
+
+
+def test_rotation_keyring_rejects_stateful_epoch_subclass_before_exposing_root() -> None:
+    keyring = RotationKeyring((_epoch(),))
+    object.__setattr__(keyring, "_epochs", (StatefulHmacKeyEpoch(),))
+
+    with pytest.raises(TypeError, match="HMAC key epoch required"):
+        keyring.accepted(NOW)
+
+
+def test_hmac_key_epoch_keeps_raw_root_runtime_only_and_immutable() -> None:
+    epoch = _epoch()
+
+    assert epoch.value == HMAC_ROOT
+    assert not is_dataclass(epoch)
+    with pytest.raises(TypeError, match="dataclass"):
+        asdict(epoch)
+    with pytest.raises(TypeError, match="__dict__"):
+        vars(epoch)
+
+    rendered = repr(epoch)
+    assert repr(HMAC_ROOT) not in rendered
+    assert "value=" not in rendered
+
+    with pytest.raises(AttributeError, match="HMAC key epoch is immutable"):
+        epoch.value = OTHER_HMAC_ROOT  # type: ignore[misc]
+    with pytest.raises(AttributeError, match="HMAC key epoch is immutable"):
+        epoch.key_id = OTHER_HMAC_KEY_ID  # type: ignore[misc]
 
 
 def test_hmac_key_epoch_repr_does_not_include_raw_root() -> None:
