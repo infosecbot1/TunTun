@@ -294,3 +294,28 @@ async def test_tts_terminal_marker_follows_receipt_ledger_and_turn_completion(
             break
 
     assert terminal is not None
+
+
+@pytest.mark.asyncio
+async def test_cross_subject_context_fails_before_dlp_consent_or_tts_reservation(
+    output_pipeline_case,
+) -> None:
+    pipeline, captures, response, route, context, budget, attempts = output_pipeline_case
+    validated = await pipeline.validate(response, route)
+    wrong_subject_context = OutputContext(
+        household_id=context.household_id,
+        subject_id=uuid4(),
+        session_id=context.session_id,
+        turn_id=context.turn_id,
+    )
+
+    with pytest.raises(PermissionError, match="provider_response_receipt_binding"):
+        _ = [
+            chunk
+            async for chunk in pipeline.synthesize(validated, wrong_subject_context)
+        ]
+
+    assert captures.output_dlp_calls == 0
+    assert captures.tts_consent_checks == 0
+    assert budget.reservation_ids == []
+    assert attempts.tracked == []

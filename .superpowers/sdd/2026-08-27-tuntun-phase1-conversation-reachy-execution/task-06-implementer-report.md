@@ -492,3 +492,344 @@ Test quality:
   are imported before plugin rewrite. It does not indicate a test failure.
 - `.venv` is present as an untracked environment symlink in the worktree and was
   intentionally not staged.
+
+## Fix Round 1 — Review fixes
+
+Base reviewed: `5f86d0b`
+
+### Fix summary
+
+- Restricted `AttemptRunner.run` retry decisions to retryable
+  `TransientProviderError` failures with disposition exactly `never_sent`, a
+  successful proof-based release, and attempts remaining.
+- Enforced locked per-purpose attempt ceilings before reserve/authorization:
+  `cloud_stt=1`, `cloud_reasoning=2`, and `cloud_tts=2`. `RetryPolicy` now also
+  rejects global attempt counts above 2.
+- Added active reservation/attempt validation for `ProviderNotSentError` and
+  `ProviderNotSentCancellation`; mismatched proof scopes conservatively settle
+  the active attempt and fail with `provider_unsent_scope_mismatch`.
+- Made OpenAI STT/TTS adapters fail closed before gateway/network unless STT uses
+  exactly `gpt-transcribe` and TTS uses exactly `tts-1`.
+- Passed `SanitizedProviderRequest.timeout_ms` to `responses.stream` as local
+  SDK timeout seconds without adding it to the committed semantic JSON body.
+- Added exact subject binding to `VerifiedProviderResponseReceipt.require_scope`
+  and updated output/proposal call sites so cross-subject contexts fail before
+  DLP, consent, reservation, or TTS.
+- Strengthened TTS activation evidence with frozen cloud/offline evidence DTOs.
+  Offline macOS evidence now checks exact `/usr/bin/say` and
+  `/usr/bin/afconvert` identities, owner-license proof, binary hashes, fixed
+  hash match, installed English/Hindi voice IDs, exact raw s16le mono 24kHz PCM
+  shape, bilingual and Hinglish quality, no-network observation, cold restart
+  voice presence, latency bounds, valid SHA-256 base64 hash encodings, and
+  current/fresh evidence. Cloud evidence now requires `character_limit == 4096`
+  exactly.
+
+### RED evidence
+
+Attempt retry disposition and per-purpose ceilings:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run pytest \
+  tests/integration/providers/test_attempt_runner.py::test_retry_policy_rejects_global_attempt_counts_above_two \
+  tests/integration/providers/test_attempt_runner.py::test_stt_attempt_policy_above_one_fails_before_reservation \
+  tests/integration/providers/test_attempt_runner.py::test_reasoning_retry_has_distinct_authorization_and_reservation \
+  tests/integration/providers/test_attempt_runner.py::test_reasoning_sent_or_unknown_retryable_failure_never_retries \
+  -q
+```
+
+Result before fix:
+
+```text
+5 failed, 1 passed in 1.08s
+```
+
+Expected failures showed:
+
+- `RetryPolicy(max_attempts=3)` did not raise.
+- STT policy with 2 attempts reached reservation/invocation instead of failing
+  before reserve.
+- Sent/unknown 503 failures retried and invoked twice.
+
+OpenAI adapter model/timeout fail-closed behavior:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run pytest \
+  tests/contract/openai/test_responses_request.py::test_reasoning_timeout_is_transmitted_but_not_committed \
+  tests/contract/openai/test_transcribe_request.py::test_transcriber_rejects_non_gpt_transcribe_model_before_gateway \
+  tests/contract/openai/test_tts_request.py::test_tts_rejects_non_tts_1_model_before_gateway \
+  -q
+```
+
+Result before fix:
+
+```text
+3 failed in 0.17s
+```
+
+Expected failures showed the missing Responses `timeout` kwarg, STT accepting a
+non-`gpt-transcribe` model through the gateway, and TTS failing later at
+commitment mismatch instead of fail-closed model authorization.
+
+Subject binding:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run pytest \
+  tests/integration/providers/test_output_pipeline.py::test_cross_subject_context_fails_before_dlp_consent_or_tts_reservation \
+  tests/unit/providers/test_output_validator.py::test_mapper_rejects_cross_subject_scope_before_resolving_refs \
+  -q
+```
+
+Result before fix:
+
+```text
+2 failed in 0.80s
+```
+
+Expected failures showed output synthesis reached DLP/TTS under a wrong subject
+and proposal mapping lacked a subject-scoped receipt API.
+
+Offline activation evidence:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run pytest tests/integration/providers/test_tts_activation.py -q
+```
+
+Result before fix:
+
+```text
+1 error in 0.31s
+```
+
+Expected collection error was the missing frozen evidence DTOs:
+`CloudRequestBoundTtsEvidence` and `OfflineMacOSSayEvidence`.
+
+Supplemental audit items:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run pytest \
+  tests/integration/providers/test_attempt_runner.py::test_run_provider_not_sent_scope_mismatch_settles_active_without_retry \
+  tests/integration/providers/test_attempt_runner.py::test_stream_provider_not_sent_scope_mismatch_settles_active_without_retry \
+  tests/integration/providers/test_tts_activation.py::test_cloud_tts_evidence_requires_exact_contract_limit \
+  -q
+```
+
+Result before supplemental fix:
+
+```text
+5 failed, 1 passed in 0.47s
+```
+
+Expected failures showed mismatched `ProviderNotSent*` proof IDs released the
+active attempt and re-raised the underlying cause instead of settling with
+`provider_unsent_scope_mismatch`, and cloud TTS evidence accepted 4097
+characters.
+
+### GREEN evidence
+
+Amended review-fix focused group:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run pytest \
+  tests/integration/providers/test_attempt_runner.py::test_retry_policy_rejects_global_attempt_counts_above_two \
+  tests/integration/providers/test_attempt_runner.py::test_stt_attempt_policy_above_one_fails_before_reservation \
+  tests/integration/providers/test_attempt_runner.py::test_reasoning_retry_has_distinct_authorization_and_reservation \
+  tests/integration/providers/test_attempt_runner.py::test_reasoning_sent_or_unknown_retryable_failure_never_retries \
+  tests/contract/openai/test_responses_request.py::test_reasoning_timeout_is_transmitted_but_not_committed \
+  tests/contract/openai/test_transcribe_request.py::test_transcriber_rejects_non_gpt_transcribe_model_before_gateway \
+  tests/contract/openai/test_tts_request.py::test_tts_rejects_non_tts_1_model_before_gateway \
+  tests/integration/providers/test_output_pipeline.py::test_cross_subject_context_fails_before_dlp_consent_or_tts_reservation \
+  tests/unit/providers/test_output_validator.py::test_mapper_rejects_cross_subject_scope_before_resolving_refs \
+  tests/integration/providers/test_tts_activation.py \
+  -q
+```
+
+Result:
+
+```text
+35 passed in 1.80s
+```
+
+Supplemental focused group after patch:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run pytest \
+  tests/integration/providers/test_attempt_runner.py::test_run_provider_not_sent_scope_mismatch_settles_active_without_retry \
+  tests/integration/providers/test_attempt_runner.py::test_stream_provider_not_sent_scope_mismatch_settles_active_without_retry \
+  tests/integration/providers/test_tts_activation.py::test_cloud_tts_evidence_requires_exact_contract_limit \
+  -q
+```
+
+Result:
+
+```text
+6 passed in 0.44s
+```
+
+Full Task06 suite:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run pytest \
+  tests/integration/providers/test_attempt_runner.py \
+  tests/integration/providers/test_output_pipeline.py \
+  tests/integration/providers/test_response_receipts.py \
+  tests/integration/providers/test_tts_activation.py \
+  tests/unit/providers/test_output_validator.py \
+  tests/unit/providers/test_openai_error_translation.py \
+  tests/contract/openai \
+  tests/contract/tts/test_macos_say_offline.py \
+  tests/evals/tts/test_bilingual_quality.py \
+  tests/security/test_openai_local_non_retention.py \
+  tests/security/test_no_external_telemetry.py \
+  -q
+```
+
+Result:
+
+```text
+158 passed, 1 warning in 3.86s
+```
+
+Affected Task03-Task06/provider/budget regression gate:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run pytest \
+  tests/security/test_log_redaction.py \
+  tests/security/test_provider_review_freshness.py \
+  tests/security/test_provider_boundary.py \
+  tests/unit/budget \
+  tests/integration/budget \
+  tests/contract/test_budget_port.py \
+  tests/contract/test_provider_route_binding.py \
+  tests/unit/providers \
+  tests/integration/providers \
+  -q
+```
+
+Result:
+
+```text
+722 passed, 1 warning in 34.89s
+```
+
+The warning in both suites remains the existing pytest assert-rewrite warning for
+`tests.fixtures.provider_routes`.
+
+Static/generated/lock gates:
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run ruff check \
+  packages/contracts/src/tuntun_contracts/provider.py \
+  packages/contracts/src/tuntun_contracts/speech.py \
+  packages/contracts/src/tuntun_contracts/budget.py \
+  packages/contracts/src/tuntun_contracts/ports.py \
+  apps/core/src/tuntun_core/adapters/openai \
+  apps/core/src/tuntun_core/adapters/tts \
+  apps/core/src/tuntun_core/services/providers \
+  packages/testing/src/tuntun_testing/fake_providers.py \
+  tests/fixtures/provider_egress.py \
+  tests/integration/providers/test_response_receipts.py \
+  tests/integration/providers/test_attempt_runner.py \
+  tests/integration/providers/test_output_pipeline.py \
+  tests/integration/providers/test_tts_activation.py \
+  tests/unit/providers/test_output_validator.py \
+  tests/unit/providers/test_openai_error_translation.py \
+  tests/contract/openai \
+  tests/contract/tts/test_macos_say_offline.py \
+  tests/evals/tts/test_bilingual_quality.py \
+  tests/security/test_openai_local_non_retention.py \
+  tests/security/test_no_external_telemetry.py
+```
+
+Result: exit 0.
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run mypy \
+  packages/contracts/src/tuntun_contracts/provider.py \
+  packages/contracts/src/tuntun_contracts/speech.py \
+  packages/contracts/src/tuntun_contracts/budget.py \
+  packages/contracts/src/tuntun_contracts/ports.py \
+  apps/core/src/tuntun_core/adapters/openai \
+  apps/core/src/tuntun_core/adapters/tts \
+  apps/core/src/tuntun_core/services/providers \
+  packages/testing/src/tuntun_testing/fake_providers.py
+```
+
+Result:
+
+```text
+Success: no issues found in 28 source files
+```
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python scripts/generate_contract_fixtures.py --check
+```
+
+Result: exit 0.
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python scripts/generate_schemas.py --check
+```
+
+Result: exit 0.
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv run python scripts/generate_openapi.py --check
+```
+
+Result: exit 0.
+
+```bash
+UV_CACHE_DIR=/private/tmp/tuntun-task06-uv-cache \
+UV_PROJECT_ENVIRONMENT=/private/tmp/tuntun-task06-venv \
+uv lock --check
+```
+
+Result:
+
+```text
+Resolved 71 packages in 12ms
+```
+
+### Fix-round self-review
+
+- Retry is now possible only for unsent proof-released attempts. Sent/unknown
+  attempts settle and surface the provider error without retrying.
+- Policy limits are enforced before reserve/authorization, so rejected STT
+  two-attempt policies do not create budget or route state.
+- Mismatched unsent proofs cannot release the active reservation under a forged
+  or stale id; they settle the active reservation and complete the turn attempt.
+- STT/TTS model checks happen before buffering/commitment/gateway work.
+- Responses timeout is an SDK kwarg only and is absent from the canonical request
+  body.
+- Subject scope is checked before output DLP, consent, reservations, TTS, ref
+  resolution, or provenance attachment.
+- Cloud/offline activation evidence now has explicit accepted fields and exact
+  contract checks; cloud `character_limit` is exact, not a lower bound.

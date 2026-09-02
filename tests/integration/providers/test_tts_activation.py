@@ -1,31 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 import pytest
-from tuntun_core.services.providers.tts_activation import TtsActivationGate
-
-
-@dataclass(frozen=True, slots=True)
-class CloudReceipt:
-    provider: str = "openai"
-    model: str = "tts-1"
-    accounting_basis: str = "request_bound_exact"
-    binary_response_has_usage: bool = False
-    character_limit: int = 4_096
-
-
-@dataclass(frozen=True, slots=True)
-class OfflineReceipt:
-    owner_license_accepted: bool = True
-    fixed_binary_hashes_match: bool = True
-    english_voice_present: bool = True
-    hindi_voice_present: bool = True
-    hinglish_corpus_passed: bool = True
-    no_network_observed: bool = True
-    cold_restart_voice_presence_passed: bool = True
-    p95_first_audio_ms: int = 1_000
-    p95_total_ms: int = 3_000
+from tuntun_core.services.providers.tts_activation import (
+    CloudRequestBoundTtsEvidence,
+    OfflineMacOSSayEvidence,
+    TtsActivationGate,
+)
 
 
 class Probe:
@@ -64,8 +46,8 @@ def _case(*, cloud=None, offline=None) -> tuple[TtsActivationGate, Readiness]:
 @pytest.mark.parametrize(
     ("cloud", "offline", "expected"),
     (
-        (CloudReceipt(), None, "cloud_request_bound_exact"),
-        (None, OfflineReceipt(), "offline_macos_say"),
+        (CloudRequestBoundTtsEvidence(), None, "cloud_request_bound_exact"),
+        (None, OfflineMacOSSayEvidence(), "offline_macos_say"),
     ),
 )
 async def test_family_voice_requires_one_verified_branch(cloud, offline, expected: str) -> None:
@@ -76,27 +58,60 @@ async def test_family_voice_requires_one_verified_branch(cloud, offline, expecte
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("character_limit", (4_000, 4_097))
+async def test_cloud_tts_evidence_requires_exact_contract_limit(
+    character_limit: int,
+) -> None:
+    gate, readiness = _case(
+        cloud=replace(
+            CloudRequestBoundTtsEvidence(),
+            character_limit=character_limit,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="family_voice_unavailable"):
+        await gate.require_family_voice()
+
+    assert not readiness.family_private_beta_ready
+    assert readiness.withdrawn_reason == "family_voice_unavailable"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "offline_failure",
+    ("offline_failure", "bad_value"),
     (
-        "owner_license_accepted",
-        "fixed_binary_hashes_match",
-        "english_voice_present",
-        "hindi_voice_present",
-        "hinglish_corpus_passed",
-        "no_network_observed",
-        "cold_restart_voice_presence_passed",
-        "p95_first_audio_ms",
-        "p95_total_ms",
+        ("say_path", "/tmp/fake-say"),
+        ("afconvert_path", "/tmp/fake-afconvert"),
+        ("owner_license_accepted", False),
+        ("say_binary_sha256_b64", ""),
+        ("say_binary_sha256_b64", "!"),
+        ("afconvert_binary_sha256_b64", ""),
+        ("afconvert_binary_sha256_b64", "!"),
+        ("fixed_binary_hashes_match", False),
+        ("english_voice_id", ""),
+        ("hindi_voice_id", ""),
+        ("pcm_sample_format", "float32_le"),
+        ("pcm_sample_rate_hz", 16_000),
+        ("pcm_channels", 2),
+        ("pcm_interleaved", False),
+        ("pcm_container", "wav"),
+        ("bilingual_quality_passed", False),
+        ("hinglish_quality_passed", False),
+        ("no_network_observed", False),
+        ("cold_restart_voice_presence_passed", False),
+        ("p95_first_audio_ms", 1_001),
+        ("p95_total_ms", 3_001),
+        ("is_current", False),
+        ("evidence_age_seconds", 86_401),
+        ("max_age_seconds", 604_800),
     ),
 )
 async def test_unproved_cloud_and_bad_offline_voice_block_stage_one(
     offline_failure: str,
+    bad_value,
 ) -> None:
-    boolean_probe = ("owner", "fixed", "english", "hindi", "hinglish", "no_", "cold")
-    bad_value = False if offline_failure.startswith(boolean_probe) else 99_999
     gate, readiness = _case(
-        offline=replace(OfflineReceipt(), **{offline_failure: bad_value})
+        offline=replace(OfflineMacOSSayEvidence(), **{offline_failure: bad_value})
     )
 
     with pytest.raises(RuntimeError, match="family_voice_unavailable"):

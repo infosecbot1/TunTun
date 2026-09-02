@@ -32,6 +32,11 @@ _CATEGORY_BY_PURPOSE = {
     "cloud_reasoning": "llm",
     "cloud_tts": "tts",
 }
+_MAX_ATTEMPTS_BY_PURPOSE = {
+    "cloud_stt": 1,
+    "cloud_reasoning": 2,
+    "cloud_tts": 2,
+}
 
 
 class TransientProviderError(RuntimeError):
@@ -55,7 +60,7 @@ class RetryPolicy:
     def __post_init__(self) -> None:
         if (
             type(self.max_attempts) is not int
-            or not 1 <= self.max_attempts <= 8
+            or not 1 <= self.max_attempts <= 2
             or type(self.base_delay_ms) is not int
             or not 0 <= self.base_delay_ms <= 60_000
         ):
@@ -122,22 +127,24 @@ class AttemptRunner:
             raise TypeError("template must be an exact AttemptTemplate")
         if type(policy) is not RetryPolicy:
             raise TypeError("policy must be an exact RetryPolicy")
+        self._validate_policy(template, policy)
         for attempt_index in range(policy.max_attempts):
             state = await self._prepare_attempt(template)
             try:
                 result = await invoke(state.route, state.consumption)
             except ProviderNotSentCancellation as error:
-                await self._release_or_settle(state, error.evidence_code)
+                await self._handle_not_sent(state, error)
                 raise error.cause from None
             except ProviderNotSentError as error:
-                await self._release_or_settle(state, error.evidence_code)
+                await self._handle_not_sent(state, error)
                 raise error.cause from None
             except TransientProviderError as error:
                 terminal = await self._terminalize_transient(state, error)
                 if (
-                    self._retryable(error)
+                    error.disposition == "never_sent"
+                    and terminal == "released"
+                    and self._retryable(error)
                     and attempt_index + 1 < policy.max_attempts
-                    and terminal != "settled_after_unsent"
                 ):
                     await self._delay(policy, attempt_index)
                     continue
@@ -162,6 +169,7 @@ class AttemptRunner:
             raise TypeError("template must be an exact AttemptTemplate")
         if type(policy) is not RetryPolicy:
             raise TypeError("policy must be an exact RetryPolicy")
+        self._validate_policy(template, policy)
         attempt_index = 0
         while attempt_index < policy.max_attempts:
             state = await self._prepare_attempt(template)
@@ -170,10 +178,10 @@ class AttemptRunner:
             try:
                 stream = invoke(state.route, state.consumption)
             except ProviderNotSentCancellation as error:
-                await self._release_or_settle(state, error.evidence_code)
+                await self._handle_not_sent(state, error)
                 raise error.cause from None
             except ProviderNotSentError as error:
-                await self._release_or_settle(state, error.evidence_code)
+                await self._handle_not_sent(state, error)
                 raise error.cause from None
             except BaseException as error:
                 await self._release_or_settle(state, type(error).__name__)
@@ -188,10 +196,10 @@ class AttemptRunner:
                     await self._release_or_settle(state, "stream_closed_without_terminal")
                     raise RuntimeError("provider_stream_missing_terminal_chunk") from error
                 except ProviderNotSentCancellation as error:
-                    await self._release_or_settle(state, error.evidence_code)
+                    await self._handle_not_sent(state, error)
                     raise error.cause from None
                 except ProviderNotSentError as error:
-                    await self._release_or_settle(state, error.evidence_code)
+                    await self._handle_not_sent(state, error)
                     raise error.cause from None
                 except TransientProviderError as error:
                     terminal = await self._terminalize_transient(state, error)
@@ -401,6 +409,19 @@ class AttemptRunner:
             await self._settle(state)
             return "settled_after_unsent"
 
+    async def _handle_not_sent(
+        self,
+        state: _AttemptState,
+        error: ProviderNotSentCancellation | ProviderNotSentError,
+    ) -> None:
+        if (
+            error.reservation_id != state.route.budget_reservation_id
+            or error.attempt_id != state.route.attempt_id
+        ):
+            await self._settle(state)
+            raise PermissionError("provider_unsent_scope_mismatch") from None
+        await self._release_or_settle(state, error.evidence_code)
+
     async def _terminalize_transient(
         self,
         state: _AttemptState,
@@ -423,6 +444,11 @@ class AttemptRunner:
     @staticmethod
     def _retryable(error: TransientProviderError) -> bool:
         return error.status_code in _RETRYABLE_STATUS
+
+    @staticmethod
+    def _validate_policy(template: AttemptTemplate, policy: RetryPolicy) -> None:
+        if policy.max_attempts > _MAX_ATTEMPTS_BY_PURPOSE[template.purpose]:
+            raise ValueError("retry_policy_exceeds_purpose_ceiling")
 
     @staticmethod
     async def _delay(policy: RetryPolicy, attempt_index: int) -> None:

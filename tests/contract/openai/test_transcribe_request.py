@@ -4,6 +4,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from tuntun_contracts.provider import RouteAuthorization
+from tuntun_contracts.speech import AuthorizedTranscriptionRequest
 from tuntun_core.adapters.openai.transcribe import (
     _duration_millis,
     _normalize_transcription_languages,
@@ -98,6 +100,28 @@ async def test_transcriber_uses_raw_request_id_duration_usage_and_bilingual_cont
     assert case.receipt.billable_usage.audio_millis == 1_001
     assert result.language == "hinglish"
     assert case.used_with_streaming_response
+
+
+@pytest.mark.asyncio
+async def test_transcriber_rejects_non_gpt_transcribe_model_before_gateway(
+    stt_accounting_case,
+) -> None:
+    case = await stt_accounting_case()
+    wrong_route = RouteAuthorization.model_validate(
+        case.route.model_dump(mode="python") | {"model": "whisper-1"}
+    )
+    request = AuthorizedTranscriptionRequest.model_validate(
+        case.request.model_dump(mode="python") | {"route": wrong_route}
+    )
+
+    async def audio_source():
+        yield case.audio
+
+    with pytest.raises(PermissionError, match="openai_transcription_route_required"):
+        await case.adapter.transcribe(request, audio_source())
+
+    assert case.gateway.calls == 0
+    assert case.sent_parameters == {}
 
 
 @pytest.mark.asyncio

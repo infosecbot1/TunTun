@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+from tuntun_contracts.provider import RouteAuthorization
+from tuntun_contracts.speech import AuthorizedSynthesisRequest
 
 
 @pytest.mark.asyncio
@@ -40,6 +42,23 @@ async def test_tts_character_under_reservation_denies_before_network(tts_account
         _ = [chunk async for chunk in case.adapter.synthesize(case.request)]
 
     assert case.sent_body == {}
+
+
+@pytest.mark.asyncio
+async def test_tts_rejects_non_tts_1_model_before_gateway(tts_accounting_case) -> None:
+    case = await tts_accounting_case()
+    wrong_route = RouteAuthorization.model_validate(
+        case.route.model_dump(mode="python") | {"model": "tts-1-hd"}
+    )
+    request = AuthorizedSynthesisRequest.model_validate(
+        case.request.model_dump(mode="python") | {"route": wrong_route}
+    )
+
+    with pytest.raises(PermissionError, match="openai_tts_route_required"):
+        _ = [chunk async for chunk in case.adapter.synthesize(request)]
+
+    assert case.sent_body == {}
+    assert case.gateway.finalized is False
 
 
 @pytest.mark.asyncio

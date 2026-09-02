@@ -204,7 +204,13 @@ def test_unknown_pseudonymous_ref_denies_before_staging(
             b"k" * 32,
             "proposal-hmac-v1",
             clock,
-        ).map_memory(turn.memory_proposals[0], scope.household_id, scope.session_id, scope.turn_id)
+        ).map_memory(
+            turn.memory_proposals[0],
+            scope.household_id,
+            scope.subject_id,
+            scope.session_id,
+            scope.turn_id,
+        )
 
 
 def test_mapper_requires_signed_response_receipt_and_turn_scoped_refs(
@@ -224,6 +230,50 @@ def test_mapper_requires_signed_response_receipt_and_turn_scoped_refs(
             b"k" * 32,
             "proposal-hmac-v1",
             clock,
+        )
+
+
+def test_mapper_rejects_cross_subject_scope_before_resolving_refs(
+    clock: FakeClock,
+    verified_response_receipt: VerifiedProviderResponseReceipt,
+) -> None:
+    scope = verified_response_receipt.receipt
+
+    class Refs:
+        def subject(self, ref, **binding):
+            raise AssertionError("subject refs must not resolve after scope failure")
+
+    class Provenance:
+        def attach(self, *args):
+            raise AssertionError("provenance must not attach after scope failure")
+
+    intent = RememberPreferenceIntent.model_validate(
+        {
+            "kind": "remember_preference",
+            "subject_ref": "subject:current",
+            "category": "synthetic",
+            "key": "format",
+            "value": "brief",
+            "confidence_micros": 900_000,
+            "reason": "asked",
+        }
+    )
+    mapper = ProposalMapper(
+        Refs(),
+        Provenance(),
+        verified_response_receipt,
+        b"k" * 32,
+        "proposal-hmac-v1",
+        clock,
+    )
+
+    with pytest.raises(PermissionError, match="provider_response_receipt_binding"):
+        mapper.map_memory(
+            intent,
+            scope.household_id,
+            uuid4(),
+            scope.session_id,
+            scope.turn_id,
         )
 
 
@@ -274,7 +324,13 @@ def test_memory_mapper_derives_audience_from_server_profile_not_provider(
         "proposal-hmac-v1",
         clock,
     )
-    draft = mapper.map_memory(intent, scope.household_id, scope.session_id, scope.turn_id)
+    draft = mapper.map_memory(
+        intent,
+        scope.household_id,
+        scope.subject_id,
+        scope.session_id,
+        scope.turn_id,
+    )
     assert draft.audience == expected_audience
 
 
@@ -314,7 +370,13 @@ def test_action_mapper_and_executor_share_exact_closed_parameter_payload(
         ),
         uncertainty_micros=10_000,
     ).action_proposals[0]
-    draft = mapper.map_action(intent, scope.household_id, scope.session_id, scope.turn_id)
+    draft = mapper.map_action(
+        intent,
+        scope.household_id,
+        scope.subject_id,
+        scope.session_id,
+        scope.turn_id,
+    )
     binding = mapper.bind_action(
         draft,
         scope.household_id,

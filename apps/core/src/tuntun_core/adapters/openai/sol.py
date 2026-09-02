@@ -82,7 +82,10 @@ class OpenAISol:
         output = bytearray()
 
         def open_response() -> Any:
-            return self._client.responses.stream(**payload)
+            return self._client.responses.stream(
+                **payload,
+                timeout=request.timeout_ms / 1_000.0,
+            )
 
         async def observe(response: Any) -> ProviderUsageObservation:
             final = await response.get_final_response()

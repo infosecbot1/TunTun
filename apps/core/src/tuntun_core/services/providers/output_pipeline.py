@@ -94,6 +94,7 @@ class OutputPipeline:
             raise TypeError("context must be an exact OutputContext")
         output.response_receipt.require_scope(
             context.household_id,
+            context.subject_id,
             context.session_id,
             context.turn_id,
         )

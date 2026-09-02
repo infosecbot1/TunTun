@@ -158,7 +158,11 @@ class OpenAITranscriber:
     ) -> TranscriptResult:
         if type(request) is not AuthorizedTranscriptionRequest:
             raise TypeError("request must be an exact AuthorizedTranscriptionRequest")
-        if request.route.provider != "openai" or request.route.purpose != "cloud_stt":
+        if (
+            request.route.provider != "openai"
+            or request.route.purpose != "cloud_stt"
+            or request.route.model != "gpt-transcribe"
+        ):
             raise PermissionError("openai_transcription_route_required")
         audio_bytes = await self._buffer_audio(request, audio)
         expected = commit_private(

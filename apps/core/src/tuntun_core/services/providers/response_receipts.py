@@ -59,9 +59,16 @@ class VerifiedProviderResponseReceipt:
     def receipt_id(self) -> UUID:
         return self.receipt.receipt_id
 
-    def require_scope(self, household_id: UUID, session_id: UUID, turn_id: UUID) -> None:
+    def require_scope(
+        self,
+        household_id: UUID,
+        subject_id: UUID | None,
+        session_id: UUID,
+        turn_id: UUID,
+    ) -> None:
         if (
             self.receipt.household_id != household_id
+            or self.receipt.subject_id != subject_id
             or self.receipt.session_id != session_id
             or self.receipt.turn_id != turn_id
         ):

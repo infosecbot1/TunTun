@@ -36,7 +36,11 @@ class OpenAITTS:
     ) -> AsyncIterator[SpeechChunk]:
         if type(request) is not AuthorizedSynthesisRequest:
             raise TypeError("request must be an exact AuthorizedSynthesisRequest")
-        if request.route.provider != "openai" or request.route.purpose != "cloud_tts":
+        if (
+            request.route.provider != "openai"
+            or request.route.purpose != "cloud_tts"
+            or request.route.model != "tts-1"
+        ):
             raise PermissionError("openai_tts_route_required")
         if (
             request.text != unicodedata.normalize("NFC", request.text)

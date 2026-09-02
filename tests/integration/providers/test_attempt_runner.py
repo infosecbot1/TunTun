@@ -160,6 +160,56 @@ class _BlockingReleaseBudget(RecordingBudget):
         return await super().release_unsent(reservation_id, attempt_id, proof)
 
 
+def test_retry_policy_rejects_global_attempt_counts_above_two() -> None:
+    with pytest.raises(ValueError, match="invalid retry policy"):
+        RetryPolicy(max_attempts=3, base_delay_ms=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ("run", "stream"))
+async def test_stt_attempt_policy_above_one_fails_before_reservation(
+    mode: Literal["run", "stream"],
+) -> None:
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    budget = RecordingBudget(clock)
+    attempts = RecordingTurnAttempts(budget)
+    runner = AttemptRunner(RecordingRouteAuthorizer(clock), budget, attempts, clock)
+    invoked = False
+
+    async def invoke_run(_route, _consumption) -> str:
+        nonlocal invoked
+        invoked = True
+        return "unreachable"
+
+    def invoke_stream(_route, _consumption) -> AsyncIterator[SpeechChunk]:
+        async def source() -> AsyncIterator[SpeechChunk]:
+            nonlocal invoked
+            invoked = True
+            yield SpeechChunk(request_id=uuid4(), sequence=0, pcm=b"pcm", final=False)
+
+        return source()
+
+    with pytest.raises(ValueError, match="retry_policy_exceeds_purpose_ceiling"):
+        if mode == "run":
+            await runner.run(
+                _stt_template(),
+                RetryPolicy(max_attempts=2, base_delay_ms=1),
+                invoke_run,
+            )
+        else:
+            await _collect_speech(
+                runner.stream(
+                    _stt_template(),
+                    RetryPolicy(max_attempts=2, base_delay_ms=1),
+                    invoke_stream,
+                )
+            )
+
+    assert invoked is False
+    assert budget.reservation_ids == []
+    assert attempts.tracked == []
+
+
 @pytest.mark.asyncio
 async def test_reasoning_retry_has_distinct_authorization_and_reservation() -> None:
     clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
@@ -174,8 +224,8 @@ async def test_reasoning_retry_has_distinct_authorization_and_reservation() -> N
         nonlocal calls
         calls += 1
         if calls == 1:
-            await budget.mark_sent(route.budget_reservation_id, route.attempt_id)
-            raise TransientProviderError(503, "sent", "http_503")
+            raise TransientProviderError(503, "never_sent", "connect_failed")
+        await budget.mark_sent(route.budget_reservation_id, route.attempt_id)
         budget.record_exact_usage(route.attempt_id)
         return "ok"
 
@@ -188,10 +238,45 @@ async def test_reasoning_retry_has_distinct_authorization_and_reservation() -> N
     assert result == "ok"
     assert len(set(authority.attempt_ids)) == 2
     assert len(set(budget.reservation_ids)) == 2
-    assert budget.conservative_settlements == [budget.reservation_ids[0]]
+    assert len(budget.released_pairs) == 1
+    assert budget.conservative_settlements == []
     assert len(attempts.tracked) == 2
     assert attempts.completed == attempts.tracked
     assert attempts.all_completions_after_budget_commit(budget)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ("sent", "unknown"))
+async def test_reasoning_sent_or_unknown_retryable_failure_never_retries(
+    disposition: Literal["sent", "unknown"],
+) -> None:
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    authority = RecordingRouteAuthorizer(clock)
+    budget = RecordingBudget(clock)
+    attempts = RecordingTurnAttempts(budget)
+    runner = AttemptRunner(authority=authority, budget=budget, turn_attempts=attempts, clock=clock)
+    calls = 0
+
+    async def invoke(route, _supplied) -> str:
+        nonlocal calls
+        calls += 1
+        if disposition == "sent":
+            await budget.mark_sent(route.budget_reservation_id, route.attempt_id)
+        raise TransientProviderError(503, disposition, "http_503")
+
+    with pytest.raises(TransientProviderError, match="http_503"):
+        await runner.run(
+            template=_reasoning_template(),
+            policy=RetryPolicy(max_attempts=2, base_delay_ms=1),
+            invoke=invoke,
+        )
+
+    assert calls == 1
+    assert len(authority.attempt_ids) == 1
+    assert len(budget.reservation_ids) == 1
+    assert budget.released_pairs == set()
+    assert len(budget.conservative_settlements) == 1
+    assert attempts.completed == attempts.tracked
 
 
 @pytest.mark.asyncio
@@ -225,6 +310,104 @@ async def test_gateway_pre_network_failure_releases_reservation_without_egress(
     assert network_calls == 0
     assert budget.released_pairs == set(budget.terminal_pairs)
     assert budget.conservative_settlements == []
+    assert attempts.completed == attempts.tracked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("error", "cancellation"))
+async def test_run_provider_not_sent_scope_mismatch_settles_active_without_retry(
+    kind: Literal["error", "cancellation"],
+) -> None:
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    authority = RecordingRouteAuthorizer(clock)
+    budget = RecordingBudget(clock)
+    attempts = RecordingTurnAttempts(budget)
+    runner = AttemptRunner(authority, budget, attempts, clock)
+    calls = 0
+
+    async def invoke(_route, _consumption) -> str:
+        nonlocal calls
+        calls += 1
+        if kind == "cancellation":
+            raise ProviderNotSentCancellation(
+                uuid4(),
+                uuid4(),
+                "claim_cancelled_before_network",
+                asyncio.CancelledError("wrong scoped cancellation"),
+            )
+        raise ProviderNotSentError(
+            uuid4(),
+            uuid4(),
+            "claim_failed_before_network",
+            RuntimeError("wrong scoped failure"),
+        )
+
+    with pytest.raises(PermissionError, match="provider_unsent_scope_mismatch"):
+        await runner.run(
+            _reasoning_template(),
+            RetryPolicy(max_attempts=2, base_delay_ms=1),
+            invoke,
+        )
+
+    assert calls == 1
+    assert len(authority.attempt_ids) == 1
+    assert len(budget.reservation_ids) == 1
+    assert budget.released_pairs == set()
+    assert budget.conservative_settlements == [budget.reservation_ids[0]]
+    assert attempts.completed == attempts.tracked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("error", "cancellation"))
+async def test_stream_provider_not_sent_scope_mismatch_settles_active_without_retry(
+    kind: Literal["error", "cancellation"],
+) -> None:
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    authority = RecordingRouteAuthorizer(clock)
+    budget = RecordingBudget(clock)
+    attempts = RecordingTurnAttempts(budget)
+    runner = AttemptRunner(authority, budget, attempts, clock)
+    template = _tts_template()
+    calls = 0
+
+    def invoke(_route, _consumption) -> AsyncIterator[SpeechChunk]:
+        nonlocal calls
+        calls += 1
+
+        async def source() -> AsyncIterator[SpeechChunk]:
+            if kind == "cancellation":
+                raise ProviderNotSentCancellation(
+                    uuid4(),
+                    uuid4(),
+                    "claim_cancelled_before_network",
+                    asyncio.CancelledError("wrong scoped cancellation"),
+                )
+            raise ProviderNotSentError(
+                uuid4(),
+                uuid4(),
+                "claim_failed_before_network",
+                RuntimeError("wrong scoped failure"),
+            )
+            if False:
+                yield SpeechChunk(
+                    request_id=template.request_id,
+                    sequence=0,
+                    pcm=b"unreachable",
+                    final=False,
+                )
+
+        return source()
+
+    with pytest.raises(PermissionError, match="provider_unsent_scope_mismatch"):
+        await _collect_speech(
+            runner.stream(template, RetryPolicy(max_attempts=2, base_delay_ms=1), invoke)
+        )
+
+    assert calls == 1
+    assert len(authority.attempt_ids) == 1
+    assert len(budget.reservation_ids) == 1
+    assert budget.released_pairs == set()
+    assert budget.conservative_settlements == [budget.reservation_ids[0]]
     assert attempts.completed == attempts.tracked
 
 

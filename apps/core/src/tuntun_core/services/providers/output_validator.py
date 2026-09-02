@@ -107,10 +107,11 @@ class ProposalMapper:
         self,
         intent: ProviderMemoryIntent,
         household_id: UUID,
+        subject_id: UUID | None,
         session_id: UUID,
         turn_id: UUID,
     ) -> MemoryProposalDraft:
-        self._verified.require_scope(household_id, session_id, turn_id)
+        self._verified.require_scope(household_id, subject_id, session_id, turn_id)
         if isinstance(intent, RememberPreferenceIntent):
             subject_id = self._refs.subject(
                 intent.subject_ref,
@@ -202,10 +203,11 @@ class ProposalMapper:
         self,
         intent: ProviderActionIntent,
         household_id: UUID,
+        subject_id: UUID | None,
         session_id: UUID,
         turn_id: UUID,
     ) -> TimerCreateActionDraft | TimerTargetActionDraft:
-        self._verified.require_scope(household_id, session_id, turn_id)
+        self._verified.require_scope(household_id, subject_id, session_id, turn_id)
         if isinstance(intent, TimerCreateIntent):
             timer_id = uuid4()
             parameters = {"duration_seconds": intent.duration_seconds, "label": intent.label}

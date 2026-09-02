@@ -6,6 +6,7 @@ import pytest
 from tuntun_contracts.base import canonical_mapping_bytes
 from tuntun_core.adapters.openai import sol as sol_module
 from tuntun_core.services.providers.attempts import TransientProviderError
+from tuntun_core.services.providers.output_validator import AssistantTurn
 
 
 @pytest.mark.asyncio
@@ -47,6 +48,27 @@ async def test_sol_response_language_comes_from_validated_assistant_turn(
 
     assert response.language == "hi"
     assert response.text.startswith('{"answer_text"')
+
+
+@pytest.mark.asyncio
+async def test_reasoning_timeout_is_transmitted_but_not_committed(
+    sol_adapter,
+    authorized_reasoning_request,
+    fake_responses_stream,
+) -> None:
+    await sol_adapter.complete(authorized_reasoning_request)
+
+    assert fake_responses_stream.sent_parameters["timeout"] == 45.0
+    payload, body = sol_module.build_openai_reasoning_wire_request(
+        model=authorized_reasoning_request.model,
+        messages=authorized_reasoning_request.messages,
+        allowed_tools=authorized_reasoning_request.allowed_tools,
+        max_output_tokens=authorized_reasoning_request.max_output_tokens,
+        store=authorized_reasoning_request.store,
+        output_schema=AssistantTurn.model_json_schema(),
+    )
+    assert "timeout" not in payload
+    assert b"timeout" not in body
 
 
 @pytest.mark.asyncio
