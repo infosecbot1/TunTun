@@ -12598,6 +12598,335 @@ components:
       - occurred_at
       title: StopSignal
       type: object
+    tuntun_contracts.reachy_operator.ReachyAcceptedCapabilityV1:
+      additionalProperties: false
+      properties:
+        capability_report_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Capability Report Sha256
+          type: string
+        acceptance_receipt_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Acceptance Receipt Sha256
+          type: string
+        sdk_version:
+          maxLength: 32
+          minLength: 5
+          pattern: ^(?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)$
+          title: Sdk Version
+          type: string
+        daemon_version:
+          maxLength: 32
+          minLength: 5
+          pattern: ^(?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)$
+          title: Daemon Version
+          type: string
+        ssh_username:
+          pattern: ^(?:[a-z_][a-z0-9_-]{0,2}|[a-qs-z_][a-z0-9_-]{3}|r[a-np-z0-9_-][a-z0-9_-]{2}|ro[a-np-z0-9_-][a-z0-9_-]|roo[a-su-z0-9_-]|[a-z_][a-z0-9_-]{4,31})$
+          title: Ssh Username
+          type: string
+          x-tuntun-field-safety:
+            constraint: non-root-posix-username
+            forbidden_values:
+            - root
+            runtime_authoritative: true
+        python_executable:
+          const: /venvs/apps_venv/bin/python3
+          title: Python Executable
+          type: string
+        python_version:
+          enum:
+          - '3.11'
+          - '3.12'
+          title: Python Version
+          type: string
+        python_abi:
+          enum:
+          - cp311
+          - cp312
+          title: Python Abi
+          type: string
+        selected_wheel_tag:
+          const: py3-none-any
+          title: Selected Wheel Tag
+          type: string
+        target_tag_set_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Target Tag Set Sha256
+          type: string
+        runtime_inventory_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Runtime Inventory Sha256
+          type: string
+      required:
+      - capability_report_sha256
+      - acceptance_receipt_sha256
+      - sdk_version
+      - daemon_version
+      - ssh_username
+      - python_executable
+      - python_version
+      - python_abi
+      - selected_wheel_tag
+      - target_tag_set_sha256
+      - runtime_inventory_sha256
+      title: ReachyAcceptedCapabilityV1
+      type: object
+      x-tuntun-cross-field-invariants:
+      - allowed_pairs:
+        - - '3.11'
+          - cp311
+        - - '3.12'
+          - cp312
+        constraint: supported-reachy-interpreter-abi-pair
+        fields:
+        - python_version
+        - python_abi
+        runtime_authoritative: true
+    tuntun_contracts.reachy_operator.ReachyOperatorStateV1:
+      $defs:
+        ReachyAcceptedCapabilityV1:
+          additionalProperties: false
+          properties:
+            capability_report_sha256:
+              pattern: ^[0-9a-f]{64}$
+              title: Capability Report Sha256
+              type: string
+            acceptance_receipt_sha256:
+              pattern: ^[0-9a-f]{64}$
+              title: Acceptance Receipt Sha256
+              type: string
+            sdk_version:
+              maxLength: 32
+              minLength: 5
+              pattern: ^(?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)$
+              title: Sdk Version
+              type: string
+            daemon_version:
+              maxLength: 32
+              minLength: 5
+              pattern: ^(?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)[.](?:0|[1-9][0-9]*)$
+              title: Daemon Version
+              type: string
+            ssh_username:
+              pattern: ^(?:[a-z_][a-z0-9_-]{0,2}|[a-qs-z_][a-z0-9_-]{3}|r[a-np-z0-9_-][a-z0-9_-]{2}|ro[a-np-z0-9_-][a-z0-9_-]|roo[a-su-z0-9_-]|[a-z_][a-z0-9_-]{4,31})$
+              title: Ssh Username
+              type: string
+              x-tuntun-field-safety:
+                constraint: non-root-posix-username
+                forbidden_values:
+                - root
+                runtime_authoritative: true
+            python_executable:
+              const: /venvs/apps_venv/bin/python3
+              title: Python Executable
+              type: string
+            python_version:
+              enum:
+              - '3.11'
+              - '3.12'
+              title: Python Version
+              type: string
+            python_abi:
+              enum:
+              - cp311
+              - cp312
+              title: Python Abi
+              type: string
+            selected_wheel_tag:
+              const: py3-none-any
+              title: Selected Wheel Tag
+              type: string
+            target_tag_set_sha256:
+              pattern: ^[0-9a-f]{64}$
+              title: Target Tag Set Sha256
+              type: string
+            runtime_inventory_sha256:
+              pattern: ^[0-9a-f]{64}$
+              title: Runtime Inventory Sha256
+              type: string
+          required:
+          - capability_report_sha256
+          - acceptance_receipt_sha256
+          - sdk_version
+          - daemon_version
+          - ssh_username
+          - python_executable
+          - python_version
+          - python_abi
+          - selected_wheel_tag
+          - target_tag_set_sha256
+          - runtime_inventory_sha256
+          title: ReachyAcceptedCapabilityV1
+          type: object
+          x-tuntun-cross-field-invariants:
+          - allowed_pairs:
+            - - '3.11'
+              - cp311
+            - - '3.12'
+              - cp312
+            constraint: supported-reachy-interpreter-abi-pair
+            fields:
+            - python_version
+            - python_abi
+            runtime_authoritative: true
+      additionalProperties: false
+      properties:
+        schema_version:
+          const: tuntun.reachy-operator-state.v1
+          title: Schema Version
+          type: string
+        commissioning_generation:
+          minimum: 1
+          title: Commissioning Generation
+          type: integer
+        commissioning_state_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Commissioning State Sha256
+          type: string
+        ssh_username:
+          pattern: ^(?:[a-z_][a-z0-9_-]{0,2}|[a-qs-z_][a-z0-9_-]{3}|r[a-np-z0-9_-][a-z0-9_-]{2}|ro[a-np-z0-9_-][a-z0-9_-]|roo[a-su-z0-9_-]|[a-z_][a-z0-9_-]{4,31})$
+          title: Ssh Username
+          type: string
+          x-tuntun-field-safety:
+            constraint: non-root-posix-username
+            forbidden_values:
+            - root
+            runtime_authoritative: true
+        reachy_ipv4:
+          pattern: ^(?:10[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])|172[.](?:1[6-9]|2[0-9]|3[0-1])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])|192[.]168[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9]))$
+          title: Reachy Ipv4
+          type: string
+          x-tuntun-field-safety:
+            allowed_cidrs:
+            - 10.0.0.0/8
+            - 172.16.0.0/12
+            - 192.168.0.0/16
+            constraint: canonical-explicit-rfc1918-ipv4
+            runtime_authoritative: true
+        core_ipv4:
+          pattern: ^(?:10[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])|172[.](?:1[6-9]|2[0-9]|3[0-1])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])|192[.]168[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])[.](?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9]))$
+          title: Core Ipv4
+          type: string
+          x-tuntun-field-safety:
+            allowed_cidrs:
+            - 10.0.0.0/8
+            - 172.16.0.0/12
+            - 192.168.0.0/16
+            constraint: canonical-explicit-rfc1918-ipv4
+            runtime_authoritative: true
+        pinned_ssh_host_key_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Pinned Ssh Host Key Sha256
+          type: string
+        dhcp_receipt_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Dhcp Receipt Sha256
+          type: string
+        accepted_capability:
+          anyOf:
+          - $ref: '#/components/schemas/tuntun_contracts.reachy_operator.ReachyOperatorStateV1/$defs/ReachyAcceptedCapabilityV1'
+          - type: 'null'
+      required:
+      - schema_version
+      - commissioning_generation
+      - commissioning_state_sha256
+      - ssh_username
+      - reachy_ipv4
+      - core_ipv4
+      - pinned_ssh_host_key_sha256
+      - dhcp_receipt_sha256
+      - accepted_capability
+      title: ReachyOperatorStateV1
+      type: object
+      x-tuntun-cross-field-invariants:
+      - constraint: distinct-rfc1918-operator-endpoints
+        fields:
+        - reachy_ipv4
+        - core_ipv4
+        relation: not_equal
+        runtime_authoritative: true
+      - constraint: accepted-capability-username-match
+        fields:
+        - ssh_username
+        - accepted_capability.ssh_username
+        relation: equal_when_present
+        runtime_authoritative: true
+    tuntun_contracts.reachy_time.CoreTimeProofV1:
+      additionalProperties: false
+      properties:
+        schema_version:
+          const: tuntun.core-time-proof.v1
+          title: Schema Version
+          type: string
+        endpoint_generation:
+          minimum: 1
+          title: Endpoint Generation
+          type: integer
+        time_sequence:
+          minimum: 1
+          title: Time Sequence
+          type: integer
+        request_nonce_b64:
+          maxLength: 44
+          minLength: 44
+          pattern: ^[A-Za-z0-9+/]{43}=$
+          title: Request Nonce B64
+          type: string
+        core_utc:
+          format: date-time
+          title: Core Utc
+          type: string
+          x-tuntun-field-safety:
+            canonical_serialization_offset: Z
+            constraint: utc-offset-zero-datetime
+            required_utc_offset_seconds: 0
+            runtime_authoritative: true
+        authority_health_generation:
+          minimum: 1
+          title: Authority Health Generation
+          type: integer
+        signing_key_id:
+          maxLength: 83
+          minLength: 12
+          pattern: ^ed25519:[a-z0-9][a-z0-9._-]{0,63}:v[1-9][0-9]{0,8}$
+          title: Signing Key Id
+          type: string
+        signature_b64:
+          maxLength: 88
+          minLength: 88
+          pattern: ^[A-Za-z0-9+/]{86}==$
+          title: Signature B64
+          type: string
+      required:
+      - schema_version
+      - endpoint_generation
+      - time_sequence
+      - request_nonce_b64
+      - core_utc
+      - authority_health_generation
+      - signing_key_id
+      - signature_b64
+      title: CoreTimeProofV1
+      type: object
+    tuntun_contracts.reachy_time.CoreTimeRequestV1:
+      additionalProperties: false
+      properties:
+        schema_version:
+          const: tuntun.core-time-request.v1
+          title: Schema Version
+          type: string
+        request_nonce_b64:
+          maxLength: 44
+          minLength: 44
+          pattern: ^[A-Za-z0-9+/]{43}=$
+          title: Request Nonce B64
+          type: string
+      required:
+      - schema_version
+      - request_nonce_b64
+      title: CoreTimeRequestV1
+      type: object
     tuntun_contracts.speech.AudioFormat:
       additionalProperties: false
       properties:

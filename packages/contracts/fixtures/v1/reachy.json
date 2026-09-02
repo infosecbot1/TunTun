@@ -1,8 +1,12 @@
 {
   "canonical_examples": {
     "CameraWindowGrant": "{\"action_name\":\"identity.enroll\",\"device_id\":\"00000000-0000-0000-0000-0000000001f7\",\"expires_at\":\"2026-08-27T00:00:05.000000Z\",\"grant_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"grant_id\":\"00000000-0000-0000-0000-0000000001f5\",\"household_id\":\"00000000-0000-0000-0000-0000000001f6\",\"issued_at\":\"2026-08-27T00:00:00.000000Z\",\"max_frame_bytes\":1024,\"max_frames\":2,\"max_frames_per_second\":1,\"max_total_bytes\":2048,\"purpose\":\"explicit_enrollment\",\"session_id\":\"00000000-0000-0000-0000-0000000001f8\",\"subject_id\":\"00000000-0000-0000-0000-0000000001f4\",\"turn_id\":\"00000000-0000-0000-0000-0000000001f9\"}",
+    "CoreTimeProofV1": "{\"authority_health_generation\":1,\"core_utc\":\"2026-08-27T00:00:00.000000Z\",\"endpoint_generation\":1,\"request_nonce_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"schema_version\":\"tuntun.core-time-proof.v1\",\"signature_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\",\"signing_key_id\":\"ed25519:fixture:v1\",\"time_sequence\":1}",
+    "CoreTimeRequestV1": "{\"request_nonce_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"schema_version\":\"tuntun.core-time-request.v1\"}",
+    "ReachyAcceptedCapabilityV1": "{\"acceptance_receipt_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"capability_report_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"daemon_version\":\"1.2.3\",\"python_abi\":\"cp311\",\"python_executable\":\"/venvs/apps_venv/bin/python3\",\"python_version\":\"3.11\",\"runtime_inventory_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"sdk_version\":\"1.2.3\",\"selected_wheel_tag\":\"py3-none-any\",\"ssh_username\":\"tuntunops\",\"target_tag_set_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
     "ReachyCommand": "{\"command_id\":\"00000000-0000-0000-0000-0000000001fb\",\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"gesture_id\":null,\"kind\":\"state\",\"media_stream_id\":null,\"state\":\"idle\",\"turn_id\":\"00000000-0000-0000-0000-0000000001fc\"}",
     "ReachyHealth": "{\"daemon_connected\":false,\"queue_depth\":0,\"state\":\"booting\"}",
+    "ReachyOperatorStateV1": "{\"accepted_capability\":{\"acceptance_receipt_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"capability_report_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"daemon_version\":\"1.2.3\",\"python_abi\":\"cp311\",\"python_executable\":\"/venvs/apps_venv/bin/python3\",\"python_version\":\"3.11\",\"runtime_inventory_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"sdk_version\":\"1.2.3\",\"selected_wheel_tag\":\"py3-none-any\",\"ssh_username\":\"tuntunops\",\"target_tag_set_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"commissioning_generation\":1,\"commissioning_state_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"core_ipv4\":\"192.168.10.10\",\"dhcp_receipt_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"pinned_ssh_host_key_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"reachy_ipv4\":\"192.168.10.20\",\"schema_version\":\"tuntun.reachy-operator-state.v1\",\"ssh_username\":\"tuntunops\"}",
     "ReachyReceipt": "{\"accepted\":false,\"command_id\":\"00000000-0000-0000-0000-0000000001fd\",\"reason_code\":\"x\"}",
     "SafetyReceipt": "{\"buffers_cleared\":false,\"motion_stopped\":false,\"playback_stopped\":false,\"turn_id\":\"00000000-0000-0000-0000-0000000001fe\"}",
     "StopAllReceiptBundleV1": "{\"command_receipt\":{\"accepted\":false,\"command_id\":\"00000000-0000-0000-0000-0000000001ff\",\"reason_code\":\"x\"},\"safety_receipt\":{\"buffers_cleared\":false,\"motion_stopped\":false,\"playback_stopped\":false,\"turn_id\":\"00000000-0000-0000-0000-000000000200\"},\"schema_version\":\"tuntun.reachy-stop-all-receipts.v1\"}",
@@ -30,6 +34,33 @@
       "subject_id": "00000000-0000-0000-0000-0000000001f4",
       "turn_id": "00000000-0000-0000-0000-0000000001f9"
     },
+    "CoreTimeProofV1": {
+      "authority_health_generation": 1,
+      "core_utc": "2026-08-27T00:00:00Z",
+      "endpoint_generation": 1,
+      "request_nonce_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "schema_version": "tuntun.core-time-proof.v1",
+      "signature_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "signing_key_id": "ed25519:fixture:v1",
+      "time_sequence": 1
+    },
+    "CoreTimeRequestV1": {
+      "request_nonce_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "schema_version": "tuntun.core-time-request.v1"
+    },
+    "ReachyAcceptedCapabilityV1": {
+      "acceptance_receipt_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "capability_report_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "daemon_version": "1.2.3",
+      "python_abi": "cp311",
+      "python_executable": "/venvs/apps_venv/bin/python3",
+      "python_version": "3.11",
+      "runtime_inventory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sdk_version": "1.2.3",
+      "selected_wheel_tag": "py3-none-any",
+      "ssh_username": "tuntunops",
+      "target_tag_set_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
     "ReachyCommand": {
       "command_id": "00000000-0000-0000-0000-0000000001fb",
       "expires_at": "2026-08-27T00:00:00Z",
@@ -43,6 +74,29 @@
       "daemon_connected": false,
       "queue_depth": 0,
       "state": "booting"
+    },
+    "ReachyOperatorStateV1": {
+      "accepted_capability": {
+        "acceptance_receipt_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "capability_report_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "daemon_version": "1.2.3",
+        "python_abi": "cp311",
+        "python_executable": "/venvs/apps_venv/bin/python3",
+        "python_version": "3.11",
+        "runtime_inventory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "sdk_version": "1.2.3",
+        "selected_wheel_tag": "py3-none-any",
+        "ssh_username": "tuntunops",
+        "target_tag_set_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "commissioning_generation": 1,
+      "commissioning_state_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "core_ipv4": "192.168.10.10",
+      "dhcp_receipt_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "pinned_ssh_host_key_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "reachy_ipv4": "192.168.10.20",
+      "schema_version": "tuntun.reachy-operator-state.v1",
+      "ssh_username": "tuntunops"
     },
     "ReachyReceipt": {
       "accepted": false,
