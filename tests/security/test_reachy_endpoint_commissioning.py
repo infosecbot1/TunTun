@@ -14,6 +14,7 @@ from uuid import UUID
 import pytest
 import tuntun_edge.transport as transport_exports
 import tuntun_edge.transport.commissioning as commissioning_module
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
@@ -24,6 +25,7 @@ from tuntun_contracts.base import (
     Sensitivity,
     canonical_bytes,
     canonical_mapping_bytes,
+    parse_contract_json,
 )
 from tuntun_contracts.events import (
     EventEnvelope,
@@ -35,6 +37,7 @@ from tuntun_contracts.reachy_operator import ReachyAcceptedCapabilityV1, ReachyO
 from tuntun_contracts.reachy_time import CoreTimeProofV1
 from tuntun_edge.transport import commissioning_repository as repository_module
 from tuntun_edge.transport.commissioning import (
+    SYNTHETIC_ISSUER_STATE_ID,
     CommissioningStateV1,
     GeneratedReachyMaterialBundle,
     GeneratedReachyMaterialV1,
@@ -45,6 +48,7 @@ from tuntun_edge.transport.commissioning import (
     ReachyCommissioningService,
     ReachyCoreEndpointV1,
     SyntheticCoreCommissioningIssuer,
+    SyntheticCoreIssuerLifecycleV1,
     SyntheticReachyPrivateMaterialGenerator,
     _SyntheticLocalPhysicalEvidence,
     _SyntheticLocalPhysicalProofIssuer,
@@ -224,6 +228,107 @@ def _legacy_state_bytes(generation: int = 1) -> bytes:
             "revoked_key_ids": [],
             "revoked_certificate_sha256": [],
         }
+    )
+
+
+def _legacy_prepared_core_material_values(
+    generation: int = 1,
+    *,
+    core_ipv4: str = "192.168.50.10",
+) -> dict[str, object]:
+    core_public = hashlib.sha256(f"legacy-core-hmac-public-{generation}".encode("ascii")).digest()
+    return {
+        "schema_version": "tuntun.core-prepared-commissioning-material.v1",
+        "generation": generation,
+        "commissioning_uuid": _uuid(generation),
+        "core_ipv4": core_ipv4,
+        "core_link_address": "02:00:5e:00:53:01",
+        "port": 7443,
+        "boot_identity_sha256": _digest(f"boot-{generation}"),
+        "capability_evidence_sha256": _digest(f"capability-{generation}"),
+        "dhcp_reservation_receipt_sha256": _digest(f"dhcp-{generation}"),
+        "household_ca_sha256": _digest(f"ca-{generation}"),
+        "certificate_generation": generation,
+        "server_key_generation": generation,
+        "trust_digest_generation": generation,
+        "server_leaf_sha256": _digest(f"server-leaf-{generation}"),
+        "server_key_id": f"reachy-server-g{generation}",
+        "server_public_key_sha256": _digest(f"server-public-{generation}"),
+        "core_hmac_agreement_public_key_b64": base64.b64encode(core_public).decode("ascii"),
+        "core_hmac_agreement_public_key_sha256": hashlib.sha256(core_public).hexdigest(),
+    }
+
+
+def _current_prepared_core_material_values(
+    generation: int = 1,
+    *,
+    core_ipv4: str = "192.168.50.10",
+    server_private_key_handle: str | None = None,
+) -> dict[str, object]:
+    values = _legacy_prepared_core_material_values(
+        generation,
+        core_ipv4=core_ipv4,
+    )
+    values["server_key_id"] = f"ed25519:reachy-server:v{generation}"
+    values["server_private_key_handle"] = (
+        server_private_key_handle
+        if server_private_key_handle is not None
+        else f"reachy-server-g{generation}-current"
+    )
+    values["server_public_key_sha256"] = _digest(f"current-server-public-{generation}")
+    return values
+
+
+def _endpoint_for_prepared_core_material(prepared: Any) -> ReachyCoreEndpointV1:
+    return _endpoint(
+        prepared.generation,
+        core_ipv4=prepared.core_ipv4,
+        overrides={
+            "commissioning_uuid": prepared.commissioning_uuid,
+            "certificate_generation": prepared.certificate_generation,
+            "server_key_generation": prepared.server_key_generation,
+            "trust_digest_generation": prepared.trust_digest_generation,
+            "core_link_address": prepared.core_link_address,
+            "port": prepared.port,
+            "household_ca_sha256": prepared.household_ca_sha256,
+            "server_leaf_sha256": prepared.server_leaf_sha256,
+            "server_key_id": prepared.server_key_id,
+            "server_public_key_sha256": prepared.server_public_key_sha256,
+            "dhcp_reservation_receipt_sha256": prepared.dhcp_reservation_receipt_sha256,
+            "boot_identity_sha256": prepared.boot_identity_sha256,
+            "capability_evidence_sha256": prepared.capability_evidence_sha256,
+        },
+    )
+
+
+def _legacy_issuer_lifecycle_values(
+    *,
+    active_generation: int | None,
+    staged_generations: tuple[int, ...] = (),
+    revoked_generations: tuple[int, ...] = (),
+) -> dict[str, object]:
+    return {
+        "schema_version": "tuntun.synthetic-core-issuer-lifecycle.v1",
+        "active_generation": active_generation,
+        "staged_generations": tuple(
+            _legacy_prepared_core_material_values(generation) for generation in staged_generations
+        ),
+        "revoked_generations": revoked_generations,
+    }
+
+
+def _legacy_issuer_lifecycle_bytes(
+    *,
+    active_generation: int | None,
+    staged_generations: tuple[int, ...] = (),
+    revoked_generations: tuple[int, ...] = (),
+) -> bytes:
+    return canonical_mapping_bytes(
+        _legacy_issuer_lifecycle_values(
+            active_generation=active_generation,
+            staged_generations=staged_generations,
+            revoked_generations=revoked_generations,
+        )
     )
 
 
@@ -852,7 +957,7 @@ class RecordingIssuer(SyntheticCoreCommissioningIssuer):
         self,
         events: list[str],
         *,
-        state_store: OwnerOnlyArtifactStore | None = None,
+        state_store: Any | None = None,
     ) -> None:
         super().__init__(state_store=state_store)
         self.events = events
@@ -895,6 +1000,39 @@ class RecordingIssuer(SyntheticCoreCommissioningIssuer):
     def revoke_generation(self, *, endpoint: ReachyCoreEndpointV1) -> None:
         self.events.append(f"issuer.revoke.{endpoint.generation}")
         super().revoke_generation(endpoint=endpoint)
+
+
+class ScriptedIssuerArtifactStore:
+    def __init__(
+        self,
+        backing: OwnerOnlyArtifactStore,
+        *,
+        fail_lifecycle_write: Literal["before", "after"] | None = None,
+        fail_lifecycle_read: bool = False,
+    ) -> None:
+        self.backing = backing
+        self.fail_lifecycle_write = fail_lifecycle_write
+        self.fail_lifecycle_read = fail_lifecycle_read
+        self.private_writes: list[str] = []
+
+    def write(self, identifier: str, value: bytes) -> None:
+        if identifier != SYNTHETIC_ISSUER_STATE_ID:
+            self.private_writes.append(identifier)
+            self.backing.write(identifier, value)
+            return
+        if self.fail_lifecycle_write == "before":
+            raise OSError("scripted lifecycle persist failure before write")
+        self.backing.write(identifier, value)
+        if self.fail_lifecycle_write == "after":
+            raise OSError("scripted lifecycle persist failure after write")
+
+    def read(self, identifier: str) -> bytes:
+        if identifier == SYNTHETIC_ISSUER_STATE_ID and self.fail_lifecycle_read:
+            raise OSError("scripted lifecycle read failure")
+        return self.backing.read(identifier)
+
+    def delete(self, identifier: str) -> None:
+        self.backing.delete(identifier)
 
 
 class ForgedHardwareStringIssuer(RecordingIssuer):
@@ -1183,6 +1321,611 @@ def test_private_material_stays_behind_artifact_port_and_state_contains_only_com
         assert stat.S_IMODE(identity.st_mode) == 0o600
 
 
+def test_synthetic_core_server_keypair_binds_endpoint_and_signs_time_payload(
+    tmp_path: Path,
+) -> None:
+    (
+        service,
+        _repository,
+        _generator,
+        issuer,
+        _acceptance,
+        proof_issuer,
+        _key_store,
+        _cert_store,
+        issuer_store,
+        _events,
+    ) = _service_case(tmp_path)
+    request1 = _request(1)
+
+    state = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+
+    prepared = issuer.staged_generations[state.endpoint.generation]
+    private_handle = prepared.server_private_key_handle
+    private_bytes = issuer_store.read(private_handle)
+    private_key = Ed25519PrivateKey.from_private_bytes(private_bytes)
+    public_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    unsigned_payload = {
+        "schema_version": "tuntun.core-time-proof.v1",
+        "endpoint_generation": state.endpoint.generation,
+        "time_sequence": 1,
+        "request_nonce_b64": base64.b64encode(bytes(32)).decode("ascii"),
+        "core_utc": datetime(2026, 8, 27, tzinfo=UTC),
+        "authority_health_generation": state.endpoint.trust_digest_generation,
+        "signing_key_id": state.endpoint.server_key_id,
+        "signature_b64": base64.b64encode(bytes(64)).decode("ascii"),
+    }
+    unsigned = CoreTimeProofV1.model_validate(unsigned_payload)
+    signature = private_key.sign(unsigned.signing_payload())
+    signed = CoreTimeProofV1.model_validate(
+        unsigned_payload | {"signature_b64": base64.b64encode(signature).decode("ascii")}
+    )
+
+    assert state.endpoint.server_key_id == "ed25519:reachy-server:v1"
+    assert private_handle != state.endpoint.server_key_id
+    assert ":" not in private_handle
+    assert len(private_bytes) == 32
+    assert hashlib.sha256(public_bytes).hexdigest() == prepared.server_public_key_sha256
+    assert state.endpoint.server_public_key_sha256 == prepared.server_public_key_sha256
+    private_key.public_key().verify(signature, signed.signing_payload())
+    with pytest.raises(InvalidSignature):
+        private_key.public_key().verify(signature, canonical_bytes(signed))
+
+    public_state = canonical_bytes(state)
+    public_endpoint = state.endpoint.model_dump_json()
+    assert private_handle.encode("ascii") not in public_state
+    assert private_handle not in public_endpoint
+    assert private_bytes.hex() not in public_endpoint
+    assert base64.b64encode(private_bytes).decode("ascii") not in public_endpoint
+    with pytest.raises(ValueError, match="artifact identifier"):
+        issuer_store.read(state.endpoint.server_key_id)
+
+
+def test_synthetic_core_issuer_abort_removes_private_server_key(
+    tmp_path: Path,
+) -> None:
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    prepared = issuer.begin_generation(request=_request(1), generation=1)
+
+    assert issuer_store.read(prepared.server_private_key_handle)
+
+    issuer.abort_staged_generation(prepared.generation)
+
+    with pytest.raises(FileNotFoundError):
+        issuer_store.read(prepared.server_private_key_handle)
+    lifecycle = parse_contract_json(
+        SyntheticCoreIssuerLifecycleV1,
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert lifecycle.staged_generations == ()
+
+
+def test_recommission_rotates_old_core_private_key_after_new_activation(
+    tmp_path: Path,
+) -> None:
+    (
+        service,
+        _repository,
+        _generator,
+        issuer,
+        _acceptance,
+        proof_issuer,
+        _key_store,
+        _cert_store,
+        issuer_store,
+        _events,
+    ) = _service_case(tmp_path)
+    request1 = _request(1)
+    first = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+    old_private_handle = issuer.staged_generations[1].server_private_key_handle
+    request2 = _request(2, core_ipv4="192.168.50.11")
+
+    second = service.recommission_local(
+        _proof_for(proof_issuer, operation="recommission", request=request2, current=first),
+        request2,
+    )
+
+    assert second.revoked_key_ids == _key_ids(first.endpoint)
+    assert second.revoked_certificate_sha256 == _certificate_digests(first.endpoint)
+    with pytest.raises(FileNotFoundError):
+        issuer_store.read(old_private_handle)
+    new_private_handle = issuer.staged_generations[2].server_private_key_handle
+    assert issuer_store.read(new_private_handle)
+    lifecycle = parse_contract_json(
+        SyntheticCoreIssuerLifecycleV1,
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert lifecycle.active_generation == second.endpoint.generation
+    assert tuple(prepared.generation for prepared in lifecycle.staged_generations) == (2,)
+    assert lifecycle.revoked_generations == (first.endpoint.generation,)
+
+
+def test_recommission_publish_failure_keeps_old_core_key_and_discards_new_key(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    repository = RecordingRepository(tmp_path / "commissioning", events)
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    backing_issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_issuer_store = ScriptedIssuerArtifactStore(backing_issuer_store)
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    issuer = RecordingIssuer(events, state_store=scripted_issuer_store)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=RecordingAcceptancePublisher(events),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request1 = _request(1)
+    first = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+    old_private_handle = issuer.staged_generations[1].server_private_key_handle
+    repository.inject_crash_at("before_temp_open")
+    request2 = _request(2, core_ipv4="192.168.50.11")
+
+    with pytest.raises(OSError, match="before_temp_open"):
+        service.recommission_local(
+            _proof_for(
+                proof_issuer,
+                operation="recommission",
+                request=request2,
+                current=first,
+            ),
+            request2,
+        )
+
+    new_private_handle = scripted_issuer_store.private_writes[-1]
+    assert backing_issuer_store.read(old_private_handle)
+    with pytest.raises(FileNotFoundError):
+        backing_issuer_store.read(new_private_handle)
+    assert repository.require_current() == first
+    assert first.endpoint.server_key_id not in repository.require_current().revoked_key_ids
+
+
+def test_recommission_activation_failure_keeps_old_core_key_until_resume(
+    tmp_path: Path,
+) -> None:
+    (
+        service,
+        repository,
+        generator,
+        issuer,
+        acceptance,
+        proof_issuer,
+        key_store,
+        certificate_store,
+        issuer_store,
+        events,
+    ) = _service_case(tmp_path)
+    request1 = _request(1)
+    first = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+    old_private_handle = issuer.staged_generations[1].server_private_key_handle
+    issuer.fail_next_activation = True
+    request2 = _request(2, core_ipv4="192.168.50.11")
+
+    with pytest.raises(OSError, match="activation"):
+        service.recommission_local(
+            _proof_for(
+                proof_issuer,
+                operation="recommission",
+                request=request2,
+                current=first,
+            ),
+            request2,
+        )
+
+    visible = repository.require_current()
+    new_private_handle = issuer.staged_generations[2].server_private_key_handle
+    assert visible.endpoint.generation == 2
+    assert visible.revoked_key_ids == _key_ids(first.endpoint)
+    assert issuer_store.read(old_private_handle)
+    assert issuer_store.read(new_private_handle)
+
+    fresh_issuer = RecordingIssuer(events, state_store=issuer_store)
+    restarted = ReachyCommissioningService(
+        repository=repository.reopen(),
+        generator=RecordingGenerator(key_store, certificate_store, events),
+        issuer=fresh_issuer,
+        acceptance_publisher=acceptance,
+        local_proof_verifier=_SyntheticLocalPhysicalProofIssuer().consumer,
+    )
+
+    assert restarted.resume_current_activation() == visible
+    with pytest.raises(FileNotFoundError):
+        issuer_store.read(old_private_handle)
+    assert issuer_store.read(new_private_handle)
+
+
+@pytest.mark.parametrize("failure_stage", ("before", "after"))
+def test_synthetic_core_private_key_lifecycle_handles_ambiguous_persist_failures(
+    tmp_path: Path,
+    failure_stage: Literal["before", "after"],
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(
+        backing_store,
+        fail_lifecycle_write=failure_stage,
+    )
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+
+    with pytest.raises(OSError, match=f"lifecycle persist failure {failure_stage}"):
+        issuer.begin_generation(request=_request(1), generation=1)
+
+    private_handle = scripted_store.private_writes[-1]
+    if failure_stage == "before":
+        with pytest.raises(FileNotFoundError):
+            backing_store.read(private_handle)
+        with pytest.raises(FileNotFoundError):
+            backing_store.read(SYNTHETIC_ISSUER_STATE_ID)
+        return
+
+    assert backing_store.read(private_handle)
+    reopened = SyntheticCoreCommissioningIssuer(state_store=backing_store)
+    assert reopened.staged_generations[1].server_private_key_handle == private_handle
+
+
+@pytest.mark.parametrize("failure_stage", ("before", "after"))
+def test_ambiguous_lifecycle_activation_failure_preserves_intended_state_and_keys(
+    tmp_path: Path,
+    failure_stage: Literal["before", "after"],
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(backing_store)
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+    first = issuer.begin_generation(request=_request(1), generation=1)
+    issuer.activate_staged_generation(
+        generation=1,
+        endpoint=_endpoint_for_prepared_core_material(first),
+    )
+    second = issuer.begin_generation(
+        request=_request(2, core_ipv4="192.168.50.11"),
+        generation=2,
+    )
+    scripted_store.fail_lifecycle_write = failure_stage
+    scripted_store.fail_lifecycle_read = True
+
+    with pytest.raises(OSError, match=f"lifecycle persist failure {failure_stage}"):
+        issuer.activate_staged_generation(
+            generation=2,
+            endpoint=_endpoint_for_prepared_core_material(second),
+        )
+
+    assert issuer.active_generation == 2
+    assert set(issuer.staged_generations) == {2}
+    assert issuer.revoked_generations == [1]
+    assert backing_store.read(first.server_private_key_handle)
+    assert backing_store.read(second.server_private_key_handle)
+    reopened = SyntheticCoreCommissioningIssuer(state_store=backing_store)
+    if failure_stage == "before":
+        assert reopened.active_generation == 1
+        assert set(reopened.staged_generations) == {1, 2}
+        assert reopened.revoked_generations == []
+    else:
+        assert reopened.active_generation == 2
+        assert set(reopened.staged_generations) == {2}
+        assert reopened.revoked_generations == [1]
+
+
+@pytest.mark.parametrize("failure_stage", ("before", "after"))
+def test_ambiguous_lifecycle_abort_failure_preserves_intended_state_and_key(
+    tmp_path: Path,
+    failure_stage: Literal["before", "after"],
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(backing_store)
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+    issuer.begin_generation(request=_request(1), generation=1)
+    second = issuer.begin_generation(
+        request=_request(2, core_ipv4="192.168.50.11"),
+        generation=2,
+    )
+    scripted_store.fail_lifecycle_write = failure_stage
+    scripted_store.fail_lifecycle_read = True
+
+    with pytest.raises(OSError, match=f"lifecycle persist failure {failure_stage}"):
+        issuer.abort_staged_generation(2)
+
+    assert set(issuer.staged_generations) == {1}
+    assert backing_store.read(second.server_private_key_handle)
+    reopened = SyntheticCoreCommissioningIssuer(state_store=backing_store)
+    if failure_stage == "before":
+        assert set(reopened.staged_generations) == {1, 2}
+    else:
+        assert set(reopened.staged_generations) == {1}
+
+
+@pytest.mark.parametrize("failure_stage", ("before", "after"))
+def test_ambiguous_lifecycle_revoke_failure_preserves_intended_state_and_key(
+    tmp_path: Path,
+    failure_stage: Literal["before", "after"],
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(backing_store)
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+    prepared = issuer.begin_generation(request=_request(1), generation=1)
+    endpoint = _endpoint_for_prepared_core_material(prepared)
+    issuer.activate_staged_generation(generation=1, endpoint=endpoint)
+    scripted_store.fail_lifecycle_write = failure_stage
+    scripted_store.fail_lifecycle_read = True
+
+    with pytest.raises(OSError, match=f"lifecycle persist failure {failure_stage}"):
+        issuer.revoke_generation(endpoint=endpoint)
+
+    assert issuer.active_generation is None
+    assert issuer.staged_generations == {}
+    assert issuer.revoked_generations == [1]
+    assert backing_store.read(prepared.server_private_key_handle)
+    reopened = SyntheticCoreCommissioningIssuer(state_store=backing_store)
+    if failure_stage == "before":
+        assert reopened.active_generation == 1
+        assert set(reopened.staged_generations) == {1}
+        assert reopened.revoked_generations == []
+    else:
+        assert reopened.active_generation is None
+        assert reopened.staged_generations == {}
+        assert reopened.revoked_generations == [1]
+
+
+def test_mismatched_visible_lifecycle_during_failed_persist_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(backing_store)
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+    first = issuer.begin_generation(request=_request(1), generation=1)
+    second = issuer.begin_generation(
+        request=_request(2, core_ipv4="192.168.50.11"),
+        generation=2,
+    )
+    mismatched_lifecycle = SyntheticCoreIssuerLifecycleV1(
+        schema_version="tuntun.synthetic-core-issuer-lifecycle.v1",
+        active_generation=None,
+        staged_generations=(first,),
+        revoked_generations=(2,),
+    )
+    backing_store.write(SYNTHETIC_ISSUER_STATE_ID, canonical_bytes(mismatched_lifecycle))
+    scripted_store.fail_lifecycle_write = "before"
+
+    with pytest.raises(OSError, match="lifecycle persist failure before write"):
+        issuer.abort_staged_generation(2)
+
+    assert set(issuer.staged_generations) == {1}
+    assert backing_store.read(second.server_private_key_handle)
+
+
+@pytest.mark.parametrize("mutation", ("missing", "mismatched"))
+def test_synthetic_core_issuer_reopen_validates_new_staged_private_key(
+    tmp_path: Path,
+    mutation: Literal["missing", "mismatched"],
+) -> None:
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    prepared = issuer.begin_generation(request=_request(1), generation=1)
+
+    if mutation == "missing":
+        issuer_store.delete(prepared.server_private_key_handle)
+    else:
+        replacement = Ed25519PrivateKey.generate().private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        issuer_store.write(prepared.server_private_key_handle, replacement)
+
+    with pytest.raises(PermissionError, match="synthetic_core_server_private_key"):
+        SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+
+
+@pytest.mark.parametrize("legacy", (False, True))
+def test_synthetic_core_lifecycle_requires_active_generation_to_be_staged(
+    legacy: bool,
+) -> None:
+    if legacy:
+        model_type = commissioning_module.LegacySyntheticCoreIssuerLifecycleV1
+        staged = (_legacy_prepared_core_material_values(1),)
+    else:
+        model_type = SyntheticCoreIssuerLifecycleV1
+        staged = (_current_prepared_core_material_values(1),)
+
+    with pytest.raises(ContractParseError):
+        parse_contract_json(
+            model_type,
+            canonical_mapping_bytes(
+                {
+                    "schema_version": "tuntun.synthetic-core-issuer-lifecycle.v1",
+                    "active_generation": 2,
+                    "staged_generations": staged,
+                    "revoked_generations": (),
+                }
+            ),
+            max_bytes=16_384,
+            require_canonical=True,
+        )
+
+
+@pytest.mark.parametrize("legacy", (False, True))
+@pytest.mark.parametrize("case", ("staged_revoked", "active_revoked"))
+def test_synthetic_core_lifecycle_rejects_revoked_active_or_staged_generation(
+    legacy: bool,
+    case: Literal["staged_revoked", "active_revoked"],
+) -> None:
+    if legacy:
+        model_type = commissioning_module.LegacySyntheticCoreIssuerLifecycleV1
+        staged = (_legacy_prepared_core_material_values(1),)
+    else:
+        model_type = SyntheticCoreIssuerLifecycleV1
+        staged = (_current_prepared_core_material_values(1),)
+    active_generation = 1 if case == "active_revoked" else None
+
+    with pytest.raises(ContractParseError):
+        parse_contract_json(
+            model_type,
+            canonical_mapping_bytes(
+                {
+                    "schema_version": "tuntun.synthetic-core-issuer-lifecycle.v1",
+                    "active_generation": active_generation,
+                    "staged_generations": staged,
+                    "revoked_generations": (1,),
+                }
+            ),
+            max_bytes=16_384,
+            require_canonical=True,
+        )
+
+
+def test_synthetic_core_issuer_refuses_to_persist_unstaged_active_generation(
+    tmp_path: Path,
+) -> None:
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    issuer.active_generation = 99
+    issuer.staged_generations[1] = PreparedCoreMaterialV1.model_validate(
+        _current_prepared_core_material_values(1)
+    )
+
+    with pytest.raises(ValueError, match="synthetic issuer active generation must be staged"):
+        issuer.abort_staged_generation(1)
+
+    with pytest.raises(FileNotFoundError):
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID)
+
+
+def test_synthetic_core_issuer_revoke_rejects_unstaged_endpoint(
+    tmp_path: Path,
+) -> None:
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+
+    with pytest.raises(PermissionError, match="commissioning_generation_not_staged"):
+        issuer.revoke_generation(endpoint=_endpoint(1))
+
+    with pytest.raises(FileNotFoundError):
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID)
+
+
+def test_synthetic_core_issuer_revoke_rejects_legacy_endpoint_without_lifecycle(
+    tmp_path: Path,
+) -> None:
+    repository = CommissioningRepository(tmp_path / "commissioning")
+    _write_owner_file(repository.path, _legacy_state_bytes())
+    legacy = repository.require_current()
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+
+    with pytest.raises(PermissionError, match="commissioning_generation_not_staged"):
+        issuer.revoke_generation(endpoint=legacy.endpoint)
+
+    with pytest.raises(FileNotFoundError):
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID)
+
+
+def test_synthetic_core_issuer_revoke_binds_current_staged_endpoint(
+    tmp_path: Path,
+) -> None:
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    prepared = issuer.begin_generation(request=_request(1), generation=1)
+    private_handle = prepared.server_private_key_handle
+
+    with pytest.raises(PermissionError, match="commissioning_staged_endpoint_mismatch"):
+        issuer.revoke_generation(endpoint=_endpoint(1))
+
+    assert issuer_store.read(private_handle)
+    lifecycle = parse_contract_json(
+        SyntheticCoreIssuerLifecycleV1,
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert lifecycle.staged_generations == (prepared,)
+    assert lifecycle.revoked_generations == ()
+
+
+def test_synthetic_core_issuer_revoke_binds_legacy_staged_endpoint(
+    tmp_path: Path,
+) -> None:
+    repository = CommissioningRepository(tmp_path / "commissioning")
+    _write_owner_file(repository.path, _legacy_state_bytes())
+    legacy = repository.require_current()
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    legacy_lifecycle_raw = _legacy_issuer_lifecycle_bytes(
+        active_generation=legacy.endpoint.generation,
+        staged_generations=(legacy.endpoint.generation,),
+    )
+    issuer_store.write(SYNTHETIC_ISSUER_STATE_ID, legacy_lifecycle_raw)
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    forged_endpoint = legacy.endpoint.model_copy(
+        update={"server_public_key_sha256": _digest("forged-legacy-server-public")}
+    )
+
+    with pytest.raises(PermissionError, match="commissioning_staged_endpoint_mismatch"):
+        issuer.revoke_generation(endpoint=forged_endpoint)
+
+    assert issuer_store.read(SYNTHETIC_ISSUER_STATE_ID) == legacy_lifecycle_raw
+
+
+@pytest.mark.parametrize("mutation", ("reserved", "duplicate"))
+def test_synthetic_core_lifecycle_rejects_reserved_or_duplicate_private_handles(
+    mutation: Literal["reserved", "duplicate"],
+) -> None:
+    if mutation == "reserved":
+        staged = (
+            _current_prepared_core_material_values(
+                1,
+                server_private_key_handle=SYNTHETIC_ISSUER_STATE_ID,
+            ),
+        )
+    else:
+        staged = (
+            _current_prepared_core_material_values(
+                1,
+                server_private_key_handle="reachy-server-shared-private",
+            ),
+            _current_prepared_core_material_values(
+                2,
+                core_ipv4="192.168.50.11",
+                server_private_key_handle="reachy-server-shared-private",
+            ),
+        )
+
+    with pytest.raises(ContractParseError):
+        parse_contract_json(
+            SyntheticCoreIssuerLifecycleV1,
+            canonical_mapping_bytes(
+                {
+                    "schema_version": "tuntun.synthetic-core-issuer-lifecycle.v1",
+                    "active_generation": 1,
+                    "staged_generations": staged,
+                    "revoked_generations": (),
+                }
+            ),
+            max_bytes=16_384,
+            require_canonical=True,
+        )
+
+
 def test_owner_only_artifact_store_rejects_public_ed25519_key_ids(tmp_path: Path) -> None:
     store = OwnerOnlyArtifactStore(tmp_path / "artifacts")
 
@@ -1260,6 +2003,101 @@ def test_legacy_colonless_commissioning_state_parses_but_is_not_runtime_usable(
         repository.require_usable(state.endpoint)
 
 
+def test_resume_current_activation_rejects_legacy_state_before_issuer_activation(
+    tmp_path: Path,
+) -> None:
+    repository = CommissioningRepository(tmp_path / "commissioning")
+    _write_owner_file(repository.path, _legacy_state_bytes())
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    legacy_lifecycle_raw = _legacy_issuer_lifecycle_bytes(
+        active_generation=1,
+        staged_generations=(1,),
+    )
+    issuer_store.write(SYNTHETIC_ISSUER_STATE_ID, legacy_lifecycle_raw)
+    events: list[str] = []
+    issuer = RecordingIssuer(events, state_store=issuer_store)
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=SyntheticReachyPrivateMaterialGenerator(
+            key_store=OwnerOnlyArtifactStore(tmp_path / "private"),
+            certificate_store=OwnerOnlyArtifactStore(tmp_path / "certificates"),
+        ),
+        issuer=issuer,
+        acceptance_publisher=RecordingAcceptancePublisher(events),
+        local_proof_verifier=_SyntheticLocalPhysicalProofIssuer().consumer,
+    )
+
+    with pytest.raises(RuntimeError, match="legacy_recommission_required"):
+        service.resume_current_activation()
+
+    assert events == []
+    assert issuer_store.read(SYNTHETIC_ISSUER_STATE_ID) == legacy_lifecycle_raw
+
+
+def test_synthetic_core_issuer_rejects_direct_legacy_staged_activation(
+    tmp_path: Path,
+) -> None:
+    repository = CommissioningRepository(tmp_path / "commissioning")
+    _write_owner_file(repository.path, _legacy_state_bytes())
+    legacy = repository.require_current()
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    legacy_lifecycle_raw = _legacy_issuer_lifecycle_bytes(
+        active_generation=legacy.endpoint.generation,
+        staged_generations=(legacy.endpoint.generation,),
+    )
+    issuer_store.write(SYNTHETIC_ISSUER_STATE_ID, legacy_lifecycle_raw)
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+
+    with pytest.raises(PermissionError, match="legacy_staged_activation"):
+        issuer.activate_staged_generation(
+            generation=legacy.endpoint.generation,
+            endpoint=legacy.endpoint,
+        )
+
+    assert issuer_store.read(SYNTHETIC_ISSUER_STATE_ID) == legacy_lifecycle_raw
+
+
+def test_synthetic_core_issuer_reopens_canonical_legacy_lifecycle_without_rewriting(
+    tmp_path: Path,
+) -> None:
+    noncanonical_store = OwnerOnlyArtifactStore(tmp_path / "noncanonical-issuer-state")
+    noncanonical_store.write(
+        SYNTHETIC_ISSUER_STATE_ID,
+        json.dumps(
+            _legacy_issuer_lifecycle_values(active_generation=None, staged_generations=(1,)),
+            indent=2,
+        ).encode("utf-8"),
+    )
+    with pytest.raises(ContractParseError):
+        SyntheticCoreCommissioningIssuer(state_store=noncanonical_store)
+
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    legacy_raw = _legacy_issuer_lifecycle_bytes(
+        active_generation=None,
+        staged_generations=(1,),
+    )
+    issuer_store.write(SYNTHETIC_ISSUER_STATE_ID, legacy_raw)
+
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+
+    assert issuer.active_generation is None
+    assert issuer.staged_generations == {}
+    assert issuer.revoked_generations == []
+    assert issuer_store.read(SYNTHETIC_ISSUER_STATE_ID) == legacy_raw
+
+    issuer.abort_staged_generation(1)
+
+    lifecycle = parse_contract_json(
+        SyntheticCoreIssuerLifecycleV1,
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert lifecycle.active_generation is None
+    assert lifecycle.staged_generations == ()
+    assert lifecycle.revoked_generations == ()
+
+
 def test_legacy_colonless_commissioning_state_recommissions_with_original_digest_cas(
     tmp_path: Path,
 ) -> None:
@@ -1284,6 +2122,11 @@ def test_legacy_colonless_commissioning_state_recommissions_with_original_digest
     key_store = OwnerOnlyArtifactStore(tmp_path / "private")
     certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
     issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    legacy_lifecycle_raw = _legacy_issuer_lifecycle_bytes(
+        active_generation=legacy.endpoint.generation,
+        staged_generations=(legacy.endpoint.generation,),
+    )
+    issuer_store.write(SYNTHETIC_ISSUER_STATE_ID, legacy_lifecycle_raw)
     generator = SyntheticReachyPrivateMaterialGenerator(
         key_store=key_store,
         certificate_store=certificate_store,
@@ -1308,6 +2151,91 @@ def test_legacy_colonless_commissioning_state_recommissions_with_original_digest
     assert recommissioned.artifact_map is not None
     assert set(recommissioned.revoked_key_ids) == set(_key_ids(legacy.endpoint))
     assert operator_repository.require_current().accepted_capability is None
+    lifecycle = parse_contract_json(
+        SyntheticCoreIssuerLifecycleV1,
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert lifecycle.active_generation == recommissioned.endpoint.generation
+    assert tuple(prepared.generation for prepared in lifecycle.staged_generations) == (2,)
+    assert lifecycle.staged_generations[0].server_key_id == "ed25519:reachy-server:v2"
+
+
+def test_legacy_synthetic_core_issuer_lifecycle_recovers_revoke_after_reopen(
+    tmp_path: Path,
+) -> None:
+    repository = CommissioningRepository(tmp_path / "commissioning")
+    _write_owner_file(repository.path, _legacy_state_bytes())
+    legacy = repository.require_current()
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer_store.write(
+        SYNTHETIC_ISSUER_STATE_ID,
+        _legacy_issuer_lifecycle_bytes(
+            active_generation=legacy.endpoint.generation,
+            staged_generations=(legacy.endpoint.generation,),
+        ),
+    )
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=SyntheticReachyPrivateMaterialGenerator(
+            key_store=key_store,
+            certificate_store=certificate_store,
+        ),
+        issuer=issuer,
+        acceptance_publisher=RecordingAcceptancePublisher([]),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+
+    revoked = service.revoke_local(_proof_for(proof_issuer, operation="revoke", current=legacy))
+
+    assert revoked.status == "revoked"
+    assert revoked.legacy_key_id_format is True
+    with pytest.raises(RuntimeError, match="legacy_recommission_required"):
+        repository.require_usable(revoked.endpoint)
+    lifecycle = parse_contract_json(
+        SyntheticCoreIssuerLifecycleV1,
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert lifecycle.active_generation is None
+    assert lifecycle.staged_generations == ()
+    assert lifecycle.revoked_generations == (legacy.endpoint.generation,)
+
+
+def test_legacy_colonless_commissioning_state_revokes_without_issuer_lifecycle(
+    tmp_path: Path,
+) -> None:
+    repository = CommissioningRepository(tmp_path / "commissioning")
+    _write_owner_file(repository.path, _legacy_state_bytes())
+    legacy = repository.require_current()
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=SyntheticReachyPrivateMaterialGenerator(
+            key_store=OwnerOnlyArtifactStore(tmp_path / "private"),
+            certificate_store=OwnerOnlyArtifactStore(tmp_path / "certificates"),
+        ),
+        issuer=SyntheticCoreCommissioningIssuer(state_store=issuer_store),
+        acceptance_publisher=RecordingAcceptancePublisher([]),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+
+    revoked = service.revoke_local(_proof_for(proof_issuer, operation="revoke", current=legacy))
+
+    assert revoked.status == "revoked"
+    assert revoked.legacy_key_id_format is True
+    assert revoked.artifact_map is None
+    with pytest.raises(RuntimeError, match="legacy_recommission_required"):
+        repository.require_usable(revoked.endpoint)
+    with pytest.raises(FileNotFoundError):
+        issuer_store.read(SYNTHETIC_ISSUER_STATE_ID)
 
 
 def test_local_physical_proof_is_one_shot_and_request_generation_bound(

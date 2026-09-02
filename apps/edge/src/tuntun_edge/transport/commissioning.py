@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import Field, StringConstraints, field_validator, model_validator
 from tuntun_contracts.base import (
     ContractModel,
+    ContractParseError,
     canonical_bytes,
     canonical_mapping_bytes,
     parse_contract_json,
@@ -646,6 +647,61 @@ class PreparedCoreMaterialV1(ContractModel):
     trust_digest_generation: Annotated[int, Field(ge=1)]
     server_leaf_sha256: Sha256Hex
     server_key_id: Ed25519KeyId
+    server_private_key_handle: ArtifactHandle
+    server_public_key_sha256: Sha256Hex
+    core_hmac_agreement_public_key_b64: Annotated[str, Field(min_length=44, max_length=44)]
+    core_hmac_agreement_public_key_sha256: Sha256Hex
+
+    @field_validator("core_ipv4")
+    @classmethod
+    def canonical_rfc1918_core_ipv4(cls, value: str) -> str:
+        return _canonical_rfc1918_ipv4(value, label="core endpoint")
+
+    @field_validator("core_link_address")
+    @classmethod
+    def canonical_unicast_link_address(cls, value: str) -> str:
+        return _canonical_unicast_mac(value, label="core link address")
+
+    @field_validator("core_hmac_agreement_public_key_b64")
+    @classmethod
+    def canonical_core_public_key_b64(cls, value: str) -> str:
+        return validate_canonical_base64(value, expected_bytes=32, label="Core public key")
+
+    @field_validator("server_private_key_handle")
+    @classmethod
+    def server_private_key_handle_is_not_reserved(cls, value: str) -> str:
+        if value == SYNTHETIC_ISSUER_STATE_ID:
+            raise ValueError("synthetic issuer lifecycle identifier is reserved")
+        return value
+
+    @model_validator(mode="after")
+    def generations_match(self) -> Self:
+        if {
+            self.generation,
+            self.certificate_generation,
+            self.server_key_generation,
+            self.trust_digest_generation,
+        } != {self.generation}:
+            raise ValueError("core commissioning material contains mixed generations")
+        return self
+
+
+class LegacyPreparedCoreMaterialV1(ContractModel):
+    schema_version: Literal["tuntun.core-prepared-commissioning-material.v1"]
+    generation: Annotated[int, Field(ge=1)]
+    commissioning_uuid: Annotated[str, Field(pattern=CANONICAL_UUID_PATTERN)]
+    core_ipv4: Annotated[str, Field(min_length=7, max_length=15)]
+    core_link_address: MacAddress
+    port: Literal[7443]
+    boot_identity_sha256: Sha256Hex
+    capability_evidence_sha256: Sha256Hex
+    dhcp_reservation_receipt_sha256: Sha256Hex
+    household_ca_sha256: Sha256Hex
+    certificate_generation: Annotated[int, Field(ge=1)]
+    server_key_generation: Annotated[int, Field(ge=1)]
+    trust_digest_generation: Annotated[int, Field(ge=1)]
+    server_leaf_sha256: Sha256Hex
+    server_key_id: ArtifactHandle
     server_public_key_sha256: Sha256Hex
     core_hmac_agreement_public_key_b64: Annotated[str, Field(min_length=44, max_length=44)]
     core_hmac_agreement_public_key_sha256: Sha256Hex
@@ -713,6 +769,9 @@ class SyntheticCoreIssuerLifecycleV1(ContractModel):
             raise ValueError("synthetic issuer staged generations must be unique")
         if tuple(sorted(generations)) != generations:
             raise ValueError("synthetic issuer staged generations must be sorted")
+        handles = tuple(item.server_private_key_handle for item in value)
+        if len(set(handles)) != len(handles):
+            raise ValueError("synthetic issuer staged private key handles must be unique")
         return value
 
     @field_validator("revoked_generations")
@@ -723,6 +782,68 @@ class SyntheticCoreIssuerLifecycleV1(ContractModel):
         if tuple(sorted(value)) != value:
             raise ValueError("synthetic issuer revoked generations must be sorted")
         return value
+
+    @model_validator(mode="after")
+    def active_generation_is_staged(self) -> Self:
+        staged_generations = {item.generation for item in self.staged_generations}
+        revoked_generations = set(self.revoked_generations)
+        if self.active_generation is not None and self.active_generation not in staged_generations:
+            raise ValueError("synthetic issuer active generation must be staged")
+        if staged_generations & revoked_generations:
+            raise ValueError("synthetic issuer revoked generations must not be staged")
+        if self.active_generation is not None and self.active_generation in revoked_generations:
+            raise ValueError("synthetic issuer active generation must not be revoked")
+        return self
+
+
+class LegacySyntheticCoreIssuerLifecycleV1(ContractModel):
+    schema_version: Literal["tuntun.synthetic-core-issuer-lifecycle.v1"]
+    active_generation: Annotated[int, Field(ge=1)] | None
+    staged_generations: tuple[LegacyPreparedCoreMaterialV1, ...] = ()
+    revoked_generations: tuple[Annotated[int, Field(ge=1)], ...] = ()
+
+    @field_validator("staged_generations")
+    @classmethod
+    def staged_generations_are_unique(
+        cls,
+        value: tuple[LegacyPreparedCoreMaterialV1, ...],
+    ) -> tuple[LegacyPreparedCoreMaterialV1, ...]:
+        generations = tuple(item.generation for item in value)
+        if len(set(generations)) != len(generations):
+            raise ValueError("synthetic issuer staged generations must be unique")
+        if tuple(sorted(generations)) != generations:
+            raise ValueError("synthetic issuer staged generations must be sorted")
+        return value
+
+    @field_validator("revoked_generations")
+    @classmethod
+    def revoked_generations_are_unique(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("synthetic issuer revoked generations must be unique")
+        if tuple(sorted(value)) != value:
+            raise ValueError("synthetic issuer revoked generations must be sorted")
+        return value
+
+    @model_validator(mode="after")
+    def active_generation_is_staged(self) -> Self:
+        staged_generations = {item.generation for item in self.staged_generations}
+        revoked_generations = set(self.revoked_generations)
+        if self.active_generation is not None and self.active_generation not in staged_generations:
+            raise ValueError("synthetic issuer active generation must be staged")
+        if staged_generations & revoked_generations:
+            raise ValueError("synthetic issuer revoked generations must not be staged")
+        if self.active_generation is not None and self.active_generation in revoked_generations:
+            raise ValueError("synthetic issuer active generation must not be revoked")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadedSyntheticCoreIssuerLifecycle:
+    active_generation: int | None
+    staged_generations: tuple[PreparedCoreMaterialV1, ...]
+    legacy_staged_generations: tuple[LegacyPreparedCoreMaterialV1, ...]
+    revoked_generations: tuple[int, ...]
+    storage_bytes: bytes | None
 
 
 class CommissioningRepositoryPort(Protocol):
@@ -944,11 +1065,15 @@ class SyntheticCoreCommissioningIssuer:
     def __init__(self, *, state_store: OwnerOnlyArtifactStorePort | None = None) -> None:
         self._state_store = state_store
         lifecycle = self._load_lifecycle()
-        self.active_generation = lifecycle.active_generation
-        self.staged_generations = {
+        self.active_generation: int | None = lifecycle.active_generation
+        self.staged_generations: dict[int, PreparedCoreMaterialV1] = {
             prepared.generation: prepared for prepared in lifecycle.staged_generations
         }
-        self.revoked_generations = list(lifecycle.revoked_generations)
+        self._legacy_staged_generations: dict[int, LegacyPreparedCoreMaterialV1] = {
+            prepared.generation: prepared for prepared in lifecycle.legacy_staged_generations
+        }
+        self.revoked_generations: list[int] = list(lifecycle.revoked_generations)
+        self._lifecycle_storage_bytes = lifecycle.storage_bytes
 
     def begin_generation(
         self,
@@ -956,8 +1081,20 @@ class SyntheticCoreCommissioningIssuer:
         request: ReachyCommissioningRequestV1,
         generation: int,
     ) -> PreparedCoreMaterialV1:
+        state_store = self._require_state_store()
         suffix = secrets.token_hex(8)
         core_public = _synthetic_public_bytes("core-hmac-agreement", generation, suffix)
+        server_private_key = Ed25519PrivateKey.generate()
+        server_private = server_private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        server_public = server_private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        server_private_key_handle = _artifact_handle("reachy-server", generation, suffix)
         prepared = PreparedCoreMaterialV1(
             schema_version="tuntun.core-prepared-commissioning-material.v1",
             generation=generation,
@@ -974,12 +1111,41 @@ class SyntheticCoreCommissioningIssuer:
             trust_digest_generation=generation,
             server_leaf_sha256=_digest_hex("server-leaf", generation, suffix),
             server_key_id=_public_ed25519_key_id("reachy-server", generation),
-            server_public_key_sha256=_digest_hex("server-public", generation, suffix),
+            server_private_key_handle=server_private_key_handle,
+            server_public_key_sha256=hashlib.sha256(server_public).hexdigest(),
             core_hmac_agreement_public_key_b64=_b64(core_public),
             core_hmac_agreement_public_key_sha256=hashlib.sha256(core_public).hexdigest(),
         )
+        state_store.write(server_private_key_handle, server_private)
+        previous_prepared = self.staged_generations.get(generation)
+        previous_legacy_prepared = self._legacy_staged_generations.get(generation)
         self.staged_generations[generation] = prepared
-        self._persist_lifecycle()
+        self._legacy_staged_generations.pop(generation, None)
+        lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None
+        try:
+            lifecycle = self._current_lifecycle()
+            self._persist_lifecycle(lifecycle)
+        except BaseException:
+            status = (
+                "not_published"
+                if lifecycle is None
+                else self._persisted_lifecycle_status(lifecycle)
+            )
+            if lifecycle is not None and status == "published":
+                self._lifecycle_storage_bytes = canonical_bytes(lifecycle)
+            elif lifecycle is not None and status == "ambiguous":
+                self._lifecycle_storage_bytes = None
+            else:
+                if previous_prepared is None:
+                    self.staged_generations.pop(generation, None)
+                else:
+                    self.staged_generations[generation] = previous_prepared
+                if previous_legacy_prepared is not None:
+                    self._legacy_staged_generations[generation] = previous_legacy_prepared
+                state_store.delete(server_private_key_handle)
+            raise
+        if previous_prepared is not None:
+            state_store.delete(previous_prepared.server_private_key_handle)
         return prepared
 
     def complete_generation(
@@ -988,6 +1154,8 @@ class SyntheticCoreCommissioningIssuer:
         prepared: PreparedCoreMaterialV1,
         reachy_material: GeneratedReachyMaterialV1,
     ) -> IssuedClientMaterialV1:
+        if type(prepared) is not PreparedCoreMaterialV1:
+            raise PermissionError("commissioning_generation_not_staged")
         if prepared.generation != reachy_material.generation:
             raise PermissionError("commissioning_public_material_generation_mismatch")
         if self.staged_generations.get(prepared.generation) != prepared:
@@ -1035,60 +1203,256 @@ class SyntheticCoreCommissioningIssuer:
     ) -> None:
         if endpoint.generation != generation:
             raise PermissionError("endpoint_generation_mismatch")
-        if generation not in self.staged_generations:
+        prepared = self.staged_generations.get(generation)
+        legacy_prepared = self._legacy_staged_generations.get(generation)
+        if prepared is not None:
+            _require_endpoint_matches_prepared_core_material(prepared, endpoint)
+        elif legacy_prepared is not None:
+            _require_endpoint_matches_prepared_core_material(legacy_prepared, endpoint)
+            raise PermissionError("legacy_staged_activation_recommission_required")
+        else:
             raise PermissionError("commissioning_generation_not_staged")
+        previous_active_generation = self.active_generation
+        previous_revoked_generations = list(self.revoked_generations)
+        retired_prepared = {
+            staged_generation: staged
+            for staged_generation, staged in self.staged_generations.items()
+            if staged_generation < generation
+        }
+        retired_legacy_prepared = {
+            staged_generation: staged
+            for staged_generation, staged in self._legacy_staged_generations.items()
+            if staged_generation < generation
+        }
         self.active_generation = generation
-        self._persist_lifecycle()
+        for staged_generation in retired_prepared:
+            self.staged_generations.pop(staged_generation, None)
+        for staged_generation in retired_legacy_prepared:
+            self._legacy_staged_generations.pop(staged_generation, None)
+        for staged_generation in (*retired_prepared, *retired_legacy_prepared):
+            if staged_generation not in self.revoked_generations:
+                self.revoked_generations.append(staged_generation)
+        self.revoked_generations.sort()
+        lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None
+        try:
+            lifecycle = self._current_lifecycle()
+            self._persist_lifecycle(lifecycle)
+        except BaseException:
+            status = (
+                "not_published"
+                if lifecycle is None
+                else self._persisted_lifecycle_status(lifecycle)
+            )
+            if lifecycle is not None and status == "published":
+                self._lifecycle_storage_bytes = canonical_bytes(lifecycle)
+                for retired in retired_prepared.values():
+                    self._require_state_store().delete(retired.server_private_key_handle)
+                raise
+            if lifecycle is not None and status == "ambiguous":
+                self._lifecycle_storage_bytes = None
+            else:
+                self.active_generation = previous_active_generation
+                self.revoked_generations = previous_revoked_generations
+                self.staged_generations.update(retired_prepared)
+                self._legacy_staged_generations.update(retired_legacy_prepared)
+            raise
+        for retired in retired_prepared.values():
+            self._require_state_store().delete(retired.server_private_key_handle)
 
     def abort_staged_generation(self, generation: int) -> None:
-        if self.active_generation != generation:
-            self.staged_generations.pop(generation, None)
-            self._persist_lifecycle()
+        if self.active_generation == generation:
+            return
+        prepared = self.staged_generations.get(generation)
+        legacy_prepared = self._legacy_staged_generations.get(generation)
+        if prepared is None and legacy_prepared is None:
+            return
+        self.staged_generations.pop(generation, None)
+        self._legacy_staged_generations.pop(generation, None)
+        lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None
+        try:
+            lifecycle = self._current_lifecycle()
+            self._persist_lifecycle(lifecycle)
+        except BaseException:
+            status = (
+                "not_published"
+                if lifecycle is None
+                else self._persisted_lifecycle_status(lifecycle)
+            )
+            if lifecycle is not None and status == "published":
+                self._lifecycle_storage_bytes = canonical_bytes(lifecycle)
+                if prepared is not None:
+                    self._require_state_store().delete(prepared.server_private_key_handle)
+                raise
+            if lifecycle is not None and status == "ambiguous":
+                self._lifecycle_storage_bytes = None
+            else:
+                if prepared is not None:
+                    self.staged_generations[generation] = prepared
+                if legacy_prepared is not None:
+                    self._legacy_staged_generations[generation] = legacy_prepared
+            raise
+        if prepared is not None:
+            self._require_state_store().delete(prepared.server_private_key_handle)
 
     def revoke_generation(self, *, endpoint: ReachyCoreEndpointV1) -> None:
+        previous_active_generation = self.active_generation
+        previous_revoked_generations = list(self.revoked_generations)
+        prepared = self.staged_generations.get(endpoint.generation)
+        legacy_prepared = self._legacy_staged_generations.get(endpoint.generation)
+        if prepared is not None:
+            _require_endpoint_matches_prepared_core_material(prepared, endpoint)
+        elif legacy_prepared is not None:
+            _require_endpoint_matches_prepared_core_material(legacy_prepared, endpoint)
+        else:
+            raise PermissionError("commissioning_generation_not_staged")
         if endpoint.generation not in self.revoked_generations:
             self.revoked_generations.append(endpoint.generation)
             self.revoked_generations.sort()
         if self.active_generation == endpoint.generation:
             self.active_generation = None
-        self._persist_lifecycle()
+        self.staged_generations.pop(endpoint.generation, None)
+        self._legacy_staged_generations.pop(endpoint.generation, None)
+        lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None
+        try:
+            lifecycle = self._current_lifecycle()
+            self._persist_lifecycle(lifecycle)
+        except BaseException:
+            status = (
+                "not_published"
+                if lifecycle is None
+                else self._persisted_lifecycle_status(lifecycle)
+            )
+            if lifecycle is not None and status == "published":
+                self._lifecycle_storage_bytes = canonical_bytes(lifecycle)
+                if prepared is not None:
+                    self._require_state_store().delete(prepared.server_private_key_handle)
+                raise
+            if lifecycle is not None and status == "ambiguous":
+                self._lifecycle_storage_bytes = None
+            else:
+                self.active_generation = previous_active_generation
+                self.revoked_generations = previous_revoked_generations
+                if prepared is not None:
+                    self.staged_generations[endpoint.generation] = prepared
+                if legacy_prepared is not None:
+                    self._legacy_staged_generations[endpoint.generation] = legacy_prepared
+            raise
+        if prepared is not None:
+            self._require_state_store().delete(prepared.server_private_key_handle)
 
     def commissioning_assurance(self) -> object:
         return _SyntheticCommissioningAssuranceCapability()
 
-    def _load_lifecycle(self) -> SyntheticCoreIssuerLifecycleV1:
+    def _load_lifecycle(self) -> _LoadedSyntheticCoreIssuerLifecycle:
         if self._state_store is None:
-            return SyntheticCoreIssuerLifecycleV1(
-                schema_version="tuntun.synthetic-core-issuer-lifecycle.v1",
+            return _LoadedSyntheticCoreIssuerLifecycle(
                 active_generation=None,
+                staged_generations=(),
+                legacy_staged_generations=(),
+                revoked_generations=(),
+                storage_bytes=None,
             )
         try:
             raw = self._state_store.read(SYNTHETIC_ISSUER_STATE_ID)
         except FileNotFoundError:
-            return SyntheticCoreIssuerLifecycleV1(
-                schema_version="tuntun.synthetic-core-issuer-lifecycle.v1",
+            return _LoadedSyntheticCoreIssuerLifecycle(
                 active_generation=None,
+                staged_generations=(),
+                legacy_staged_generations=(),
+                revoked_generations=(),
+                storage_bytes=None,
             )
-        return parse_contract_json(
-            SyntheticCoreIssuerLifecycleV1,
-            raw,
-            max_bytes=MAX_SYNTHETIC_ISSUER_STATE_BYTES,
-            require_canonical=True,
+        try:
+            lifecycle = parse_contract_json(
+                SyntheticCoreIssuerLifecycleV1,
+                raw,
+                max_bytes=MAX_SYNTHETIC_ISSUER_STATE_BYTES,
+                require_canonical=True,
+            )
+        except ContractParseError as current_error:
+            try:
+                legacy = parse_contract_json(
+                    LegacySyntheticCoreIssuerLifecycleV1,
+                    raw,
+                    max_bytes=MAX_SYNTHETIC_ISSUER_STATE_BYTES,
+                    require_canonical=True,
+                )
+            except ContractParseError:
+                raise current_error from None
+            return _LoadedSyntheticCoreIssuerLifecycle(
+                active_generation=legacy.active_generation,
+                staged_generations=(),
+                legacy_staged_generations=legacy.staged_generations,
+                revoked_generations=legacy.revoked_generations,
+                storage_bytes=raw,
+            )
+        for prepared in lifecycle.staged_generations:
+            _require_synthetic_core_server_private_key(self._state_store, prepared)
+        return _LoadedSyntheticCoreIssuerLifecycle(
+            active_generation=lifecycle.active_generation,
+            staged_generations=lifecycle.staged_generations,
+            legacy_staged_generations=(),
+            revoked_generations=lifecycle.revoked_generations,
+            storage_bytes=raw,
         )
 
-    def _persist_lifecycle(self) -> None:
+    def _persist_lifecycle(
+        self,
+        lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None,
+    ) -> None:
         if self._state_store is None:
             return
-        lifecycle = SyntheticCoreIssuerLifecycleV1(
+        if lifecycle is None:
+            lifecycle = self._current_lifecycle()
+        lifecycle_bytes = canonical_bytes(lifecycle)
+        self._state_store.write(SYNTHETIC_ISSUER_STATE_ID, lifecycle_bytes)
+        self._lifecycle_storage_bytes = lifecycle_bytes
+
+    def _current_lifecycle(self) -> SyntheticCoreIssuerLifecycleV1:
+        if self.active_generation is None or self.active_generation in self.staged_generations:
+            active_generation = self.active_generation
+        elif self.active_generation in self._legacy_staged_generations:
+            active_generation = None
+        else:
+            raise ValueError("synthetic issuer active generation must be staged")
+        return SyntheticCoreIssuerLifecycleV1(
             schema_version="tuntun.synthetic-core-issuer-lifecycle.v1",
-            active_generation=self.active_generation,
+            active_generation=active_generation,
             staged_generations=tuple(
                 self.staged_generations[generation]
                 for generation in sorted(self.staged_generations)
             ),
             revoked_generations=tuple(self.revoked_generations),
         )
-        self._state_store.write(SYNTHETIC_ISSUER_STATE_ID, canonical_bytes(lifecycle))
+
+    def _persisted_lifecycle_status(
+        self,
+        lifecycle: SyntheticCoreIssuerLifecycleV1,
+    ) -> Literal["published", "not_published", "ambiguous"]:
+        if self._state_store is None:
+            return "not_published"
+        expected = canonical_bytes(lifecycle)
+        try:
+            visible = self._state_store.read(SYNTHETIC_ISSUER_STATE_ID)
+        except FileNotFoundError:
+            if self._lifecycle_storage_bytes is None:
+                return "not_published"
+            return "ambiguous"
+        except BaseException:
+            return "ambiguous"
+        if hmac.compare_digest(visible, expected):
+            return "published"
+        if self._lifecycle_storage_bytes is not None and hmac.compare_digest(
+            visible,
+            self._lifecycle_storage_bytes,
+        ):
+            return "not_published"
+        return "ambiguous"
+
+    def _require_state_store(self) -> OwnerOnlyArtifactStorePort:
+        if self._state_store is None:
+            raise RuntimeError("synthetic_core_issuer_state_store_required")
+        return self._state_store
 
 
 class ReachyCommissioningService:
@@ -1111,6 +1475,8 @@ class ReachyCommissioningService:
 
     def resume_current_activation(self) -> CommissioningStateV1:
         state = self._repository.require_current()
+        if state.legacy_key_id_format or state.artifact_map is None:
+            raise RuntimeError("commissioning_material_legacy_recommission_required")
         if state.status != "active":
             raise PermissionError("commissioning_revoked")
         self._issuer.activate_staged_generation(
@@ -1284,7 +1650,14 @@ class ReachyCommissioningService:
                 revoked,
                 expected_current=current,
             )
-            self._issuer.revoke_generation(endpoint=current.endpoint)
+            try:
+                self._issuer.revoke_generation(endpoint=current.endpoint)
+            except PermissionError as error:
+                if (
+                    current.legacy_key_id_format or current.artifact_map is None
+                ) and error.args == ("commissioning_generation_not_staged",):
+                    return revoked
+                raise
             return revoked
 
         return self._require_local_proof_verifier().consume_and_execute(
@@ -1495,6 +1868,57 @@ def _endpoint_key_ids(endpoint: ReachyCoreEndpointV1) -> tuple[str, str, str, st
 
 def _endpoint_certificate_digests(endpoint: ReachyCoreEndpointV1) -> tuple[str, str]:
     return (endpoint.server_leaf_sha256, endpoint.client_certificate_sha256)
+
+
+def _require_endpoint_matches_prepared_core_material(
+    prepared: PreparedCoreMaterialV1 | LegacyPreparedCoreMaterialV1,
+    endpoint: ReachyCoreEndpointV1,
+) -> None:
+    expected_values = {
+        "commissioning_uuid": prepared.commissioning_uuid,
+        "generation": prepared.generation,
+        "certificate_generation": prepared.certificate_generation,
+        "server_key_generation": prepared.server_key_generation,
+        "trust_digest_generation": prepared.trust_digest_generation,
+        "core_ipv4": prepared.core_ipv4,
+        "core_link_address": prepared.core_link_address,
+        "port": prepared.port,
+        "household_ca_sha256": prepared.household_ca_sha256,
+        "server_leaf_sha256": prepared.server_leaf_sha256,
+        "server_key_id": prepared.server_key_id,
+        "server_public_key_sha256": prepared.server_public_key_sha256,
+        "dhcp_reservation_receipt_sha256": prepared.dhcp_reservation_receipt_sha256,
+        "boot_identity_sha256": prepared.boot_identity_sha256,
+        "capability_evidence_sha256": prepared.capability_evidence_sha256,
+    }
+    for field_name, expected in expected_values.items():
+        if getattr(endpoint, field_name) != expected:
+            raise PermissionError("commissioning_staged_endpoint_mismatch")
+
+
+def _require_synthetic_core_server_private_key(
+    state_store: OwnerOnlyArtifactStorePort,
+    prepared: PreparedCoreMaterialV1,
+) -> None:
+    try:
+        private_bytes = state_store.read(prepared.server_private_key_handle)
+    except FileNotFoundError as error:
+        raise PermissionError("synthetic_core_server_private_key_missing") from error
+    if type(private_bytes) is not bytes or len(private_bytes) != 32:
+        raise PermissionError("synthetic_core_server_private_key_invalid")
+    try:
+        private_key = Ed25519PrivateKey.from_private_bytes(private_bytes)
+    except ValueError as error:
+        raise PermissionError("synthetic_core_server_private_key_invalid") from error
+    public_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    if not hmac.compare_digest(
+        hashlib.sha256(public_bytes).hexdigest(),
+        prepared.server_public_key_sha256,
+    ):
+        raise PermissionError("synthetic_core_server_private_key_public_digest_mismatch")
 
 
 def _legacy_endpoint_key_ids(endpoint: LegacyReachyCoreEndpointV1) -> tuple[str, str, str, str]:
