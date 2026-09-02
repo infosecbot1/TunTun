@@ -20,6 +20,7 @@ from tuntun_core.services.personalized_turn_context import (
     ProviderTurnContext,
     SessionLanguageRegistry,
     TranscribedTurn,
+    provider_messages_sha256,
 )
 from tuntun_core.workflows.conversation import LinearConversationEngine, TurnRequest
 
@@ -441,6 +442,7 @@ async def test_private_profile_sentinels_are_loaded_but_never_provider_visible(
         case.provider_capture_bytes
         + repr(case.provider_captures).encode("utf-8")
         + case.provider_captures[-1].prompt_bundle_sha256.encode("utf-8")
+        + case.provider_captures[-1].provider_messages_sha256.encode("utf-8")
         + caplog.text.encode("utf-8")
     )
     for sentinel in (
@@ -452,6 +454,37 @@ async def test_private_profile_sentinels_are_loaded_but_never_provider_visible(
         "raw-free-form-trait-sentinel",
     ):
         assert sentinel.encode("utf-8") not in provider_surface
+
+
+async def test_prompt_bundle_hash_is_static_while_provider_body_hash_tracks_transcript(
+    personalized_workflow_case: Callable[..., _PersonalizedWorkflowCase],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    case = personalized_workflow_case(profile="guest")
+    first_transcript = "raw-transcript-digest-sentinel-one"
+    second_transcript = "raw-transcript-digest-sentinel-two"
+
+    await case.run_turn(text=first_transcript, stt_language="en")
+    await case.run_turn(text=second_transcript, stt_language="en")
+    first, second = case.provider_captures
+
+    assert first.prompt_bundle_sha256 == case.context_builder.prompt_bundle_sha256
+    assert second.prompt_bundle_sha256 == case.context_builder.prompt_bundle_sha256
+    assert first.prompt_bundle_sha256 == second.prompt_bundle_sha256
+    assert first.provider_messages_sha256 == provider_messages_sha256(first.messages)
+    assert second.provider_messages_sha256 == provider_messages_sha256(second.messages)
+    assert first.provider_messages_sha256 != second.provider_messages_sha256
+    digest_and_log_surface = (
+        first.prompt_bundle_sha256
+        + second.prompt_bundle_sha256
+        + first.provider_messages_sha256
+        + second.provider_messages_sha256
+        + caplog.text
+    )
+    assert first_transcript not in digest_and_log_surface
+    assert second_transcript not in digest_and_log_surface
+    assert first.provider_messages_sha256 not in caplog.text
+    assert second.provider_messages_sha256 not in caplog.text
 
 
 async def test_provider_turn_context_is_immutable_and_hash_commits_visible_body(
@@ -467,11 +500,12 @@ async def test_provider_turn_context_is_immutable_and_hash_commits_visible_body(
     tampered_system = dict(context.messages[0])
     tampered_user = dict(context.messages[1])
     tampered_system["content"] += " changed"
-    with pytest.raises(ValueError, match="prompt hash"):
+    with pytest.raises(ValueError, match="provider message hash"):
         ProviderTurnContext(
             messages=(tampered_system, tampered_user),
             reply_mode=context.reply_mode,
             prompt_bundle_sha256=context.prompt_bundle_sha256,
+            provider_messages_sha256=context.provider_messages_sha256,
         )
 
     with pytest.raises(ValueError, match="provider message"):
@@ -479,6 +513,15 @@ async def test_provider_turn_context_is_immutable_and_hash_commits_visible_body(
             messages=({"role": "assistant", "content": "no"},),
             reply_mode="en",
             prompt_bundle_sha256=context.prompt_bundle_sha256,
+            provider_messages_sha256=context.provider_messages_sha256,
+        )
+
+    with pytest.raises(ValueError, match="invalid prompt bundle hash"):
+        ProviderTurnContext(
+            messages=context.messages,
+            reply_mode=context.reply_mode,
+            prompt_bundle_sha256=context.prompt_bundle_sha256.upper(),
+            provider_messages_sha256=context.provider_messages_sha256,
         )
 
 

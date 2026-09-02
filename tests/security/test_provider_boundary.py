@@ -16,6 +16,7 @@ from tuntun_core.services.personalized_turn_context import (
     PersonalizedTurnContextProvider,
     SessionLanguageRegistry,
     TranscribedTurn,
+    provider_messages_sha256,
 )
 
 pytest_plugins = ("tests.fixtures.provider_egress",)
@@ -138,12 +139,24 @@ async def test_task14_persona_projection_keeps_private_profile_out_of_provider_b
         Clock(),
     )
 
-    context = await provider.prepare(session_id, TranscribedTurn(text="hello", stt_language="en"))
+    transcript = "raw-transcript-digest-sentinel"
+    context = await provider.prepare(
+        session_id, TranscribedTurn(text=transcript, stt_language="en")
+    )
 
     assert profiles.loaded_private_profile is True
-    assert context.prompt_bundle_sha256 != context_builder.prompt_bundle_sha256
-    provider_surface = (repr(context.messages) + context.prompt_bundle_sha256 + caplog.text).encode(
-        "utf-8"
-    )
+    assert context.prompt_bundle_sha256 == context_builder.prompt_bundle_sha256
+    assert context.provider_messages_sha256 == provider_messages_sha256(context.messages)
+    digest_and_log_surface = (
+        context.prompt_bundle_sha256 + context.provider_messages_sha256 + caplog.text
+    ).encode("utf-8")
+    assert transcript.encode("utf-8") not in digest_and_log_surface
+    assert context.provider_messages_sha256 not in caplog.text
+    provider_surface = (
+        repr(context.messages)
+        + context.prompt_bundle_sha256
+        + context.provider_messages_sha256
+        + caplog.text
+    ).encode("utf-8")
     for sentinel in sentinels:
         assert sentinel.encode("utf-8") not in provider_surface

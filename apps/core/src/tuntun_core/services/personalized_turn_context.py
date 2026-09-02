@@ -57,19 +57,22 @@ class ProviderTurnContext:
     messages: tuple[Mapping[str, str], ...]
     reply_mode: ReplyMode
     prompt_bundle_sha256: str
+    provider_messages_sha256: str
 
     def __post_init__(self) -> None:
         frozen = _freeze_provider_messages(self.messages)
         object.__setattr__(self, "messages", frozen)
         require_reply_mode(self.reply_mode)
-        if (
-            type(self.prompt_bundle_sha256) is not str
-            or len(self.prompt_bundle_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in self.prompt_bundle_sha256)
-        ):
-            raise ValueError("invalid prompt hash")
-        if self.prompt_bundle_sha256 != provider_messages_sha256(frozen):
-            raise ValueError("prompt hash does not match provider messages")
+        _require_sha256(
+            self.prompt_bundle_sha256,
+            name="prompt bundle hash",
+        )
+        _require_sha256(
+            self.provider_messages_sha256,
+            name="provider message hash",
+        )
+        if self.provider_messages_sha256 != provider_messages_sha256(frozen):
+            raise ValueError("provider message hash does not match provider messages")
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +185,8 @@ class PersonalizedTurnContextProvider:
             return ProviderTurnContext(
                 messages=messages,
                 reply_mode=mode,
-                prompt_bundle_sha256=provider_messages_sha256(messages),
+                prompt_bundle_sha256=self._contexts.prompt_bundle_sha256,
+                provider_messages_sha256=provider_messages_sha256(messages),
             )
 
     async def on_session_ended(self, session_id: UUID) -> None:
@@ -212,6 +216,15 @@ def _safe_current_subject_id(decision: object, observed_at: datetime) -> UUID | 
 def provider_messages_sha256(messages: tuple[Mapping[str, str], ...]) -> str:
     body = _provider_visible_body(_freeze_provider_messages(messages))
     return hashlib.sha256(body).hexdigest()
+
+
+def _require_sha256(value: object, *, name: str) -> None:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"invalid {name}")
 
 
 def _freeze_provider_messages(
