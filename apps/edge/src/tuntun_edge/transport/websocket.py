@@ -70,12 +70,12 @@ _TERMINAL_TLS_AUTH_REASONS: Final[frozenset[str]] = frozenset(
     }
 )
 _TERMINAL_WEBSOCKETS_COMMISSIONING_EXCEPTION_NAMES: Final[tuple[str, ...]] = (
-    "InvalidMessage",
     "InvalidHeader",
     "InvalidUpgrade",
     "NegotiationError",
     "SecurityError",
 )
+_WEBSOCKETS_INVALID_MESSAGE_EXCEPTION_NAME: Final = "InvalidMessage"
 _CleanupResult = TypeVar("_CleanupResult")
 
 
@@ -1080,7 +1080,14 @@ def _terminal_commissioning_code(error: Exception, *, setup_complete: bool) -> s
             return "reachy_tls_certificate_verification"
         if isinstance(candidate, ssl.SSLError) and _is_terminal_tls_auth_error(candidate):
             return "reachy_tls_authentication"
-        if not setup_complete and _is_terminal_websockets_commissioning_error(candidate):
+    if setup_complete:
+        return None
+    for candidate in _iter_exception_chain(error):
+        if _is_terminal_websockets_commissioning_error(candidate):
+            return "reachy_wss_commissioning_protocol_mismatch"
+        if _is_websockets_invalid_message(candidate) and not _is_transient_invalid_message(
+            candidate
+        ):
             return "reachy_wss_commissioning_protocol_mismatch"
     return None
 
@@ -1112,17 +1119,61 @@ def _is_terminal_websockets_commissioning_error(error: BaseException) -> bool:
     return bool(terminal_types) and isinstance(error, terminal_types)
 
 
+def _is_websockets_invalid_message(error: BaseException) -> bool:
+    invalid_message = _websockets_exception_type(_WEBSOCKETS_INVALID_MESSAGE_EXCEPTION_NAME)
+    return invalid_message is not None and isinstance(error, invalid_message)
+
+
+def _is_transient_invalid_message(error: BaseException) -> bool:
+    causes = list(_iter_exception_causes(error))
+    return bool(causes) and all(_is_transient_presocket_transport_error(cause) for cause in causes)
+
+
+def _iter_exception_causes(error: BaseException) -> Iterator[BaseException]:
+    seen: set[int] = {id(error)}
+    stack: list[BaseException] = []
+    context = error.__context__ if not error.__suppress_context__ else None
+    if context is not None:
+        stack.append(context)
+    if error.__cause__ is not None:
+        stack.append(error.__cause__)
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        yield current
+        context = current.__context__ if not current.__suppress_context__ else None
+        if context is not None:
+            stack.append(context)
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+
+
+def _is_transient_presocket_transport_error(error: BaseException) -> bool:
+    if isinstance(error, ssl.SSLError):
+        return False
+    return isinstance(error, (EOFError, ConnectionError, TimeoutError, OSError))
+
+
 def _terminal_websockets_commissioning_exception_types() -> tuple[type[BaseException], ...]:
+    return tuple(
+        exception_type
+        for name in _TERMINAL_WEBSOCKETS_COMMISSIONING_EXCEPTION_NAMES
+        if (exception_type := _websockets_exception_type(name)) is not None
+    )
+
+
+def _websockets_exception_type(name: str) -> type[BaseException] | None:
     try:
         exceptions_module = importlib.import_module("websockets.exceptions")
     except ModuleNotFoundError:
-        return ()
-    terminal_types: list[type[BaseException]] = []
-    for name in _TERMINAL_WEBSOCKETS_COMMISSIONING_EXCEPTION_NAMES:
-        candidate = getattr(exceptions_module, name, None)
-        if isinstance(candidate, type) and issubclass(candidate, BaseException):
-            terminal_types.append(candidate)
-    return tuple(terminal_types)
+        return None
+    candidate = getattr(exceptions_module, name, None)
+    if isinstance(candidate, type) and issubclass(candidate, BaseException):
+        return candidate
+    return None
 
 
 def _is_transient_reconnect_error(error: Exception, *, setup_complete: bool) -> bool:
@@ -1130,7 +1181,9 @@ def _is_transient_reconnect_error(error: Exception, *, setup_complete: bool) -> 
         return not isinstance(error, _TaskFactoryUnavailable)
     if isinstance(error, PermissionError):
         return False
-    return isinstance(error, (ConnectionError, TimeoutError, OSError))
+    if _is_websockets_invalid_message(error) and _is_transient_invalid_message(error):
+        return True
+    return isinstance(error, (EOFError, ConnectionError, TimeoutError, OSError))
 
 
 def _fresh_nonce(factory: Callable[[int], bytes], size: int) -> bytes:

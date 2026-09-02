@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -10,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -1146,6 +1147,53 @@ async def test_run_treats_presocket_tls_auth_protocol_error_as_terminal_recommis
 
 
 @pytest.mark.asyncio
+async def test_run_treats_invalid_message_wrapped_tls_auth_error_as_tls_recommission() -> None:
+    from tuntun_edge.transport.websocket import ReachyWssClient
+    from websockets import exceptions as ws_exceptions
+
+    state = FakeState()
+    safety = FakeSafety()
+    readiness = FakeReadiness()
+    sleeps: list[float] = []
+    stop = asyncio.Event()
+    wrapped_error = ws_exceptions.InvalidMessage("opening handshake failed")
+    wrapped_error.__cause__ = ReasonedTlsAuthError(
+        ssl.SSL_ERROR_SSL,
+        "peer rejected TLS client auth",
+    )
+    connector = ScriptedConnector([wrapped_error])
+
+    async def fail_if_retried(delay: float) -> None:
+        sleeps.append(delay)
+        raise AssertionError("wrapped terminal TLS auth failure retried")
+
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(Ed25519PrivateKey.generate()),
+        state=state,
+        safety=safety,
+        handler=FakeHandler(),
+        readiness=readiness,
+        clock=Clock(),
+        connect_factory=connector,
+        sleeper=fail_if_retried,
+    )
+
+    with pytest.raises(ws_exceptions.InvalidMessage, match="opening handshake failed"):
+        await client.run(stop)
+
+    assert len(connector.calls) == 1
+    assert safety.latched == ["transport_disconnect"]
+    assert state.abandoned == ["disconnect"]
+    assert sleeps == []
+    assert readiness.disconnect_degraded_codes == (
+        "reachy_recommission_required:reachy_tls_authentication",
+    )
+    assert readiness.restart_required is True
+
+
+@pytest.mark.asyncio
 async def test_run_treats_wrapped_tls_certificate_error_as_terminal_recommission() -> None:
     from tuntun_edge.transport.websocket import ReachyWssClient
 
@@ -1187,6 +1235,65 @@ async def test_run_treats_wrapped_tls_certificate_error_as_terminal_recommission
         "reachy_recommission_required:reachy_tls_certificate_verification",
     )
     assert readiness.restart_required is True
+
+
+@pytest.mark.parametrize(
+    "cause_factory",
+    (
+        EOFError,
+        lambda: ConnectionResetError("connection reset by peer"),
+        lambda: TimeoutError("open timed out"),
+    ),
+    ids=("eof", "connection_reset", "timeout"),
+)
+@pytest.mark.asyncio
+async def test_run_treats_invalid_message_with_bare_transport_cause_as_transient_reconnect(
+    cause_factory: Callable[[], BaseException],
+) -> None:
+    from tuntun_edge.transport.websocket import ReachyWssClient
+    from websockets import exceptions as ws_exceptions
+
+    signer = Ed25519PrivateKey.generate()
+    second_nonce = b"u" * 32
+    second_challenge = _challenge(marker=b"u")
+    second = ClientSocket(
+        second_challenge,
+        _accepted_for(second_challenge, client_nonce=second_nonce),
+    )
+    invalid_message = ws_exceptions.InvalidMessage("handshake ended before response headers")
+    invalid_message.__cause__ = cause_factory()
+    state = FakeState()
+    safety = FakeSafety()
+    readiness = FakeReadiness()
+    sleeps: list[float] = []
+    stop = asyncio.Event()
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(signer),
+        state=state,
+        safety=safety,
+        handler=FakeHandler(),
+        readiness=readiness,
+        clock=Clock(),
+        connect_factory=ScriptedConnector([invalid_message, second]),
+        tls_peer_verifier=lambda _socket, expected: ("TLSv1.3", SERVER_LEAF_DER),
+        client_certificate_sha256=lambda _socket: CLIENT_CERTIFICATE_SHA256,
+        nonce_factory=lambda size: second_nonce if size == 32 else b"",
+        sleeper=lambda delay: _record_sleep(sleeps, delay),
+    )
+
+    await asyncio.wait_for(
+        client.run(stop, after_connect=lambda _connection: stop.set()),
+        timeout=0.2,
+    )
+
+    assert len(client.connection_history) == 1
+    assert second.closed == [(1000, "edge_stopped")]
+    assert safety.latched == ["transport_disconnect", "transport_disconnect"]
+    assert state.abandoned == ["disconnect", "disconnect"]
+    assert sleeps == [0.25]
+    assert readiness.ready is True
 
 
 @pytest.mark.asyncio
@@ -1419,10 +1526,15 @@ async def test_run_bounds_application_response_send_and_reconnects() -> None:
         socket_close_timeout=0.001,
     )
 
-    await asyncio.wait_for(
-        client.run(stop, after_connect=stop_after_second_connection),
-        timeout=0.1,
-    )
+    run_task = asyncio.create_task(client.run(stop, after_connect=stop_after_second_connection))
+    try:
+        await asyncio.wait_for(first.hanging_send_started.wait(), timeout=1)
+        await asyncio.wait_for(run_task, timeout=1)
+    finally:
+        if not run_task.done():
+            run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run_task
 
     assert first.hanging_send_started.is_set()
     assert first.closed == [(1011, "edge_connection_failed")]
@@ -3469,8 +3581,16 @@ async def test_server_session_clear_timeout_is_bounded_latched_and_raised() -> N
         pre_session_cleanup_timeout=0.001,
     )
 
-    with pytest.raises(RuntimeError, match="reachy_session_clear_degraded"):
-        await asyncio.wait_for(server.accept(socket), timeout=0.05)
+    accept_task = asyncio.create_task(server.accept(socket))
+    try:
+        await asyncio.wait_for(sessions.clear_started.wait(), timeout=1)
+        with pytest.raises(RuntimeError, match="reachy_session_clear_degraded"):
+            await asyncio.wait_for(accept_task, timeout=1)
+    finally:
+        if not accept_task.done():
+            accept_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await accept_task
 
     assert sessions.published == [DEVICE_ID]
     assert sessions.clear_started.is_set()
@@ -4338,7 +4458,7 @@ async def test_websockets_dependency_pin_for_live_wss(tmp_path: Path) -> None:
     ("missing_client_certificate", "wrong_client_ca"),
 )
 @pytest.mark.asyncio
-async def test_reachy_client_run_latches_live_websockets_client_auth_failure(
+async def test_reachy_client_run_retries_live_websockets_invalid_message_eof_without_tls_signal(
     tmp_path: Path,
     client_auth_failure: str,
 ) -> None:
@@ -4348,7 +4468,6 @@ async def test_reachy_client_run_latches_live_websockets_client_auth_failure(
         MAX_WSS_MESSAGE_BYTES,
         ReachyWssClient,
     )
-    from websockets import exceptions as ws_exceptions
     from websockets.asyncio import client as ws_client
     from websockets.asyncio import server as ws_server
 
@@ -4361,18 +4480,28 @@ async def test_reachy_client_run_latches_live_websockets_client_auth_failure(
             materials.ca_path,
         )
     application_dispatches = 0
+    signer = Ed25519PrivateKey.generate()
+    second_nonce = b"v" * 32
+    second_challenge = _challenge(marker=b"v")
 
-    async def fail_if_application_dispatches(socket: Any) -> None:
+    async def complete_application_handshake(socket: Any) -> None:
         nonlocal application_dispatches
         application_dispatches += 1
-        await socket.close(code=1011, reason="unexpected_application_dispatch")
+        await socket.send(canonical_bytes(second_challenge).decode("utf-8"))
+        await socket.recv()
+        await socket.send(
+            canonical_bytes(_accepted_for(second_challenge, client_nonce=second_nonce)).decode(
+                "utf-8"
+            )
+        )
+        await socket.wait_closed()
 
     server = await ws_server.serve(
-        fail_if_application_dispatches,
+        complete_application_handshake,
         host="127.0.0.1",
         port=0,
         ssl=materials.server_context,
-        subprotocols=[APP_SUBPROTOCOL],
+        subprotocols=cast(Any, [APP_SUBPROTOCOL]),
         compression=None,
         ping_interval=None,
         max_size=MAX_WSS_MESSAGE_BYTES,
@@ -4390,60 +4519,58 @@ async def test_reachy_client_run_latches_live_websockets_client_auth_failure(
     sleeps: list[float] = []
     stop = asyncio.Event()
     connect_attempts = 0
+    connect_contexts = [client_context, materials.client_context]
 
     async def connect_factory(_uri: str, **kwargs: object) -> Any:
         nonlocal connect_attempts
         connect_attempts += 1
         return await ws_client.connect(
             f"wss://127.0.0.1:{port}{APP_PATH}",
-            ssl=client_context,
+            ssl=connect_contexts.pop(0),
             server_hostname="127.0.0.1",
-            subprotocols=kwargs["subprotocols"],
-            compression=kwargs["compression"],
-            ping_interval=kwargs["ping_interval"],
-            proxy=kwargs["proxy"],
-            open_timeout=kwargs["open_timeout"],
-            close_timeout=kwargs["close_timeout"],
-            max_size=kwargs["max_size"],
-            max_queue=kwargs["max_queue"],
+            subprotocols=cast(Any, kwargs["subprotocols"]),
+            compression=cast(Any, kwargs["compression"]),
+            ping_interval=cast(Any, kwargs["ping_interval"]),
+            proxy=cast(Any, kwargs["proxy"]),
+            open_timeout=cast(Any, kwargs["open_timeout"]),
+            close_timeout=cast(Any, kwargs["close_timeout"]),
+            max_size=cast(Any, kwargs["max_size"]),
+            max_queue=cast(Any, kwargs["max_queue"]),
         )
-
-    async def fail_if_retried(delay: float) -> None:
-        sleeps.append(delay)
-        raise AssertionError("terminal live WebSockets mTLS failure retried")
 
     client = ReachyWssClient(
         Endpoint(),
         tls_context=object(),
-        pairing_keys=EdgePairingKeys(Ed25519PrivateKey.generate()),
+        pairing_keys=EdgePairingKeys(signer),
         state=state,
         safety=safety,
         handler=handler,
         readiness=readiness,
         clock=Clock(),
-        connect_factory=connect_factory,
-        sleeper=fail_if_retried,
+        connect_factory=cast(Any, connect_factory),
+        sleeper=lambda delay: _record_sleep(sleeps, delay),
+        tls_peer_verifier=lambda _socket, expected: ("TLSv1.3", SERVER_LEAF_DER),
+        client_certificate_sha256=lambda _socket: CLIENT_CERTIFICATE_SHA256,
+        nonce_factory=lambda size: second_nonce if size == 32 else b"",
     )
 
     try:
-        with pytest.raises(ws_exceptions.InvalidMessage) as raised:
-            await asyncio.wait_for(client.run(stop), timeout=2.0)
+        await asyncio.wait_for(
+            client.run(stop, after_connect=lambda _connection: stop.set()),
+            timeout=2.0,
+        )
     finally:
         server.close()
         await server.wait_closed()
 
-    assert any(isinstance(error, EOFError) for error in _test_exception_chain(raised.value))
-    assert application_dispatches == 0
+    assert application_dispatches == 1
     assert handler.control_calls == []
     assert handler.media_calls == []
-    assert connect_attempts == 1
-    assert safety.latched == ["transport_disconnect"]
-    assert state.abandoned == ["disconnect"]
-    assert sleeps == []
-    assert readiness.disconnect_degraded_codes == (
-        "reachy_recommission_required:reachy_wss_commissioning_protocol_mismatch",
-    )
-    assert readiness.restart_required is True
+    assert connect_attempts == 2
+    assert safety.latched == ["transport_disconnect", "transport_disconnect"]
+    assert state.abandoned == ["disconnect", "disconnect"]
+    assert sleeps == [0.25]
+    assert readiness.ready is True
 
 
 def _write_ed25519_mtls_materials(tmp_path: Path) -> TlsMaterials:
