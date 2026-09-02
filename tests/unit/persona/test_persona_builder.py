@@ -5,8 +5,9 @@ import shutil
 from pathlib import Path
 
 import pytest
+import tuntun_core.services.persona_builder as persona_builder_module
 from tuntun_contracts.identity import PersonaProjection
-from tuntun_core.services.persona_builder import PersonaBuilder
+from tuntun_core.services.persona_builder import PersonaBuilder, _read_prompt_text
 
 
 def test_child_persona_contains_no_identity_or_adult_private_fact() -> None:
@@ -186,3 +187,64 @@ def test_prompt_controls_are_exact_bounded_and_nofollow(tmp_path: Path, mutation
 
     with pytest.raises((PermissionError, ValueError)):
         PersonaBuilder.from_directory(root)
+
+
+@pytest.mark.parametrize("symlink_kind", ("root", "parent"))
+def test_read_prompt_text_rejects_symlinked_root_or_parent(
+    tmp_path: Path,
+    symlink_kind: str,
+) -> None:
+    real_root = tmp_path / "real-prompts"
+    (real_root / "conversation").mkdir(parents=True)
+    (real_root / "conversation/base.md").write_text("safe prompt", encoding="utf-8")
+
+    if symlink_kind == "root":
+        requested_root = tmp_path / "prompt-root-link"
+        requested_root.symlink_to(real_root, target_is_directory=True)
+        requested = requested_root / "conversation/base.md"
+    else:
+        requested_root = tmp_path / "prompts"
+        requested_root.mkdir()
+        (requested_root / "conversation").symlink_to(
+            real_root / "conversation",
+            target_is_directory=True,
+        )
+        requested = requested_root / "conversation/base.md"
+
+    with pytest.raises(PermissionError, match="unsafe prompt control file"):
+        _read_prompt_text(requested)
+
+
+def test_read_prompt_text_rejects_parent_replacement_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_root = tmp_path / "prompts"
+    conversation = prompt_root / "conversation"
+    conversation.mkdir(parents=True)
+    requested = conversation / "base.md"
+    requested.write_text("safe prompt", encoding="utf-8")
+    replacement_root = tmp_path / "replacement"
+    (replacement_root / "conversation").mkdir(parents=True)
+    (replacement_root / "conversation/base.md").write_text("safe prompt", encoding="utf-8")
+    replaced = False
+    real_read = persona_builder_module.os.read
+
+    def replace_parent_after_read(fd: int, byte_count: int) -> bytes:
+        nonlocal replaced
+        chunk = real_read(fd, byte_count)
+        if chunk and not replaced:
+            conversation.rename(prompt_root / "conversation.old")
+            conversation.symlink_to(
+                replacement_root / "conversation",
+                target_is_directory=True,
+            )
+            replaced = True
+        return chunk
+
+    monkeypatch.setattr(persona_builder_module.os, "read", replace_parent_after_read)
+
+    with pytest.raises(PermissionError, match="unsafe prompt control file"):
+        _read_prompt_text(requested)
+
+    assert replaced is True

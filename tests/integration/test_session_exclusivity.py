@@ -10,12 +10,20 @@ from tuntun_contracts.budget import BudgetReconciliationRequest
 from tuntun_contracts.reachy import SafetyReceipt
 from tuntun_core.bootstrap.lifecycle import shutdown
 from tuntun_core.domain.conversation import TurnEvent, TurnState, transition
+from tuntun_core.services.personalized_turn_context import (
+    SessionLanguageRegistry,
+    TranscribedTurn,
+)
 from tuntun_core.services.sessions.idempotency import (
     IdempotencyCapacityError,
     IdempotencyStore,
 )
 from tuntun_core.services.sessions.manager import SessionManager, SessionRejected
-from tuntun_core.services.sessions.turn_coordinator import SafetyBlockedError, TurnCoordinator
+from tuntun_core.services.sessions.turn_coordinator import (
+    CoordinatorState,
+    SafetyBlockedError,
+    TurnCoordinator,
+)
 from tuntun_testing.fake_clock import FakeClock
 
 
@@ -163,9 +171,11 @@ async def test_manager_cancel_synchronizes_its_admission() -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_finish_waits_for_active_context_lease_before_end_handlers() -> None:
-    manager = SessionManager(_coordinator())
-    admission = await manager.open(uuid4(), uuid4())
+async def test_turn_finish_waits_for_lease_without_clearing_stable_context() -> None:
+    coordinator = _coordinator()
+    manager = SessionManager(coordinator)
+    context_session_id = uuid4()
+    admission = await manager.open(uuid4(), uuid4(), context_session_id=context_session_id)
     ended_sessions: list[UUID] = []
 
     async def record_session_end(session_id: UUID) -> None:
@@ -173,23 +183,35 @@ async def test_manager_finish_waits_for_active_context_lease_before_end_handlers
 
     manager.register_session_ended_handler(record_session_end)
     async with manager.active_context_lease(admission.turn_id) as session:
-        assert session.id == admission.turn_id
+        assert session.id == context_session_id
         assert session.household_id == admission.household_id
         finishing = asyncio.create_task(manager.finish(admission.turn_id))
-        await asyncio.sleep(0)
+        for _ in range(1_000):
+            if coordinator.state is CoordinatorState.IDLE:
+                break
+            await asyncio.sleep(0)
 
+        assert coordinator.state is CoordinatorState.IDLE
         assert finishing.done() is False
+        with pytest.raises(SessionRejected) as rejected:
+            await manager.open(
+                admission.household_id,
+                uuid4(),
+                context_session_id=context_session_id,
+            )
+        assert rejected.value.reason == "busy"
         assert ended_sessions == []
 
     assert await finishing is True
-    assert ended_sessions == [admission.turn_id]
+    assert ended_sessions == []
     assert manager.active is None
 
 
 @pytest.mark.asyncio
-async def test_manager_cancel_waits_for_lease_and_rejects_new_leases_after_end_begins() -> None:
+async def test_manager_turn_cancel_waits_for_lease_without_clearing_stable_context() -> None:
     manager = SessionManager(_coordinator())
-    admission = await manager.open(uuid4(), uuid4())
+    context_session_id = uuid4()
+    admission = await manager.open(uuid4(), uuid4(), context_session_id=context_session_id)
     ended_sessions: list[UUID] = []
 
     async def record_session_end(session_id: UUID) -> None:
@@ -207,13 +229,46 @@ async def test_manager_cancel_waits_for_lease_and_rejects_new_leases_after_end_b
         assert ended_sessions == []
 
     await cancellation
-    assert ended_sessions == [admission.turn_id]
+    assert ended_sessions == []
     assert manager.active is None
 
 
 @pytest.mark.asyncio
-async def test_manager_end_alias_uses_the_same_lease_and_handler_barrier() -> None:
+async def test_manager_explicit_context_session_end_waits_for_turn_and_rejects_stale_reuse() -> (
+    None
+):
     manager = SessionManager(_coordinator())
+    context_session_id = uuid4()
+    admission = await manager.open(uuid4(), uuid4(), context_session_id=context_session_id)
+    ended_sessions: list[UUID] = []
+
+    async def record_session_end(session_id: UUID) -> None:
+        ended_sessions.append(session_id)
+
+    manager.register_session_ended_handler(record_session_end)
+    async with manager.active_context_lease(admission.turn_id) as session:
+        assert session.id == context_session_id
+        ending = asyncio.create_task(manager.end_context_session(context_session_id))
+        await asyncio.sleep(0)
+        assert ending.done() is False
+        with pytest.raises(RuntimeError, match="session_context_unavailable"):
+            async with manager.active_context_lease(admission.turn_id):
+                raise AssertionError("ending context must reject new leases")
+        finishing = asyncio.create_task(manager.finish(admission.turn_id))
+        await asyncio.sleep(0)
+        assert ending.done() is False
+
+    assert await finishing is True
+    assert await ending is True
+    assert ended_sessions == [context_session_id]
+    with pytest.raises(RuntimeError, match="context_session_unavailable"):
+        await manager.open(uuid4(), uuid4(), context_session_id=context_session_id)
+
+
+@pytest.mark.asyncio
+async def test_manager_implicit_one_turn_session_finish_still_clears_after_lease() -> None:
+    coordinator = _coordinator()
+    manager = SessionManager(coordinator)
     admission = await manager.open(uuid4(), uuid4())
     ended_sessions: list[UUID] = []
 
@@ -221,13 +276,127 @@ async def test_manager_end_alias_uses_the_same_lease_and_handler_barrier() -> No
         ended_sessions.append(session_id)
 
     manager.register_session_ended_handler(record_session_end)
-    async with manager.active_context_lease(admission.turn_id):
-        ending = asyncio.create_task(manager.end(admission.turn_id))
-        await asyncio.sleep(0)
-        assert ending.done() is False
+    async with manager.active_context_lease(admission.turn_id) as session:
+        assert session.id == admission.turn_id
+        finishing = asyncio.create_task(manager.finish(admission.turn_id))
+        for _ in range(1_000):
+            if coordinator.state is CoordinatorState.IDLE:
+                break
+            await asyncio.sleep(0)
+        assert coordinator.state is CoordinatorState.IDLE
+        assert finishing.done() is False
+        with pytest.raises(SessionRejected) as rejected:
+            await manager.open(uuid4(), uuid4())
+        assert rejected.value.reason == "busy"
 
-    assert await ending is True
+    assert await finishing is True
     assert ended_sessions == [admission.turn_id]
+
+
+@pytest.mark.asyncio
+async def test_context_session_end_blocks_fresh_turn_until_clear_handlers_complete() -> None:
+    manager = SessionManager(_coordinator())
+    context_session_id = uuid4()
+    active = await manager.open(uuid4(), uuid4(), context_session_id=context_session_id)
+    await manager.finish(active.turn_id)
+    clear_entered = asyncio.Event()
+    release_clear = asyncio.Event()
+
+    async def hold_clear(session_id: UUID) -> None:
+        assert session_id == context_session_id
+        clear_entered.set()
+        await release_clear.wait()
+
+    manager.register_session_ended_handler(hold_clear)
+
+    ending = asyncio.create_task(manager.end_context_session(context_session_id))
+    await clear_entered.wait()
+    assert ending.done() is False
+    with pytest.raises(SessionRejected) as rejected:
+        await manager.open(uuid4(), uuid4(), context_session_id=uuid4())
+    assert rejected.value.reason == "busy"
+
+    release_clear.set()
+    assert await ending is True
+    fresh = await manager.open(uuid4(), uuid4(), context_session_id=uuid4())
+    assert manager.active == fresh
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_context_session_reuse_for_different_household() -> None:
+    manager = SessionManager(_coordinator())
+    context_session_id = uuid4()
+    household_id = uuid4()
+    active = await manager.open(household_id, uuid4(), context_session_id=context_session_id)
+    await manager.finish(active.turn_id)
+
+    with pytest.raises(RuntimeError, match="context_session_unavailable"):
+        await manager.open(uuid4(), uuid4(), context_session_id=context_session_id)
+
+    resumed = await manager.open(household_id, uuid4(), context_session_id=context_session_id)
+    assert resumed.context_session_id == context_session_id
+
+
+@pytest.mark.asyncio
+async def test_context_session_end_attempts_all_handlers_and_records_runtime_failures() -> None:
+    coordinator = _coordinator()
+    manager = SessionManager(coordinator)
+    context_session_id = uuid4()
+    registry = SessionLanguageRegistry()
+    registry.detect(context_session_id, TranscribedTurn(text="बारिश", stt_language="hi"))
+    active = await manager.open(uuid4(), uuid4(), context_session_id=context_session_id)
+    await manager.finish(active.turn_id)
+    calls: list[str] = []
+
+    async def fail_first(session_id: UUID) -> None:
+        assert session_id == context_session_id
+        calls.append("fail")
+        raise RuntimeError("private handler detail")
+
+    async def clear_language(session_id: UUID) -> None:
+        calls.append("clear")
+        registry.clear(session_id)
+
+    manager.register_session_ended_handler(fail_first)
+    manager.register_session_ended_handler(clear_language)
+
+    with pytest.raises(RuntimeError, match="session_end_handler_failed"):
+        await manager.end_context_session(context_session_id)
+
+    assert calls == ["fail", "clear"]
+    assert not registry.contains(context_session_id)
+    assert coordinator.health.detached_barrier_errors == ("RuntimeError",)
+
+
+@pytest.mark.asyncio
+async def test_context_session_end_preserves_cancellation_after_attempting_clear_handler() -> None:
+    coordinator = _coordinator()
+    manager = SessionManager(coordinator)
+    context_session_id = uuid4()
+    registry = SessionLanguageRegistry()
+    registry.detect(context_session_id, TranscribedTurn(text="बारिश", stt_language="hi"))
+    active = await manager.open(uuid4(), uuid4(), context_session_id=context_session_id)
+    await manager.finish(active.turn_id)
+    calls: list[str] = []
+
+    async def cancel_first(session_id: UUID) -> None:
+        assert session_id == context_session_id
+        calls.append("cancel")
+        raise asyncio.CancelledError
+
+    async def clear_language(session_id: UUID) -> None:
+        calls.append("clear")
+        registry.clear(session_id)
+
+    manager.register_session_ended_handler(cancel_first)
+    manager.register_session_ended_handler(clear_language)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.end_context_session(context_session_id)
+
+    assert calls == ["cancel", "clear"]
+    assert not registry.contains(context_session_id)
+    assert coordinator.health.detached_barrier_errors == ("CancelledError",)
 
 
 @pytest.mark.asyncio

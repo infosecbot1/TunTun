@@ -55,7 +55,9 @@ from tuntun_core.workflows.conversation import (
     WorkflowPorts,
 )
 
-_SIMULATED_GUEST_ROUTE_NAMES = frozenset({"health.ready", "session.simulated_turn"})
+_SIMULATED_GUEST_ROUTE_NAMES = frozenset(
+    {"health.ready", "session.simulated_end", "session.simulated_turn"}
+)
 _LOOPBACK_LISTENER_BINDINGS = frozenset({"loopback"})
 
 

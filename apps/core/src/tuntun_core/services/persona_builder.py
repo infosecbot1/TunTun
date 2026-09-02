@@ -11,6 +11,13 @@ from pydantic import Field
 from tuntun_contracts.base import ContractModel
 from tuntun_contracts.identity import PersonaProjection
 from tuntun_core.config.loader import read_bounded_strict_yaml
+from tuntun_core.config.secure_paths import (
+    _acquire_owned_descriptor,
+    _close_preserving_primary,
+    _require_no_unsafe_acl,
+    absolute_lexical_path,
+    open_trusted_directory,
+)
 
 RuleText = Annotated[str, Field(min_length=1, max_length=512)]
 
@@ -85,48 +92,103 @@ class PromptVersionsV1(ContractModel):
 def _read_prompt_text(path: Path, max_bytes: int = _PROMPT_MAX_BYTES) -> str:
     if type(max_bytes) is not int or not 1 <= max_bytes <= _PROMPT_MAX_BYTES:
         raise ValueError("invalid prompt control bound")
-    descriptor: int | None = None
     try:
-        descriptor = os.open(path, _PROMPT_READ_FLAGS)
-        before = os.fstat(descriptor)
-        _require_safe_prompt_file(before)
-        if not 1 <= before.st_size <= max_bytes:
-            raise PermissionError("unsafe prompt control file")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, min(65_536, max_bytes + 1 - total))
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise PermissionError("prompt control file too large")
-            chunks.append(chunk)
-        after = os.fstat(descriptor)
-        named = os.lstat(path)
-        if (
-            total != before.st_size
-            or _stable_identity(before) != _stable_identity(after)
-            or (after.st_dev, after.st_ino) != (named.st_dev, named.st_ino)
-        ):
-            raise PermissionError("prompt control file changed")
-        _require_safe_prompt_file(after)
-        return b"".join(chunks).decode("utf-8", errors="strict").strip()
+        absolute = absolute_lexical_path(Path(path))
+        with open_trusted_directory(absolute.parent) as parent:
+            parent.revalidate()
+            try:
+                file_owner = _acquire_owned_descriptor(
+                    lambda: os.open(absolute.name, _PROMPT_READ_FLAGS, dir_fd=parent.fd),
+                    _close_fd,
+                )
+            except OSError:
+                raise PermissionError("unsafe prompt control file") from None
+            file_error: BaseException | None = None
+            try:
+                descriptor = file_owner.borrow()
+                before = os.fstat(descriptor)
+                named_before = os.stat(
+                    absolute.name,
+                    dir_fd=parent.fd,
+                    follow_symlinks=False,
+                )
+                _require_safe_prompt_file(
+                    descriptor,
+                    before,
+                    named_before,
+                    parent_device=parent.device,
+                )
+                if not 1 <= before.st_size <= max_bytes:
+                    raise PermissionError("unsafe prompt control file")
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = os.read(descriptor, min(65_536, max_bytes + 1 - total))
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise PermissionError("unsafe prompt control file")
+                    chunks.append(chunk)
+                after = os.fstat(descriptor)
+                named_after = os.stat(
+                    absolute.name,
+                    dir_fd=parent.fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    total != before.st_size
+                    or _stable_identity(before) != _stable_identity(after)
+                    or (before.st_dev, before.st_ino) != (named_before.st_dev, named_before.st_ino)
+                    or (after.st_dev, after.st_ino) != (named_after.st_dev, named_after.st_ino)
+                    or (named_before.st_dev, named_before.st_ino)
+                    != (named_after.st_dev, named_after.st_ino)
+                ):
+                    raise PermissionError("unsafe prompt control file")
+                _require_safe_prompt_file(
+                    descriptor,
+                    after,
+                    named_after,
+                    parent_device=parent.device,
+                )
+                parent.revalidate()
+                return b"".join(chunks).decode("utf-8", errors="strict").strip()
+            except OSError:
+                file_error = PermissionError("unsafe prompt control file")
+                raise file_error from None
+            except BaseException as error:
+                file_error = error
+                raise
+            finally:
+                _close_preserving_primary(file_owner, _close_fd, file_error)
+    except PermissionError:
+        raise PermissionError("unsafe prompt control file") from None
     except OSError:
         raise PermissionError("unsafe prompt control file") from None
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
 
 
-def _require_safe_prompt_file(value: os.stat_result) -> None:
+def _close_fd(descriptor: int) -> None:
+    os.close(descriptor)
+
+
+def _require_safe_prompt_file(
+    descriptor: int,
+    opened: os.stat_result,
+    named: os.stat_result,
+    *,
+    parent_device: int,
+) -> None:
     if (
-        not stat.S_ISREG(value.st_mode)
-        or value.st_uid not in {0, os.geteuid()}
-        or value.st_mode & 0o022
-        or value.st_nlink != 1
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(named.st_mode)
+        or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        or opened.st_dev != parent_device
+        or opened.st_uid not in {0, os.geteuid()}
+        or opened.st_mode & 0o022
+        or opened.st_nlink != 1
     ):
         raise PermissionError("unsafe prompt control file")
+    _require_no_unsafe_acl(descriptor, "unsafe prompt control file")
 
 
 def _stable_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:

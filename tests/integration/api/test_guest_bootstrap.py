@@ -59,14 +59,29 @@ class _Reachy:
 
 class _SessionManager:
     def __init__(self) -> None:
-        self.opens: list[tuple[UUID, UUID]] = []
+        self.opens: list[tuple[UUID, UUID, UUID | None]] = []
+        self.ended_context_sessions: list[UUID] = []
         self.rejection: SessionRejected | None = None
 
-    async def open(self, household_id: UUID, turn_id: UUID) -> SessionAdmission:
-        self.opens.append((household_id, turn_id))
+    async def open(
+        self,
+        household_id: UUID,
+        turn_id: UUID,
+        *,
+        context_session_id: UUID | None = None,
+    ) -> SessionAdmission:
+        self.opens.append((household_id, turn_id, context_session_id))
         if self.rejection is not None:
             raise self.rejection
-        return SessionAdmission(household_id=household_id, turn_id=turn_id)
+        return SessionAdmission(
+            household_id=household_id,
+            turn_id=turn_id,
+            context_session_id=context_session_id,
+        )
+
+    async def end_context_session(self, context_session_id: UUID) -> bool:
+        self.ended_context_sessions.append(context_session_id)
+        return True
 
 
 class _Workflow:
@@ -123,6 +138,37 @@ class _Ports:
     async def finish(self, turn_id: UUID) -> None:
         del turn_id
         self.events.append("ports.finish")
+
+
+class _LanguagePorts:
+    def __init__(self, transcripts: tuple[TranscribedTurn, ...]) -> None:
+        self._transcripts = list(transcripts)
+        self.reply_modes: list[str] = []
+
+    async def start(self, turn_id: UUID) -> None:
+        del turn_id
+
+    async def transcribe(self, wav_bytes: bytes) -> TranscribedTurn:
+        assert wav_bytes == b"RIFFsynthetic"
+        return self._transcripts.pop(0)
+
+    async def guest_identity(self) -> str:
+        raise AssertionError("production route must not use legacy guest identity")
+
+    async def generate(self, context: ProviderTurnContext) -> str:
+        self.reply_modes.append(context.reply_mode)
+        return "safe answer"
+
+    async def synthesize(self, answer: str) -> bytes:
+        assert answer == "safe answer"
+        return b"pcm"
+
+    async def play(self, turn_id: UUID, pcm: bytes) -> None:
+        del turn_id
+        assert pcm == b"pcm"
+
+    async def finish(self, turn_id: UUID) -> None:
+        del turn_id
 
 
 class _Startup:
@@ -255,7 +301,11 @@ async def test_installed_guest_app_has_only_first_owned_routes() -> None:
     deps, _session, _workflow, _readiness = _dependencies()
     app = create_app(deps)
 
-    assert _owned_route_names(app) == {"health.ready", "session.simulated_turn"}
+    assert _owned_route_names(app) == {
+        "health.ready",
+        "session.simulated_end",
+        "session.simulated_turn",
+    }
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 42_000))
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         openapi = await client.get("/openapi.json")
@@ -304,12 +354,43 @@ async def test_simulated_turn_is_empty_loopback_only_and_uses_server_side_identi
     assert accepted.headers["Cache-Control"] == "no-store"
     body = accepted.json()
     assert body == {"turn_id": str(workflow.turns[0].turn_id), "outcome": "completed"}
-    assert session.opens == [(deps.household_id, workflow.turns[0].turn_id)]
+    assert session.opens == [
+        (
+            deps.household_id,
+            workflow.turns[0].turn_id,
+            deps.context_session_id,
+        )
+    ]
     assert workflow.turns == [
         TurnInput(
             turn_id=workflow.turns[0].turn_id,
             household_id=deps.household_id,
             device_id=deps.device_id,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_simulated_end_rotates_server_side_context_without_returning_ids() -> None:
+    deps, session, workflow, _readiness = _dependencies()
+    original_context_session_id = deps.context_session_id
+    transport = httpx.ASGITransport(app=create_app(deps), client=("127.0.0.1", 42_000))
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        ended = await client.post("/session/simulated-end", json={})
+        next_turn = await client.post("/session/simulated-turn", json={})
+
+    assert ended.status_code == 200
+    assert ended.json() == {"status": "ended"}
+    assert str(original_context_session_id) not in ended.text
+    assert session.ended_context_sessions == [original_context_session_id]
+    assert deps.context_session_id != original_context_session_id
+    assert next_turn.status_code == 200
+    assert session.opens == [
+        (
+            deps.household_id,
+            workflow.turns[0].turn_id,
+            deps.context_session_id,
         )
     ]
 
@@ -535,7 +616,13 @@ async def test_content_length_allows_equal_numeric_duplicates_and_sp_htab_ows() 
     )
     assert body == expected_body
     assert receive_calls == 1
-    assert session.opens == [(deps.household_id, workflow.turns[0].turn_id)]
+    assert session.opens == [
+        (
+            deps.household_id,
+            workflow.turns[0].turn_id,
+            deps.context_session_id,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -714,7 +801,11 @@ async def test_production_container_installs_single_guest_app_with_existing_root
     assert installed.session_manager is session_manager
     assert installed.readiness_dependencies == (lifecycle,)
     assert type(installed.route_ids) is set
-    assert installed.route_ids == {"health.ready", "session.simulated_turn"}
+    assert installed.route_ids == {
+        "health.ready",
+        "session.simulated_end",
+        "session.simulated_turn",
+    }
     assert type(installed.duplicate_route_ids) is tuple
     assert installed.duplicate_route_ids == ()
     assert installed.listener_bindings == frozenset({"loopback"})
@@ -747,3 +838,71 @@ async def test_production_container_installs_single_guest_app_with_existing_root
             identity=_Identity(uuid4()),
             profiles=_Profiles(),
         )
+
+
+@pytest.mark.asyncio
+async def test_production_api_language_prior_survives_turn_finish_until_explicit_context_end() -> (
+    None
+):
+    reachy = _Reachy()
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    coordinator = TurnCoordinator(
+        budget=_Budget(),
+        reachy=reachy,
+        clock=clock,
+    )
+    session_manager = RealSessionManager(coordinator)
+    process_lease = object()
+    startup = _Startup(process_lease)
+    reconciler = object()
+    lifecycle = _Lifecycle(reconciler, startup)
+    container = ProductionContainer(
+        core=_Core(clock),  # type: ignore[arg-type]
+        core_process_lease=process_lease,  # type: ignore[arg-type]
+        budget_reconciler=reconciler,  # type: ignore[arg-type]
+        startup_turn_recovery=startup,  # type: ignore[arg-type]
+        budget_lifecycle=lifecycle,  # type: ignore[arg-type]
+        turn_coordinator=coordinator,
+        session_manager=session_manager,
+    )
+    ports = _LanguagePorts(
+        (
+            TranscribedTurn(text="बारिश", stt_language="hi"),
+            TranscribedTurn(text="hmm", stt_language="unknown"),
+            TranscribedTurn(text="okay", stt_language="unknown"),
+            TranscribedTurn(text="hmm", stt_language="unknown"),
+            TranscribedTurn(text="hmm", stt_language="unknown"),
+        )
+    )
+    installed = container.install_simulated_guest_app(
+        ports=ports,
+        completed_audio=_CompletedAudio(),
+        household_id=uuid4(),
+        device_id=uuid4(),
+        loopback_host="127.0.0.1",
+        identity=_Identity(uuid4()),
+        profiles=_Profiles(),
+    )
+    first_context_session_id = installed.composition.dependencies.context_session_id
+    transport = httpx.ASGITransport(
+        app=installed.composition.app,
+        client=("127.0.0.1", 42_000),
+    )
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        for _ in range(4):
+            response = await client.post("/session/simulated-turn", json={})
+            assert response.status_code == 200
+
+        assert ports.reply_modes == ["hi", "hi", "hi", "en"]
+
+        ended = await client.post("/session/simulated-end", json={})
+        assert ended.status_code == 200
+        assert ended.json() == {"status": "ended"}
+        assert str(first_context_session_id) not in ended.text
+        assert installed.composition.dependencies.context_session_id != first_context_session_id
+
+        response = await client.post("/session/simulated-turn", json={})
+        assert response.status_code == 200
+
+    assert ports.reply_modes == ["hi", "hi", "hi", "en", "en"]
