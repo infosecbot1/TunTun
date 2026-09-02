@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import secrets
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ from tuntun_contracts.reachy_operator import ReachyAcceptedCapabilityV1, ReachyO
 from tuntun_contracts.reachy_time import CoreTimeProofV1
 from tuntun_edge.transport import commissioning_repository as repository_module
 from tuntun_edge.transport.commissioning import (
+    SYNTHETIC_ISSUER_CLEANUP_STATE_ID,
     SYNTHETIC_ISSUER_STATE_ID,
     CommissioningStateV1,
     GeneratedReachyMaterialBundle,
@@ -44,6 +46,7 @@ from tuntun_edge.transport.commissioning import (
     IssuedClientMaterialV1,
     LocalPhysicalProof,
     PreparedCoreMaterialV1,
+    ReachyCommissioningArtifactMapV1,
     ReachyCommissioningRequestV1,
     ReachyCommissioningService,
     ReachyCoreEndpointV1,
@@ -60,6 +63,12 @@ from tuntun_edge.transport.commissioning_repository import (
     OwnerOnlyArtifactStore,
     ReachyOperatorAcceptancePublisher,
     ReachyOperatorStateRepository,
+)
+
+_CONTROL_FLOW_EXCEPTION_TYPES: tuple[type[BaseException], ...] = (
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
 )
 
 
@@ -82,6 +91,77 @@ def _key_ids(endpoint: ReachyCoreEndpointV1) -> tuple[str, str, str, str]:
 
 def _certificate_digests(endpoint: ReachyCoreEndpointV1) -> tuple[str, str]:
     return (endpoint.server_leaf_sha256, endpoint.client_certificate_sha256)
+
+
+def _artifact_handles_for_material(material: GeneratedReachyMaterialBundle) -> tuple[str, ...]:
+    return (
+        material.artifacts.client_tls_private_key_handle,
+        material.artifacts.device_signing_private_key_handle,
+        material.artifacts.frame_hmac_root_handle,
+        material.artifacts.client_certificate_handle,
+    )
+
+
+def _reachy_cleanup_entry_values(
+    artifact_map: ReachyCommissioningArtifactMapV1,
+) -> dict[str, object]:
+    return {
+        "generation": artifact_map.generation,
+        "client_tls_private_key_handle": artifact_map.client_tls_private_key_handle,
+        "client_certificate_handle": artifact_map.client_certificate_handle,
+        "device_signing_private_key_handle": artifact_map.device_signing_private_key_handle,
+        "frame_hmac_root_handle": artifact_map.frame_hmac_root_handle,
+    }
+
+
+def _read_reachy_generator_cleanup_journal(key_store: OwnerOnlyArtifactStore) -> Any:
+    return parse_contract_json(
+        commissioning_module.ReachyGeneratorArtifactCleanupJournalV1,
+        key_store.read(commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+
+
+def _write_reachy_generator_cleanup_journal(
+    key_store: OwnerOnlyArtifactStore,
+    entries: tuple[dict[str, object], ...],
+) -> None:
+    key_store.write(
+        commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID,
+        canonical_mapping_bytes(
+            {
+                "schema_version": "tuntun.reachy-generator-artifact-cleanup.v1",
+                "pending_artifact_deletions": entries,
+            }
+        ),
+    )
+
+
+def _assert_generated_material_artifacts_present(
+    material: GeneratedReachyMaterialBundle,
+    key_store: OwnerOnlyArtifactStore,
+    certificate_store: OwnerOnlyArtifactStore,
+) -> None:
+    assert key_store.read(material.artifacts.client_tls_private_key_handle)
+    assert key_store.read(material.artifacts.device_signing_private_key_handle)
+    assert key_store.read(material.artifacts.frame_hmac_root_handle)
+    assert certificate_store.read(material.artifacts.client_certificate_handle)
+
+
+def _assert_generated_material_artifacts_absent(
+    material: GeneratedReachyMaterialBundle,
+    key_store: OwnerOnlyArtifactStore,
+    certificate_store: OwnerOnlyArtifactStore,
+) -> None:
+    with pytest.raises(FileNotFoundError):
+        key_store.read(material.artifacts.client_tls_private_key_handle)
+    with pytest.raises(FileNotFoundError):
+        key_store.read(material.artifacts.device_signing_private_key_handle)
+    with pytest.raises(FileNotFoundError):
+        key_store.read(material.artifacts.frame_hmac_root_handle)
+    with pytest.raises(FileNotFoundError):
+        certificate_store.read(material.artifacts.client_certificate_handle)
 
 
 def _state_digest(state: CommissioningStateV1) -> str:
@@ -175,15 +255,14 @@ def _endpoint(
     return ReachyCoreEndpointV1.model_validate(values)
 
 
-def _artifact_map(generation: int = 1) -> dict[str, object]:
-    return {
-        "schema_version": "tuntun.reachy-commissioning-artifact-map.v1",
-        "generation": generation,
-        "client_tls_private_key_handle": f"reachy-client-tls-g{generation}",
-        "client_certificate_handle": f"reachy-client-cert-g{generation}",
-        "device_signing_private_key_handle": f"reachy-device-sign-g{generation}",
-        "frame_hmac_root_handle": f"reachy-frame-hmac-g{generation}",
-    }
+def _artifact_map(generation: int = 1) -> ReachyCommissioningArtifactMapV1:
+    return ReachyCommissioningArtifactMapV1(
+        generation=generation,
+        client_tls_private_key_handle=f"reachy-client-tls-g{generation}",
+        client_certificate_handle=f"reachy-client-cert-g{generation}",
+        device_signing_private_key_handle=f"reachy-device-sign-g{generation}",
+        frame_hmac_root_handle=f"reachy-frame-hmac-g{generation}",
+    )
 
 
 def _legacy_endpoint_values(generation: int = 1) -> dict[str, object]:
@@ -901,6 +980,7 @@ class AmbiguousPublicationRepository(RecordingRepository):
     def __init__(self, root: Path, events: list[str]) -> None:
         super().__init__(root, events)
         self.fail_current_read_after_publish_error = False
+        self.current_read_error_after_publish_error: BaseException | None = None
 
     def replace_atomic(
         self,
@@ -923,6 +1003,8 @@ class AmbiguousPublicationRepository(RecordingRepository):
 
     def require_current(self) -> CommissioningStateV1:
         if self.fail_current_read_after_publish_error:
+            if self.current_read_error_after_publish_error is not None:
+                raise self.current_read_error_after_publish_error
             raise OSError("scripted ambiguous commissioning read failure")
         return super().require_current()
 
@@ -1008,31 +1090,90 @@ class ScriptedIssuerArtifactStore:
         backing: OwnerOnlyArtifactStore,
         *,
         fail_lifecycle_write: Literal["before", "after"] | None = None,
+        fail_lifecycle_write_on_call: int | None = None,
         fail_lifecycle_read: bool = False,
+        lifecycle_read_error: BaseException | None = None,
+        fail_delete_identifier: str | None = None,
     ) -> None:
         self.backing = backing
         self.fail_lifecycle_write = fail_lifecycle_write
+        self.fail_lifecycle_write_on_call = fail_lifecycle_write_on_call
         self.fail_lifecycle_read = fail_lifecycle_read
+        self.lifecycle_read_error = lifecycle_read_error
+        self.fail_delete_identifier = fail_delete_identifier
+        self.fail_cleanup_write = False
+        self.lifecycle_writes = 0
         self.private_writes: list[str] = []
+        self.cleanup_writes: list[str] = []
+        self.write_events: list[str] = []
 
     def write(self, identifier: str, value: bytes) -> None:
-        if identifier != SYNTHETIC_ISSUER_STATE_ID:
+        self.write_events.append(identifier)
+        if identifier not in {SYNTHETIC_ISSUER_STATE_ID, SYNTHETIC_ISSUER_CLEANUP_STATE_ID}:
             self.private_writes.append(identifier)
             self.backing.write(identifier, value)
             return
-        if self.fail_lifecycle_write == "before":
+        if identifier == SYNTHETIC_ISSUER_CLEANUP_STATE_ID:
+            self.cleanup_writes.append(identifier)
+            if self.fail_cleanup_write:
+                raise OSError("scripted cleanup journal write failure")
+            self.backing.write(identifier, value)
+            return
+        self.lifecycle_writes += 1
+        fail_this_write = self.fail_lifecycle_write is not None and (
+            self.fail_lifecycle_write_on_call is None
+            or self.lifecycle_writes == self.fail_lifecycle_write_on_call
+        )
+        if fail_this_write and self.fail_lifecycle_write == "before":
             raise OSError("scripted lifecycle persist failure before write")
         self.backing.write(identifier, value)
-        if self.fail_lifecycle_write == "after":
+        if fail_this_write and self.fail_lifecycle_write == "after":
             raise OSError("scripted lifecycle persist failure after write")
 
     def read(self, identifier: str) -> bytes:
+        if identifier == SYNTHETIC_ISSUER_STATE_ID and self.lifecycle_read_error is not None:
+            raise self.lifecycle_read_error
         if identifier == SYNTHETIC_ISSUER_STATE_ID and self.fail_lifecycle_read:
             raise OSError("scripted lifecycle read failure")
         return self.backing.read(identifier)
 
     def delete(self, identifier: str) -> None:
+        if identifier == self.fail_delete_identifier:
+            raise OSError("scripted private key delete failure")
         self.backing.delete(identifier)
+
+
+class RecordingArtifactStore(OwnerOnlyArtifactStore):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        label: str,
+        events: list[str],
+        fail_write_identifier: str | None = None,
+        fail_after_write_identifier: str | None = None,
+        fail_delete_identifier: str | None = None,
+    ) -> None:
+        super().__init__(root)
+        self.label = label
+        self.events = events
+        self.fail_write_identifier = fail_write_identifier
+        self.fail_after_write_identifier = fail_after_write_identifier
+        self.fail_delete_identifier = fail_delete_identifier
+
+    def write(self, identifier: str, value: bytes) -> None:
+        self.events.append(f"{self.label}.write.{identifier}")
+        if identifier == self.fail_write_identifier:
+            raise OSError(f"scripted {self.label} write failure")
+        super().write(identifier, value)
+        if identifier == self.fail_after_write_identifier:
+            raise OSError(f"scripted {self.label} write failure")
+
+    def delete(self, identifier: str) -> None:
+        self.events.append(f"{self.label}.delete.{identifier}")
+        if identifier == self.fail_delete_identifier:
+            raise OSError(f"scripted {self.label} delete failure")
+        super().delete(identifier)
 
 
 class ForgedHardwareStringIssuer(RecordingIssuer):
@@ -1266,8 +1407,8 @@ def test_private_material_stays_behind_artifact_port_and_state_contains_only_com
         request1,
     )
     public_material = generator.generated_material[-1]
-    material = getattr(public_material, "public", public_material)
-    artifact_map = getattr(state, "artifact_map", None)
+    material = public_material.public
+    artifact_map = state.artifact_map
     state_bytes = canonical_bytes(state)
 
     assert getattr(state, "legacy_key_id_format", None) is False
@@ -1558,6 +1699,1190 @@ def test_recommission_activation_failure_keeps_old_core_key_until_resume(
     assert issuer_store.read(new_private_handle)
 
 
+@pytest.mark.parametrize("control_error_type", _CONTROL_FLOW_EXCEPTION_TYPES)
+def test_lifecycle_status_read_propagates_control_flow_exceptions(
+    tmp_path: Path,
+    control_error_type: type[BaseException],
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(backing_store)
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+    prepared = issuer.begin_generation(request=_request(1), generation=1)
+    scripted_store.fail_lifecycle_write = "before"
+    scripted_store.lifecycle_read_error = control_error_type("lifecycle-status-control")
+
+    with pytest.raises(control_error_type):
+        issuer.activate_staged_generation(
+            generation=prepared.generation,
+            endpoint=_endpoint_for_prepared_core_material(prepared),
+        )
+
+
+@pytest.mark.parametrize("failure_stage", ("before", "after"))
+@pytest.mark.parametrize("control_error_type", _CONTROL_FLOW_EXCEPTION_TYPES)
+def test_begin_generation_status_interrupt_retries_without_orphaning_core_key(
+    tmp_path: Path,
+    failure_stage: Literal["before", "after"],
+    control_error_type: type[BaseException],
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(
+        backing_store,
+        fail_lifecycle_write=failure_stage,
+    )
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+    request1 = _request(1)
+
+    with pytest.raises(control_error_type):
+        scripted_store.lifecycle_read_error = control_error_type("lifecycle-status-control")
+        issuer.begin_generation(request=request1, generation=1)
+
+    interrupted_private_handle = scripted_store.private_writes[-1]
+    assert backing_store.read(interrupted_private_handle)
+    if failure_stage == "after":
+        interrupted_lifecycle = parse_contract_json(
+            SyntheticCoreIssuerLifecycleV1,
+            backing_store.read(SYNTHETIC_ISSUER_STATE_ID),
+            max_bytes=16_384,
+            require_canonical=True,
+        )
+        assert (
+            interrupted_lifecycle.staged_generations[0].server_private_key_handle
+            == interrupted_private_handle
+        )
+
+    scripted_store.fail_lifecycle_write = None
+    scripted_store.lifecycle_read_error = None
+
+    retried = issuer.begin_generation(request=request1, generation=1)
+
+    assert retried.server_private_key_handle != interrupted_private_handle
+    assert backing_store.read(retried.server_private_key_handle)
+    with pytest.raises(FileNotFoundError):
+        backing_store.read(interrupted_private_handle)
+    visible_lifecycle = parse_contract_json(
+        SyntheticCoreIssuerLifecycleV1,
+        backing_store.read(SYNTHETIC_ISSUER_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert tuple(
+        staged.server_private_key_handle for staged in visible_lifecycle.staged_generations
+    ) == (retried.server_private_key_handle,)
+
+
+@pytest.mark.parametrize("control_error_type", (KeyboardInterrupt, SystemExit))
+def test_begin_generation_status_interrupt_cleanup_survives_fresh_issuer_restart(
+    tmp_path: Path,
+    control_error_type: type[BaseException],
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(
+        backing_store,
+        fail_lifecycle_write="before",
+    )
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+    request1 = _request(1)
+
+    with pytest.raises(control_error_type):
+        scripted_store.lifecycle_read_error = control_error_type("lifecycle-status-control")
+        issuer.begin_generation(request=request1, generation=1)
+
+    interrupted_private_handle = scripted_store.private_writes[-1]
+    assert backing_store.read(interrupted_private_handle)
+    assert scripted_store.write_events.index(SYNTHETIC_ISSUER_CLEANUP_STATE_ID) < (
+        scripted_store.write_events.index(interrupted_private_handle)
+    )
+    cleanup = parse_contract_json(
+        commissioning_module.SyntheticCoreIssuerCleanupV1,
+        backing_store.read(SYNTHETIC_ISSUER_CLEANUP_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert cleanup.pending_private_key_deletions == (interrupted_private_handle,)
+
+    restarted = SyntheticCoreCommissioningIssuer(state_store=backing_store)
+    retried = restarted.begin_generation(request=request1, generation=1)
+
+    assert retried.server_private_key_handle != interrupted_private_handle
+    with pytest.raises(FileNotFoundError):
+        backing_store.read(interrupted_private_handle)
+    assert backing_store.read(retried.server_private_key_handle)
+
+
+def test_begin_generation_cleanup_journal_is_persisted_before_private_key_write(
+    tmp_path: Path,
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(backing_store)
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+
+    prepared = issuer.begin_generation(request=_request(1), generation=1)
+
+    assert scripted_store.write_events.index(SYNTHETIC_ISSUER_CLEANUP_STATE_ID) < (
+        scripted_store.write_events.index(prepared.server_private_key_handle)
+    )
+
+
+def test_begin_generation_cleanup_journal_failure_blocks_private_key_write(
+    tmp_path: Path,
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(backing_store)
+    scripted_store.fail_cleanup_write = True
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+
+    with pytest.raises(OSError, match="cleanup journal write failure"):
+        issuer.begin_generation(request=_request(1), generation=1)
+
+    assert scripted_store.private_writes == []
+    with pytest.raises(FileNotFoundError):
+        backing_store.read(SYNTHETIC_ISSUER_STATE_ID)
+    with pytest.raises(FileNotFoundError):
+        backing_store.read(SYNTHETIC_ISSUER_CLEANUP_STATE_ID)
+
+
+@pytest.mark.parametrize("control_error_type", (KeyboardInterrupt, SystemExit))
+def test_begin_generation_status_interrupt_published_handle_is_unjournaled_after_restart(
+    tmp_path: Path,
+    control_error_type: type[BaseException],
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_store = ScriptedIssuerArtifactStore(
+        backing_store,
+        fail_lifecycle_write="after",
+    )
+    issuer = SyntheticCoreCommissioningIssuer(state_store=scripted_store)
+    request1 = _request(1)
+
+    with pytest.raises(control_error_type):
+        scripted_store.lifecycle_read_error = control_error_type("lifecycle-status-control")
+        issuer.begin_generation(request=request1, generation=1)
+
+    published_private_handle = scripted_store.private_writes[-1]
+    lifecycle = parse_contract_json(
+        SyntheticCoreIssuerLifecycleV1,
+        backing_store.read(SYNTHETIC_ISSUER_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert lifecycle.staged_generations[0].server_private_key_handle == published_private_handle
+    cleanup = parse_contract_json(
+        commissioning_module.SyntheticCoreIssuerCleanupV1,
+        backing_store.read(SYNTHETIC_ISSUER_CLEANUP_STATE_ID),
+        max_bytes=16_384,
+        require_canonical=True,
+    )
+    assert cleanup.pending_private_key_deletions == (published_private_handle,)
+
+    restarted = SyntheticCoreCommissioningIssuer(state_store=backing_store)
+    restarted.abort_staged_generation(99)
+
+    assert backing_store.read(published_private_handle)
+    with pytest.raises(FileNotFoundError):
+        backing_store.read(SYNTHETIC_ISSUER_CLEANUP_STATE_ID)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("reserved_lifecycle", "reserved_cleanup", "traversal", "arbitrary", "too_many"),
+)
+def test_synthetic_core_cleanup_journal_rejects_untrusted_handles(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    if mutation == "reserved_lifecycle":
+        pending: tuple[str, ...] = (SYNTHETIC_ISSUER_STATE_ID,)
+    elif mutation == "reserved_cleanup":
+        pending = (SYNTHETIC_ISSUER_CLEANUP_STATE_ID,)
+    elif mutation == "traversal":
+        pending = ("../reachy-server-g1-private",)
+    elif mutation == "arbitrary":
+        pending = ("arbitrary-private-handle",)
+    else:
+        pending = tuple(
+            f"reachy-server-g1-{index:016x}"
+            for index in range(commissioning_module.MAX_SYNTHETIC_ISSUER_PENDING_DELETIONS + 1)
+        )
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    backing_store.write(
+        SYNTHETIC_ISSUER_CLEANUP_STATE_ID,
+        canonical_mapping_bytes(
+            {
+                "schema_version": "tuntun.synthetic-core-issuer-cleanup.v1",
+                "pending_private_key_deletions": pending,
+            }
+        ),
+    )
+
+    with pytest.raises(ContractParseError):
+        SyntheticCoreCommissioningIssuer(state_store=backing_store)
+
+
+def test_synthetic_core_cleanup_journal_requires_canonical_owner_only_storage(
+    tmp_path: Path,
+) -> None:
+    backing_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    backing_store.write(
+        SYNTHETIC_ISSUER_CLEANUP_STATE_ID,
+        json.dumps(
+            {
+                "schema_version": "tuntun.synthetic-core-issuer-cleanup.v1",
+                "pending_private_key_deletions": ["reachy-server-g1-0000000000000001"],
+            },
+            indent=2,
+        ).encode("utf-8"),
+    )
+
+    with pytest.raises(ContractParseError):
+        SyntheticCoreCommissioningIssuer(state_store=backing_store)
+
+    backing_store.write(
+        SYNTHETIC_ISSUER_CLEANUP_STATE_ID,
+        canonical_mapping_bytes(
+            {
+                "schema_version": "tuntun.synthetic-core-issuer-cleanup.v1",
+                "pending_private_key_deletions": ("reachy-server-g1-0000000000000001",),
+            }
+        ),
+    )
+    (backing_store.root / SYNTHETIC_ISSUER_CLEANUP_STATE_ID).chmod(0o644)
+
+    with pytest.raises(PermissionError):
+        SyntheticCoreCommissioningIssuer(state_store=backing_store)
+
+
+@pytest.mark.parametrize("control_error_type", _CONTROL_FLOW_EXCEPTION_TYPES)
+def test_publication_status_read_propagates_control_flow_exceptions(
+    tmp_path: Path,
+    control_error_type: type[BaseException],
+) -> None:
+    events: list[str] = []
+    repository = AmbiguousPublicationRepository(tmp_path / "commissioning", events)
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    issuer = RecordingIssuer(events, state_store=issuer_store)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=RecordingAcceptancePublisher(events),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    repository.inject_crash_at("before_temp_open")
+    repository.current_read_error_after_publish_error = control_error_type(
+        "publication-status-control"
+    )
+    request1 = _request(1)
+
+    with pytest.raises(control_error_type):
+        service.commission_local(
+            _proof_for(proof_issuer, operation="commission", request=request1),
+            request1,
+        )
+
+
+def test_reachy_generator_cleanup_journal_is_persisted_before_first_artifact_write(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    key_store = RecordingArtifactStore(tmp_path / "private", label="key", events=events)
+    certificate_store = RecordingArtifactStore(
+        tmp_path / "certificates",
+        label="cert",
+        events=events,
+    )
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    request1 = _request(1)
+    prepared = issuer.begin_generation(request=request1, generation=1)
+
+    material = generator.generate(
+        request=request1,
+        generation=1,
+        core_hmac_agreement_public_key_b64=prepared.core_hmac_agreement_public_key_b64,
+    )
+
+    journal_id = commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID
+    first_private_artifact_write = min(
+        events.index(f"key.write.{handle}")
+        for handle in (
+            material.artifacts.client_tls_private_key_handle,
+            material.artifacts.device_signing_private_key_handle,
+            material.artifacts.frame_hmac_root_handle,
+        )
+    )
+    assert events.index(f"key.write.{journal_id}") < first_private_artifact_write
+    journal = _read_reachy_generator_cleanup_journal(key_store)
+    assert len(journal.pending_artifact_deletions) == 1
+    pending = journal.pending_artifact_deletions[0]
+    assert pending.generation == material.public.generation
+    assert (
+        pending.client_tls_private_key_handle,
+        pending.device_signing_private_key_handle,
+        pending.frame_hmac_root_handle,
+        pending.client_certificate_handle,
+    ) == _artifact_handles_for_material(material)
+
+
+def test_reachy_generator_cleanup_journal_write_failure_blocks_artifact_writes(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    key_store = RecordingArtifactStore(
+        tmp_path / "private",
+        label="key",
+        events=events,
+        fail_write_identifier=commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID,
+    )
+    certificate_store = RecordingArtifactStore(
+        tmp_path / "certificates",
+        label="cert",
+        events=events,
+    )
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    request1 = _request(1)
+    prepared = issuer.begin_generation(request=request1, generation=1)
+
+    with pytest.raises(OSError, match="scripted key write failure"):
+        generator.generate(
+            request=request1,
+            generation=1,
+            core_hmac_agreement_public_key_b64=prepared.core_hmac_agreement_public_key_b64,
+        )
+
+    assert not any(event.startswith("key.write.reachy-client-tls-g") for event in events)
+    assert not any(event.startswith("key.write.reachy-device-sign-g") for event in events)
+    assert not any(event.startswith("key.write.reachy-frame-hmac-g") for event in events)
+    assert generator.generated_material == []
+
+
+@pytest.mark.parametrize(
+    ("handle_template", "stage"),
+    (
+        ("reachy-client-tls-g1-{suffix}", "before"),
+        ("reachy-client-tls-g1-{suffix}", "after"),
+        ("reachy-device-sign-g1-{suffix}", "before"),
+        ("reachy-device-sign-g1-{suffix}", "after"),
+        ("reachy-frame-hmac-g1-{suffix}", "before"),
+        ("reachy-frame-hmac-g1-{suffix}", "after"),
+    ),
+)
+def test_reachy_generator_key_write_faults_delete_exact_journaled_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    handle_template: str,
+    stage: Literal["before", "after"],
+) -> None:
+    suffix = "00000000000000aa"
+    target_handle = handle_template.format(suffix=suffix)
+    monkeypatch.setattr(secrets, "token_hex", lambda _n: suffix)
+    events: list[str] = []
+    key_store = RecordingArtifactStore(
+        tmp_path / "private",
+        label="key",
+        events=events,
+        fail_write_identifier=target_handle if stage == "before" else None,
+        fail_after_write_identifier=target_handle if stage == "after" else None,
+    )
+    certificate_store = RecordingArtifactStore(
+        tmp_path / "certificates",
+        label="cert",
+        events=events,
+    )
+    issuer = SyntheticCoreCommissioningIssuer(
+        state_store=OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    )
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    request1 = _request(1)
+    prepared = issuer.begin_generation(request=request1, generation=1)
+
+    with pytest.raises(OSError, match="scripted key write failure"):
+        generator.generate(
+            request=request1,
+            generation=1,
+            core_hmac_agreement_public_key_b64=prepared.core_hmac_agreement_public_key_b64,
+        )
+
+    expected_artifacts = ReachyCommissioningArtifactMapV1(
+        generation=1,
+        client_tls_private_key_handle=f"reachy-client-tls-g1-{suffix}",
+        client_certificate_handle=f"reachy-client-cert-g1-{suffix}",
+        device_signing_private_key_handle=f"reachy-device-sign-g1-{suffix}",
+        frame_hmac_root_handle=f"reachy-frame-hmac-g1-{suffix}",
+    )
+    for identifier in (
+        expected_artifacts.client_tls_private_key_handle,
+        expected_artifacts.device_signing_private_key_handle,
+        expected_artifacts.frame_hmac_root_handle,
+        commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID,
+    ):
+        with pytest.raises(FileNotFoundError):
+            key_store.read(identifier)
+    with pytest.raises(FileNotFoundError):
+        certificate_store.read(expected_artifacts.client_certificate_handle)
+    assert generator.generated_material == []
+
+
+@pytest.mark.parametrize("stage", ("before", "after"))
+def test_reachy_service_certificate_write_faults_delete_exact_journaled_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: Literal["before", "after"],
+) -> None:
+    suffix = "00000000000000bb"
+    monkeypatch.setattr(secrets, "token_hex", lambda _n: suffix)
+    events: list[str] = []
+    key_store = RecordingArtifactStore(tmp_path / "private", label="key", events=events)
+    certificate_store = RecordingArtifactStore(
+        tmp_path / "certificates",
+        label="cert",
+        events=events,
+        fail_write_identifier=f"reachy-client-cert-g1-{suffix}" if stage == "before" else None,
+        fail_after_write_identifier=f"reachy-client-cert-g1-{suffix}" if stage == "after" else None,
+    )
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=CommissioningRepository(tmp_path / "commissioning"),
+        generator=RecordingGenerator(key_store, certificate_store, events),
+        issuer=RecordingIssuer(events, state_store=issuer_store),
+        acceptance_publisher=RecordingAcceptancePublisher(events),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request1 = _request(1)
+
+    with pytest.raises(OSError, match="scripted cert write failure"):
+        service.commission_local(
+            _proof_for(proof_issuer, operation="commission", request=request1),
+            request1,
+        )
+
+    expected_artifacts = ReachyCommissioningArtifactMapV1(
+        generation=1,
+        client_tls_private_key_handle=f"reachy-client-tls-g1-{suffix}",
+        client_certificate_handle=f"reachy-client-cert-g1-{suffix}",
+        device_signing_private_key_handle=f"reachy-device-sign-g1-{suffix}",
+        frame_hmac_root_handle=f"reachy-frame-hmac-g1-{suffix}",
+    )
+    for identifier in (
+        expected_artifacts.client_tls_private_key_handle,
+        expected_artifacts.device_signing_private_key_handle,
+        expected_artifacts.frame_hmac_root_handle,
+        commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID,
+    ):
+        with pytest.raises(FileNotFoundError):
+            key_store.read(identifier)
+    with pytest.raises(FileNotFoundError):
+        certificate_store.read(expected_artifacts.client_certificate_handle)
+
+
+@pytest.mark.parametrize(
+    ("publish_stage", "state_was_published"),
+    (
+        ("before_temp_open", False),
+        ("after_replace_before_parent_fsync", True),
+    ),
+)
+def test_commission_status_interrupt_reconciles_reachy_artifacts_after_fresh_service_restart(
+    tmp_path: Path,
+    publish_stage: str,
+    state_was_published: bool,
+) -> None:
+    events: list[str] = []
+    repository = AmbiguousPublicationRepository(tmp_path / "commissioning", events)
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    issuer = RecordingIssuer(events, state_store=issuer_store)
+    acceptance = RecordingAcceptancePublisher(events)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=acceptance,
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request1 = _request(1)
+    repository.inject_crash_at(publish_stage)
+    repository.current_read_error_after_publish_error = SystemExit("publication-status-control")
+
+    with pytest.raises(SystemExit):
+        service.commission_local(
+            _proof_for(proof_issuer, operation="commission", request=request1),
+            request1,
+        )
+
+    interrupted_material = generator.generated_material[-1]
+    _assert_generated_material_artifacts_present(
+        interrupted_material,
+        key_store,
+        certificate_store,
+    )
+    _read_reachy_generator_cleanup_journal(key_store)
+    repository.fail_current_read_after_publish_error = False
+    repository.current_read_error_after_publish_error = None
+    fresh_proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    fresh_generator = RecordingGenerator(key_store, certificate_store, events)
+    restarted = ReachyCommissioningService(
+        repository=repository.reopen(),
+        generator=fresh_generator,
+        issuer=RecordingIssuer(events, state_store=issuer_store),
+        acceptance_publisher=acceptance,
+        local_proof_verifier=fresh_proof_issuer.consumer,
+    )
+
+    if state_was_published:
+        visible = repository.require_current()
+        assert restarted.resume_current_activation() == visible
+        _assert_generated_material_artifacts_present(
+            interrupted_material,
+            key_store,
+            certificate_store,
+        )
+    else:
+        retried = restarted.commission_local(
+            _proof_for(fresh_proof_issuer, operation="commission", request=request1),
+            request1,
+        )
+        replacement_material = fresh_generator.generated_material[-1]
+        assert retried.endpoint.generation == 1
+        assert set(_artifact_handles_for_material(replacement_material)).isdisjoint(
+            _artifact_handles_for_material(interrupted_material)
+        )
+        _assert_generated_material_artifacts_absent(
+            interrupted_material,
+            key_store,
+            certificate_store,
+        )
+        _assert_generated_material_artifacts_present(
+            replacement_material,
+            key_store,
+            certificate_store,
+        )
+    with pytest.raises(FileNotFoundError):
+        key_store.read(commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID)
+
+
+def test_reachy_generator_reconcile_preserves_current_bundle_and_deletes_stale_bundle(
+    tmp_path: Path,
+) -> None:
+    (
+        service,
+        repository,
+        generator,
+        _issuer,
+        acceptance,
+        proof_issuer,
+        key_store,
+        certificate_store,
+        issuer_store,
+        events,
+    ) = _service_case(tmp_path)
+    request1 = _request(1)
+    current = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+    current_material = generator.generated_material[-1]
+    assert current.artifact_map is not None
+    stale_artifacts = ReachyCommissioningArtifactMapV1(
+        generation=2,
+        client_tls_private_key_handle="reachy-client-tls-g2-0000000000000001",
+        client_certificate_handle="reachy-client-cert-g2-0000000000000001",
+        device_signing_private_key_handle="reachy-device-sign-g2-0000000000000001",
+        frame_hmac_root_handle="reachy-frame-hmac-g2-0000000000000001",
+    )
+    key_store.write(stale_artifacts.client_tls_private_key_handle, b"stale tls")
+    key_store.write(stale_artifacts.device_signing_private_key_handle, b"stale signing")
+    key_store.write(stale_artifacts.frame_hmac_root_handle, b"stale hmac")
+    certificate_store.write(stale_artifacts.client_certificate_handle, b"stale certificate")
+    _write_reachy_generator_cleanup_journal(
+        key_store,
+        (
+            _reachy_cleanup_entry_values(current.artifact_map),
+            _reachy_cleanup_entry_values(stale_artifacts),
+        ),
+    )
+
+    restarted = ReachyCommissioningService(
+        repository=repository.reopen(),
+        generator=RecordingGenerator(key_store, certificate_store, events),
+        issuer=RecordingIssuer(events, state_store=issuer_store),
+        acceptance_publisher=acceptance,
+        local_proof_verifier=_SyntheticLocalPhysicalProofIssuer().consumer,
+    )
+
+    assert restarted.resume_current_activation() == current
+    _assert_generated_material_artifacts_present(
+        current_material,
+        key_store,
+        certificate_store,
+    )
+    for identifier in (
+        stale_artifacts.client_tls_private_key_handle,
+        stale_artifacts.device_signing_private_key_handle,
+        stale_artifacts.frame_hmac_root_handle,
+    ):
+        with pytest.raises(FileNotFoundError):
+            key_store.read(identifier)
+    with pytest.raises(FileNotFoundError):
+        certificate_store.read(stale_artifacts.client_certificate_handle)
+    with pytest.raises(FileNotFoundError):
+        key_store.read(commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID)
+
+
+def test_reachy_generator_cleanup_delete_failure_retries_after_fresh_restart(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    key_store = RecordingArtifactStore(tmp_path / "private", label="key", events=events)
+    certificate_store = RecordingArtifactStore(
+        tmp_path / "certificates",
+        label="cert",
+        events=events,
+    )
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    issuer = SyntheticCoreCommissioningIssuer(state_store=issuer_store)
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    request1 = _request(1)
+    prepared = issuer.begin_generation(request=request1, generation=1)
+    material = generator.generate(
+        request=request1,
+        generation=1,
+        core_hmac_agreement_public_key_b64=prepared.core_hmac_agreement_public_key_b64,
+    )
+    generator.install_client_certificate(
+        material=material,
+        certificate_pem="-----BEGIN CERTIFICATE-----\neA==\n-----END CERTIFICATE-----\n",
+    )
+    key_store.fail_delete_identifier = material.artifacts.device_signing_private_key_handle
+
+    with pytest.raises(OSError, match="scripted key delete failure"):
+        generator.reconcile_artifact_cleanup(None)
+
+    assert key_store.read(material.artifacts.device_signing_private_key_handle)
+    _read_reachy_generator_cleanup_journal(key_store)
+    key_store.fail_delete_identifier = None
+    restarted = RecordingGenerator(key_store, certificate_store, events)
+
+    restarted.reconcile_artifact_cleanup(None)
+
+    _assert_generated_material_artifacts_absent(material, key_store, certificate_store)
+    with pytest.raises(FileNotFoundError):
+        key_store.read(commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "reserved",
+        "traversal",
+        "arbitrary",
+        "generation_mismatch",
+        "duplicate_entry",
+        "too_many",
+        "noncanonical",
+    ),
+)
+def test_reachy_generator_cleanup_journal_rejects_untrusted_entries(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    entry = {
+        "generation": 1,
+        "client_tls_private_key_handle": "reachy-client-tls-g1-0000000000000001",
+        "client_certificate_handle": "reachy-client-cert-g1-0000000000000001",
+        "device_signing_private_key_handle": "reachy-device-sign-g1-0000000000000001",
+        "frame_hmac_root_handle": "reachy-frame-hmac-g1-0000000000000001",
+    }
+    entries: tuple[dict[str, object], ...] = (entry,)
+    if mutation == "reserved":
+        entry["client_tls_private_key_handle"] = (
+            commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID
+        )
+    elif mutation == "traversal":
+        entry["client_tls_private_key_handle"] = "../reachy-client-tls-g1-private"
+    elif mutation == "arbitrary":
+        entry["client_tls_private_key_handle"] = "arbitrary-client-tls-handle"
+    elif mutation == "generation_mismatch":
+        entry["client_tls_private_key_handle"] = "reachy-client-tls-g2-0000000000000001"
+    elif mutation == "duplicate_entry":
+        entries = (entry, dict(entry))
+    elif mutation == "too_many":
+        entries = tuple(
+            {
+                "generation": 1,
+                "client_tls_private_key_handle": f"reachy-client-tls-g1-{index:016x}",
+                "client_certificate_handle": f"reachy-client-cert-g1-{index:016x}",
+                "device_signing_private_key_handle": f"reachy-device-sign-g1-{index:016x}",
+                "frame_hmac_root_handle": f"reachy-frame-hmac-g1-{index:016x}",
+            }
+            for index in range(
+                commissioning_module.MAX_REACHY_GENERATOR_PENDING_ARTIFACT_DELETIONS + 1
+            )
+        )
+    elif mutation == "noncanonical":
+        key_store.write(
+            commissioning_module.REACHY_GENERATOR_CLEANUP_STATE_ID,
+            json.dumps(
+                {
+                    "schema_version": "tuntun.reachy-generator-artifact-cleanup.v1",
+                    "pending_artifact_deletions": [entry],
+                },
+                indent=2,
+            ).encode("utf-8"),
+        )
+        with pytest.raises(ContractParseError):
+            SyntheticReachyPrivateMaterialGenerator(
+                key_store=key_store,
+                certificate_store=certificate_store,
+            )
+        return
+    _write_reachy_generator_cleanup_journal(key_store, entries)
+
+    with pytest.raises(ContractParseError):
+        SyntheticReachyPrivateMaterialGenerator(
+            key_store=key_store,
+            certificate_store=certificate_store,
+        )
+
+
+@pytest.mark.parametrize(
+    ("publish_stage", "state_was_published"),
+    (
+        ("before_temp_open", False),
+        ("after_replace_before_parent_fsync", True),
+    ),
+)
+def test_commission_status_interrupt_reconciles_reachy_artifacts_after_service_reopen(
+    tmp_path: Path,
+    publish_stage: str,
+    state_was_published: bool,
+) -> None:
+    events: list[str] = []
+    repository = AmbiguousPublicationRepository(tmp_path / "commissioning", events)
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    issuer = RecordingIssuer(events, state_store=issuer_store)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=RecordingAcceptancePublisher(events),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request1 = _request(1)
+    repository.inject_crash_at(publish_stage)
+    repository.current_read_error_after_publish_error = KeyboardInterrupt(
+        "publication-status-control"
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        service.commission_local(
+            _proof_for(proof_issuer, operation="commission", request=request1),
+            request1,
+        )
+
+    interrupted_material = generator.generated_material[-1]
+    _assert_generated_material_artifacts_present(
+        interrupted_material,
+        key_store,
+        certificate_store,
+    )
+    repository.fail_current_read_after_publish_error = False
+    repository.current_read_error_after_publish_error = None
+    restarted = service.reopen()
+
+    if state_was_published:
+        visible = repository.require_current()
+        assert restarted.resume_current_activation() == visible
+        _assert_generated_material_artifacts_present(
+            interrupted_material,
+            key_store,
+            certificate_store,
+        )
+    else:
+        retried = restarted.commission_local(
+            _proof_for(proof_issuer, operation="commission", request=request1),
+            request1,
+        )
+        replacement_material = generator.generated_material[-1]
+        assert retried.endpoint.generation == 1
+        assert set(_artifact_handles_for_material(replacement_material)).isdisjoint(
+            _artifact_handles_for_material(interrupted_material)
+        )
+        _assert_generated_material_artifacts_absent(
+            interrupted_material,
+            key_store,
+            certificate_store,
+        )
+        _assert_generated_material_artifacts_present(
+            replacement_material,
+            key_store,
+            certificate_store,
+        )
+
+
+@pytest.mark.parametrize(
+    ("publish_stage", "state_was_published"),
+    (
+        ("before_temp_open", False),
+        ("after_replace_before_parent_fsync", True),
+    ),
+)
+def test_commission_status_interrupt_reconciles_reachy_artifacts_on_next_operation(
+    tmp_path: Path,
+    publish_stage: str,
+    state_was_published: bool,
+) -> None:
+    events: list[str] = []
+    repository = AmbiguousPublicationRepository(tmp_path / "commissioning", events)
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    issuer = RecordingIssuer(events, state_store=issuer_store)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=RecordingAcceptancePublisher(events),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request1 = _request(1)
+    repository.inject_crash_at(publish_stage)
+    repository.current_read_error_after_publish_error = SystemExit("publication-status-control")
+
+    with pytest.raises(SystemExit):
+        service.commission_local(
+            _proof_for(proof_issuer, operation="commission", request=request1),
+            request1,
+        )
+
+    interrupted_material = generator.generated_material[-1]
+    _assert_generated_material_artifacts_present(
+        interrupted_material,
+        key_store,
+        certificate_store,
+    )
+    repository.fail_current_read_after_publish_error = False
+    repository.current_read_error_after_publish_error = None
+
+    if state_was_published:
+        visible = repository.require_current()
+        assert service.resume_current_activation() == visible
+        _assert_generated_material_artifacts_present(
+            interrupted_material,
+            key_store,
+            certificate_store,
+        )
+    else:
+        retried = service.commission_local(
+            _proof_for(proof_issuer, operation="commission", request=request1),
+            request1,
+        )
+        replacement_material = generator.generated_material[-1]
+        assert retried.endpoint.generation == 1
+        assert set(_artifact_handles_for_material(replacement_material)).isdisjoint(
+            _artifact_handles_for_material(interrupted_material)
+        )
+        _assert_generated_material_artifacts_absent(
+            interrupted_material,
+            key_store,
+            certificate_store,
+        )
+        _assert_generated_material_artifacts_present(
+            replacement_material,
+            key_store,
+            certificate_store,
+        )
+
+
+@pytest.mark.parametrize(
+    ("publish_stage", "state_was_published"),
+    (
+        ("before_temp_open", False),
+        ("after_replace_before_parent_fsync", True),
+    ),
+)
+def test_recommission_status_interrupt_reconciles_reachy_artifacts_on_next_operation(
+    tmp_path: Path,
+    publish_stage: str,
+    state_was_published: bool,
+) -> None:
+    events: list[str] = []
+    repository = AmbiguousPublicationRepository(tmp_path / "commissioning", events)
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    issuer = RecordingIssuer(events, state_store=issuer_store)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=RecordingAcceptancePublisher(events),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request1 = _request(1)
+    first = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+    request2 = _request(2, core_ipv4="192.168.50.11")
+    repository.inject_crash_at(publish_stage)
+    repository.current_read_error_after_publish_error = SystemExit("publication-status-control")
+
+    with pytest.raises(SystemExit):
+        service.recommission_local(
+            _proof_for(
+                proof_issuer,
+                operation="recommission",
+                request=request2,
+                current=first,
+            ),
+            request2,
+        )
+
+    interrupted_material = generator.generated_material[-1]
+    _assert_generated_material_artifacts_present(
+        interrupted_material,
+        key_store,
+        certificate_store,
+    )
+    repository.fail_current_read_after_publish_error = False
+    repository.current_read_error_after_publish_error = None
+
+    if state_was_published:
+        visible = repository.require_current()
+        assert service.resume_current_activation() == visible
+        _assert_generated_material_artifacts_present(
+            interrupted_material,
+            key_store,
+            certificate_store,
+        )
+    else:
+        retried = service.recommission_local(
+            _proof_for(
+                proof_issuer,
+                operation="recommission",
+                request=request2,
+                current=first,
+            ),
+            request2,
+        )
+        replacement_material = generator.generated_material[-1]
+        assert retried.endpoint.generation == 2
+        assert set(_artifact_handles_for_material(replacement_material)).isdisjoint(
+            _artifact_handles_for_material(interrupted_material)
+        )
+        _assert_generated_material_artifacts_absent(
+            interrupted_material,
+            key_store,
+            certificate_store,
+        )
+        _assert_generated_material_artifacts_present(
+            replacement_material,
+            key_store,
+            certificate_store,
+        )
+
+
+def test_recommission_activation_verification_interrupt_keeps_same_object_recoverable(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    repository = RecordingRepository(tmp_path / "commissioning", events)
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    backing_issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_issuer_store = ScriptedIssuerArtifactStore(backing_issuer_store)
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    issuer = RecordingIssuer(events, state_store=scripted_issuer_store)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=RecordingAcceptancePublisher(events),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request1 = _request(1)
+    first = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+    old_private_handle = issuer.staged_generations[1].server_private_key_handle
+    scripted_issuer_store.fail_lifecycle_write = "before"
+    scripted_issuer_store.fail_lifecycle_write_on_call = scripted_issuer_store.lifecycle_writes + 2
+    scripted_issuer_store.lifecycle_read_error = SystemExit("lifecycle-status-control")
+    request2 = _request(2, core_ipv4="192.168.50.11")
+
+    with pytest.raises(SystemExit):
+        service.recommission_local(
+            _proof_for(
+                proof_issuer,
+                operation="recommission",
+                request=request2,
+                current=first,
+            ),
+            request2,
+        )
+
+    visible = repository.require_current()
+    new_private_handle = issuer.staged_generations[2].server_private_key_handle
+    assert visible.endpoint.generation == 2
+    assert issuer.active_generation == 1
+    assert set(issuer.staged_generations) == {1, 2}
+    assert issuer.revoked_generations == []
+    assert backing_issuer_store.read(old_private_handle)
+    assert backing_issuer_store.read(new_private_handle)
+
+    scripted_issuer_store.fail_lifecycle_write = None
+    scripted_issuer_store.lifecycle_read_error = None
+
+    assert service.resume_current_activation() == visible
+    assert issuer.active_generation == 2
+    assert set(issuer.staged_generations) == {2}
+    assert issuer.revoked_generations == [1]
+    with pytest.raises(FileNotFoundError):
+        backing_issuer_store.read(old_private_handle)
+    assert backing_issuer_store.read(new_private_handle)
+    with pytest.raises(PermissionError, match="commissioning_material_revoked"):
+        repository.require_usable(first.endpoint)
+
+
+def test_recommission_cleanup_delete_failure_retries_on_same_object_resume(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    repository = RecordingRepository(tmp_path / "commissioning", events)
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    backing_issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_issuer_store = ScriptedIssuerArtifactStore(backing_issuer_store)
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    issuer = RecordingIssuer(events, state_store=scripted_issuer_store)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=RecordingAcceptancePublisher(events),
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request1 = _request(1)
+    first = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+    old_private_handle = issuer.staged_generations[1].server_private_key_handle
+    scripted_issuer_store.fail_delete_identifier = old_private_handle
+    request2 = _request(2, core_ipv4="192.168.50.11")
+
+    with pytest.raises(OSError, match="private key delete failure"):
+        service.recommission_local(
+            _proof_for(
+                proof_issuer,
+                operation="recommission",
+                request=request2,
+                current=first,
+            ),
+            request2,
+        )
+
+    visible = repository.require_current()
+    new_private_handle = issuer.staged_generations[2].server_private_key_handle
+    assert visible.endpoint.generation == 2
+    assert visible.revoked_key_ids == _key_ids(first.endpoint)
+    assert backing_issuer_store.read(old_private_handle)
+    assert backing_issuer_store.read(new_private_handle)
+
+    scripted_issuer_store.fail_delete_identifier = None
+
+    assert service.resume_current_activation() == visible
+    with pytest.raises(FileNotFoundError):
+        backing_issuer_store.read(old_private_handle)
+    assert backing_issuer_store.read(new_private_handle)
+
+
+def test_recommission_cleanup_delete_failure_survives_fresh_issuer_restart(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    repository = RecordingRepository(tmp_path / "commissioning", events)
+    key_store = OwnerOnlyArtifactStore(tmp_path / "private")
+    certificate_store = OwnerOnlyArtifactStore(tmp_path / "certificates")
+    backing_issuer_store = OwnerOnlyArtifactStore(tmp_path / "issuer-state")
+    scripted_issuer_store = ScriptedIssuerArtifactStore(backing_issuer_store)
+    generator = RecordingGenerator(key_store, certificate_store, events)
+    issuer = RecordingIssuer(events, state_store=scripted_issuer_store)
+    acceptance = RecordingAcceptancePublisher(events)
+    proof_issuer = _SyntheticLocalPhysicalProofIssuer()
+    service = ReachyCommissioningService(
+        repository=repository,
+        generator=generator,
+        issuer=issuer,
+        acceptance_publisher=acceptance,
+        local_proof_verifier=proof_issuer.consumer,
+    )
+    request1 = _request(1)
+    first = service.commission_local(
+        _proof_for(proof_issuer, operation="commission", request=request1),
+        request1,
+    )
+    old_private_handle = issuer.staged_generations[1].server_private_key_handle
+    scripted_issuer_store.fail_delete_identifier = old_private_handle
+    request2 = _request(2, core_ipv4="192.168.50.11")
+
+    with pytest.raises(OSError, match="private key delete failure"):
+        service.recommission_local(
+            _proof_for(
+                proof_issuer,
+                operation="recommission",
+                request=request2,
+                current=first,
+            ),
+            request2,
+        )
+
+    visible = repository.require_current()
+    new_private_handle = issuer.staged_generations[2].server_private_key_handle
+    assert visible.endpoint.generation == 2
+    assert backing_issuer_store.read(old_private_handle)
+    assert backing_issuer_store.read(new_private_handle)
+
+    fresh_issuer = RecordingIssuer(events, state_store=backing_issuer_store)
+    restarted = ReachyCommissioningService(
+        repository=repository.reopen(),
+        generator=RecordingGenerator(key_store, certificate_store, events),
+        issuer=fresh_issuer,
+        acceptance_publisher=acceptance,
+        local_proof_verifier=_SyntheticLocalPhysicalProofIssuer().consumer,
+    )
+
+    assert restarted.resume_current_activation() == visible
+    with pytest.raises(FileNotFoundError):
+        backing_issuer_store.read(old_private_handle)
+    assert backing_issuer_store.read(new_private_handle)
+
+
 @pytest.mark.parametrize("failure_stage", ("before", "after"))
 def test_synthetic_core_private_key_lifecycle_handles_ambiguous_persist_failures(
     tmp_path: Path,
@@ -1612,9 +2937,9 @@ def test_ambiguous_lifecycle_activation_failure_preserves_intended_state_and_key
             endpoint=_endpoint_for_prepared_core_material(second),
         )
 
-    assert issuer.active_generation == 2
-    assert set(issuer.staged_generations) == {2}
-    assert issuer.revoked_generations == [1]
+    assert issuer.active_generation == 1
+    assert set(issuer.staged_generations) == {1, 2}
+    assert issuer.revoked_generations == []
     assert backing_store.read(first.server_private_key_handle)
     assert backing_store.read(second.server_private_key_handle)
     reopened = SyntheticCoreCommissioningIssuer(state_store=backing_store)
@@ -1626,6 +2951,21 @@ def test_ambiguous_lifecycle_activation_failure_preserves_intended_state_and_key
         assert reopened.active_generation == 2
         assert set(reopened.staged_generations) == {2}
         assert reopened.revoked_generations == [1]
+
+    scripted_store.fail_lifecycle_write = None
+    scripted_store.fail_lifecycle_read = False
+
+    issuer.activate_staged_generation(
+        generation=2,
+        endpoint=_endpoint_for_prepared_core_material(second),
+    )
+
+    assert issuer.active_generation == 2
+    assert set(issuer.staged_generations) == {2}
+    assert issuer.revoked_generations == [1]
+    with pytest.raises(FileNotFoundError):
+        backing_store.read(first.server_private_key_handle)
+    assert backing_store.read(second.server_private_key_handle)
 
 
 @pytest.mark.parametrize("failure_stage", ("before", "after"))
@@ -1647,13 +2987,22 @@ def test_ambiguous_lifecycle_abort_failure_preserves_intended_state_and_key(
     with pytest.raises(OSError, match=f"lifecycle persist failure {failure_stage}"):
         issuer.abort_staged_generation(2)
 
-    assert set(issuer.staged_generations) == {1}
+    assert set(issuer.staged_generations) == {1, 2}
     assert backing_store.read(second.server_private_key_handle)
     reopened = SyntheticCoreCommissioningIssuer(state_store=backing_store)
     if failure_stage == "before":
         assert set(reopened.staged_generations) == {1, 2}
     else:
         assert set(reopened.staged_generations) == {1}
+
+    scripted_store.fail_lifecycle_write = None
+    scripted_store.fail_lifecycle_read = False
+
+    issuer.abort_staged_generation(2)
+
+    assert set(issuer.staged_generations) == {1}
+    with pytest.raises(FileNotFoundError):
+        backing_store.read(second.server_private_key_handle)
 
 
 @pytest.mark.parametrize("failure_stage", ("before", "after"))
@@ -1673,9 +3022,9 @@ def test_ambiguous_lifecycle_revoke_failure_preserves_intended_state_and_key(
     with pytest.raises(OSError, match=f"lifecycle persist failure {failure_stage}"):
         issuer.revoke_generation(endpoint=endpoint)
 
-    assert issuer.active_generation is None
-    assert issuer.staged_generations == {}
-    assert issuer.revoked_generations == [1]
+    assert issuer.active_generation == 1
+    assert set(issuer.staged_generations) == {1}
+    assert issuer.revoked_generations == []
     assert backing_store.read(prepared.server_private_key_handle)
     reopened = SyntheticCoreCommissioningIssuer(state_store=backing_store)
     if failure_stage == "before":
@@ -1686,6 +3035,17 @@ def test_ambiguous_lifecycle_revoke_failure_preserves_intended_state_and_key(
         assert reopened.active_generation is None
         assert reopened.staged_generations == {}
         assert reopened.revoked_generations == [1]
+
+    scripted_store.fail_lifecycle_write = None
+    scripted_store.fail_lifecycle_read = False
+
+    issuer.revoke_generation(endpoint=endpoint)
+
+    assert issuer.active_generation is None
+    assert issuer.staged_generations == {}
+    assert issuer.revoked_generations == [1]
+    with pytest.raises(FileNotFoundError):
+        backing_store.read(prepared.server_private_key_handle)
 
 
 def test_mismatched_visible_lifecycle_during_failed_persist_is_ambiguous(
@@ -1711,7 +3071,7 @@ def test_mismatched_visible_lifecycle_during_failed_persist_is_ambiguous(
     with pytest.raises(OSError, match="lifecycle persist failure before write"):
         issuer.abort_staged_generation(2)
 
-    assert set(issuer.staged_generations) == {1}
+    assert set(issuer.staged_generations) == {1, 2}
     assert backing_store.read(second.server_private_key_handle)
 
 
@@ -1742,6 +3102,8 @@ def test_synthetic_core_issuer_reopen_validates_new_staged_private_key(
 def test_synthetic_core_lifecycle_requires_active_generation_to_be_staged(
     legacy: bool,
 ) -> None:
+    model_type: type[ContractModel]
+    staged: tuple[dict[str, object], ...]
     if legacy:
         model_type = commissioning_module.LegacySyntheticCoreIssuerLifecycleV1
         staged = (_legacy_prepared_core_material_values(1),)
@@ -1771,6 +3133,8 @@ def test_synthetic_core_lifecycle_rejects_revoked_active_or_staged_generation(
     legacy: bool,
     case: Literal["staged_revoked", "active_revoked"],
 ) -> None:
+    model_type: type[ContractModel]
+    staged: tuple[dict[str, object], ...]
     if legacy:
         model_type = commissioning_module.LegacySyntheticCoreIssuerLifecycleV1
         staged = (_legacy_prepared_core_material_values(1),)
@@ -1890,6 +3254,7 @@ def test_synthetic_core_issuer_revoke_binds_legacy_staged_endpoint(
 def test_synthetic_core_lifecycle_rejects_reserved_or_duplicate_private_handles(
     mutation: Literal["reserved", "duplicate"],
 ) -> None:
+    staged: tuple[dict[str, object], ...]
     if mutation == "reserved":
         staged = (
             _current_prepared_core_material_values(

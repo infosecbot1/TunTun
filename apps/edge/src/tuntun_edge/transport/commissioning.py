@@ -31,7 +31,20 @@ PUBLIC_KEY_ID_PATTERN = (
 CANONICAL_UUID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 FRAME_HMAC_INFO = b"tuntun/reachy/frame-hmac/v1"
 SYNTHETIC_ISSUER_STATE_ID = "synthetic-core-issuer-state.v1"
+SYNTHETIC_ISSUER_CLEANUP_STATE_ID = "synthetic-core-issuer-cleanup.v1"
 MAX_SYNTHETIC_ISSUER_STATE_BYTES = 16_384
+MAX_SYNTHETIC_ISSUER_CLEANUP_STATE_BYTES = 16_384
+MAX_SYNTHETIC_ISSUER_PENDING_DELETIONS = 64
+SYNTHETIC_CORE_PRIVATE_KEY_HANDLE_PATTERN = r"^reachy-server-g[1-9][0-9]{0,8}-[0-9a-f]{16}$"
+REACHY_GENERATOR_CLEANUP_STATE_ID = "reachy-generator-cleanup.v1"
+MAX_REACHY_GENERATOR_CLEANUP_STATE_BYTES = 16_384
+MAX_REACHY_GENERATOR_PENDING_ARTIFACT_DELETIONS = 16
+REACHY_GENERATOR_ARTIFACT_HANDLE_PATTERNS = {
+    "client_tls_private_key_handle": r"^reachy-client-tls-g{generation}-[0-9a-f]{{16}}$",
+    "client_certificate_handle": r"^reachy-client-cert-g{generation}-[0-9a-f]{{16}}$",
+    "device_signing_private_key_handle": r"^reachy-device-sign-g{generation}-[0-9a-f]{{16}}$",
+    "frame_hmac_root_handle": r"^reachy-frame-hmac-g{generation}-[0-9a-f]{{16}}$",
+}
 
 Sha256Hex = Annotated[str, Field(pattern=SHA256_PATTERN)]
 ArtifactHandle = Annotated[
@@ -346,12 +359,84 @@ class ReachyCommissioningArtifactMapV1(ContractModel):
     device_signing_private_key_handle: ArtifactHandle
     frame_hmac_root_handle: ArtifactHandle
 
+    @field_validator(
+        "client_tls_private_key_handle",
+        "client_certificate_handle",
+        "device_signing_private_key_handle",
+        "frame_hmac_root_handle",
+    )
+    @classmethod
+    def artifact_handles_are_not_reserved(cls, value: str) -> str:
+        if value in {
+            SYNTHETIC_ISSUER_STATE_ID,
+            SYNTHETIC_ISSUER_CLEANUP_STATE_ID,
+            REACHY_GENERATOR_CLEANUP_STATE_ID,
+        }:
+            raise ValueError("commissioning artifact handle is reserved")
+        return value
+
     @model_validator(mode="after")
     def artifact_handles_are_unique(self) -> Self:
         handles = _artifact_map_handles(self)
         if len(set(handles)) != len(handles):
             raise ValueError("commissioning artifact handles must be unique")
         return self
+
+
+class ReachyGeneratorArtifactCleanupEntryV1(ContractModel):
+    generation: Annotated[int, Field(ge=1)]
+    client_tls_private_key_handle: ArtifactHandle
+    client_certificate_handle: ArtifactHandle
+    device_signing_private_key_handle: ArtifactHandle
+    frame_hmac_root_handle: ArtifactHandle
+
+    @field_validator(
+        "client_tls_private_key_handle",
+        "client_certificate_handle",
+        "device_signing_private_key_handle",
+        "frame_hmac_root_handle",
+    )
+    @classmethod
+    def cleanup_artifact_handles_are_not_reserved(cls, value: str) -> str:
+        if value in {
+            SYNTHETIC_ISSUER_STATE_ID,
+            SYNTHETIC_ISSUER_CLEANUP_STATE_ID,
+            REACHY_GENERATOR_CLEANUP_STATE_ID,
+        }:
+            raise ValueError("Reachy generator cleanup artifact handle is reserved")
+        return value
+
+    @model_validator(mode="after")
+    def cleanup_artifact_handles_are_exact_generated_bundle(self) -> Self:
+        handles = _reachy_cleanup_entry_handles(self)
+        if len(set(handles)) != len(handles):
+            raise ValueError("Reachy generator cleanup artifact handles must be unique")
+        for field_name, pattern_template in REACHY_GENERATOR_ARTIFACT_HANDLE_PATTERNS.items():
+            pattern = pattern_template.format(generation=self.generation)
+            if re.fullmatch(pattern, getattr(self, field_name)) is None:
+                raise ValueError("Reachy generator cleanup artifact handle invalid")
+        return self
+
+
+class ReachyGeneratorArtifactCleanupJournalV1(ContractModel):
+    schema_version: Literal["tuntun.reachy-generator-artifact-cleanup.v1"]
+    pending_artifact_deletions: Annotated[
+        tuple[ReachyGeneratorArtifactCleanupEntryV1, ...],
+        Field(max_length=MAX_REACHY_GENERATOR_PENDING_ARTIFACT_DELETIONS),
+    ] = ()
+
+    @field_validator("pending_artifact_deletions")
+    @classmethod
+    def pending_artifact_deletions_are_unique_and_sorted(
+        cls,
+        value: tuple[ReachyGeneratorArtifactCleanupEntryV1, ...],
+    ) -> tuple[ReachyGeneratorArtifactCleanupEntryV1, ...]:
+        keys = tuple(_reachy_cleanup_entry_key(entry) for entry in value)
+        if len(set(keys)) != len(keys):
+            raise ValueError("Reachy generator cleanup entries must be unique")
+        if tuple(sorted(keys)) != keys:
+            raise ValueError("Reachy generator cleanup entries must be sorted")
+        return value
 
 
 class CommissioningStateV1(ContractModel):
@@ -670,8 +755,8 @@ class PreparedCoreMaterialV1(ContractModel):
     @field_validator("server_private_key_handle")
     @classmethod
     def server_private_key_handle_is_not_reserved(cls, value: str) -> str:
-        if value == SYNTHETIC_ISSUER_STATE_ID:
-            raise ValueError("synthetic issuer lifecycle identifier is reserved")
+        if value in {SYNTHETIC_ISSUER_STATE_ID, SYNTHETIC_ISSUER_CLEANUP_STATE_ID}:
+            raise ValueError("synthetic issuer state identifier is reserved")
         return value
 
     @model_validator(mode="after")
@@ -796,6 +881,34 @@ class SyntheticCoreIssuerLifecycleV1(ContractModel):
         return self
 
 
+class SyntheticCoreIssuerCleanupV1(ContractModel):
+    schema_version: Literal["tuntun.synthetic-core-issuer-cleanup.v1"]
+    pending_private_key_deletions: Annotated[
+        tuple[ArtifactHandle, ...],
+        Field(max_length=MAX_SYNTHETIC_ISSUER_PENDING_DELETIONS),
+    ] = ()
+
+    @field_validator("pending_private_key_deletions")
+    @classmethod
+    def pending_private_key_deletions_are_unique_and_sorted(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        reserved = {SYNTHETIC_ISSUER_STATE_ID, SYNTHETIC_ISSUER_CLEANUP_STATE_ID}
+        if any(handle in reserved for handle in value):
+            raise ValueError("synthetic issuer state identifiers are reserved")
+        if any(
+            re.fullmatch(SYNTHETIC_CORE_PRIVATE_KEY_HANDLE_PATTERN, handle) is None
+            for handle in value
+        ):
+            raise ValueError("synthetic issuer pending private key deletion handle invalid")
+        if len(set(value)) != len(value):
+            raise ValueError("synthetic issuer pending private key deletions must be unique")
+        if tuple(sorted(value)) != value:
+            raise ValueError("synthetic issuer pending private key deletions must be sorted")
+        return value
+
+
 class LegacySyntheticCoreIssuerLifecycleV1(ContractModel):
     schema_version: Literal["tuntun.synthetic-core-issuer-lifecycle.v1"]
     active_generation: Annotated[int, Field(ge=1)] | None
@@ -846,6 +959,30 @@ class _LoadedSyntheticCoreIssuerLifecycle:
     storage_bytes: bytes | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ProposedSyntheticCoreIssuerLifecycle:
+    active_generation: int | None
+    staged_generations: tuple[PreparedCoreMaterialV1, ...]
+    legacy_staged_generations: tuple[LegacyPreparedCoreMaterialV1, ...]
+    revoked_generations: tuple[int, ...]
+    lifecycle: SyntheticCoreIssuerLifecycleV1
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSyntheticCoreIssuerLifecycleUpdate:
+    proposed: _ProposedSyntheticCoreIssuerLifecycle
+    lifecycle_bytes: bytes
+    cleanup_private_key_handles: tuple[str, ...]
+    not_published_private_key_handles: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingReachyPublicationReconciliation:
+    generation: int
+    state: CommissioningStateV1
+    material: GeneratedReachyMaterialBundle | None
+
+
 class CommissioningRepositoryPort(Protocol):
     def has_current(self) -> bool: ...
 
@@ -888,6 +1025,11 @@ class ReachyPrivateMaterialGeneratorPort(Protocol):
     ) -> None: ...
 
     def discard(self, material: GeneratedReachyMaterialBundle) -> None: ...
+
+    def reconcile_artifact_cleanup(
+        self,
+        current_artifact_map: ReachyCommissioningArtifactMapV1 | None,
+    ) -> None: ...
 
 
 class CoreCommissioningIssuerPort(Protocol):
@@ -950,6 +1092,7 @@ class SyntheticReachyPrivateMaterialGenerator:
     ) -> None:
         self._key_store = key_store
         self._certificate_store = certificate_store
+        self._pending_artifact_deletions = self._load_pending_artifact_deletions()
         self.generated_material: list[GeneratedReachyMaterialBundle] = []
 
     def generate(
@@ -1008,21 +1151,6 @@ class SyntheticReachyPrivateMaterialGenerator:
                 }
             ),
         )
-        written: list[str] = []
-        try:
-            self._key_store.write(
-                artifacts.client_tls_private_key_handle,
-                _pem("PRIVATE KEY", b"synthetic-client-tls-" + client_public).encode("ascii"),
-            )
-            written.append(artifacts.client_tls_private_key_handle)
-            self._key_store.write(artifacts.device_signing_private_key_handle, device_private)
-            written.append(artifacts.device_signing_private_key_handle)
-            self._key_store.write(artifacts.frame_hmac_root_handle, hmac_root)
-            written.append(artifacts.frame_hmac_root_handle)
-        except BaseException:
-            for identifier in written:
-                self._key_store.delete(identifier)
-            raise
         material = GeneratedReachyMaterialV1(
             schema_version="tuntun.reachy-generated-public-material.v1",
             generation=generation,
@@ -1038,6 +1166,29 @@ class SyntheticReachyPrivateMaterialGenerator:
             hmac_key_sha256=hashlib.sha256(hmac_root).hexdigest(),
         )
         bundle = GeneratedReachyMaterialBundle(public=material, artifacts=artifacts)
+        cleanup_entry = _reachy_artifact_cleanup_entry_from_map(artifacts)
+        try:
+            self._queue_artifact_deletions((cleanup_entry,))
+            self._key_store.write(
+                artifacts.client_tls_private_key_handle,
+                _pem("PRIVATE KEY", b"synthetic-client-tls-" + client_public).encode("ascii"),
+            )
+            self._key_store.write(artifacts.device_signing_private_key_handle, device_private)
+            self._key_store.write(artifacts.frame_hmac_root_handle, hmac_root)
+        except Exception as error:
+            cleanup_error: Exception | None = None
+            try:
+                self._delete_artifact_deletion_entry(cleanup_entry)
+            except Exception as exception:
+                cleanup_error = exception
+            if cleanup_error is None:
+                try:
+                    self._unqueue_artifact_deletions((cleanup_entry,))
+                except Exception as exception:
+                    cleanup_error = exception
+            if cleanup_error is not None:
+                error.add_note(f"Reachy generated artifact cleanup failed: {cleanup_error}")
+            raise
         self.generated_material.append(bundle)
         return bundle
 
@@ -1055,10 +1206,92 @@ class SyntheticReachyPrivateMaterialGenerator:
         )
 
     def discard(self, material: GeneratedReachyMaterialBundle) -> None:
-        self._key_store.delete(material.artifacts.client_tls_private_key_handle)
-        self._key_store.delete(material.artifacts.device_signing_private_key_handle)
-        self._key_store.delete(material.artifacts.frame_hmac_root_handle)
-        self._certificate_store.delete(material.artifacts.client_certificate_handle)
+        cleanup_entry = _reachy_artifact_cleanup_entry_from_map(material.artifacts)
+        self._delete_artifact_deletion_entry(cleanup_entry)
+        self._unqueue_artifact_deletions((cleanup_entry,))
+
+    def reconcile_artifact_cleanup(
+        self,
+        current_artifact_map: ReachyCommissioningArtifactMapV1 | None,
+    ) -> None:
+        if not self._pending_artifact_deletions:
+            return
+        current_key: tuple[str, str, str, str, str] | None = None
+        if current_artifact_map is not None:
+            current_entry = _reachy_artifact_cleanup_entry_from_map(current_artifact_map)
+            current_key = _reachy_cleanup_entry_key(current_entry)
+        remaining = dict(self._pending_artifact_deletions)
+        for key, entry in sorted(self._pending_artifact_deletions.items()):
+            if current_key is not None and key == current_key:
+                remaining.pop(key, None)
+                continue
+            self._delete_artifact_deletion_entry(entry)
+            remaining.pop(key, None)
+        self._persist_pending_artifact_deletions(remaining)
+        self._pending_artifact_deletions = remaining
+
+    def _load_pending_artifact_deletions(
+        self,
+    ) -> dict[tuple[str, str, str, str, str], ReachyGeneratorArtifactCleanupEntryV1]:
+        try:
+            raw = self._key_store.read(REACHY_GENERATOR_CLEANUP_STATE_ID)
+        except FileNotFoundError:
+            return {}
+        journal = parse_contract_json(
+            ReachyGeneratorArtifactCleanupJournalV1,
+            raw,
+            max_bytes=MAX_REACHY_GENERATOR_CLEANUP_STATE_BYTES,
+            require_canonical=True,
+        )
+        return {
+            _reachy_cleanup_entry_key(entry): entry for entry in journal.pending_artifact_deletions
+        }
+
+    def _queue_artifact_deletions(
+        self,
+        entries: tuple[ReachyGeneratorArtifactCleanupEntryV1, ...],
+    ) -> None:
+        if not entries:
+            return
+        updated = dict(self._pending_artifact_deletions)
+        for entry in entries:
+            updated[_reachy_cleanup_entry_key(entry)] = entry
+        self._persist_pending_artifact_deletions(updated)
+        self._pending_artifact_deletions = updated
+
+    def _unqueue_artifact_deletions(
+        self,
+        entries: tuple[ReachyGeneratorArtifactCleanupEntryV1, ...],
+    ) -> None:
+        if not entries:
+            return
+        updated = dict(self._pending_artifact_deletions)
+        for entry in entries:
+            updated.pop(_reachy_cleanup_entry_key(entry), None)
+        self._persist_pending_artifact_deletions(updated)
+        self._pending_artifact_deletions = updated
+
+    def _persist_pending_artifact_deletions(
+        self,
+        entries: dict[tuple[str, str, str, str, str], ReachyGeneratorArtifactCleanupEntryV1],
+    ) -> None:
+        if not entries:
+            self._key_store.delete(REACHY_GENERATOR_CLEANUP_STATE_ID)
+            return
+        journal = ReachyGeneratorArtifactCleanupJournalV1(
+            schema_version="tuntun.reachy-generator-artifact-cleanup.v1",
+            pending_artifact_deletions=tuple(entry for _key, entry in sorted(entries.items())),
+        )
+        self._key_store.write(REACHY_GENERATOR_CLEANUP_STATE_ID, canonical_bytes(journal))
+
+    def _delete_artifact_deletion_entry(
+        self,
+        entry: ReachyGeneratorArtifactCleanupEntryV1,
+    ) -> None:
+        self._key_store.delete(entry.client_tls_private_key_handle)
+        self._key_store.delete(entry.device_signing_private_key_handle)
+        self._key_store.delete(entry.frame_hmac_root_handle)
+        self._certificate_store.delete(entry.client_certificate_handle)
 
 
 class SyntheticCoreCommissioningIssuer:
@@ -1074,6 +1307,8 @@ class SyntheticCoreCommissioningIssuer:
         }
         self.revoked_generations: list[int] = list(lifecycle.revoked_generations)
         self._lifecycle_storage_bytes = lifecycle.storage_bytes
+        self._pending_private_key_deletions = self._load_pending_private_key_deletions()
+        self._pending_lifecycle_update: _PendingSyntheticCoreIssuerLifecycleUpdate | None = None
 
     def begin_generation(
         self,
@@ -1082,6 +1317,8 @@ class SyntheticCoreCommissioningIssuer:
         generation: int,
     ) -> PreparedCoreMaterialV1:
         state_store = self._require_state_store()
+        self._reconcile_pending_lifecycle_update()
+        self._drain_pending_private_key_deletions()
         suffix = secrets.token_hex(8)
         core_public = _synthetic_public_bytes("core-hmac-agreement", generation, suffix)
         server_private_key = Ed25519PrivateKey.generate()
@@ -1116,36 +1353,27 @@ class SyntheticCoreCommissioningIssuer:
             core_hmac_agreement_public_key_b64=_b64(core_public),
             core_hmac_agreement_public_key_sha256=hashlib.sha256(core_public).hexdigest(),
         )
+        self._queue_private_key_deletions((server_private_key_handle,))
         state_store.write(server_private_key_handle, server_private)
         previous_prepared = self.staged_generations.get(generation)
-        previous_legacy_prepared = self._legacy_staged_generations.get(generation)
-        self.staged_generations[generation] = prepared
-        self._legacy_staged_generations.pop(generation, None)
-        lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None
-        try:
-            lifecycle = self._current_lifecycle()
-            self._persist_lifecycle(lifecycle)
-        except BaseException:
-            status = (
-                "not_published"
-                if lifecycle is None
-                else self._persisted_lifecycle_status(lifecycle)
-            )
-            if lifecycle is not None and status == "published":
-                self._lifecycle_storage_bytes = canonical_bytes(lifecycle)
-            elif lifecycle is not None and status == "ambiguous":
-                self._lifecycle_storage_bytes = None
-            else:
-                if previous_prepared is None:
-                    self.staged_generations.pop(generation, None)
-                else:
-                    self.staged_generations[generation] = previous_prepared
-                if previous_legacy_prepared is not None:
-                    self._legacy_staged_generations[generation] = previous_legacy_prepared
-                state_store.delete(server_private_key_handle)
-            raise
-        if previous_prepared is not None:
-            state_store.delete(previous_prepared.server_private_key_handle)
+        proposed_staged = dict(self.staged_generations)
+        proposed_legacy_staged = dict(self._legacy_staged_generations)
+        proposed_staged[generation] = prepared
+        proposed_legacy_staged.pop(generation, None)
+        proposed = self._propose_lifecycle(
+            active_generation=self.active_generation,
+            staged_generations=proposed_staged,
+            legacy_staged_generations=proposed_legacy_staged,
+            revoked_generations=self.revoked_generations,
+        )
+        cleanup_handles = (
+            () if previous_prepared is None else (previous_prepared.server_private_key_handle,)
+        )
+        self._publish_lifecycle_update(
+            proposed,
+            cleanup_private_key_handles=cleanup_handles,
+            not_published_private_key_handles=(server_private_key_handle,),
+        )
         return prepared
 
     def complete_generation(
@@ -1203,6 +1431,8 @@ class SyntheticCoreCommissioningIssuer:
     ) -> None:
         if endpoint.generation != generation:
             raise PermissionError("endpoint_generation_mismatch")
+        self._reconcile_pending_lifecycle_update()
+        self._drain_pending_private_key_deletions()
         prepared = self.staged_generations.get(generation)
         legacy_prepared = self._legacy_staged_generations.get(generation)
         if prepared is not None:
@@ -1212,8 +1442,6 @@ class SyntheticCoreCommissioningIssuer:
             raise PermissionError("legacy_staged_activation_recommission_required")
         else:
             raise PermissionError("commissioning_generation_not_staged")
-        previous_active_generation = self.active_generation
-        previous_revoked_generations = list(self.revoked_generations)
         retired_prepared = {
             staged_generation: staged
             for staged_generation, staged in self.staged_generations.items()
@@ -1224,79 +1452,59 @@ class SyntheticCoreCommissioningIssuer:
             for staged_generation, staged in self._legacy_staged_generations.items()
             if staged_generation < generation
         }
-        self.active_generation = generation
+        proposed_staged = dict(self.staged_generations)
+        proposed_legacy_staged = dict(self._legacy_staged_generations)
+        proposed_revoked_generations = list(self.revoked_generations)
         for staged_generation in retired_prepared:
-            self.staged_generations.pop(staged_generation, None)
+            proposed_staged.pop(staged_generation, None)
         for staged_generation in retired_legacy_prepared:
-            self._legacy_staged_generations.pop(staged_generation, None)
+            proposed_legacy_staged.pop(staged_generation, None)
         for staged_generation in (*retired_prepared, *retired_legacy_prepared):
-            if staged_generation not in self.revoked_generations:
-                self.revoked_generations.append(staged_generation)
-        self.revoked_generations.sort()
-        lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None
-        try:
-            lifecycle = self._current_lifecycle()
-            self._persist_lifecycle(lifecycle)
-        except BaseException:
-            status = (
-                "not_published"
-                if lifecycle is None
-                else self._persisted_lifecycle_status(lifecycle)
-            )
-            if lifecycle is not None and status == "published":
-                self._lifecycle_storage_bytes = canonical_bytes(lifecycle)
-                for retired in retired_prepared.values():
-                    self._require_state_store().delete(retired.server_private_key_handle)
-                raise
-            if lifecycle is not None and status == "ambiguous":
-                self._lifecycle_storage_bytes = None
-            else:
-                self.active_generation = previous_active_generation
-                self.revoked_generations = previous_revoked_generations
-                self.staged_generations.update(retired_prepared)
-                self._legacy_staged_generations.update(retired_legacy_prepared)
-            raise
-        for retired in retired_prepared.values():
-            self._require_state_store().delete(retired.server_private_key_handle)
+            if staged_generation not in proposed_revoked_generations:
+                proposed_revoked_generations.append(staged_generation)
+        proposed_revoked_generations.sort()
+        proposed = self._propose_lifecycle(
+            active_generation=generation,
+            staged_generations=proposed_staged,
+            legacy_staged_generations=proposed_legacy_staged,
+            revoked_generations=proposed_revoked_generations,
+        )
+        self._publish_lifecycle_update(
+            proposed,
+            cleanup_private_key_handles=tuple(
+                retired.server_private_key_handle for retired in retired_prepared.values()
+            ),
+        )
 
     def abort_staged_generation(self, generation: int) -> None:
+        self._reconcile_pending_lifecycle_update()
+        self._drain_pending_private_key_deletions()
         if self.active_generation == generation:
             return
         prepared = self.staged_generations.get(generation)
         legacy_prepared = self._legacy_staged_generations.get(generation)
         if prepared is None and legacy_prepared is None:
             return
-        self.staged_generations.pop(generation, None)
-        self._legacy_staged_generations.pop(generation, None)
-        lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None
-        try:
-            lifecycle = self._current_lifecycle()
-            self._persist_lifecycle(lifecycle)
-        except BaseException:
-            status = (
-                "not_published"
-                if lifecycle is None
-                else self._persisted_lifecycle_status(lifecycle)
-            )
-            if lifecycle is not None and status == "published":
-                self._lifecycle_storage_bytes = canonical_bytes(lifecycle)
-                if prepared is not None:
-                    self._require_state_store().delete(prepared.server_private_key_handle)
-                raise
-            if lifecycle is not None and status == "ambiguous":
-                self._lifecycle_storage_bytes = None
-            else:
-                if prepared is not None:
-                    self.staged_generations[generation] = prepared
-                if legacy_prepared is not None:
-                    self._legacy_staged_generations[generation] = legacy_prepared
-            raise
-        if prepared is not None:
-            self._require_state_store().delete(prepared.server_private_key_handle)
+        proposed_staged = dict(self.staged_generations)
+        proposed_legacy_staged = dict(self._legacy_staged_generations)
+        proposed_staged.pop(generation, None)
+        proposed_legacy_staged.pop(generation, None)
+        proposed = self._propose_lifecycle(
+            active_generation=self.active_generation,
+            staged_generations=proposed_staged,
+            legacy_staged_generations=proposed_legacy_staged,
+            revoked_generations=self.revoked_generations,
+        )
+        cleanup_handles = () if prepared is None else (prepared.server_private_key_handle,)
+        self._publish_lifecycle_update(
+            proposed,
+            cleanup_private_key_handles=cleanup_handles,
+        )
 
     def revoke_generation(self, *, endpoint: ReachyCoreEndpointV1) -> None:
+        self._reconcile_pending_lifecycle_update()
+        self._drain_pending_private_key_deletions()
         previous_active_generation = self.active_generation
-        previous_revoked_generations = list(self.revoked_generations)
         prepared = self.staged_generations.get(endpoint.generation)
         legacy_prepared = self._legacy_staged_generations.get(endpoint.generation)
         if prepared is not None:
@@ -1304,41 +1512,35 @@ class SyntheticCoreCommissioningIssuer:
         elif legacy_prepared is not None:
             _require_endpoint_matches_prepared_core_material(legacy_prepared, endpoint)
         else:
+            if (
+                endpoint.generation in self.revoked_generations
+                and self.active_generation != endpoint.generation
+            ):
+                return
             raise PermissionError("commissioning_generation_not_staged")
         if endpoint.generation not in self.revoked_generations:
-            self.revoked_generations.append(endpoint.generation)
-            self.revoked_generations.sort()
-        if self.active_generation == endpoint.generation:
-            self.active_generation = None
-        self.staged_generations.pop(endpoint.generation, None)
-        self._legacy_staged_generations.pop(endpoint.generation, None)
-        lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None
-        try:
-            lifecycle = self._current_lifecycle()
-            self._persist_lifecycle(lifecycle)
-        except BaseException:
-            status = (
-                "not_published"
-                if lifecycle is None
-                else self._persisted_lifecycle_status(lifecycle)
-            )
-            if lifecycle is not None and status == "published":
-                self._lifecycle_storage_bytes = canonical_bytes(lifecycle)
-                if prepared is not None:
-                    self._require_state_store().delete(prepared.server_private_key_handle)
-                raise
-            if lifecycle is not None and status == "ambiguous":
-                self._lifecycle_storage_bytes = None
-            else:
-                self.active_generation = previous_active_generation
-                self.revoked_generations = previous_revoked_generations
-                if prepared is not None:
-                    self.staged_generations[endpoint.generation] = prepared
-                if legacy_prepared is not None:
-                    self._legacy_staged_generations[endpoint.generation] = legacy_prepared
-            raise
-        if prepared is not None:
-            self._require_state_store().delete(prepared.server_private_key_handle)
+            proposed_revoked_generations = [*self.revoked_generations, endpoint.generation]
+            proposed_revoked_generations.sort()
+        else:
+            proposed_revoked_generations = list(self.revoked_generations)
+        proposed_active_generation = previous_active_generation
+        if proposed_active_generation == endpoint.generation:
+            proposed_active_generation = None
+        proposed_staged = dict(self.staged_generations)
+        proposed_legacy_staged = dict(self._legacy_staged_generations)
+        proposed_staged.pop(endpoint.generation, None)
+        proposed_legacy_staged.pop(endpoint.generation, None)
+        proposed = self._propose_lifecycle(
+            active_generation=proposed_active_generation,
+            staged_generations=proposed_staged,
+            legacy_staged_generations=proposed_legacy_staged,
+            revoked_generations=proposed_revoked_generations,
+        )
+        cleanup_handles = () if prepared is None else (prepared.server_private_key_handle,)
+        self._publish_lifecycle_update(
+            proposed,
+            cleanup_private_key_handles=cleanup_handles,
+        )
 
     def commissioning_assurance(self) -> object:
         return _SyntheticCommissioningAssuranceCapability()
@@ -1396,6 +1598,21 @@ class SyntheticCoreCommissioningIssuer:
             storage_bytes=raw,
         )
 
+    def _load_pending_private_key_deletions(self) -> set[str]:
+        if self._state_store is None:
+            return set()
+        try:
+            raw = self._state_store.read(SYNTHETIC_ISSUER_CLEANUP_STATE_ID)
+        except FileNotFoundError:
+            return set()
+        cleanup = parse_contract_json(
+            SyntheticCoreIssuerCleanupV1,
+            raw,
+            max_bytes=MAX_SYNTHETIC_ISSUER_CLEANUP_STATE_BYTES,
+            require_canonical=True,
+        )
+        return set(cleanup.pending_private_key_deletions)
+
     def _persist_lifecycle(
         self,
         lifecycle: SyntheticCoreIssuerLifecycleV1 | None = None,
@@ -1409,21 +1626,178 @@ class SyntheticCoreCommissioningIssuer:
         self._lifecycle_storage_bytes = lifecycle_bytes
 
     def _current_lifecycle(self) -> SyntheticCoreIssuerLifecycleV1:
-        if self.active_generation is None or self.active_generation in self.staged_generations:
-            active_generation = self.active_generation
-        elif self.active_generation in self._legacy_staged_generations:
-            active_generation = None
+        return self._propose_lifecycle(
+            active_generation=self.active_generation,
+            staged_generations=self.staged_generations,
+            legacy_staged_generations=self._legacy_staged_generations,
+            revoked_generations=self.revoked_generations,
+        ).lifecycle
+
+    def _propose_lifecycle(
+        self,
+        *,
+        active_generation: int | None,
+        staged_generations: dict[int, PreparedCoreMaterialV1],
+        legacy_staged_generations: dict[int, LegacyPreparedCoreMaterialV1],
+        revoked_generations: list[int] | tuple[int, ...],
+    ) -> _ProposedSyntheticCoreIssuerLifecycle:
+        if active_generation is None or active_generation in staged_generations:
+            lifecycle_active_generation = active_generation
+        elif active_generation in legacy_staged_generations:
+            lifecycle_active_generation = None
         else:
             raise ValueError("synthetic issuer active generation must be staged")
-        return SyntheticCoreIssuerLifecycleV1(
-            schema_version="tuntun.synthetic-core-issuer-lifecycle.v1",
-            active_generation=active_generation,
-            staged_generations=tuple(
-                self.staged_generations[generation]
-                for generation in sorted(self.staged_generations)
-            ),
-            revoked_generations=tuple(self.revoked_generations),
+        staged = tuple(staged_generations[generation] for generation in sorted(staged_generations))
+        legacy_staged = tuple(
+            legacy_staged_generations[generation]
+            for generation in sorted(legacy_staged_generations)
         )
+        revoked = tuple(revoked_generations)
+        lifecycle = SyntheticCoreIssuerLifecycleV1(
+            schema_version="tuntun.synthetic-core-issuer-lifecycle.v1",
+            active_generation=lifecycle_active_generation,
+            staged_generations=staged,
+            revoked_generations=revoked,
+        )
+        return _ProposedSyntheticCoreIssuerLifecycle(
+            active_generation=active_generation,
+            staged_generations=staged,
+            legacy_staged_generations=legacy_staged,
+            revoked_generations=revoked,
+            lifecycle=lifecycle,
+        )
+
+    def _publish_lifecycle_update(
+        self,
+        proposed: _ProposedSyntheticCoreIssuerLifecycle,
+        *,
+        cleanup_private_key_handles: tuple[str, ...] = (),
+        not_published_private_key_handles: tuple[str, ...] = (),
+    ) -> None:
+        lifecycle_bytes = canonical_bytes(proposed.lifecycle)
+        queued_private_key_handles = tuple(
+            sorted({*cleanup_private_key_handles, *not_published_private_key_handles})
+        )
+        pending = _PendingSyntheticCoreIssuerLifecycleUpdate(
+            proposed=proposed,
+            lifecycle_bytes=lifecycle_bytes,
+            cleanup_private_key_handles=cleanup_private_key_handles,
+            not_published_private_key_handles=not_published_private_key_handles,
+        )
+        self._pending_lifecycle_update = pending
+        try:
+            self._queue_private_key_deletions(queued_private_key_handles)
+        except Exception:
+            self._pending_lifecycle_update = None
+            self._delete_private_key_handles(not_published_private_key_handles)
+            raise
+        try:
+            self._persist_lifecycle(proposed.lifecycle)
+        except Exception as publish_error:
+            status = self._persisted_lifecycle_status(proposed.lifecycle)
+            if status == "published":
+                self._apply_proposed_lifecycle(proposed, lifecycle_bytes)
+                self._pending_lifecycle_update = None
+                try:
+                    self._drain_pending_private_key_deletions()
+                except Exception as cleanup_error:
+                    publish_error.add_note(
+                        f"synthetic core private key cleanup failed: {cleanup_error}"
+                    )
+            elif status == "not_published":
+                try:
+                    self._drain_pending_private_key_deletions()
+                except Exception as cleanup_error:
+                    publish_error.add_note(
+                        f"synthetic core cleanup journal update failed: {cleanup_error}"
+                    )
+                else:
+                    self._pending_lifecycle_update = None
+            raise
+        self._apply_proposed_lifecycle(proposed, lifecycle_bytes)
+        self._pending_lifecycle_update = None
+        self._drain_pending_private_key_deletions()
+
+    def _reconcile_pending_lifecycle_update(self) -> None:
+        pending = self._pending_lifecycle_update
+        if pending is None:
+            return
+        status = self._persisted_lifecycle_status(pending.proposed.lifecycle)
+        if status == "published":
+            self._apply_proposed_lifecycle(pending.proposed, pending.lifecycle_bytes)
+            self._pending_lifecycle_update = None
+            self._drain_pending_private_key_deletions()
+            return
+        if status == "not_published":
+            self._drain_pending_private_key_deletions()
+            self._pending_lifecycle_update = None
+            return
+        raise OSError("synthetic_core_issuer_lifecycle_reconciliation_ambiguous")
+
+    def _apply_proposed_lifecycle(
+        self,
+        proposed: _ProposedSyntheticCoreIssuerLifecycle,
+        storage_bytes: bytes,
+    ) -> None:
+        self.active_generation = proposed.active_generation
+        self.staged_generations = {
+            prepared.generation: prepared for prepared in proposed.staged_generations
+        }
+        self._legacy_staged_generations = {
+            prepared.generation: prepared for prepared in proposed.legacy_staged_generations
+        }
+        self.revoked_generations = list(proposed.revoked_generations)
+        self._lifecycle_storage_bytes = storage_bytes
+
+    def _queue_private_key_deletions(self, handles: tuple[str, ...]) -> None:
+        if not handles:
+            return
+        updated = self._pending_private_key_deletions | set(handles)
+        self._persist_pending_private_key_deletions(updated)
+        self._pending_private_key_deletions = updated
+
+    def _unqueue_private_key_deletions(self, handles: tuple[str, ...]) -> None:
+        if not handles:
+            return
+        updated = self._pending_private_key_deletions - set(handles)
+        self._persist_pending_private_key_deletions(updated)
+        self._pending_private_key_deletions = updated
+
+    def _persist_pending_private_key_deletions(self, handles: set[str]) -> None:
+        if self._state_store is None:
+            return
+        if not handles:
+            self._state_store.delete(SYNTHETIC_ISSUER_CLEANUP_STATE_ID)
+            return
+        cleanup = SyntheticCoreIssuerCleanupV1(
+            schema_version="tuntun.synthetic-core-issuer-cleanup.v1",
+            pending_private_key_deletions=tuple(sorted(handles)),
+        )
+        self._state_store.write(SYNTHETIC_ISSUER_CLEANUP_STATE_ID, canonical_bytes(cleanup))
+
+    def _drain_pending_private_key_deletions(self) -> None:
+        if not self._pending_private_key_deletions:
+            return
+        referenced_handles = {
+            prepared.server_private_key_handle for prepared in self.staged_generations.values()
+        }
+        state_store = self._require_state_store()
+        remaining = set(self._pending_private_key_deletions)
+        for handle in sorted(self._pending_private_key_deletions):
+            if handle in referenced_handles:
+                remaining.remove(handle)
+                continue
+            state_store.delete(handle)
+            remaining.remove(handle)
+        self._persist_pending_private_key_deletions(remaining)
+        self._pending_private_key_deletions = remaining
+
+    def _delete_private_key_handles(self, handles: tuple[str, ...]) -> None:
+        if not handles:
+            return
+        state_store = self._require_state_store()
+        for handle in handles:
+            state_store.delete(handle)
 
     def _persisted_lifecycle_status(
         self,
@@ -1438,7 +1812,7 @@ class SyntheticCoreCommissioningIssuer:
             if self._lifecycle_storage_bytes is None:
                 return "not_published"
             return "ambiguous"
-        except BaseException:
+        except Exception:
             return "ambiguous"
         if hmac.compare_digest(visible, expected):
             return "published"
@@ -1472,8 +1846,14 @@ class ReachyCommissioningService:
         self._acceptance_publisher = acceptance_publisher
         self._request_factory = request_factory
         self._local_proof_verifier = local_proof_verifier
+        self._pending_publication_reconciliations: dict[
+            int,
+            _PendingReachyPublicationReconciliation,
+        ] = {}
 
     def resume_current_activation(self) -> CommissioningStateV1:
+        self._reconcile_generator_artifact_cleanup()
+        self._reconcile_pending_publications()
         state = self._repository.require_current()
         if state.legacy_key_id_format or state.artifact_map is None:
             raise RuntimeError("commissioning_material_legacy_recommission_required")
@@ -1500,6 +1880,8 @@ class ReachyCommissioningService:
         proof: LocalPhysicalProof,
         request: ReachyCommissioningRequestV1 | None = None,
     ) -> CommissioningStateV1:
+        self._reconcile_generator_artifact_cleanup()
+        self._reconcile_pending_publications()
         selected = self._select_request(request)
         generation = 1
 
@@ -1544,14 +1926,28 @@ class ReachyCommissioningService:
                     expected_current=None,
                     assurance=self._issuer.commissioning_assurance(),
                 )
+                self._generator.reconcile_artifact_cleanup(state.artifact_map)
                 self._issuer.activate_staged_generation(generation=generation, endpoint=endpoint)
                 return state
-            except BaseException:
+            except Exception as error:
+                self._record_pending_publication_reconciliation(
+                    generation=generation,
+                    state=state,
+                    material=material,
+                )
                 publication_status = _published_state_status(self._repository, state)
+                cleanup_error: Exception | None = None
                 if publication_status == "not_published":
-                    self._issuer.abort_staged_generation(generation)
-                    if material is not None:
-                        self._generator.discard(material)
+                    try:
+                        self._cleanup_unpublished_generation(generation, material)
+                    except Exception as exception:
+                        cleanup_error = exception
+                    else:
+                        self._clear_pending_publication_reconciliation(generation, state)
+                elif publication_status == "published":
+                    self._clear_pending_publication_reconciliation(generation, state)
+                if cleanup_error is not None:
+                    error.add_note(f"unpublished Reachy material cleanup failed: {cleanup_error}")
                 raise
 
         return self._require_local_proof_verifier().consume_and_execute(
@@ -1567,6 +1963,8 @@ class ReachyCommissioningService:
         proof: LocalPhysicalProof,
         request: ReachyCommissioningRequestV1 | None = None,
     ) -> CommissioningStateV1:
+        self._reconcile_generator_artifact_cleanup()
+        self._reconcile_pending_publications()
         selected = self._select_request(request)
         current = self._repository.require_current()
         generation = current.endpoint.generation + 1
@@ -1611,14 +2009,28 @@ class ReachyCommissioningService:
                     expected_current=current,
                     assurance=self._issuer.commissioning_assurance(),
                 )
+                self._generator.reconcile_artifact_cleanup(state.artifact_map)
                 self._issuer.activate_staged_generation(generation=generation, endpoint=endpoint)
                 return state
-            except BaseException:
+            except Exception as error:
+                self._record_pending_publication_reconciliation(
+                    generation=generation,
+                    state=state,
+                    material=material,
+                )
                 publication_status = _published_state_status(self._repository, state)
+                cleanup_error: Exception | None = None
                 if publication_status == "not_published":
-                    self._issuer.abort_staged_generation(generation)
-                    if material is not None:
-                        self._generator.discard(material)
+                    try:
+                        self._cleanup_unpublished_generation(generation, material)
+                    except Exception as exception:
+                        cleanup_error = exception
+                    else:
+                        self._clear_pending_publication_reconciliation(generation, state)
+                elif publication_status == "published":
+                    self._clear_pending_publication_reconciliation(generation, state)
+                if cleanup_error is not None:
+                    error.add_note(f"unpublished Reachy material cleanup failed: {cleanup_error}")
                 raise
 
         return self._require_local_proof_verifier().consume_and_execute(
@@ -1630,6 +2042,8 @@ class ReachyCommissioningService:
         )
 
     def revoke_local(self, proof: LocalPhysicalProof) -> CommissioningStateV1:
+        self._reconcile_generator_artifact_cleanup()
+        self._reconcile_pending_publications()
         current = self._repository.require_current()
 
         def transition() -> CommissioningStateV1:
@@ -1687,6 +2101,66 @@ class ReachyCommissioningService:
             raise RuntimeError("local_physical_proof_verifier_required")
         return self._local_proof_verifier
 
+    def _reconcile_generator_artifact_cleanup(self) -> None:
+        try:
+            current = self._repository.require_current()
+        except FileNotFoundError:
+            self._generator.reconcile_artifact_cleanup(None)
+            return
+        if current.legacy_key_id_format:
+            self._generator.reconcile_artifact_cleanup(None)
+            return
+        self._generator.reconcile_artifact_cleanup(current.artifact_map)
+
+    def _record_pending_publication_reconciliation(
+        self,
+        *,
+        generation: int,
+        state: CommissioningStateV1 | None,
+        material: GeneratedReachyMaterialBundle | None,
+    ) -> None:
+        if state is None:
+            return
+        self._pending_publication_reconciliations[generation] = (
+            _PendingReachyPublicationReconciliation(
+                generation=generation,
+                state=state,
+                material=material,
+            )
+        )
+
+    def _clear_pending_publication_reconciliation(
+        self,
+        generation: int,
+        state: CommissioningStateV1 | None,
+    ) -> None:
+        if state is None:
+            return
+        pending = self._pending_publication_reconciliations.get(generation)
+        if pending is not None and pending.state == state:
+            self._pending_publication_reconciliations.pop(generation, None)
+
+    def _reconcile_pending_publications(self) -> None:
+        for generation, pending in tuple(sorted(self._pending_publication_reconciliations.items())):
+            publication_status = _published_state_status(self._repository, pending.state)
+            if publication_status == "published":
+                self._pending_publication_reconciliations.pop(generation, None)
+                continue
+            if publication_status == "not_published":
+                self._cleanup_unpublished_generation(pending.generation, pending.material)
+                self._pending_publication_reconciliations.pop(generation, None)
+                continue
+            raise OSError("commissioning_publication_reconciliation_ambiguous")
+
+    def _cleanup_unpublished_generation(
+        self,
+        generation: int,
+        material: GeneratedReachyMaterialBundle | None,
+    ) -> None:
+        self._issuer.abort_staged_generation(generation)
+        if material is not None:
+            self._generator.discard(material)
+
 
 def _endpoint_from_material(
     *,
@@ -1742,7 +2216,7 @@ def _published_state_status(
         visible = repository.require_current()
     except FileNotFoundError:
         return "not_published"
-    except BaseException:
+    except Exception:
         return "ambiguous"
     return "published" if visible == state else "not_published"
 
@@ -1854,6 +2328,35 @@ def _artifact_map_handles(
         artifact_map.client_certificate_handle,
         artifact_map.device_signing_private_key_handle,
         artifact_map.frame_hmac_root_handle,
+    )
+
+
+def _reachy_cleanup_entry_handles(
+    entry: ReachyGeneratorArtifactCleanupEntryV1,
+) -> tuple[str, str, str, str]:
+    return (
+        entry.client_tls_private_key_handle,
+        entry.client_certificate_handle,
+        entry.device_signing_private_key_handle,
+        entry.frame_hmac_root_handle,
+    )
+
+
+def _reachy_cleanup_entry_key(
+    entry: ReachyGeneratorArtifactCleanupEntryV1,
+) -> tuple[str, str, str, str, str]:
+    return (str(entry.generation), *_reachy_cleanup_entry_handles(entry))
+
+
+def _reachy_artifact_cleanup_entry_from_map(
+    artifact_map: ReachyCommissioningArtifactMapV1,
+) -> ReachyGeneratorArtifactCleanupEntryV1:
+    return ReachyGeneratorArtifactCleanupEntryV1(
+        generation=artifact_map.generation,
+        client_tls_private_key_handle=artifact_map.client_tls_private_key_handle,
+        client_certificate_handle=artifact_map.client_certificate_handle,
+        device_signing_private_key_handle=artifact_map.device_signing_private_key_handle,
+        frame_hmac_root_handle=artifact_map.frame_hmac_root_handle,
     )
 
 
