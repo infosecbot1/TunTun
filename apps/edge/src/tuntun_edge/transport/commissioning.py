@@ -35,16 +35,16 @@ SYNTHETIC_ISSUER_CLEANUP_STATE_ID = "synthetic-core-issuer-cleanup.v1"
 MAX_SYNTHETIC_ISSUER_STATE_BYTES = 16_384
 MAX_SYNTHETIC_ISSUER_CLEANUP_STATE_BYTES = 16_384
 MAX_SYNTHETIC_ISSUER_PENDING_DELETIONS = 64
-SYNTHETIC_CORE_PRIVATE_KEY_HANDLE_PATTERN = r"^reachy-server-g[1-9][0-9]{0,8}-[0-9a-f]{16}$"
 REACHY_GENERATOR_CLEANUP_STATE_ID = "reachy-generator-cleanup.v1"
 MAX_REACHY_GENERATOR_CLEANUP_STATE_BYTES = 16_384
 MAX_REACHY_GENERATOR_PENDING_ARTIFACT_DELETIONS = 16
-REACHY_GENERATOR_ARTIFACT_HANDLE_PATTERNS = {
-    "client_tls_private_key_handle": r"^reachy-client-tls-g{generation}-[0-9a-f]{{16}}$",
-    "client_certificate_handle": r"^reachy-client-cert-g{generation}-[0-9a-f]{{16}}$",
-    "device_signing_private_key_handle": r"^reachy-device-sign-g{generation}-[0-9a-f]{{16}}$",
-    "frame_hmac_root_handle": r"^reachy-frame-hmac-g{generation}-[0-9a-f]{{16}}$",
-}
+_RESERVED_COMMISSIONING_ARTIFACT_STATE_IDS = frozenset(
+    {
+        SYNTHETIC_ISSUER_STATE_ID,
+        SYNTHETIC_ISSUER_CLEANUP_STATE_ID,
+        REACHY_GENERATOR_CLEANUP_STATE_ID,
+    }
+)
 
 Sha256Hex = Annotated[str, Field(pattern=SHA256_PATTERN)]
 ArtifactHandle = Annotated[
@@ -367,11 +367,7 @@ class ReachyCommissioningArtifactMapV1(ContractModel):
     )
     @classmethod
     def artifact_handles_are_not_reserved(cls, value: str) -> str:
-        if value in {
-            SYNTHETIC_ISSUER_STATE_ID,
-            SYNTHETIC_ISSUER_CLEANUP_STATE_ID,
-            REACHY_GENERATOR_CLEANUP_STATE_ID,
-        }:
+        if value in _RESERVED_COMMISSIONING_ARTIFACT_STATE_IDS:
             raise ValueError("commissioning artifact handle is reserved")
         return value
 
@@ -398,23 +394,15 @@ class ReachyGeneratorArtifactCleanupEntryV1(ContractModel):
     )
     @classmethod
     def cleanup_artifact_handles_are_not_reserved(cls, value: str) -> str:
-        if value in {
-            SYNTHETIC_ISSUER_STATE_ID,
-            SYNTHETIC_ISSUER_CLEANUP_STATE_ID,
-            REACHY_GENERATOR_CLEANUP_STATE_ID,
-        }:
+        if value in _RESERVED_COMMISSIONING_ARTIFACT_STATE_IDS:
             raise ValueError("Reachy generator cleanup artifact handle is reserved")
         return value
 
     @model_validator(mode="after")
-    def cleanup_artifact_handles_are_exact_generated_bundle(self) -> Self:
+    def cleanup_artifact_handles_are_unique(self) -> Self:
         handles = _reachy_cleanup_entry_handles(self)
         if len(set(handles)) != len(handles):
             raise ValueError("Reachy generator cleanup artifact handles must be unique")
-        for field_name, pattern_template in REACHY_GENERATOR_ARTIFACT_HANDLE_PATTERNS.items():
-            pattern = pattern_template.format(generation=self.generation)
-            if re.fullmatch(pattern, getattr(self, field_name)) is None:
-                raise ValueError("Reachy generator cleanup artifact handle invalid")
         return self
 
 
@@ -755,7 +743,7 @@ class PreparedCoreMaterialV1(ContractModel):
     @field_validator("server_private_key_handle")
     @classmethod
     def server_private_key_handle_is_not_reserved(cls, value: str) -> str:
-        if value in {SYNTHETIC_ISSUER_STATE_ID, SYNTHETIC_ISSUER_CLEANUP_STATE_ID}:
+        if value in _RESERVED_COMMISSIONING_ARTIFACT_STATE_IDS:
             raise ValueError("synthetic issuer state identifier is reserved")
         return value
 
@@ -894,14 +882,8 @@ class SyntheticCoreIssuerCleanupV1(ContractModel):
         cls,
         value: tuple[str, ...],
     ) -> tuple[str, ...]:
-        reserved = {SYNTHETIC_ISSUER_STATE_ID, SYNTHETIC_ISSUER_CLEANUP_STATE_ID}
-        if any(handle in reserved for handle in value):
+        if any(handle in _RESERVED_COMMISSIONING_ARTIFACT_STATE_IDS for handle in value):
             raise ValueError("synthetic issuer state identifiers are reserved")
-        if any(
-            re.fullmatch(SYNTHETIC_CORE_PRIVATE_KEY_HANDLE_PATTERN, handle) is None
-            for handle in value
-        ):
-            raise ValueError("synthetic issuer pending private key deletion handle invalid")
         if len(set(value)) != len(value):
             raise ValueError("synthetic issuer pending private key deletions must be unique")
         if tuple(sorted(value)) != value:
@@ -1024,6 +1006,8 @@ class ReachyPrivateMaterialGeneratorPort(Protocol):
         certificate_pem: str,
     ) -> None: ...
 
+    def queue_artifact_cleanup(self, artifact_map: ReachyCommissioningArtifactMapV1) -> None: ...
+
     def discard(self, material: GeneratedReachyMaterialBundle) -> None: ...
 
     def reconcile_artifact_cleanup(
@@ -1055,6 +1039,8 @@ class CoreCommissioningIssuerPort(Protocol):
     ) -> None: ...
 
     def abort_staged_generation(self, generation: int) -> None: ...
+
+    def prepare_revoke_generation(self, *, endpoint: ReachyCoreEndpointV1) -> None: ...
 
     def revoke_generation(self, *, endpoint: ReachyCoreEndpointV1) -> None: ...
 
@@ -1210,22 +1196,22 @@ class SyntheticReachyPrivateMaterialGenerator:
         self._delete_artifact_deletion_entry(cleanup_entry)
         self._unqueue_artifact_deletions((cleanup_entry,))
 
+    def queue_artifact_cleanup(self, artifact_map: ReachyCommissioningArtifactMapV1) -> None:
+        cleanup_entry = _reachy_artifact_cleanup_entry_from_map(artifact_map)
+        self._queue_artifact_deletions((cleanup_entry,))
+
     def reconcile_artifact_cleanup(
         self,
         current_artifact_map: ReachyCommissioningArtifactMapV1 | None,
     ) -> None:
         if not self._pending_artifact_deletions:
             return
-        current_key: tuple[str, str, str, str, str] | None = None
+        current_handles: set[str] = set()
         if current_artifact_map is not None:
-            current_entry = _reachy_artifact_cleanup_entry_from_map(current_artifact_map)
-            current_key = _reachy_cleanup_entry_key(current_entry)
+            current_handles = set(_artifact_map_handles(current_artifact_map))
         remaining = dict(self._pending_artifact_deletions)
         for key, entry in sorted(self._pending_artifact_deletions.items()):
-            if current_key is not None and key == current_key:
-                remaining.pop(key, None)
-                continue
-            self._delete_artifact_deletion_entry(entry)
+            self._delete_artifact_deletion_entry(entry, preserved_handles=current_handles)
             remaining.pop(key, None)
         self._persist_pending_artifact_deletions(remaining)
         self._pending_artifact_deletions = remaining
@@ -1287,11 +1273,18 @@ class SyntheticReachyPrivateMaterialGenerator:
     def _delete_artifact_deletion_entry(
         self,
         entry: ReachyGeneratorArtifactCleanupEntryV1,
+        *,
+        preserved_handles: set[str] | None = None,
     ) -> None:
-        self._key_store.delete(entry.client_tls_private_key_handle)
-        self._key_store.delete(entry.device_signing_private_key_handle)
-        self._key_store.delete(entry.frame_hmac_root_handle)
-        self._certificate_store.delete(entry.client_certificate_handle)
+        preserved = set() if preserved_handles is None else preserved_handles
+        if entry.client_tls_private_key_handle not in preserved:
+            self._key_store.delete(entry.client_tls_private_key_handle)
+        if entry.device_signing_private_key_handle not in preserved:
+            self._key_store.delete(entry.device_signing_private_key_handle)
+        if entry.frame_hmac_root_handle not in preserved:
+            self._key_store.delete(entry.frame_hmac_root_handle)
+        if entry.client_certificate_handle not in preserved:
+            self._certificate_store.delete(entry.client_certificate_handle)
 
 
 class SyntheticCoreCommissioningIssuer:
@@ -1500,6 +1493,25 @@ class SyntheticCoreCommissioningIssuer:
             proposed,
             cleanup_private_key_handles=cleanup_handles,
         )
+
+    def prepare_revoke_generation(self, *, endpoint: ReachyCoreEndpointV1) -> None:
+        self._reconcile_pending_lifecycle_update()
+        self._drain_pending_private_key_deletions()
+        prepared = self.staged_generations.get(endpoint.generation)
+        legacy_prepared = self._legacy_staged_generations.get(endpoint.generation)
+        if prepared is not None:
+            _require_endpoint_matches_prepared_core_material(prepared, endpoint)
+            self._queue_private_key_deletions((prepared.server_private_key_handle,))
+            return
+        if legacy_prepared is not None:
+            _require_endpoint_matches_prepared_core_material(legacy_prepared, endpoint)
+            return
+        if (
+            endpoint.generation in self.revoked_generations
+            and self.active_generation != endpoint.generation
+        ):
+            return
+        raise PermissionError("commissioning_generation_not_staged")
 
     def revoke_generation(self, *, endpoint: ReachyCoreEndpointV1) -> None:
         self._reconcile_pending_lifecycle_update()
@@ -1785,7 +1797,6 @@ class SyntheticCoreCommissioningIssuer:
         remaining = set(self._pending_private_key_deletions)
         for handle in sorted(self._pending_private_key_deletions):
             if handle in referenced_handles:
-                remaining.remove(handle)
                 continue
             state_store.delete(handle)
             remaining.remove(handle)
@@ -1855,10 +1866,11 @@ class ReachyCommissioningService:
         self._reconcile_generator_artifact_cleanup()
         self._reconcile_pending_publications()
         state = self._repository.require_current()
+        if state.status != "active":
+            self._recover_revoked_current(state)
+            raise PermissionError("commissioning_revoked")
         if state.legacy_key_id_format or state.artifact_map is None:
             raise RuntimeError("commissioning_material_legacy_recommission_required")
-        if state.status != "active":
-            raise PermissionError("commissioning_revoked")
         self._issuer.activate_staged_generation(
             generation=state.endpoint.generation,
             endpoint=state.endpoint,
@@ -2004,6 +2016,8 @@ class ReachyCommissioningService:
                     revoked_key_ids=_endpoint_key_ids(current.endpoint),
                     revoked_certificate_sha256=_endpoint_certificate_digests(current.endpoint),
                 )
+                if not current.legacy_key_id_format and current.artifact_map is not None:
+                    self._generator.queue_artifact_cleanup(current.artifact_map)
                 self._repository.replace_atomic(
                     state,
                     expected_current=current,
@@ -2050,7 +2064,19 @@ class ReachyCommissioningService:
             if current.status != "revoked":
                 self._require_acceptance_publisher().clear_before_revoke(current)
             if current.status == "revoked":
+                self._recover_revoked_current(current)
                 return current
+            if not current.legacy_key_id_format and current.artifact_map is not None:
+                self._generator.queue_artifact_cleanup(current.artifact_map)
+            try:
+                self._issuer.prepare_revoke_generation(endpoint=current.endpoint)
+            except PermissionError as error:
+                if (
+                    current.legacy_key_id_format or current.artifact_map is None
+                ) and error.args == ("commissioning_generation_not_staged",):
+                    pass
+                else:
+                    raise
             revoked = CommissioningStateV1(
                 schema_version="tuntun.reachy-commissioning-state.v1",
                 status="revoked",
@@ -2072,6 +2098,8 @@ class ReachyCommissioningService:
                 ) and error.args == ("commissioning_generation_not_staged",):
                     return revoked
                 raise
+            if not current.legacy_key_id_format:
+                self._generator.reconcile_artifact_cleanup(None)
             return revoked
 
         return self._require_local_proof_verifier().consume_and_execute(
@@ -2107,10 +2135,24 @@ class ReachyCommissioningService:
         except FileNotFoundError:
             self._generator.reconcile_artifact_cleanup(None)
             return
-        if current.legacy_key_id_format:
+        if current.legacy_key_id_format or current.status != "active":
             self._generator.reconcile_artifact_cleanup(None)
             return
         self._generator.reconcile_artifact_cleanup(current.artifact_map)
+
+    def _recover_revoked_current(self, current: CommissioningStateV1) -> None:
+        try:
+            self._issuer.revoke_generation(endpoint=current.endpoint)
+        except PermissionError as error:
+            if (current.legacy_key_id_format or current.artifact_map is None) and error.args == (
+                "commissioning_generation_not_staged",
+            ):
+                pass
+            else:
+                raise
+        if not current.legacy_key_id_format and current.artifact_map is not None:
+            self._generator.queue_artifact_cleanup(current.artifact_map)
+            self._generator.reconcile_artifact_cleanup(None)
 
     def _record_pending_publication_reconciliation(
         self,
