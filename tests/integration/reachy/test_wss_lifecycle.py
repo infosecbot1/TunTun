@@ -50,8 +50,6 @@ DEVICE_PROOF_SCHEMA = "tuntun.reachy-device-proof.v1"
 CHALLENGE_ACCEPTED_SCHEMA = "tuntun.reachy-challenge-accepted.v1"
 HANDSHAKE_SIGNATURE_PAYLOAD_SCHEMA = "tuntun.reachy-device-challenge-signing-payload.v1"
 HANDSHAKE_SIGNATURE_DOMAIN = "tuntun.reachy.wss.device-challenge-signature.v1"
-CONNECTION_NONCE_PAYLOAD_SCHEMA = "tuntun.reachy-connection-nonce-payload.v1"
-CONNECTION_NONCE_DOMAIN = "tuntun.reachy.wss.connection-nonce.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +368,21 @@ class FakeConnector:
         return self.sockets.pop(0)
 
 
+class ScriptedConnector:
+    def __init__(self, steps: list[ClientSocket | Exception]) -> None:
+        self.steps = steps
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def __call__(self, uri: str, **kwargs: object) -> ClientSocket:
+        self.calls.append((uri, kwargs))
+        if not self.steps:
+            raise AssertionError("unexpected extra connect")
+        step = self.steps.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
 class MutatingConnector(FakeConnector):
     def __init__(self, endpoint: MutableEndpoint, sockets: list[ClientSocket]) -> None:
         super().__init__(sockets)
@@ -463,13 +476,36 @@ class ScriptedApplicationSocket(ClientSocket):
         return item
 
 
+class HangingApplicationSendSocket(ScriptedApplicationSocket):
+    def __init__(
+        self,
+        challenge: DeviceChallengeV1,
+        accepted: ChallengeAcceptedV1,
+        incoming: list[str | bytes | BaseException],
+        *,
+        hang_on_send: int,
+    ) -> None:
+        super().__init__(challenge, accepted, incoming)
+        self.hang_on_send = hang_on_send
+        self.send_attempts = 0
+        self.hanging_send_started = asyncio.Event()
+
+    async def send(self, message: str | bytes) -> None:
+        assert message
+        self.send_attempts += 1
+        if self.send_attempts == self.hang_on_send:
+            self.hanging_send_started.set()
+            await asyncio.sleep(3600)
+        await super().send(message)
+
+
 def _accepted_for(
     challenge: DeviceChallengeV1,
     *,
     client_nonce: bytes,
 ) -> ChallengeAcceptedV1:
     client_nonce_b64 = base64.b64encode(client_nonce).decode("ascii")
-    connection_nonce = _expected_bound_connection_nonce(challenge, client_nonce_b64)
+    connection_nonce = _expected_raw_connection_nonce(challenge, client_nonce_b64)
     return ChallengeAcceptedV1(
         schema_version=CHALLENGE_ACCEPTED_SCHEMA,
         connection_nonce_b64=base64.b64encode(connection_nonce).decode("ascii"),
@@ -509,32 +545,16 @@ def _expected_bound_device_challenge_payload(
     )
 
 
-def _expected_bound_connection_nonce(
+def _expected_raw_connection_nonce(
     challenge: DeviceChallengeV1,
     client_nonce_b64: str,
-    *,
-    route: str = "/v1/reachy",
-    subprotocol: str = "tuntun.reachy.v1",
-    proof_schema_version: str = DEVICE_PROOF_SCHEMA,
-    accepted_schema_version: str = CHALLENGE_ACCEPTED_SCHEMA,
 ) -> bytes:
-    return hashlib.sha256(
-        canonical_mapping_bytes(
-            {
-                "schema_version": CONNECTION_NONCE_PAYLOAD_SCHEMA,
-                "domain": CONNECTION_NONCE_DOMAIN,
-                "route": route,
-                "subprotocol": subprotocol,
-                "challenge_schema_version": challenge.schema_version,
-                "proof_schema_version": proof_schema_version,
-                "accepted_schema_version": accepted_schema_version,
-                "challenge_b64": challenge.challenge_b64,
-                "server_nonce_b64": challenge.server_nonce_b64,
-                "client_nonce_b64": client_nonce_b64,
-                "endpoint_generation": challenge.endpoint_generation,
-            }
-        )
-    ).digest()
+    challenge_nonce = base64.b64decode(challenge.challenge_b64, validate=True)
+    server_nonce = base64.b64decode(challenge.server_nonce_b64, validate=True)
+    client_nonce = base64.b64decode(client_nonce_b64, validate=True)
+    if len(challenge_nonce) != 32 or len(server_nonce) != 32 or len(client_nonce) != 32:
+        raise ValueError("connection_nonce_or_sequence")
+    return hashlib.sha256(challenge_nonce + server_nonce + client_nonce).digest()
 
 
 def _legacy_device_challenge_payload(
@@ -864,7 +884,7 @@ def test_client_rejects_non_finite_or_unbounded_timing_config() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_reconnects_after_handshake_failure_without_replaying_connection() -> None:
+async def test_run_treats_generation_mismatch_as_terminal_recommission() -> None:
     from tuntun_edge.transport.websocket import ReachyWssClient
 
     signer = Ed25519PrivateKey.generate()
@@ -873,10 +893,9 @@ async def test_run_reconnects_after_handshake_failure_without_replaying_connecti
         _challenge(generation=99, marker=b"x"),
         _accepted_for(_challenge(marker=b"x"), client_nonce=client_nonce),
     )
-    fresh_challenge = _challenge(marker=b"y")
-    fresh = ClientSocket(fresh_challenge, _accepted_for(fresh_challenge, client_nonce=client_nonce))
     state = FakeState()
     safety = FakeSafety()
+    readiness = FakeReadiness()
     sleeps: list[float] = []
     stop = asyncio.Event()
     client = ReachyWssClient(
@@ -886,53 +905,47 @@ async def test_run_reconnects_after_handshake_failure_without_replaying_connecti
         state=state,
         safety=safety,
         handler=FakeHandler(),
-        readiness=FakeReadiness(),
+        readiness=readiness,
         clock=Clock(),
-        connect_factory=FakeConnector([stale, fresh]),
+        connect_factory=FakeConnector([stale]),
         tls_peer_verifier=lambda _socket, expected: ("TLSv1.3", SERVER_LEAF_DER),
         client_certificate_sha256=lambda _socket: CLIENT_CERTIFICATE_SHA256,
         nonce_factory=lambda size: client_nonce if size == 32 else b"",
         sleeper=lambda delay: _record_sleep(sleeps, delay),
     )
 
-    await client.run(stop, after_connect=lambda _connection: stop.set())
+    with pytest.raises(PermissionError, match="device_challenge_generation"):
+        await asyncio.wait_for(
+            client.run(stop, after_connect=lambda _connection: stop.set()),
+            timeout=0.1,
+        )
 
     assert stale.closed == [(1008, "reachy_handshake_failed")]
-    assert fresh.closed == [(1000, "edge_stopped")]
-    assert safety.latched == ["transport_disconnect", "transport_disconnect"]
-    assert state.abandoned == ["disconnect", "disconnect"]
-    assert sleeps == [0.25]
-    assert client.connection_history == [
-        base64.b64decode(fresh.accepted.connection_nonce_b64, validate=True)
-    ]
+    assert safety.latched == ["transport_disconnect"]
+    assert state.abandoned == ["disconnect"]
+    assert sleeps == []
+    assert client.connection_history == []
+    assert readiness.disconnect_degraded_codes == (
+        "reachy_recommission_required:device_challenge_generation",
+    )
+    assert readiness.restart_required is True
 
 
 @pytest.mark.asyncio
-async def test_run_closes_live_connection_and_retries_after_callback_failure() -> None:
+async def test_run_closes_live_connection_and_propagates_callback_failure() -> None:
     from tuntun_edge.transport.websocket import ReachyWssClient
 
     signer = Ed25519PrivateKey.generate()
     first_nonce = b"q" * 32
-    second_nonce = b"z" * 32
     first_challenge = _challenge(marker=b"q")
-    second_challenge = _challenge(marker=b"z")
     first = ClientSocket(first_challenge, _accepted_for(first_challenge, client_nonce=first_nonce))
-    second = ClientSocket(
-        second_challenge, _accepted_for(second_challenge, client_nonce=second_nonce)
-    )
     state = FakeState()
     safety = FakeSafety()
     sleeps: list[float] = []
-    nonces = [first_nonce, second_nonce]
-    callbacks = 0
     stop = asyncio.Event()
 
     def callback(_connection: object) -> None:
-        nonlocal callbacks
-        callbacks += 1
-        if callbacks == 1:
-            raise RuntimeError("callback failed")
-        stop.set()
+        raise RuntimeError("callback failed")
 
     client = ReachyWssClient(
         Endpoint(),
@@ -943,21 +956,21 @@ async def test_run_closes_live_connection_and_retries_after_callback_failure() -
         handler=FakeHandler(),
         readiness=FakeReadiness(),
         clock=Clock(),
-        connect_factory=FakeConnector([first, second]),
+        connect_factory=FakeConnector([first]),
         tls_peer_verifier=lambda _socket, expected: ("TLSv1.3", SERVER_LEAF_DER),
         client_certificate_sha256=lambda _socket: CLIENT_CERTIFICATE_SHA256,
-        nonce_factory=lambda size: nonces.pop(0) if size == 32 else b"",
+        nonce_factory=lambda size: first_nonce if size == 32 else b"",
         sleeper=lambda delay: _record_sleep(sleeps, delay),
     )
 
-    await client.run(stop, after_connect=callback)
+    with pytest.raises(RuntimeError, match="callback failed"):
+        await asyncio.wait_for(client.run(stop, after_connect=callback), timeout=0.1)
 
     assert first.closed == [(1011, "edge_connection_setup_failed")]
-    assert second.closed == [(1000, "edge_stopped")]
-    assert safety.latched == ["transport_disconnect", "transport_disconnect"]
-    assert state.abandoned == ["disconnect", "disconnect"]
-    assert sleeps == [0.25]
-    assert len(client.connection_history) == 2
+    assert safety.latched == ["transport_disconnect"]
+    assert state.abandoned == ["disconnect"]
+    assert sleeps == []
+    assert len(client.connection_history) == 1
 
 
 @pytest.mark.asyncio
@@ -986,7 +999,10 @@ async def test_run_clean_stop_performs_disconnect_cleanup_before_return() -> Non
         nonce_factory=lambda size: client_nonce if size == 32 else b"",
     )
 
-    await client.run(stop, after_connect=lambda _connection: stop.set())
+    await asyncio.wait_for(
+        client.run(stop, after_connect=lambda _connection: stop.set()),
+        timeout=0.1,
+    )
 
     assert socket.closed == [(1000, "edge_stopped")]
     assert safety.latched == ["transport_disconnect"]
@@ -1074,16 +1090,10 @@ async def test_run_resets_backoff_after_genuinely_successful_connection() -> Non
         handler=FakeHandler(),
         readiness=FakeReadiness(),
         clock=Clock(),
-        connect_factory=FakeConnector(
+        connect_factory=ScriptedConnector(
             [
-                ClientSocket(
-                    _challenge(generation=99, marker=b"1"),
-                    _accepted_for(_challenge(marker=b"1"), client_nonce=heartbeat_nonce),
-                ),
-                ClientSocket(
-                    _challenge(generation=99, marker=b"2"),
-                    _accepted_for(_challenge(marker=b"2"), client_nonce=heartbeat_nonce),
-                ),
+                ConnectionError("offline"),
+                TimeoutError("open timed out"),
                 heartbeat_socket,
                 stop_socket,
             ]
@@ -1096,7 +1106,7 @@ async def test_run_resets_backoff_after_genuinely_successful_connection() -> Non
         heartbeat_timeout=0.001,
     )
 
-    await client.run(stop, after_connect=after_connect)
+    await asyncio.wait_for(client.run(stop, after_connect=after_connect), timeout=0.2)
 
     assert sleeps == [0.25, 0.5, 0.25]
     assert heartbeat_socket.closed == [(1011, "heartbeat_lost")]
@@ -1223,6 +1233,71 @@ async def test_run_closes_live_socket_before_reconnect_after_malformed_control_f
 
 
 @pytest.mark.asyncio
+async def test_run_bounds_application_response_send_and_reconnects() -> None:
+    from tuntun_edge.transport.websocket import ReachyWssClient
+
+    signer = Ed25519PrivateKey.generate()
+    first_nonce = b"s" * 32
+    second_nonce = b"t" * 32
+    first_challenge = _challenge(marker=b"s")
+    second_challenge = _challenge(marker=b"t")
+    connection_nonce = base64.b64decode(
+        _accepted_for(first_challenge, client_nonce=first_nonce).connection_nonce_b64,
+        validate=True,
+    )
+    first = HangingApplicationSendSocket(
+        first_challenge,
+        _accepted_for(first_challenge, client_nonce=first_nonce),
+        [_signed_core_request(signer, connection_nonce=connection_nonce)],
+        hang_on_send=2,
+    )
+    second = ClientSocket(
+        second_challenge, _accepted_for(second_challenge, client_nonce=second_nonce)
+    )
+    state = FakeState()
+    safety = FakeSafety()
+    sleeps: list[float] = []
+    nonces = [first_nonce, second_nonce]
+    stop = asyncio.Event()
+    connections = 0
+
+    def stop_after_second_connection(_connection: object) -> None:
+        nonlocal connections
+        connections += 1
+        if connections == 2:
+            stop.set()
+
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(signer),
+        state=state,
+        safety=safety,
+        handler=FakeHandler(),
+        readiness=FakeReadiness(),
+        clock=Clock(),
+        connect_factory=FakeConnector([first, second]),
+        tls_peer_verifier=lambda _socket, expected: ("TLSv1.3", SERVER_LEAF_DER),
+        client_certificate_sha256=lambda _socket: CLIENT_CERTIFICATE_SHA256,
+        nonce_factory=lambda size: nonces.pop(0) if size == 32 else b"",
+        sleeper=lambda delay: _record_sleep(sleeps, delay),
+        socket_close_timeout=0.001,
+    )
+
+    await asyncio.wait_for(
+        client.run(stop, after_connect=stop_after_second_connection),
+        timeout=0.1,
+    )
+
+    assert first.hanging_send_started.is_set()
+    assert first.closed == [(1011, "edge_connection_failed")]
+    assert second.closed == [(1000, "edge_stopped")]
+    assert safety.latched == ["transport_disconnect", "transport_disconnect"]
+    assert state.abandoned == ["disconnect", "disconnect"]
+    assert sleeps == [0.25]
+
+
+@pytest.mark.asyncio
 async def test_run_closes_live_socket_before_reconnect_after_dispatch_failure() -> None:
     from tuntun_edge.transport.websocket import ReachyWssClient
 
@@ -1283,6 +1358,178 @@ async def test_run_closes_live_socket_before_reconnect_after_dispatch_failure() 
     assert second.closed == [(1000, "edge_stopped")]
     assert safety.latched == ["transport_disconnect", "transport_disconnect"]
     assert state.abandoned == ["disconnect", "disconnect"]
+    assert sleeps == [0.25]
+
+
+@pytest.mark.asyncio
+async def test_edge_connection_serve_uses_direct_task_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tuntun_edge.transport.websocket as edge_wss
+    from tuntun_edge.transport.websocket import ReachyWssClient
+
+    signer = Ed25519PrivateKey.generate()
+    client_nonce = b"f" * 32
+    challenge = _challenge(marker=b"f")
+    socket = ScriptedApplicationSocket(
+        challenge,
+        _accepted_for(challenge, client_nonce=client_nonce),
+        [ConnectionError("receive failed")],
+    )
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(signer),
+        state=FakeState(),
+        safety=FakeSafety(),
+        handler=FakeHandler(),
+        readiness=FakeReadiness(),
+        clock=Clock(),
+        connect_factory=FakeConnector([socket]),
+        tls_peer_verifier=lambda _socket, expected: ("TLSv1.3", SERVER_LEAF_DER),
+        client_certificate_sha256=lambda _socket: CLIENT_CERTIFICATE_SHA256,
+        nonce_factory=lambda size: client_nonce if size == 32 else b"",
+    )
+    connection = await client.connect_once()
+    real_create_task = asyncio.create_task
+
+    def create_task_or_fail(coro: Awaitable[object], *, name: str | None = None) -> Any:
+        if name == "edge_connection_receive":
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            raise RuntimeError("task factory unavailable")
+        return real_create_task(coro, name=name)
+
+    def task_group_create_task_or_fail(
+        self: asyncio.TaskGroup,
+        coro: Awaitable[object],
+        *,
+        name: str | None = None,
+        **kwargs: object,
+    ) -> Any:
+        assert self
+        assert name is None
+        assert kwargs == {}
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        raise RuntimeError("task factory unavailable")
+
+    monkeypatch.setattr(edge_wss.asyncio, "create_task", create_task_or_fail)
+    monkeypatch.setattr(edge_wss.asyncio.TaskGroup, "create_task", task_group_create_task_or_fail)
+
+    with pytest.raises(ConnectionError, match="receive failed"):
+        await connection.serve()
+
+
+@pytest.mark.asyncio
+async def test_run_stop_wait_uses_direct_task_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tuntun_edge.transport.websocket as edge_wss
+    from tuntun_edge.transport.websocket import ReachyWssClient
+
+    signer = Ed25519PrivateKey.generate()
+    client_nonce = b"w" * 32
+    challenge = _challenge(marker=b"w")
+    socket = ClientSocket(challenge, _accepted_for(challenge, client_nonce=client_nonce))
+    real_create_task = asyncio.create_task
+
+    def create_task_or_fail(coro: Awaitable[object], *, name: str | None = None) -> Any:
+        if name == "edge_connection_stop_wait":
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            raise RuntimeError("task factory unavailable")
+        return real_create_task(coro, name=name)
+
+    monkeypatch.setattr(edge_wss.asyncio, "create_task", create_task_or_fail)
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(signer),
+        state=FakeState(),
+        safety=FakeSafety(),
+        handler=FakeHandler(),
+        readiness=FakeReadiness(),
+        clock=Clock(),
+        connect_factory=FakeConnector([socket]),
+        tls_peer_verifier=lambda _socket, expected: ("TLSv1.3", SERVER_LEAF_DER),
+        client_certificate_sha256=lambda _socket: CLIENT_CERTIFICATE_SHA256,
+        nonce_factory=lambda size: client_nonce if size == 32 else b"",
+    )
+    stop = asyncio.Event()
+
+    await asyncio.wait_for(
+        client.run(stop, after_connect=lambda _connection: stop.set()),
+        timeout=0.1,
+    )
+
+    assert socket.closed == [(1000, "edge_stopped")]
+    assert client.task_factory_failure_points == ("edge_connection_stop_wait",)
+
+
+@pytest.mark.asyncio
+async def test_run_connection_close_uses_direct_task_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tuntun_edge.transport.websocket as edge_wss
+    from tuntun_edge.transport.websocket import ReachyWssClient
+
+    signer = Ed25519PrivateKey.generate()
+    first_nonce = b"l" * 32
+    second_nonce = b"r" * 32
+    first_challenge = _challenge(marker=b"l")
+    second_challenge = _challenge(marker=b"r")
+    first = ScriptedApplicationSocket(
+        first_challenge,
+        _accepted_for(first_challenge, client_nonce=first_nonce),
+        [ConnectionError("receive failed")],
+    )
+    second = ClientSocket(
+        second_challenge, _accepted_for(second_challenge, client_nonce=second_nonce)
+    )
+    real_create_task = asyncio.create_task
+
+    def create_task_or_fail(coro: Awaitable[object], *, name: str | None = None) -> Any:
+        if name == "edge_connection_close":
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            raise RuntimeError("task factory unavailable")
+        return real_create_task(coro, name=name)
+
+    monkeypatch.setattr(edge_wss.asyncio, "create_task", create_task_or_fail)
+    sleeps: list[float] = []
+    nonces = [first_nonce, second_nonce]
+    stop = asyncio.Event()
+    connections = 0
+
+    def stop_after_second_connection(_connection: object) -> None:
+        nonlocal connections
+        connections += 1
+        if connections == 2:
+            stop.set()
+
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(signer),
+        state=FakeState(),
+        safety=FakeSafety(),
+        handler=FakeHandler(),
+        readiness=FakeReadiness(),
+        clock=Clock(),
+        connect_factory=FakeConnector([first, second]),
+        tls_peer_verifier=lambda _socket, expected: ("TLSv1.3", SERVER_LEAF_DER),
+        client_certificate_sha256=lambda _socket: CLIENT_CERTIFICATE_SHA256,
+        nonce_factory=lambda size: nonces.pop(0) if size == 32 else b"",
+        sleeper=lambda delay: _record_sleep(sleeps, delay),
+    )
+
+    await client.run(stop, after_connect=stop_after_second_connection)
+
+    assert first.closed == [(1011, "edge_connection_failed")]
+    assert second.closed == [(1000, "edge_stopped")]
     assert sleeps == [0.25]
 
 
@@ -1789,6 +2036,50 @@ async def test_server_rejects_malformed_request_path_with_bounded_close() -> Non
 
     with pytest.raises(PermissionError, match="reachy_path_or_subprotocol"):
         await asyncio.wait_for(server.accept(socket), timeout=0.05)
+
+    assert socket.closed == [(1008, "reachy_path_or_subprotocol")]
+    assert registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_server_pre_session_socket_close_uses_direct_task_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tuntun_core.adapters.reachy.wss_server as core_wss
+    from tuntun_core.adapters.reachy.wss_server import ReachyWssServer
+
+    registry = DeviceRegistry()
+    socket = ServerSocket("/v1/reachy", "tuntun.reachy.v1", [])
+    socket.request.path = object()
+    real_create_task = asyncio.create_task
+
+    def create_task_or_fail(coro: Awaitable[object], *, name: str | None = None) -> Any:
+        if name == "reachy_pre_session_socket_close":
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            raise RuntimeError("task factory unavailable")
+        return real_create_task(coro, name=name)
+
+    monkeypatch.setattr(core_wss.asyncio, "create_task", create_task_or_fail)
+    server = ReachyWssServer(
+        Endpoint(),
+        tls_context=object(),
+        device_registry=registry,
+        pairing_keys=CorePairingKeys(Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()),
+        state=FakeState(),
+        handler=FakeHandler(),
+        sessions=SessionPublisher(),
+        readiness=FakeReadiness(),
+        time_issuer=TimeIssuer(),
+        clock=Clock(),
+        session_factory=SessionFactory(),
+        client_certificate_verifier=lambda _socket, expected: ("TLSv1.3", CLIENT_CERTIFICATE_DER),
+        socket_close_timeout=0.001,
+    )
+
+    with pytest.raises(PermissionError, match="reachy_path_or_subprotocol"):
+        await server.accept(socket)
 
     assert socket.closed == [(1008, "reachy_path_or_subprotocol")]
     assert registry.calls == []
@@ -2779,7 +3070,44 @@ async def test_server_rejects_legacy_unbound_device_proof_before_session() -> No
 
 
 @pytest.mark.asyncio
-async def test_server_connection_nonce_is_domain_separated_from_raw_nonce_concatenation() -> None:
+async def test_connection_nonce_matches_frozen_raw_nonce_interop_vector() -> None:
+    import tuntun_core.adapters.reachy.wss_server as core_wss
+    import tuntun_edge.transport.websocket as edge_wss
+
+    challenge = DeviceChallengeV1(
+        schema_version="tuntun.reachy-device-challenge.v1",
+        challenge_b64=base64.b64encode(b"a" * 32).decode("ascii"),
+        server_nonce_b64=base64.b64encode(b"b" * 32).decode("ascii"),
+        endpoint_generation=7,
+    )
+    client_nonce_b64 = base64.b64encode(b"c" * 32).decode("ascii")
+    expected = bytes.fromhex("a0072c38c4ca385fcfada6fbb8d31e72ffb8cd037662b0c6ac7e05b44f8738d1")
+
+    assert expected == _expected_raw_connection_nonce(challenge, client_nonce_b64)
+    assert expected == core_wss._expected_connection_nonce(challenge, client_nonce_b64)
+    assert expected == edge_wss._expected_connection_nonce(challenge, client_nonce_b64)
+
+
+def test_connection_nonce_rejects_noncanonical_nonce_base64() -> None:
+    import tuntun_core.adapters.reachy.wss_server as core_wss
+    import tuntun_edge.transport.websocket as edge_wss
+
+    challenge = DeviceChallengeV1(
+        schema_version="tuntun.reachy-device-challenge.v1",
+        challenge_b64=base64.b64encode(b"a" * 32).decode("ascii"),
+        server_nonce_b64=base64.b64encode(b"b" * 32).decode("ascii"),
+        endpoint_generation=7,
+    )
+    noncanonical_client_nonce_b64 = base64.b64encode(b"c" * 32).decode("ascii").rstrip("=")
+
+    with pytest.raises(ValueError, match="connection_nonce_or_sequence"):
+        core_wss._expected_connection_nonce(challenge, noncanonical_client_nonce_b64)
+    with pytest.raises(ValueError, match="connection_nonce_or_sequence"):
+        edge_wss._expected_connection_nonce(challenge, noncanonical_client_nonce_b64)
+
+
+@pytest.mark.asyncio
+async def test_server_connection_nonce_uses_raw_nonce_concatenation() -> None:
     from tuntun_core.adapters.reachy.wss_server import ReachyWssServer
 
     signer = Ed25519PrivateKey.generate()
@@ -2821,17 +3149,17 @@ async def test_server_connection_nonce_is_domain_separated_from_raw_nonce_concat
     )
     client_nonce_b64 = base64.b64encode(b"c" * 32).decode("ascii")
     accepted_nonce = base64.b64decode(accepted.connection_nonce_b64, validate=True)
-    old_raw_nonce = hashlib.sha256(
+    raw_nonce = hashlib.sha256(
         base64.b64decode(challenge.challenge_b64, validate=True)
         + base64.b64decode(challenge.server_nonce_b64, validate=True)
         + b"c" * 32
     ).digest()
 
-    assert accepted_nonce == _expected_bound_connection_nonce(
+    assert accepted_nonce == _expected_raw_connection_nonce(
         challenge,
         client_nonce_b64,
     )
-    assert accepted_nonce != old_raw_nonce
+    assert accepted_nonce == raw_nonce
 
 
 @pytest.mark.asyncio
@@ -3210,6 +3538,70 @@ async def test_server_close_wait_closed_is_bounded() -> None:
     assert server._server is hanging_server
     assert readiness.disconnect_degraded_codes == ("reachy_server_close:timeout",)
     assert readiness.restart_required is True
+
+
+@pytest.mark.asyncio
+async def test_server_close_wait_closed_uses_direct_task_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tuntun_core.adapters.reachy.wss_server as core_wss
+    from tuntun_core.adapters.reachy.wss_server import ReachyWssServer
+
+    class BoundServer:
+        def __init__(self) -> None:
+            self.close_called = False
+            self.wait_closed_called = False
+
+        def close(self) -> None:
+            self.close_called = True
+
+        async def wait_closed(self) -> None:
+            self.wait_closed_called = True
+
+    bound_server = BoundServer()
+
+    async def serve_factory(
+        handler: Callable[[Any], Awaitable[None]],
+        **kwargs: object,
+    ) -> object:
+        assert callable(handler)
+        assert kwargs["host"] == "192.168.50.10"
+        return bound_server
+
+    real_create_task = asyncio.create_task
+
+    def create_task_or_fail(coro: Awaitable[object], *, name: str | None = None) -> Any:
+        if name == "reachy_server_wait_closed":
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            raise RuntimeError("task factory unavailable")
+        return real_create_task(coro, name=name)
+
+    monkeypatch.setattr(core_wss.asyncio, "create_task", create_task_or_fail)
+    readiness = FakeReadiness()
+    server = ReachyWssServer(
+        Endpoint(),
+        tls_context=object(),
+        device_registry=DeviceRegistry(),
+        pairing_keys=CorePairingKeys(Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()),
+        state=FakeState(),
+        handler=FakeHandler(),
+        sessions=SessionPublisher(),
+        readiness=readiness,
+        time_issuer=TimeIssuer(),
+        clock=Clock(),
+        session_factory=SessionFactory(),
+        serve_factory=serve_factory,
+    )
+
+    await server.start()
+    await server.close()
+
+    assert bound_server.close_called is True
+    assert bound_server.wait_closed_called is True
+    assert server._server is None
+    assert readiness.disconnect_degraded_codes == ()
 
 
 @pytest.mark.asyncio

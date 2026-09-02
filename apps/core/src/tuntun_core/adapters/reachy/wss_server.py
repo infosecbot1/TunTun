@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import hmac
 import importlib
@@ -33,8 +34,10 @@ DEVICE_PROOF_SCHEMA: Final = "tuntun.reachy-device-proof.v1"
 CHALLENGE_ACCEPTED_SCHEMA: Final = "tuntun.reachy-challenge-accepted.v1"
 HANDSHAKE_SIGNATURE_PAYLOAD_SCHEMA: Final = "tuntun.reachy-device-challenge-signing-payload.v1"
 HANDSHAKE_SIGNATURE_DOMAIN: Final = "tuntun.reachy.wss.device-challenge-signature.v1"
-CONNECTION_NONCE_PAYLOAD_SCHEMA: Final = "tuntun.reachy-connection-nonce-payload.v1"
-CONNECTION_NONCE_DOMAIN: Final = "tuntun.reachy.wss.connection-nonce.v1"
+
+
+class _TaskFactoryUnavailable(RuntimeError):
+    pass
 
 
 class Endpoint(Protocol):
@@ -400,14 +403,20 @@ class ReachyWssServer:
         if callable(wait_closed):
             wait_task: asyncio.Task[Any] | None = None
             try:
-                wait_task = asyncio.create_task(
-                    wait_closed(),
+                wait_task = _spawn_task_with_direct_fallback(
+                    lambda: _await_once(wait_closed),
                     name="reachy_server_wait_closed",
+                    on_factory_unavailable=lambda code: self._readiness.latch_disconnect_degraded(
+                        (code,),
+                        restart_required=True,
+                    ),
                 )
                 await asyncio.wait_for(
                     asyncio.shield(wait_task),
                     timeout=self._socket_close_timeout,
                 )
+            except _TaskFactoryUnavailable:
+                wait_completed = False
             except TimeoutError:
                 wait_completed = False
                 if wait_task is not None:
@@ -459,6 +468,7 @@ class ReachyWssServer:
                 code=1008,
                 reason="reachy_path_or_subprotocol",
                 timeout=self._socket_close_timeout,
+                readiness=self._readiness,
             )
             if cancellations:
                 raise asyncio.CancelledError from error
@@ -473,6 +483,7 @@ class ReachyWssServer:
                 code=1008,
                 reason="reachy_path_or_subprotocol",
                 timeout=self._socket_close_timeout,
+                readiness=self._readiness,
             )
             if cancellations:
                 raise asyncio.CancelledError
@@ -483,6 +494,7 @@ class ReachyWssServer:
                 code=1013,
                 reason="commissioned_reachy_already_connected",
                 timeout=self._socket_close_timeout,
+                readiness=self._readiness,
             )
             if cancellations:
                 raise asyncio.CancelledError
@@ -559,6 +571,7 @@ class ReachyWssServer:
             code=code,
             reason=reason,
             timeout=self._socket_close_timeout,
+            readiness=self._readiness,
         )
         self._readiness.latch_disconnect_degraded((readiness_code,))
         cleanup_cancellations = await self._observe_pre_session_cleanup()
@@ -775,6 +788,7 @@ class ReachyWssServer:
             code=1000,
             reason="secure_time_complete",
             timeout=self._socket_close_timeout,
+            readiness=self._readiness,
         )
         if cancellations:
             raise asyncio.CancelledError
@@ -814,7 +828,10 @@ class ReachyWssServer:
         self._require_unchanged_endpoint(endpoint)
         self._require_unchanged_device(device, device_snapshot)
         proof = _parse_handshake_text(DeviceProofV1, raw_proof)
-        base64.b64decode(proof.client_nonce_b64, validate=True)
+        try:
+            _strict_b64_32(proof.client_nonce_b64, "connection_nonce_or_sequence")
+        except ValueError as error:
+            raise PermissionError("connection_nonce_or_sequence") from error
         inbound_keys = await self._pairing_keys.resolve_inbound(
             device_id=device_snapshot.device_id,
             tls_peer_sha256=client_sha256,
@@ -835,11 +852,14 @@ class ReachyWssServer:
             )
         except (InvalidSignature, ValueError, TypeError) as error:
             raise PermissionError("device_challenge") from error
-        connection_nonce = _expected_connection_nonce(
-            challenge,
-            proof.client_nonce_b64,
-            proof_schema_version=proof.schema_version,
-        )
+        try:
+            connection_nonce = _expected_connection_nonce(
+                challenge,
+                proof.client_nonce_b64,
+                proof_schema_version=proof.schema_version,
+            )
+        except ValueError as error:
+            raise PermissionError("connection_nonce_or_sequence") from error
         accepted = ChallengeAcceptedV1(
             schema_version=CHALLENGE_ACCEPTED_SCHEMA,
             connection_nonce_b64=base64.b64encode(connection_nonce).decode("ascii"),
@@ -931,6 +951,36 @@ def _close_unstarted_awaitable(awaitable: Awaitable[Any]) -> None:
         close()
 
 
+async def _await_once(awaitable_factory: Callable[[], Awaitable[Any]]) -> None:
+    await awaitable_factory()
+
+
+def _spawn_task_with_direct_fallback(
+    awaitable_factory: Callable[[], Coroutine[Any, Any, Any]],
+    *,
+    name: str,
+    on_factory_unavailable: Callable[[str], None] | None = None,
+) -> asyncio.Task[Any]:
+    awaitable = awaitable_factory()
+    try:
+        return asyncio.create_task(awaitable, name=name)
+    except BaseException as error:
+        _close_unstarted_awaitable(awaitable)
+        if not isinstance(error, Exception):
+            raise
+    fallback = awaitable_factory()
+    try:
+        return asyncio.Task(fallback, name=name)
+    except BaseException as error:
+        _close_unstarted_awaitable(fallback)
+        if not isinstance(error, Exception):
+            raise
+        code = f"{name}:factory_unavailable"
+        if on_factory_unavailable is not None:
+            on_factory_unavailable(code)
+        raise _TaskFactoryUnavailable(code) from error
+
+
 async def _serve_with_websockets(
     handler: Callable[[SocketLike], Awaitable[None]],
     **kwargs: object,
@@ -1012,23 +1062,23 @@ def _expected_connection_nonce(
     proof_schema_version: str = DEVICE_PROOF_SCHEMA,
     accepted_schema_version: str = CHALLENGE_ACCEPTED_SCHEMA,
 ) -> bytes:
-    return hashlib.sha256(
-        canonical_mapping_bytes(
-            {
-                "schema_version": CONNECTION_NONCE_PAYLOAD_SCHEMA,
-                "domain": CONNECTION_NONCE_DOMAIN,
-                "route": APP_PATH,
-                "subprotocol": APP_SUBPROTOCOL,
-                "challenge_schema_version": challenge.schema_version,
-                "proof_schema_version": proof_schema_version,
-                "accepted_schema_version": accepted_schema_version,
-                "challenge_b64": challenge.challenge_b64,
-                "server_nonce_b64": challenge.server_nonce_b64,
-                "client_nonce_b64": client_nonce_b64,
-                "endpoint_generation": challenge.endpoint_generation,
-            }
-        )
-    ).digest()
+    del proof_schema_version, accepted_schema_version
+    challenge_nonce = _strict_b64_32(challenge.challenge_b64, "connection_nonce_or_sequence")
+    server_nonce = _strict_b64_32(challenge.server_nonce_b64, "connection_nonce_or_sequence")
+    client_nonce = _strict_b64_32(client_nonce_b64, "connection_nonce_or_sequence")
+    return hashlib.sha256(challenge_nonce + server_nonce + client_nonce).digest()
+
+
+def _strict_b64_32(value: object, error: str) -> bytes:
+    if type(value) is not str:
+        raise ValueError(error)
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as decode_error:
+        raise ValueError(error) from decode_error
+    if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError(error)
+    return decoded
 
 
 def _fresh_nonce(factory: Callable[[int], bytes], size: int) -> bytes:
@@ -1129,11 +1179,30 @@ async def _close_socket_observing_cancellation(
     code: int,
     reason: str,
     timeout: float,
+    readiness: Readiness | None = None,
 ) -> int:
-    close_task = asyncio.create_task(
-        _close_bounded_suppressing_errors(socket, code=code, reason=reason, timeout=timeout),
-        name="reachy_pre_session_socket_close",
-    )
+    try:
+        close_task = _spawn_task_with_direct_fallback(
+            lambda: _close_bounded_suppressing_errors(
+                socket,
+                code=code,
+                reason=reason,
+                timeout=timeout,
+            ),
+            name="reachy_pre_session_socket_close",
+            on_factory_unavailable=(
+                lambda code: (
+                    readiness.latch_disconnect_degraded(
+                        (code,),
+                        restart_required=True,
+                    )
+                    if readiness is not None
+                    else None
+                )
+            ),
+        )
+    except _TaskFactoryUnavailable:
+        return 0
     cancellations = 0
     while not close_task.done():
         try:

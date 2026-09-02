@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import hashlib
 import hmac
@@ -40,9 +41,17 @@ DEVICE_PROOF_SCHEMA: Final = "tuntun.reachy-device-proof.v1"
 CHALLENGE_ACCEPTED_SCHEMA: Final = "tuntun.reachy-challenge-accepted.v1"
 HANDSHAKE_SIGNATURE_PAYLOAD_SCHEMA: Final = "tuntun.reachy-device-challenge-signing-payload.v1"
 HANDSHAKE_SIGNATURE_DOMAIN: Final = "tuntun.reachy.wss.device-challenge-signature.v1"
-CONNECTION_NONCE_PAYLOAD_SCHEMA: Final = "tuntun.reachy-connection-nonce-payload.v1"
-CONNECTION_NONCE_DOMAIN: Final = "tuntun.reachy.wss.connection-nonce.v1"
 _CleanupResult = TypeVar("_CleanupResult")
+
+
+class _TerminalCommissioningError(PermissionError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.readiness_code = f"reachy_recommission_required:{code}"
+
+
+class _TaskFactoryUnavailable(RuntimeError):
+    pass
 
 
 class Endpoint(Protocol):
@@ -225,6 +234,7 @@ class EdgeReachyConnection:
         heartbeat_interval: float = 1.0,
         heartbeat_timeout: float = 0.9,
         socket_close_timeout: float = 2.0,
+        readiness: TransportReadiness | None = None,
     ) -> None:
         if type(connection_nonce) is not bytes or len(connection_nonce) != 32:
             raise ValueError("connection_nonce_or_sequence")
@@ -250,6 +260,7 @@ class EdgeReachyConnection:
             "socket_close_timeout",
             MAX_SOCKET_CLOSE_SECONDS,
         )
+        self._readiness = readiness
         self.negotiated_tls_version = negotiated_tls_version
         self.peer_leaf_sha256 = peer_leaf_sha256
         self.client_certificate_sha256 = client_certificate_sha256
@@ -329,7 +340,10 @@ class EdgeReachyConnection:
                     purpose=frame.purpose,
                     payload=response,
                 )
-                await self._socket.send(canonical_bytes(signed).decode("utf-8"))
+                await asyncio.wait_for(
+                    self._socket.send(canonical_bytes(signed).decode("utf-8")),
+                    timeout=self._socket_close_timeout,
+                )
             await self._state.complete(frame.correlation_id)
         raise ConnectionError("reachy websocket closed")
 
@@ -351,9 +365,59 @@ class EdgeReachyConnection:
                     raise ConnectionError("two consecutive heartbeats missed") from error
 
     async def serve(self) -> None:
-        async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(self._receive_loop())
-            tasks.create_task(self._heartbeat_loop())
+        receive_task = self._spawn_owned_task(
+            self._receive_loop,
+            name="edge_connection_receive",
+        )
+        heartbeat_task: asyncio.Task[Any] | None = None
+        try:
+            heartbeat_task = self._spawn_owned_task(
+                self._heartbeat_loop,
+                name="edge_connection_heartbeat",
+            )
+            done, pending = await asyncio.wait(
+                {receive_task, heartbeat_task},
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                await _cancel_and_observe(task)
+            for task in done:
+                try:
+                    task.result()
+                except BaseException as error:
+                    if isinstance(error, Exception):
+                        raise
+                    raise BaseExceptionGroup("edge_connection_serve_failed", [error]) from error
+        finally:
+            if not receive_task.done():
+                receive_task.cancel()
+                await _cancel_and_observe(receive_task)
+            if heartbeat_task is not None and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                await _cancel_and_observe(heartbeat_task)
+
+    def _spawn_owned_task(
+        self,
+        awaitable_factory: Callable[[], Coroutine[Any, Any, Any]],
+        *,
+        name: str,
+    ) -> asyncio.Task[Any]:
+        return _spawn_task_with_direct_fallback(
+            awaitable_factory,
+            name=name,
+            on_factory_unavailable=(
+                lambda code: (
+                    self._readiness.latch_disconnect_degraded(
+                        (code,),
+                        restart_required=True,
+                    )
+                    if self._readiness is not None
+                    else None
+                )
+            ),
+        )
 
 
 class ReachyWssClient:
@@ -443,7 +507,7 @@ class ReachyWssClient:
 
     def _require_unchanged_endpoint(self, snapshot: _EndpointSnapshot) -> None:
         if self._capture_endpoint() != snapshot:
-            raise PermissionError("reachy_endpoint_changed")
+            raise _TerminalCommissioningError("reachy_endpoint_changed")
 
     @staticmethod
     def _capture_outbound_keys(keys: OutboundKeys) -> _OutboundKeysSnapshot:
@@ -490,34 +554,40 @@ class ReachyWssClient:
         try:
             self._require_unchanged_endpoint(endpoint)
             if socket.subprotocol != APP_SUBPROTOCOL:
-                raise PermissionError("reachy_path_or_subprotocol")
+                raise _TerminalCommissioningError("reachy_path_or_subprotocol")
             negotiated_tls_version, leaf_der = self._tls_peer_verifier(
                 socket,
                 endpoint.server_leaf_sha256,
             )
             self._require_unchanged_endpoint(endpoint)
             if negotiated_tls_version != "TLSv1.3":
-                raise PermissionError("reachy_tls13_required")
-            peer_leaf_sha256 = _verified_leaf_sha256(
-                leaf_der,
-                endpoint.server_leaf_sha256,
-                invalid_error="reachy_server_leaf_invalid",
-                mismatch_error="reachy_server_leaf_mismatch",
-            )
-            outbound_keys = self._capture_outbound_keys(
-                await self._pairing_keys.current_outbound(
-                    tls_peer_sha256=peer_leaf_sha256,
-                    now=self._clock.now(),
+                raise _TerminalCommissioningError("reachy_tls13_required")
+            try:
+                peer_leaf_sha256 = _verified_leaf_sha256(
+                    leaf_der,
+                    endpoint.server_leaf_sha256,
+                    invalid_error="reachy_server_leaf_invalid",
+                    mismatch_error="reachy_server_leaf_mismatch",
                 )
-            )
+                outbound_keys = self._capture_outbound_keys(
+                    await self._pairing_keys.current_outbound(
+                        tls_peer_sha256=peer_leaf_sha256,
+                        now=self._clock.now(),
+                    )
+                )
+            except PermissionError as error:
+                raise _terminal_commissioning_from(error) from error
             self._require_unchanged_endpoint(endpoint)
-            challenge = _parse_handshake_text(
-                DeviceChallengeV1,
-                await asyncio.wait_for(socket.recv(), timeout=self._handshake_timeout),
-            )
+            try:
+                challenge = _parse_handshake_text(
+                    DeviceChallengeV1,
+                    await asyncio.wait_for(socket.recv(), timeout=self._handshake_timeout),
+                )
+            except PermissionError as error:
+                raise _terminal_commissioning_from(error) from error
             self._require_unchanged_endpoint(endpoint)
             if challenge.endpoint_generation != endpoint.generation:
-                raise PermissionError("device_challenge_generation")
+                raise _TerminalCommissioningError("device_challenge_generation")
             client_nonce = _fresh_nonce(self._nonce_factory, 32)
             client_nonce_b64 = base64.b64encode(client_nonce).decode("ascii")
             signature = outbound_keys.signer.sign(
@@ -533,19 +603,32 @@ class ReachyWssClient:
                 timeout=self._handshake_timeout,
             )
             self._require_unchanged_endpoint(endpoint)
-            accepted = _parse_handshake_text(
-                ChallengeAcceptedV1,
-                await asyncio.wait_for(socket.recv(), timeout=self._handshake_timeout),
-            )
+            try:
+                accepted = _parse_handshake_text(
+                    ChallengeAcceptedV1,
+                    await asyncio.wait_for(socket.recv(), timeout=self._handshake_timeout),
+                )
+            except PermissionError as error:
+                raise _terminal_commissioning_from(error) from error
             self._require_unchanged_endpoint(endpoint)
-            connection_nonce = _expected_connection_nonce(
-                challenge,
-                client_nonce_b64,
-                proof_schema_version=proof.schema_version,
-                accepted_schema_version=accepted.schema_version,
-            )
-            if base64.b64decode(accepted.connection_nonce_b64, validate=True) != connection_nonce:
-                raise PermissionError("connection_nonce_or_sequence")
+            try:
+                connection_nonce = _expected_connection_nonce(
+                    challenge,
+                    client_nonce_b64,
+                    proof_schema_version=proof.schema_version,
+                    accepted_schema_version=accepted.schema_version,
+                )
+            except ValueError as error:
+                raise _TerminalCommissioningError("connection_nonce_or_sequence") from error
+            try:
+                accepted_nonce = _strict_b64_32(
+                    accepted.connection_nonce_b64,
+                    "connection_nonce_or_sequence",
+                )
+            except ValueError as error:
+                raise _TerminalCommissioningError("connection_nonce_or_sequence") from error
+            if accepted_nonce != connection_nonce:
+                raise _TerminalCommissioningError("connection_nonce_or_sequence")
             client_certificate_sha256 = _require_sha256(
                 self._client_certificate_sha256(socket),
                 "reachy_client_certificate_sha256_invalid",
@@ -554,7 +637,7 @@ class ReachyWssClient:
             if not hmac.compare_digest(
                 client_certificate_sha256, endpoint.client_certificate_sha256
             ):
-                raise PermissionError("reachy_client_certificate_binding")
+                raise _TerminalCommissioningError("reachy_client_certificate_binding")
             return EdgeReachyConnection(
                 socket=socket,
                 connection_nonce=connection_nonce,
@@ -569,6 +652,7 @@ class ReachyWssClient:
                 heartbeat_interval=self._heartbeat_interval,
                 heartbeat_timeout=self._heartbeat_timeout,
                 socket_close_timeout=self._socket_close_timeout,
+                readiness=self._readiness,
             )
         except BaseException:
             await _close_bounded_suppressing_errors(
@@ -600,34 +684,62 @@ class ReachyWssClient:
                 attempt = 0
                 stopped = await self._serve_until_stop(connection, stop)
             except asyncio.CancelledError as error:
+                cancel_close_failure: BaseException | None = None
                 if connection is not None:
-                    close_cancellations = await _close_connection_observing_cancellation(
-                        connection,
-                        code=1011,
-                        reason="edge_supervisor_cancelled",
-                    )
+                    try:
+                        close_cancellations = await _close_connection_observing_cancellation(
+                            connection,
+                            code=1011,
+                            reason="edge_supervisor_cancelled",
+                            on_factory_failure=self._record_task_factory_failure,
+                            on_factory_unavailable=self._latch_task_factory_unavailable,
+                        )
+                    except _TaskFactoryUnavailable as close_error:
+                        cancel_close_failure = close_error
+                        close_cancellations = 0
                 else:
                     close_cancellations = 0
                 _failures, cleanup_cancellations = await self._complete_disconnect_cleanup()
+                if cancel_close_failure is not None:
+                    raise asyncio.CancelledError from cancel_close_failure
                 if close_cancellations or cleanup_cancellations:
+                    raise asyncio.CancelledError from error
+                raise
+            except _TerminalCommissioningError as error:
+                _failures, cancellations = await self._complete_disconnect_cleanup()
+                self._readiness.latch_disconnect_degraded(
+                    (error.readiness_code,),
+                    restart_required=True,
+                )
+                if cancellations:
                     raise asyncio.CancelledError from error
                 raise
             except BaseException as error:
                 close_cancellations = 0
+                run_close_failure: BaseException | None = None
                 if connection is not None:
-                    close_cancellations = await _close_connection_observing_cancellation(
-                        connection,
-                        code=1011,
-                        reason=(
-                            "edge_connection_failed"
-                            if setup_complete
-                            else "edge_connection_setup_failed"
-                        ),
-                    )
+                    try:
+                        close_cancellations = await _close_connection_observing_cancellation(
+                            connection,
+                            code=1011,
+                            reason=(
+                                "edge_connection_failed"
+                                if setup_complete
+                                else "edge_connection_setup_failed"
+                            ),
+                            on_factory_failure=self._record_task_factory_failure,
+                            on_factory_unavailable=self._latch_task_factory_unavailable,
+                        )
+                    except _TaskFactoryUnavailable as close_error:
+                        run_close_failure = close_error
                 _failures, cancellations = await self._complete_disconnect_cleanup()
+                if run_close_failure is not None:
+                    raise run_close_failure from error
                 if close_cancellations or cancellations:
                     raise asyncio.CancelledError from error
                 if not isinstance(error, Exception):
+                    raise
+                if not _is_transient_reconnect_error(error, setup_complete=setup_complete):
                     raise
                 if stop.is_set():
                     return
@@ -644,8 +756,20 @@ class ReachyWssClient:
     async def _serve_until_stop(
         self, connection: EdgeReachyConnection, stop: asyncio.Event
     ) -> bool:
-        serve_task = asyncio.create_task(connection.serve(), name="edge_connection_serve")
-        stop_task = asyncio.create_task(stop.wait(), name="edge_connection_stop_wait")
+        serve_task = self._spawn_supervisor_task(
+            lambda: connection.serve(),
+            name="edge_connection_serve",
+        )
+        try:
+            stop_task = self._spawn_supervisor_task(
+                stop.wait,
+                name="edge_connection_stop_wait",
+            )
+        except BaseException:
+            if not serve_task.done():
+                serve_task.cancel()
+                await _cancel_and_observe(serve_task)
+            raise
         try:
             done, pending = await asyncio.wait(
                 {serve_task, stop_task},
@@ -665,6 +789,27 @@ class ReachyWssClient:
                 if not task.done():
                     task.cancel()
                     await _cancel_and_observe(task)
+
+    def _record_task_factory_failure(self, name: str) -> None:
+        self.task_factory_failure_points = tuple(
+            dict.fromkeys((*self.task_factory_failure_points, name))
+        )
+
+    def _latch_task_factory_unavailable(self, code: str) -> None:
+        self._readiness.latch_disconnect_degraded((code,), restart_required=True)
+
+    def _spawn_supervisor_task(
+        self,
+        awaitable_factory: Callable[[], Coroutine[Any, Any, Any]],
+        *,
+        name: str,
+    ) -> asyncio.Task[Any]:
+        return _spawn_task_with_direct_fallback(
+            awaitable_factory,
+            name=name,
+            on_factory_failure=self._record_task_factory_failure,
+            on_factory_unavailable=self._latch_task_factory_unavailable,
+        )
 
     def _retain_cleanup(self, task: asyncio.Task[Any]) -> None:
         self._cleanup_background.add(task)
@@ -860,23 +1005,36 @@ def _expected_connection_nonce(
     proof_schema_version: str = DEVICE_PROOF_SCHEMA,
     accepted_schema_version: str = CHALLENGE_ACCEPTED_SCHEMA,
 ) -> bytes:
-    return hashlib.sha256(
-        canonical_mapping_bytes(
-            {
-                "schema_version": CONNECTION_NONCE_PAYLOAD_SCHEMA,
-                "domain": CONNECTION_NONCE_DOMAIN,
-                "route": APP_PATH,
-                "subprotocol": APP_SUBPROTOCOL,
-                "challenge_schema_version": challenge.schema_version,
-                "proof_schema_version": proof_schema_version,
-                "accepted_schema_version": accepted_schema_version,
-                "challenge_b64": challenge.challenge_b64,
-                "server_nonce_b64": challenge.server_nonce_b64,
-                "client_nonce_b64": client_nonce_b64,
-                "endpoint_generation": challenge.endpoint_generation,
-            }
-        )
-    ).digest()
+    del proof_schema_version, accepted_schema_version
+    challenge_nonce = _strict_b64_32(challenge.challenge_b64, "connection_nonce_or_sequence")
+    server_nonce = _strict_b64_32(challenge.server_nonce_b64, "connection_nonce_or_sequence")
+    client_nonce = _strict_b64_32(client_nonce_b64, "connection_nonce_or_sequence")
+    return hashlib.sha256(challenge_nonce + server_nonce + client_nonce).digest()
+
+
+def _strict_b64_32(value: object, error: str) -> bytes:
+    if type(value) is not str:
+        raise ValueError(error)
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as decode_error:
+        raise ValueError(error) from decode_error
+    if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError(error)
+    return decoded
+
+
+def _terminal_commissioning_from(error: PermissionError) -> _TerminalCommissioningError:
+    code = error.args[0] if error.args and type(error.args[0]) is str else type(error).__name__
+    return _TerminalCommissioningError(code)
+
+
+def _is_transient_reconnect_error(error: Exception, *, setup_complete: bool) -> bool:
+    if setup_complete:
+        return not isinstance(error, _TaskFactoryUnavailable)
+    if isinstance(error, PermissionError):
+        return False
+    return isinstance(error, (ConnectionError, TimeoutError, OSError))
 
 
 def _fresh_nonce(factory: Callable[[int], bytes], size: int) -> bytes:
@@ -956,6 +1114,41 @@ def _require_sha256(value: object, error: str) -> str:
     return value
 
 
+def _close_unstarted_awaitable(awaitable: Awaitable[Any]) -> None:
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        close()
+
+
+def _spawn_task_with_direct_fallback(
+    awaitable_factory: Callable[[], Coroutine[Any, Any, Any]],
+    *,
+    name: str,
+    on_factory_failure: Callable[[str], None] | None = None,
+    on_factory_unavailable: Callable[[str], None] | None = None,
+) -> asyncio.Task[Any]:
+    awaitable = awaitable_factory()
+    try:
+        return asyncio.create_task(awaitable, name=name)
+    except BaseException as error:
+        _close_unstarted_awaitable(awaitable)
+        if not isinstance(error, Exception):
+            raise
+        if on_factory_failure is not None:
+            on_factory_failure(name)
+    fallback = awaitable_factory()
+    try:
+        return asyncio.Task(fallback, loop=asyncio.get_running_loop(), name=name)
+    except BaseException as error:
+        _close_unstarted_awaitable(fallback)
+        if not isinstance(error, Exception):
+            raise
+        code = f"{name}:factory_unavailable"
+        if on_factory_unavailable is not None:
+            on_factory_unavailable(code)
+        raise _TaskFactoryUnavailable(code) from error
+
+
 async def _close_bounded_suppressing_errors(
     socket: WebSocketLike,
     *,
@@ -976,10 +1169,14 @@ async def _close_connection_observing_cancellation(
     *,
     code: int,
     reason: str,
+    on_factory_failure: Callable[[str], None] | None = None,
+    on_factory_unavailable: Callable[[str], None] | None = None,
 ) -> int:
-    close_task = asyncio.create_task(
-        connection.close(code=code, reason=reason),
+    close_task = _spawn_task_with_direct_fallback(
+        lambda: connection.close(code=code, reason=reason),
         name="edge_connection_close",
+        on_factory_failure=on_factory_failure,
+        on_factory_unavailable=on_factory_unavailable,
     )
     cancellations = 0
     while not close_task.done():
