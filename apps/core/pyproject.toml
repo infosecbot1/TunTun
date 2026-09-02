@@ -5,6 +5,7 @@ requires-python = "==3.12.*"
 dependencies = [
   "alembic>=1.16,<2",
   "cryptography>=45,<46",
+  "fastapi>=0.141.1,<0.142",
   "keyring>=25.6,<26",
   "jsonschema>=4.25,<5",
   "platformdirs>=4.4,<5",

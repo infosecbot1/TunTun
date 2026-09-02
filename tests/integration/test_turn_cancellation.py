@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from tuntun_contracts.budget import BudgetReconciliationRequest
+from tuntun_contracts.ports import TurnInput
 from tuntun_contracts.reachy import SafetyReceipt
 from tuntun_core.services.sessions.turn_coordinator import (
     CancellationHealthRecorder,
@@ -15,6 +16,8 @@ from tuntun_core.services.sessions.turn_coordinator import (
     SafetyBlockedRecord,
     TurnCoordinator,
 )
+from tuntun_core.workflows.contract_workflow import ContractConversationWorkflow
+from tuntun_core.workflows.conversation import TurnOutcome
 from tuntun_testing.fake_clock import FakeClock
 
 
@@ -814,3 +817,123 @@ def test_constructor_rejects_unsafe_retry_and_timeout_bounds(
     }
     with pytest.raises(ValueError, match="invalid"):
         TurnCoordinator(**arguments)  # type: ignore[arg-type]
+
+
+class _CompletedAudio:
+    async def consume_once(self, turn: TurnInput) -> bytes:
+        del turn
+        return b"synthetic-wav"
+
+
+class _BlockingCompletedAudio:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.cancelled = False
+
+    async def consume_once(self, turn: TurnInput) -> bytes:
+        del turn
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return b"unreachable"
+
+
+class _BlockingConversationEngine:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.cancelled = False
+        self.calls_after_cancel = 0
+
+    async def run(self, turn: object) -> TurnOutcome:
+        del turn
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        if self.cancelled:
+            self.calls_after_cancel += 1
+        return TurnOutcome(spoken=True)
+
+
+class _EngineSpy:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, turn: object) -> TurnOutcome:
+        del turn
+        self.calls += 1
+        return TurnOutcome(spoken=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_the_registered_workflow_task_before_it_can_continue() -> None:
+    coordinator = _coordinator()
+    turn = TurnInput(turn_id=uuid4(), household_id=uuid4(), device_id=uuid4())
+    await coordinator.start(turn.turn_id)
+    engine = _BlockingConversationEngine()
+    workflow = ContractConversationWorkflow(_CompletedAudio(), engine, coordinator)
+    workflow_task = asyncio.create_task(workflow.run(turn))
+    await asyncio.wait_for(engine.entered.wait(), timeout=1)
+
+    await coordinator.cancel(turn.turn_id, "physical_stop")
+    output = await asyncio.wait_for(workflow_task, timeout=1)
+
+    assert output.outcome == "cancelled"
+    assert engine.cancelled is True
+    assert engine.calls_after_cancel == 0
+    assert coordinator.is_current(turn.turn_id) is False
+
+
+@pytest.mark.asyncio
+async def test_stop_during_completed_audio_consumption_never_enters_engine() -> None:
+    coordinator = _coordinator()
+    turn = TurnInput(turn_id=uuid4(), household_id=uuid4(), device_id=uuid4())
+    await coordinator.start(turn.turn_id)
+    audio = _BlockingCompletedAudio()
+    engine = _EngineSpy()
+    workflow = ContractConversationWorkflow(audio, engine, coordinator)
+    workflow_task = asyncio.create_task(workflow.run(turn))
+    await asyncio.wait_for(audio.entered.wait(), timeout=1)
+
+    await coordinator.cancel(turn.turn_id, "privacy_shield")
+    output = await asyncio.wait_for(workflow_task, timeout=1)
+
+    assert output.outcome == "cancelled"
+    assert audio.cancelled is True
+    assert engine.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_count", (1, 3))
+async def test_caller_cancellation_waits_for_coordinator_owned_safety_barrier(
+    cancel_count: int,
+) -> None:
+    reachy = _GatedReachy()
+    coordinator = _coordinator(reachy=reachy)
+    turn = TurnInput(turn_id=uuid4(), household_id=uuid4(), device_id=uuid4())
+    await coordinator.start(turn.turn_id)
+    engine = _BlockingConversationEngine()
+    workflow = ContractConversationWorkflow(_CompletedAudio(), engine, coordinator)
+    caller = asyncio.create_task(workflow.run(turn))
+    await asyncio.wait_for(engine.entered.wait(), timeout=1)
+
+    for _ in range(cancel_count):
+        caller.cancel()
+        await asyncio.sleep(0)
+    await asyncio.wait_for(coordinator.cancel_started.wait(), timeout=1)
+
+    assert caller.done() is False
+    assert coordinator.active_turn_id() == turn.turn_id
+    with pytest.raises(RuntimeError, match="household conversation busy"):
+        await coordinator.start(uuid4())
+
+    reachy.release.set()
+    output = await asyncio.wait_for(caller, timeout=1)
+    assert output.outcome == "cancelled"
+    assert engine.cancelled is True
+    assert coordinator.active_turn_id() is None

@@ -28,7 +28,14 @@ from tuntun_core.services.providers.review import (
     RuntimeProviderIdentityReader,
     SqlcipherCurrentProviderReviews,
 )
+from tuntun_core.services.sessions.manager import SessionManager
+from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
 from tuntun_core.services.transactions.protocols import UnitOfWorkProtocol
+from tuntun_core.workflows.contract_workflow import (
+    CompletedTurnAudioPort,
+    ContractConversationWorkflow,
+)
+from tuntun_core.workflows.conversation import LinearConversationEngine, WorkflowPorts
 
 
 class CurrentProviderReviews(Protocol):
@@ -109,6 +116,8 @@ class ProductionContainer:
 
     __slots__ = (
         "core",
+        "turn_coordinator",
+        "session_manager",
         "core_process_lease",
         "budget_reconciler",
         "startup_turn_recovery",
@@ -124,6 +133,8 @@ class ProductionContainer:
         budget_reconciler: ExpiredBudgetReconciler,
         startup_turn_recovery: StartupTurnRecovery,
         budget_lifecycle: BudgetReconciliationSupervisor,
+        turn_coordinator: TurnCoordinator | None = None,
+        session_manager: SessionManager | None = None,
     ) -> None:
         if budget_lifecycle.reconciler is not budget_reconciler:
             raise TypeError("production reconciler identity mismatch")
@@ -132,6 +143,8 @@ class ProductionContainer:
         if startup_turn_recovery.process_lease is not core_process_lease:
             raise TypeError("production process lease identity mismatch")
         self.core = core
+        self.turn_coordinator = turn_coordinator
+        self.session_manager = session_manager
         self.core_process_lease = core_process_lease
         self.budget_reconciler = budget_reconciler
         self.startup_turn_recovery = startup_turn_recovery
@@ -187,8 +200,16 @@ class ProductionContainer:
                 reconciler,
                 startup_recovery,
             )
+            turn_coordinator = TurnCoordinator(
+                core.budget_guard,
+                reachy,
+                clock,
+            )
+            session_manager = SessionManager(turn_coordinator)
             return cls(
                 core=core,
+                turn_coordinator=turn_coordinator,
+                session_manager=session_manager,
                 core_process_lease=lease,
                 budget_reconciler=reconciler,
                 startup_turn_recovery=startup_recovery,
@@ -197,3 +218,12 @@ class ProductionContainer:
         except BaseException:
             lease.release_after_shutdown()
             raise
+
+
+def build_workflow(
+    ports: WorkflowPorts,
+    completed_audio: CompletedTurnAudioPort,
+    coordinator: TurnCoordinator,
+) -> ContractConversationWorkflow:
+    engine = LinearConversationEngine(ports, accepts_results=coordinator.accepts_results)
+    return ContractConversationWorkflow(completed_audio, engine, coordinator)
