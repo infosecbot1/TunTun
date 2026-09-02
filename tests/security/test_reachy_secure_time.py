@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import stat
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +16,7 @@ from typing import Annotated, Literal, cast
 from uuid import UUID
 
 import pytest
+import tuntun_edge.transport.secure_time as secure_time_module
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from pydantic import Field, ValidationError
@@ -22,7 +25,6 @@ from tuntun_contracts.reachy_time import CoreTimeProofV1, CoreTimeRequestV1
 from tuntun_edge.reachy.probe import CapabilityReport
 from tuntun_edge.transport.secure_time import (
     MAX_SECURE_TIME_STATE_BYTES,
-    SECURE_TIME_LOCK_NAME,
     SECURE_TIME_PUBLISH_FAULT_STAGES,
     SECURE_TIME_STATE_NAME,
     SecureTimeBootLifecycle,
@@ -1313,42 +1315,152 @@ def test_state_repository_rejects_symlink_hardlink_oversize_and_noncanonical_sta
         repository.require_previous()
 
 
-def test_state_repository_rejects_named_lock_replacement_after_flock_without_state_mutation(
+def test_state_repository_lock_covers_full_cas_write_after_named_lock_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = SecureTimeStateRepository(tmp_path / "secure-time")
-    proof = signed_proof(Ed25519PrivateKey.generate())
-    replaced = False
-    real_flock = fcntl.flock
+    competitor = SecureTimeStateRepository(tmp_path / "secure-time")
+    private_key = Ed25519PrivateKey.generate()
+    first = signed_proof(private_key, time_sequence=11)
+    repository.replace_atomic(
+        first,
+        hashlib.sha256(first.signing_payload()).hexdigest(),
+        expected_previous=None,
+        deadline_monotonic=102.0,
+        boot_attempt_id=BOOT_ATTEMPT_ID,
+        monotonic=lambda: 100.0,
+    )
+    previous = repository.require_previous()
+    assert previous is not None
 
-    def replace_named_lock_after_acquire(descriptor: int, operation: int) -> None:
-        nonlocal replaced
-        real_flock(descriptor, operation)
-        if operation & fcntl.LOCK_EX and operation & fcntl.LOCK_NB:
-            if replaced:
-                return
-            lock_path = repository.root / SECURE_TIME_LOCK_NAME
+    writer_a = signed_proof(private_key, time_sequence=12)
+    writer_b = signed_proof(private_key, time_sequence=13)
+    lock_path = repository.root / ".secure-time-state.lock"
+    if not lock_path.exists():
+        lock_path.write_bytes(b"")
+        lock_path.chmod(0o600)
+
+    competitor_started = threading.Event()
+    competitor_reached_process_lock = threading.Event()
+    competitor_entered_write_before_writer_a_publish = threading.Event()
+    writer_a_published = threading.Event()
+    competitor_errors: list[BaseException] = []
+    competitor_writes = 0
+    competitor_monotonic = FakeMonotonic()
+    real_writer_a_atomic_write = repository._atomic_write
+    real_competitor_atomic_write = competitor._atomic_write
+    real_acquire_process_lock = secure_time_module._acquire_process_lock
+
+    def track_competitor_write(
+        target_name: str,
+        payload: bytes,
+        max_bytes: int,
+        *,
+        deadline_monotonic: float,
+        monotonic: Callable[[], float],
+    ) -> None:
+        if not writer_a_published.is_set():
+            competitor_entered_write_before_writer_a_publish.set()
+        real_competitor_atomic_write(
+            target_name,
+            payload,
+            max_bytes,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+        )
+
+    def competitor_write() -> None:
+        nonlocal competitor_writes
+        competitor_started.set()
+        try:
+            competitor.replace_atomic(
+                writer_b,
+                hashlib.sha256(writer_b.signing_payload()).hexdigest(),
+                expected_previous=previous,
+                deadline_monotonic=competitor_monotonic() + 2.0,
+                boot_attempt_id=RESTORE_ATTEMPT_ID,
+                monotonic=competitor_monotonic,
+            )
+        except BaseException as error:
+            competitor_errors.append(error)
+        else:
+            competitor_writes += 1
+
+    competitor_thread = threading.Thread(target=competitor_write, name="secure-time-cas-race")
+
+    def track_process_lock_attempt(
+        process_lock: threading.Lock,
+        *,
+        deadline_monotonic: float,
+        monotonic: Callable[[], float],
+    ) -> None:
+        if threading.current_thread() is competitor_thread:
+            competitor_reached_process_lock.set()
+        real_acquire_process_lock(
+            process_lock,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+        )
+
+    def replace_named_lock_after_cas_before_write(
+        target_name: str,
+        payload: bytes,
+        max_bytes: int,
+        *,
+        deadline_monotonic: float,
+        monotonic: Callable[[], float],
+    ) -> None:
+        if not competitor_started.is_set():
+            lock_path = repository.root / ".secure-time-state.lock"
             displaced = repository.root / "displaced-secure-time-state.lock"
             os.replace(lock_path, displaced)
             lock_path.write_bytes(b"")
             lock_path.chmod(0o600)
-            replaced = True
+            competitor_thread.start()
+            assert competitor_started.wait(1.0)
+            assert competitor_reached_process_lock.wait(1.0)
+            assert not competitor_entered_write_before_writer_a_publish.is_set()
+        real_writer_a_atomic_write(
+            target_name,
+            payload,
+            max_bytes,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
+        )
+        writer_a_published.set()
 
-    monkeypatch.setattr(fcntl, "flock", replace_named_lock_after_acquire)
+    monkeypatch.setattr(secure_time_module, "_acquire_process_lock", track_process_lock_attempt)
+    monkeypatch.setattr(repository, "_atomic_write", replace_named_lock_after_cas_before_write)
+    monkeypatch.setattr(competitor, "_atomic_write", track_competitor_write)
 
-    with pytest.raises(PermissionError, match="secure time lock identity changed"):
+    try:
         repository.replace_atomic(
-            proof,
-            hashlib.sha256(proof.signing_payload()).hexdigest(),
-            expected_previous=None,
+            writer_a,
+            hashlib.sha256(writer_a.signing_payload()).hexdigest(),
+            expected_previous=previous,
             deadline_monotonic=102.0,
-            boot_attempt_id=BOOT_ATTEMPT_ID,
+            boot_attempt_id=NEXT_BOOT_ATTEMPT_ID,
             monotonic=lambda: 100.0,
         )
+    finally:
+        if competitor_thread.is_alive():
+            competitor_thread.join(timeout=1.0)
+        if competitor_thread.is_alive():
+            competitor_monotonic.advance(3.0)
+            competitor_thread.join(timeout=1.0)
 
-    assert replaced
-    assert repository.require_previous() is None
+    assert not competitor_thread.is_alive()
+    assert competitor_reached_process_lock.is_set()
+    assert not competitor_entered_write_before_writer_a_publish.is_set()
+    assert competitor_writes == 0
+    assert len(competitor_errors) == 1
+    assert isinstance(competitor_errors[0], PermissionError)
+    assert "secure_time_state_cas_failed" in str(competitor_errors[0])
+    state = repository.require_previous()
+    assert state is not None
+    assert state.boot_attempt_id == NEXT_BOOT_ATTEMPT_ID
+    assert state.time_sequence == writer_a.time_sequence
 
 
 @pytest.mark.parametrize(
@@ -1461,6 +1573,98 @@ def test_state_repository_rejects_owner_metadata_drift_before_final_read_verific
     assert mutated
 
 
+def test_state_repository_fails_closed_when_state_disappears_between_stat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = SecureTimeStateRepository(tmp_path / "secure-time")
+    proof = signed_proof(Ed25519PrivateKey.generate())
+    repository.replace_atomic(
+        proof,
+        hashlib.sha256(proof.signing_payload()).hexdigest(),
+        expected_previous=None,
+        deadline_monotonic=102.0,
+        boot_attempt_id=BOOT_ATTEMPT_ID,
+        monotonic=lambda: 100.0,
+    )
+    removed = False
+    real_open = os.open
+
+    def remove_state_after_pre_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal removed
+        if path == SECURE_TIME_STATE_NAME and dir_fd == repository.directory_fd and not removed:
+            repository.path.unlink()
+            removed = True
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", remove_state_after_pre_stat)
+
+    with pytest.raises(PermissionError, match="disappeared"):
+        repository.require_previous()
+
+    assert removed
+
+
+def test_state_repository_fails_closed_when_state_disappears_before_final_named_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = SecureTimeStateRepository(tmp_path / "secure-time")
+    proof = signed_proof(Ed25519PrivateKey.generate())
+    repository.replace_atomic(
+        proof,
+        hashlib.sha256(proof.signing_payload()).hexdigest(),
+        expected_previous=None,
+        deadline_monotonic=102.0,
+        boot_attempt_id=BOOT_ATTEMPT_ID,
+        monotonic=lambda: 100.0,
+    )
+    removed = False
+    state_descriptor: int | None = None
+    real_open = os.open
+    real_read = os.read
+
+    def track_state_descriptor(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal state_descriptor
+        if dir_fd is None:
+            descriptor = real_open(path, flags, mode)
+        else:
+            descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == SECURE_TIME_STATE_NAME and dir_fd == repository.directory_fd:
+            state_descriptor = descriptor
+        return descriptor
+
+    def remove_state_after_first_payload_read(descriptor: int, byte_count: int) -> bytes:
+        nonlocal removed
+        chunk = real_read(descriptor, byte_count)
+        if descriptor == state_descriptor and chunk and not removed:
+            repository.path.unlink()
+            removed = True
+        return bytes(chunk)
+
+    monkeypatch.setattr(os, "open", track_state_descriptor)
+    monkeypatch.setattr(os, "read", remove_state_after_first_payload_read)
+
+    with pytest.raises(PermissionError, match="disappeared"):
+        repository.require_previous()
+
+    assert removed
+
+
 def test_state_repository_requires_exact_private_directory_and_deadline_lock(
     tmp_path: Path,
 ) -> None:
@@ -1471,11 +1675,12 @@ def test_state_repository_requires_exact_private_directory_and_deadline_lock(
         SecureTimeStateRepository(bad_root)
 
     repository = SecureTimeStateRepository(tmp_path / "secure-time")
-    lock_path = tmp_path / "secure-time" / ".secure-time-state.lock"
-    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    lock_fd = os.open(
+        ".",
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=repository.directory_fd,
+    )
     try:
-        import fcntl
-
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         proof = signed_proof(Ed25519PrivateKey.generate())
         lock_calls = 0

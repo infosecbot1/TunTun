@@ -10,6 +10,7 @@ import hmac
 import os
 import re
 import stat
+import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -35,7 +36,6 @@ MAX_CORE_TIME_PROOF_BYTES: Final = 8_192
 MAX_CANONICAL_PROOF_B64_LENGTH: Final = ((MAX_CORE_TIME_PROOF_BYTES + 2) // 3) * 4
 SECURE_TIME_BOOT_DEADLINE_SECONDS: Final = 2.0
 SECURE_TIME_STATE_NAME: Final = "secure-time-state.json"
-SECURE_TIME_LOCK_NAME: Final = ".secure-time-state.lock"
 SECURE_TIME_PUBLISH_FAULT_STAGES: Final = (
     "before_temp_open",
     "after_temp_open",
@@ -54,7 +54,6 @@ _NONBLOCK: Final = getattr(os, "O_NONBLOCK", 0)
 _DIRECTORY: Final = getattr(os, "O_DIRECTORY", 0)
 _READ_FLAGS: Final = os.O_RDONLY | _CLOEXEC | _NOFOLLOW | _NONBLOCK
 _DIRECTORY_FLAGS: Final = os.O_RDONLY | _DIRECTORY | _CLOEXEC | _NOFOLLOW
-_LOCK_FLAGS: Final = os.O_RDWR | os.O_CREAT | _CLOEXEC | _NOFOLLOW
 _WRITE_FLAGS: Final = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _CLOEXEC | _NOFOLLOW
 _READ_CHUNK_BYTES: Final = 64
 _HEX_SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
@@ -82,6 +81,8 @@ _UTC_DATETIME_SCHEMA_EXTRA: Final = {
 _MAX_SIGNED_FORWARD_STEP: Final = timedelta(days=31)
 _MAX_AUTHORITY_GENERATION_FORWARD_STEP: Final = 1
 _ROLLBACK_SKEW_TOLERANCE: Final = timedelta(seconds=0)
+_DIRECTORY_PROCESS_LOCKS_GUARD: Final = threading.Lock()
+_DIRECTORY_PROCESS_LOCKS: Final[dict[tuple[int, int], threading.Lock]] = {}
 
 Monotonic = Callable[[], float]
 SecureTimeBootMode = Literal["qualified_rtc", "signed_core_bootstrap"]
@@ -931,7 +932,6 @@ class SecureTimeStateRepository:
             raise ValueError("secure time state size invalid")
         with _exclusive_lock(
             self._directory,
-            SECURE_TIME_LOCK_NAME,
             deadline_monotonic=deadline_monotonic,
             monotonic=monotonic,
         ):
@@ -1318,7 +1318,10 @@ def _stat_owner_file(
 def _read_owner_file(directory: _OwnedDirectory, name: str, *, max_bytes: int) -> bytes:
     before = _stat_owner_file(directory, name, max_bytes=max_bytes)
     expected = _FileIdentity.from_stat(before)
-    descriptor = os.open(name, _READ_FLAGS, dir_fd=directory.fd)
+    try:
+        descriptor = os.open(name, _READ_FLAGS, dir_fd=directory.fd)
+    except FileNotFoundError as error:
+        raise PermissionError("secure time owner file disappeared during read") from error
     try:
         opened = os.fstat(descriptor)
         _require_owner_regular(
@@ -1341,7 +1344,10 @@ def _read_owner_file(directory: _OwnedDirectory, name: str, *, max_bytes: int) -
         if os.read(descriptor, 1):
             raise ValueError("secure time owner file changed during read")
         after = os.fstat(descriptor)
-        named_after = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+        try:
+            named_after = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+        except FileNotFoundError as error:
+            raise PermissionError("secure time owner file disappeared during read") from error
         for candidate in (after, named_after):
             _require_owner_regular(
                 candidate,
@@ -1383,24 +1389,27 @@ def _require_owner_regular(
 @contextlib.contextmanager
 def _exclusive_lock(
     directory: _OwnedDirectory,
-    name: str,
     *,
     deadline_monotonic: float,
     monotonic: Monotonic,
 ) -> Iterator[None]:
-    descriptor = os.open(name, _LOCK_FLAGS, 0o600, dir_fd=directory.fd)
+    descriptor = -1
+    process_lock = _process_lock_for_directory(directory.identity)
+    process_locked = False
     try:
-        identity = os.fstat(descriptor)
-        named = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
-        _require_owner_regular(
-            identity,
-            expected_mode=0o600,
-            require_single_link=True,
-            directory_device=directory.identity.device,
+        _acquire_process_lock(
+            process_lock,
+            deadline_monotonic=deadline_monotonic,
+            monotonic=monotonic,
         )
-        if (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino):
+        process_locked = True
+        _require_deadline(monotonic, deadline_monotonic, "secure_time_state_lock")
+        descriptor = os.open(".", _DIRECTORY_FLAGS, dir_fd=directory.fd)
+        identity = os.fstat(descriptor)
+        _require_private_directory(identity)
+        expected = directory.identity
+        if expected != _DirectoryIdentity.from_stat(identity):
             raise PermissionError("secure time lock identity changed")
-        expected = _FileIdentity.from_stat(identity)
         while True:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1412,24 +1421,44 @@ def _exclusive_lock(
                 if sleep_seconds:
                     time.sleep(sleep_seconds)
         locked = os.fstat(descriptor)
-        named_locked = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
-        for candidate in (locked, named_locked):
-            _require_owner_regular(
-                candidate,
-                expected_mode=0o600,
-                require_single_link=True,
-                directory_device=directory.identity.device,
-            )
-        if expected != _FileIdentity.from_stat(locked) or expected != _FileIdentity.from_stat(
-            named_locked
-        ):
+        _require_private_directory(locked)
+        if expected != _DirectoryIdentity.from_stat(locked):
             raise PermissionError("secure time lock identity changed")
         try:
             yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        if process_locked:
+            process_lock.release()
+
+
+def _process_lock_for_directory(identity: _DirectoryIdentity) -> threading.Lock:
+    key = (identity.device, identity.inode)
+    with _DIRECTORY_PROCESS_LOCKS_GUARD:
+        process_lock = _DIRECTORY_PROCESS_LOCKS.get(key)
+        if process_lock is None:
+            process_lock = threading.Lock()
+            _DIRECTORY_PROCESS_LOCKS[key] = process_lock
+        return process_lock
+
+
+def _acquire_process_lock(
+    process_lock: threading.Lock,
+    *,
+    deadline_monotonic: float,
+    monotonic: Monotonic,
+) -> None:
+    while True:
+        if process_lock.acquire(blocking=False):
+            return
+        if monotonic() >= deadline_monotonic:
+            raise TimeoutError("secure time repository lock deadline")
+        sleep_seconds = max(0.0, min(0.01, deadline_monotonic - monotonic()))
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
