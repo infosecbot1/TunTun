@@ -10,7 +10,8 @@ import importlib
 import inspect
 import math
 import secrets
-from collections.abc import Awaitable, Callable, Coroutine
+import ssl
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, TypeVar, cast
 from uuid import UUID
@@ -41,6 +42,33 @@ DEVICE_PROOF_SCHEMA: Final = "tuntun.reachy-device-proof.v1"
 CHALLENGE_ACCEPTED_SCHEMA: Final = "tuntun.reachy-challenge-accepted.v1"
 HANDSHAKE_SIGNATURE_PAYLOAD_SCHEMA: Final = "tuntun.reachy-device-challenge-signing-payload.v1"
 HANDSHAKE_SIGNATURE_DOMAIN: Final = "tuntun.reachy.wss.device-challenge-signature.v1"
+_TERMINAL_TLS_AUTH_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "CERTIFICATE_VERIFY_FAILED",
+        "CERTIFICATE_REQUIRED",
+        "PEER_DID_NOT_RETURN_A_CERTIFICATE",
+        "SSLV3_ALERT_BAD_CERTIFICATE",
+        "SSLV3_ALERT_CERTIFICATE_EXPIRED",
+        "SSLV3_ALERT_CERTIFICATE_REVOKED",
+        "SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+        "SSLV3_ALERT_HANDSHAKE_FAILURE",
+        "SSLV3_ALERT_UNSUPPORTED_CERTIFICATE",
+        "TLSV1_ALERT_ACCESS_DENIED",
+        "TLSV1_ALERT_BAD_CERTIFICATE",
+        "TLSV1_ALERT_CERTIFICATE_EXPIRED",
+        "TLSV1_ALERT_CERTIFICATE_REQUIRED",
+        "TLSV1_ALERT_CERTIFICATE_REVOKED",
+        "TLSV1_ALERT_CERTIFICATE_UNKNOWN",
+        "TLSV1_ALERT_DECRYPT_ERROR",
+        "TLSV1_ALERT_HANDSHAKE_FAILURE",
+        "TLSV1_ALERT_INSUFFICIENT_SECURITY",
+        "TLSV1_ALERT_PROTOCOL_VERSION",
+        "TLSV1_ALERT_UNKNOWN_CA",
+        "TLSV1_ALERT_UNSUPPORTED_CERTIFICATE",
+        "TLSV13_ALERT_CERTIFICATE_REQUIRED",
+        "WRONG_VERSION_NUMBER",
+    }
+)
 _CleanupResult = TypeVar("_CleanupResult")
 
 
@@ -739,6 +767,13 @@ class ReachyWssClient:
                     raise asyncio.CancelledError from error
                 if not isinstance(error, Exception):
                     raise
+                terminal_tls_code = _terminal_tls_commissioning_code(error)
+                if terminal_tls_code is not None:
+                    self._readiness.latch_disconnect_degraded(
+                        (f"reachy_recommission_required:{terminal_tls_code}",),
+                        restart_required=True,
+                    )
+                    raise
                 if not _is_transient_reconnect_error(error, setup_complete=setup_complete):
                     raise
                 if stop.is_set():
@@ -1027,6 +1062,37 @@ def _strict_b64_32(value: object, error: str) -> bytes:
 def _terminal_commissioning_from(error: PermissionError) -> _TerminalCommissioningError:
     code = error.args[0] if error.args and type(error.args[0]) is str else type(error).__name__
     return _TerminalCommissioningError(code)
+
+
+def _terminal_tls_commissioning_code(error: Exception) -> str | None:
+    for candidate in _iter_exception_chain(error):
+        if isinstance(candidate, ssl.SSLCertVerificationError):
+            return "reachy_tls_certificate_verification"
+        if isinstance(candidate, ssl.SSLError) and _is_terminal_tls_auth_error(candidate):
+            return "reachy_tls_authentication"
+    return None
+
+
+def _iter_exception_chain(error: BaseException) -> Iterator[BaseException]:
+    seen: set[int] = set()
+    stack: list[BaseException] = [error]
+    while stack:
+        current = stack.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        yield current
+        context = current.__context__ if not current.__suppress_context__ else None
+        if context is not None:
+            stack.append(context)
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+
+
+def _is_terminal_tls_auth_error(error: ssl.SSLError) -> bool:
+    reason = getattr(error, "reason", None)
+    return type(reason) is str and reason in _TERMINAL_TLS_AUTH_REASONS
 
 
 def _is_transient_reconnect_error(error: Exception, *, setup_complete: bool) -> bool:

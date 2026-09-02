@@ -1020,6 +1020,12 @@ class FatalConnector:
         raise FatalTransportExit
 
 
+class ReasonedTlsAuthError(ssl.SSLError):
+    @property
+    def reason(self) -> str:
+        return "TLSV1_ALERT_UNKNOWN_CA"
+
+
 @pytest.mark.asyncio
 async def test_run_re_raises_fatal_base_exception_after_cleanup() -> None:
     from tuntun_edge.transport.websocket import ReachyWssClient
@@ -1052,6 +1058,135 @@ async def test_run_re_raises_fatal_base_exception_after_cleanup() -> None:
     assert safety.latched == ["transport_disconnect"]
     assert state.abandoned == ["disconnect"]
     assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_run_treats_presocket_certificate_verification_as_terminal_recommission() -> None:
+    from tuntun_edge.transport.websocket import ReachyWssClient
+
+    state = FakeState()
+    safety = FakeSafety()
+    readiness = FakeReadiness()
+    sleeps: list[float] = []
+    stop = asyncio.Event()
+    certificate_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+    connector = ScriptedConnector([certificate_error])
+
+    async def fail_if_retried(delay: float) -> None:
+        sleeps.append(delay)
+        raise AssertionError("terminal TLS certificate verification failure retried")
+
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(Ed25519PrivateKey.generate()),
+        state=state,
+        safety=safety,
+        handler=FakeHandler(),
+        readiness=readiness,
+        clock=Clock(),
+        connect_factory=connector,
+        sleeper=fail_if_retried,
+    )
+
+    with pytest.raises(ssl.SSLCertVerificationError):
+        await client.run(stop)
+
+    assert len(connector.calls) == 1
+    assert safety.latched == ["transport_disconnect"]
+    assert state.abandoned == ["disconnect"]
+    assert sleeps == []
+    assert readiness.disconnect_degraded_codes == (
+        "reachy_recommission_required:reachy_tls_certificate_verification",
+    )
+    assert readiness.restart_required is True
+
+
+@pytest.mark.asyncio
+async def test_run_treats_presocket_tls_auth_protocol_error_as_terminal_recommission() -> None:
+    from tuntun_edge.transport.websocket import ReachyWssClient
+
+    state = FakeState()
+    safety = FakeSafety()
+    readiness = FakeReadiness()
+    sleeps: list[float] = []
+    stop = asyncio.Event()
+    connector = ScriptedConnector(
+        [ReasonedTlsAuthError(ssl.SSL_ERROR_SSL, "peer rejected TLS client auth")]
+    )
+
+    async def fail_if_retried(delay: float) -> None:
+        sleeps.append(delay)
+        raise AssertionError("terminal TLS auth/protocol failure retried")
+
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(Ed25519PrivateKey.generate()),
+        state=state,
+        safety=safety,
+        handler=FakeHandler(),
+        readiness=readiness,
+        clock=Clock(),
+        connect_factory=connector,
+        sleeper=fail_if_retried,
+    )
+
+    with pytest.raises(ReasonedTlsAuthError):
+        await client.run(stop)
+
+    assert len(connector.calls) == 1
+    assert safety.latched == ["transport_disconnect"]
+    assert state.abandoned == ["disconnect"]
+    assert sleeps == []
+    assert readiness.disconnect_degraded_codes == (
+        "reachy_recommission_required:reachy_tls_authentication",
+    )
+    assert readiness.restart_required is True
+
+
+@pytest.mark.asyncio
+async def test_run_treats_wrapped_tls_certificate_error_as_terminal_recommission() -> None:
+    from tuntun_edge.transport.websocket import ReachyWssClient
+
+    state = FakeState()
+    safety = FakeSafety()
+    readiness = FakeReadiness()
+    sleeps: list[float] = []
+    stop = asyncio.Event()
+    wrapped_error = ConnectionError("websockets connect failed")
+    wrapped_error.__cause__ = ssl.SSLCertVerificationError(1, "certificate verify failed")
+    connector = ScriptedConnector([wrapped_error])
+
+    async def fail_if_retried(delay: float) -> None:
+        sleeps.append(delay)
+        raise AssertionError("wrapped terminal TLS certificate failure retried")
+
+    client = ReachyWssClient(
+        Endpoint(),
+        tls_context=object(),
+        pairing_keys=EdgePairingKeys(Ed25519PrivateKey.generate()),
+        state=state,
+        safety=safety,
+        handler=FakeHandler(),
+        readiness=readiness,
+        clock=Clock(),
+        connect_factory=connector,
+        sleeper=fail_if_retried,
+    )
+
+    with pytest.raises(ConnectionError, match="websockets connect failed") as raised:
+        await client.run(stop)
+
+    assert isinstance(raised.value.__cause__, ssl.SSLCertVerificationError)
+    assert len(connector.calls) == 1
+    assert safety.latched == ["transport_disconnect"]
+    assert state.abandoned == ["disconnect"]
+    assert sleeps == []
+    assert readiness.disconnect_degraded_codes == (
+        "reachy_recommission_required:reachy_tls_certificate_verification",
+    )
+    assert readiness.restart_required is True
 
 
 @pytest.mark.asyncio
