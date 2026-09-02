@@ -1321,6 +1321,13 @@ def _read_owner_file(directory: _OwnedDirectory, name: str, *, max_bytes: int) -
     descriptor = os.open(name, _READ_FLAGS, dir_fd=directory.fd)
     try:
         opened = os.fstat(descriptor)
+        _require_owner_regular(
+            opened,
+            expected_mode=0o600,
+            require_single_link=True,
+            max_bytes=max_bytes,
+            directory_device=directory.identity.device,
+        )
         if not expected.same_file_and_size(opened):
             raise PermissionError("secure time owner file changed during read")
         chunks: list[bytes] = []
@@ -1335,6 +1342,14 @@ def _read_owner_file(directory: _OwnedDirectory, name: str, *, max_bytes: int) -
             raise ValueError("secure time owner file changed during read")
         after = os.fstat(descriptor)
         named_after = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+        for candidate in (after, named_after):
+            _require_owner_regular(
+                candidate,
+                expected_mode=0o600,
+                require_single_link=True,
+                max_bytes=max_bytes,
+                directory_device=directory.identity.device,
+            )
         if not expected.same_file_and_size(after) or not expected.same_file_and_size(named_after):
             raise PermissionError("secure time owner file changed during read")
         return b"".join(chunks)
@@ -1385,6 +1400,7 @@ def _exclusive_lock(
         )
         if (identity.st_dev, identity.st_ino) != (named.st_dev, named.st_ino):
             raise PermissionError("secure time lock identity changed")
+        expected = _FileIdentity.from_stat(identity)
         while True:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1395,6 +1411,19 @@ def _exclusive_lock(
                 sleep_seconds = max(0.0, min(0.01, deadline_monotonic - monotonic()))
                 if sleep_seconds:
                     time.sleep(sleep_seconds)
+        locked = os.fstat(descriptor)
+        named_locked = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+        for candidate in (locked, named_locked):
+            _require_owner_regular(
+                candidate,
+                expected_mode=0o600,
+                require_single_link=True,
+                directory_device=directory.identity.device,
+            )
+        if expected != _FileIdentity.from_stat(locked) or expected != _FileIdentity.from_stat(
+            named_locked
+        ):
+            raise PermissionError("secure time lock identity changed")
         try:
             yield
         finally:

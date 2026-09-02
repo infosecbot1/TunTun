@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ from tuntun_contracts.reachy_time import CoreTimeProofV1, CoreTimeRequestV1
 from tuntun_edge.reachy.probe import CapabilityReport
 from tuntun_edge.transport.secure_time import (
     MAX_SECURE_TIME_STATE_BYTES,
+    SECURE_TIME_LOCK_NAME,
     SECURE_TIME_PUBLISH_FAULT_STAGES,
     SECURE_TIME_STATE_NAME,
     SecureTimeBootLifecycle,
@@ -1309,6 +1311,154 @@ def test_state_repository_rejects_symlink_hardlink_oversize_and_noncanonical_sta
     os.link(current, root / "second-link.json")
     with pytest.raises(PermissionError):
         repository.require_previous()
+
+
+def test_state_repository_rejects_named_lock_replacement_after_flock_without_state_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = SecureTimeStateRepository(tmp_path / "secure-time")
+    proof = signed_proof(Ed25519PrivateKey.generate())
+    replaced = False
+    real_flock = fcntl.flock
+
+    def replace_named_lock_after_acquire(descriptor: int, operation: int) -> None:
+        nonlocal replaced
+        real_flock(descriptor, operation)
+        if operation & fcntl.LOCK_EX and operation & fcntl.LOCK_NB:
+            if replaced:
+                return
+            lock_path = repository.root / SECURE_TIME_LOCK_NAME
+            displaced = repository.root / "displaced-secure-time-state.lock"
+            os.replace(lock_path, displaced)
+            lock_path.write_bytes(b"")
+            lock_path.chmod(0o600)
+            replaced = True
+
+    monkeypatch.setattr(fcntl, "flock", replace_named_lock_after_acquire)
+
+    with pytest.raises(PermissionError, match="secure time lock identity changed"):
+        repository.replace_atomic(
+            proof,
+            hashlib.sha256(proof.signing_payload()).hexdigest(),
+            expected_previous=None,
+            deadline_monotonic=102.0,
+            boot_attempt_id=BOOT_ATTEMPT_ID,
+            monotonic=lambda: 100.0,
+        )
+
+    assert replaced
+    assert repository.require_previous() is None
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    (("chmod", "owner-only"), ("hardlink", "one link")),
+)
+def test_state_repository_rejects_owner_metadata_drift_between_stat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    match: str,
+) -> None:
+    repository = SecureTimeStateRepository(tmp_path / "secure-time")
+    proof = signed_proof(Ed25519PrivateKey.generate())
+    repository.replace_atomic(
+        proof,
+        hashlib.sha256(proof.signing_payload()).hexdigest(),
+        expected_previous=None,
+        deadline_monotonic=102.0,
+        boot_attempt_id=BOOT_ATTEMPT_ID,
+        monotonic=lambda: 100.0,
+    )
+    mutated = False
+    real_open = os.open
+
+    def mutate_after_owner_pre_stat(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal mutated
+        if path == SECURE_TIME_STATE_NAME and dir_fd == repository.directory_fd and not mutated:
+            if mutation == "chmod":
+                repository.path.chmod(0o644)
+            else:
+                os.link(repository.path, repository.root / "second-secure-time-state.json")
+            mutated = True
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", mutate_after_owner_pre_stat)
+
+    with pytest.raises(PermissionError, match=match):
+        repository.require_previous()
+
+    assert mutated
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    (("chmod", "owner-only"), ("hardlink", "one link")),
+)
+def test_state_repository_rejects_owner_metadata_drift_before_final_read_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    match: str,
+) -> None:
+    repository = SecureTimeStateRepository(tmp_path / "secure-time")
+    proof = signed_proof(Ed25519PrivateKey.generate())
+    repository.replace_atomic(
+        proof,
+        hashlib.sha256(proof.signing_payload()).hexdigest(),
+        expected_previous=None,
+        deadline_monotonic=102.0,
+        boot_attempt_id=BOOT_ATTEMPT_ID,
+        monotonic=lambda: 100.0,
+    )
+    mutated = False
+    state_descriptor: int | None = None
+    real_open = os.open
+    real_read = os.read
+
+    def track_state_descriptor(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal state_descriptor
+        if dir_fd is None:
+            descriptor = real_open(path, flags, mode)
+        else:
+            descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if path == SECURE_TIME_STATE_NAME and dir_fd == repository.directory_fd:
+            state_descriptor = descriptor
+        return descriptor
+
+    def mutate_after_first_payload_read(descriptor: int, byte_count: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(descriptor, byte_count)
+        if descriptor == state_descriptor and chunk and not mutated:
+            if mutation == "chmod":
+                repository.path.chmod(0o644)
+            else:
+                os.link(repository.path, repository.root / "second-secure-time-state.json")
+            mutated = True
+        return bytes(chunk)
+
+    monkeypatch.setattr(os, "open", track_state_descriptor)
+    monkeypatch.setattr(os, "read", mutate_after_first_payload_read)
+
+    with pytest.raises(PermissionError, match=match):
+        repository.require_previous()
+
+    assert mutated
 
 
 def test_state_repository_requires_exact_private_directory_and_deadline_lock(
