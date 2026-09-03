@@ -13,14 +13,14 @@ pytest_plugins = ("tests.fixtures.provider_egress",)
 @pytest.mark.asyncio
 async def test_fifty_concurrent_reservations_never_cross_hard_cap(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
 ) -> None:
     guard = BudgetGuard(
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         provider_reviews,
         budget_evidence,

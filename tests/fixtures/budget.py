@@ -161,5 +161,5 @@ def runtime_provider_identities() -> CurrentRuntimeProviderIdentities:
 
 
 @pytest.fixture
-def budget_evidence(clock) -> BudgetEvidenceService:
-    return BudgetEvidenceService(b"e" * 32, "budget-evidence-v1", clock)
+def budget_evidence(route_clock) -> BudgetEvidenceService:
+    return BudgetEvidenceService(b"e" * 32, "budget-evidence-v1", route_clock)

@@ -654,7 +654,7 @@ async def test_current_session_invalidates_in_flight_stop_after_session_replacem
 
 def test_production_container_builds_one_shared_core_transport_composition(
     async_uow_factory: object,
-    clock: object,
+    route_clock: object,
     catalog: object,
     runtime_provider_identities: object,
     budget_evidence: object,
@@ -667,7 +667,7 @@ def test_production_container_builds_one_shared_core_transport_composition(
     production = _build_production_container(
         tmp_path,
         async_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
@@ -713,7 +713,7 @@ def test_production_container_builds_one_shared_core_transport_composition(
 @pytest.mark.asyncio
 async def test_production_start_waits_for_authenticated_session_before_startup_recovery(
     async_uow_factory: object,
-    clock: object,
+    route_clock: object,
     catalog: object,
     runtime_provider_identities: object,
     budget_evidence: object,
@@ -724,7 +724,7 @@ async def test_production_start_waits_for_authenticated_session_before_startup_r
     production = _build_production_container(
         tmp_path,
         async_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
@@ -777,7 +777,7 @@ async def test_production_start_waits_for_authenticated_session_before_startup_r
 @pytest.mark.asyncio
 async def test_production_listener_start_failure_releases_lease_and_stays_unready(
     async_uow_factory: object,
-    clock: object,
+    route_clock: object,
     catalog: object,
     runtime_provider_identities: object,
     budget_evidence: object,
@@ -787,7 +787,7 @@ async def test_production_listener_start_failure_releases_lease_and_stays_unread
     production = _build_production_container(
         tmp_path,
         async_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
@@ -807,7 +807,7 @@ async def test_production_listener_start_failure_releases_lease_and_stays_unread
 @pytest.mark.asyncio
 async def test_production_start_cancellation_closes_wss_and_releases_lease(
     async_uow_factory: object,
-    clock: object,
+    route_clock: object,
     catalog: object,
     runtime_provider_identities: object,
     budget_evidence: object,
@@ -818,7 +818,7 @@ async def test_production_start_cancellation_closes_wss_and_releases_lease(
     production = _build_production_container(
         tmp_path,
         async_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
@@ -849,7 +849,7 @@ async def test_production_start_cancellation_closes_wss_and_releases_lease(
 @pytest.mark.asyncio
 async def test_production_start_helper_timeout_cancels_start_and_stops_production(
     async_uow_factory: object,
-    clock: object,
+    route_clock: object,
     catalog: object,
     runtime_provider_identities: object,
     budget_evidence: object,
@@ -860,7 +860,7 @@ async def test_production_start_helper_timeout_cancels_start_and_stops_productio
     production = _build_production_container(
         tmp_path,
         async_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
@@ -1054,7 +1054,7 @@ async def test_production_stop_bounds_in_flight_start_observation() -> None:
 @pytest.mark.asyncio
 async def test_production_partial_start_timeout_closes_wss_and_releases_lease(
     async_uow_factory: object,
-    clock: object,
+    route_clock: object,
     catalog: object,
     runtime_provider_identities: object,
     budget_evidence: object,
@@ -1065,7 +1065,7 @@ async def test_production_partial_start_timeout_closes_wss_and_releases_lease(
     production = _build_production_container(
         tmp_path,
         async_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
@@ -1093,7 +1093,7 @@ async def test_production_partial_start_timeout_closes_wss_and_releases_lease(
 @pytest.mark.asyncio
 async def test_production_failed_start_unproven_close_surfaces_both_causes_and_blocks_retry(
     async_uow_factory: object,
-    clock: object,
+    route_clock: object,
     catalog: object,
     runtime_provider_identities: object,
     budget_evidence: object,
@@ -1105,7 +1105,7 @@ async def test_production_failed_start_unproven_close_surfaces_both_causes_and_b
     production = _build_production_container(
         tmp_path,
         async_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
@@ -1148,7 +1148,7 @@ async def test_production_failed_start_unproven_close_surfaces_both_causes_and_b
 @pytest.mark.asyncio
 async def test_production_shutdown_withdraws_readiness_runs_safety_closes_wss_then_releases_lease(
     async_uow_factory: object,
-    clock: object,
+    route_clock: object,
     catalog: object,
     runtime_provider_identities: object,
     budget_evidence: object,
@@ -1159,7 +1159,7 @@ async def test_production_shutdown_withdraws_readiness_runs_safety_closes_wss_th
     production = _build_production_container(
         tmp_path,
         async_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
@@ -1196,7 +1196,7 @@ async def test_production_shutdown_withdraws_readiness_runs_safety_closes_wss_th
 @pytest.mark.asyncio
 async def test_production_shutdown_close_failure_retains_listener_and_lease_until_retry(
     async_uow_factory: object,
-    clock: object,
+    route_clock: object,
     catalog: object,
     runtime_provider_identities: object,
     budget_evidence: object,
@@ -1208,7 +1208,7 @@ async def test_production_shutdown_close_failure_retains_listener_and_lease_unti
     production = _build_production_container(
         tmp_path,
         async_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,

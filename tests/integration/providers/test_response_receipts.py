@@ -36,7 +36,7 @@ pytest_plugins = ("tests.fixtures.provider_egress",)
 
 
 @pytest_asyncio.fixture
-async def response_receipt_case(production_provider_gateway_case, budget_evidence, clock):
+async def response_receipt_case(production_provider_gateway_case, budget_evidence, route_clock):
     case = await production_provider_gateway_case(
         valid_usage=True,
         seed_response_scope=True,
@@ -61,7 +61,7 @@ async def response_receipt_case(production_provider_gateway_case, budget_evidenc
         repository=repository,
         commitment_root=b"r" * 32,
         key_id="provider-response-v1",
-        clock=clock,
+        clock=route_clock,
         audit=case.audit,
         usage_evidence=budget_evidence,
         assistant_turn_adapter=AssistantTurn,
@@ -280,7 +280,7 @@ async def test_concurrent_replay_is_one_receipt_and_one_audit(response_receipt_c
 async def test_unknown_usage_success_cannot_mint_output_receipt(
     production_provider_gateway_case,
     budget_evidence,
-    clock,
+    route_clock,
 ) -> None:
     case = await production_provider_gateway_case(
         valid_usage=False,
@@ -294,7 +294,7 @@ async def test_unknown_usage_success_cannot_mint_output_receipt(
         repository=ProviderResponseReceiptRepository(case.factory),
         commitment_root=b"r" * 32,
         key_id="provider-response-v1",
-        clock=clock,
+        clock=route_clock,
         audit=audit,
         usage_evidence=budget_evidence,
         assistant_turn_adapter=AssistantTurn,

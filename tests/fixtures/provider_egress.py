@@ -1647,16 +1647,11 @@ def async_uow_factory(route_uow_factory):
     return route_uow_factory
 
 
-@pytest.fixture
-def clock(route_clock):
-    return route_clock
-
-
 @pytest_asyncio.fixture
 async def provider_egress_harness(
     route_database: RouteDatabase,
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
@@ -1664,7 +1659,7 @@ async def provider_egress_harness(
     harness = await ProviderEgressHarness.create(
         route_database,
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         provider_reviews,
         budget_evidence,
@@ -1740,7 +1735,7 @@ def provider_gateway(provider_egress_harness):
 @pytest_asyncio.fixture
 async def production_core_container(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
@@ -1748,7 +1743,7 @@ async def production_core_container(
 ):
     context, _reservation, _guard = await _create_production_context(
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         provider_reviews,
         budget_evidence,
@@ -1756,7 +1751,7 @@ async def production_core_container(
     )
     return CoreContainer(
         sqlcipher_uow_factory=async_uow_factory,
-        clock=clock,
+        clock=route_clock,
         route_authorizer=BoundAuthorizerFake(context),
         price_catalog=catalog,
         provider_reviews=provider_reviews,
@@ -1768,7 +1763,7 @@ async def production_core_container(
 @pytest_asyncio.fixture
 async def production_container(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     runtime_provider_identities,
@@ -1788,7 +1783,7 @@ async def production_container(
         reachy=reachy,
         sqlcipher_uow_factory=async_uow_factory,
         task1_identity_key_provider=StaticTask1IdentityKeyProvider(),
-        clock=clock,
+        clock=route_clock,
         route_authorizer=route_authorizer,
         price_catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
@@ -1798,7 +1793,7 @@ async def production_container(
     try:
         context, _reservation, _guard = await _create_production_context(
             async_uow_factory,
-            clock,
+            route_clock,
             catalog,
             provider_reviews,
             budget_evidence,
@@ -1813,7 +1808,7 @@ async def production_container(
 @pytest.fixture
 def production_provider_gateway_case(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
@@ -1830,7 +1825,7 @@ def production_provider_gateway_case(
     ):
         context, reservation, guard = await _create_production_context(
             async_uow_factory,
-            clock,
+            route_clock,
             catalog,
             provider_reviews,
             budget_evidence,
@@ -1841,7 +1836,7 @@ def production_provider_gateway_case(
         )
         return ProductionProviderGatewayCase(
             factory=async_uow_factory,
-            clock=clock,
+            clock=route_clock,
             catalog=catalog,
             provider_reviews=provider_reviews,
             evidence=budget_evidence,

@@ -25,14 +25,14 @@ pytest_plugins = ("tests.fixtures.provider_egress",)
 @pytest.mark.asyncio
 async def test_budget_guard_uses_configured_reservation_expiry_seconds(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
 ) -> None:
     guard = BudgetGuard(
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         provider_reviews,
         budget_evidence,
@@ -54,13 +54,13 @@ async def test_budget_guard_uses_configured_reservation_expiry_seconds(
         )
     )
 
-    assert reservation.expires_at == clock.now() + timedelta(seconds=45)
+    assert reservation.expires_at == route_clock.now() + timedelta(seconds=45)
 
 
 @pytest.mark.parametrize("expiry_seconds", (0, 901, -1, True))
 def test_budget_guard_rejects_unsafe_reservation_expiry_seconds(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
@@ -69,7 +69,7 @@ def test_budget_guard_rejects_unsafe_reservation_expiry_seconds(
     with pytest.raises(ValueError, match="reservation_expiry_seconds"):
         BudgetGuard(
             async_uow_factory,
-            clock,
+            route_clock,
             catalog,
             provider_reviews,
             budget_evidence,
@@ -81,14 +81,14 @@ def test_budget_guard_rejects_unsafe_reservation_expiry_seconds(
 @pytest.mark.asyncio
 async def test_exact_hard_cap_allowed_and_one_micro_above_denied(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
 ) -> None:
     guard = BudgetGuard(
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         provider_reviews,
         budget_evidence,
@@ -185,7 +185,7 @@ def test_zero_negative_or_overflowed_usage_ceiling_is_rejected(usage) -> None:
 @pytest.mark.asyncio
 async def test_missing_real_provider_review_denies_without_reservation_insert(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     budget_evidence,
 ) -> None:
@@ -200,7 +200,7 @@ async def test_missing_real_provider_review_denies_without_reservation_insert(
 
     guard = BudgetGuard(
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         SqlcipherCurrentProviderReviews(RuntimeIdentities()),
         budget_evidence,
@@ -235,14 +235,14 @@ async def test_missing_real_provider_review_denies_without_reservation_insert(
 @pytest.mark.asyncio
 async def test_web_search_budget_shape_is_dormant_and_inserts_nothing(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
 ) -> None:
     guard = BudgetGuard(
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         provider_reviews,
         budget_evidence,
@@ -289,7 +289,7 @@ async def test_web_search_budget_shape_is_dormant_and_inserts_nothing(
 )
 async def test_silent_ignored_budget_insert_rolls_back_reservation_and_binding(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
@@ -298,7 +298,7 @@ async def test_silent_ignored_budget_insert_rolls_back_reservation_and_binding(
 ) -> None:
     guard = BudgetGuard(
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         provider_reviews,
         budget_evidence,
@@ -369,14 +369,14 @@ async def test_silent_ignored_budget_insert_rolls_back_reservation_and_binding(
 @pytest.mark.asyncio
 async def test_silent_ignored_soft_warning_marker_rolls_back_reservation_and_binding(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
 ) -> None:
     guard = BudgetGuard(
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         provider_reviews,
         budget_evidence,
@@ -448,7 +448,7 @@ async def test_silent_ignored_soft_warning_marker_rolls_back_reservation_and_bin
 @pytest.mark.asyncio
 async def test_sent_attempt_cannot_be_released(
     async_uow_factory,
-    clock,
+    route_clock,
     catalog,
     provider_reviews,
     budget_evidence,
@@ -458,7 +458,7 @@ async def test_sent_attempt_cannot_be_released(
 ) -> None:
     guard = BudgetGuard(
         async_uow_factory,
-        clock,
+        route_clock,
         catalog,
         provider_reviews,
         budget_evidence,
@@ -498,7 +498,7 @@ async def test_sent_attempt_cannot_be_released(
     )
     await ProviderCallRepository(
         async_uow_factory,
-        clock,
+        route_clock,
         redaction_receipt_repository,
     ).begin(claimed_route, claimed_consumption, None)
     await guard.mark_sent(reservation.reservation_id, reservation.attempt_id)
@@ -506,7 +506,7 @@ async def test_sent_attempt_cannot_be_released(
         reservation_id=reservation.reservation_id,
         attempt_id=reservation.attempt_id,
         disposition="never_sent",
-        observed_at=clock.now(),
+        observed_at=route_clock.now(),
         evidence_code="socket_connect_failed",
     )
     with pytest.raises(PermissionError, match="sent_reservation_requires_settlement"):

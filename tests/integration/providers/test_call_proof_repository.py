@@ -10,9 +10,9 @@ pytest_plugins = ("tests.fixtures.provider_egress",)
 # Test-only BudgetPort seam. Task 05 replaces this with BudgetGuard; keeping the
 # helper here prevents a backwards task dependency while still proving the SQL pair.
 @pytest.fixture
-def task04_sql_mark_sent(async_uow_factory, clock):
+def task04_sql_mark_sent(async_uow_factory, route_clock):
     async def mark_sent(reservation_id, attempt_id):
-        now = utc_storage(clock.now())
+        now = utc_storage(route_clock.now())
 
         def mark(db):
             call = db.exec_driver_sql(
@@ -71,7 +71,7 @@ async def proof_rows(factory, route):
 @pytest.mark.asyncio
 async def test_claim_and_network_boundaries_are_atomic_and_survive_restart(
     async_uow_factory,
-    clock,
+    route_clock,
     route,
     consumption,
     redaction_receipt_id,
@@ -80,13 +80,13 @@ async def test_claim_and_network_boundaries_are_atomic_and_survive_restart(
 ):
     calls = ProviderCallRepository(
         async_uow_factory,
-        clock,
+        route_clock,
         redaction_receipt_repository,
     )
     call_id = await calls.begin(route, consumption, redaction_receipt_id)
     restarted_calls = ProviderCallRepository(
         async_uow_factory,
-        clock,
+        route_clock,
         redaction_receipt_repository,
     )
     assert await proof_rows(async_uow_factory, route) == (
