@@ -34,11 +34,15 @@ stop/go gate. A simulator or media-only run is progress, not accepted A0.5.
   310-second complete-turn bounds. Core heartbeats every second and Edge cleans up after 5 seconds
   without a valid Core frame. On a valid stream, stop observations finish/time out by T+2 seconds,
   truthful receipt send finishes by T+2.5, and acknowledgement by T+3.5. Admission remains closed
-  while transport close and owned-task teardown finish by T+4.0. A poisoned stream follows only Task
+  while Core supervisor/pipeline teardown finishes by T+4.0. A poisoned stream follows only Task
   2's terminal emergency rule and never waits for an acknowledgement. At the same cleanup T0, Core
   enqueues `abort` on the reserved priority lane and concurrently starts provider cancellation;
-  provider-transport close is 0.5 seconds and provider join 1 second. SSH connect is 5 seconds,
-  server-alive 2 seconds/count 2, and stdin/TERM/KILL waits 1 second each.
+  provider-transport close is 0.5 seconds, provider join is 1 second, and Core supervisor/pipeline
+  quarantine remains bounded by T0+4. SSH connect is 5 seconds and server-alive is 2 seconds/count
+  2. The first synchronous transport close fixes a separate S0; stdin, TERM, and KILL/reap end at
+  S0+1, S0+2, and S0+3 respectively, without renewing S0. An already-fenced transport may outlive
+  T0+4 only while that S0 escalation completes; it cannot reopen admission or extend Core's cleanup
+  bound.
 - The mode matrix is exactly fake/simulated, fake/ssh, and—only after Checkpoint A0—live-cloud/
   simulated and live-cloud/ssh. No fallback changes mode or transport.
 - Core remains Python `==3.12.*`; Edge and Contracts remain `>=3.11,<3.13` compatible.
@@ -484,8 +488,9 @@ uses the runtime's task creation for its coordinator and ordinary children.
   completion permanently makes the transport unwritable; no later sequence is emitted. Admission
   rechecks the clock-fault generation after joining send deadline/fault owners and immediately before
   reporting success, so a fault in that completion window leaves the sequence unchanged. Admission
-  remains closed while transport close and every final join finish by the separate T0+4.0 teardown
-  deadline, with no await after it.
+  remains closed while every Core-owned supervisor/pipeline join finishes by the separate T0+4.0
+  teardown deadline, with no Core await after it. Bridge close is synchronously fenced within that
+  teardown, then its nonrenewable S0 escalation may finish afterward under the separate S0+3 bound.
 - Clean EOF and a receive exception preserve `peer_closed` as the first semantic reason on a
   still-valid stream. Because the terminal reader cannot receive an acknowledgement afterward, the
   universal missing-ack rule makes the final public outcome `cleanup_incomplete`. A non-bytes or
@@ -516,7 +521,7 @@ uses the runtime's task creation for its coordinator and ordinary children.
   that operation or records it false. Partial-startup rollback owner allocation has one fresh adopted
   attempt, then a cancellation-shieldable direct owner, and only then the same bounded inline
   rollback; it never recurses or skips physical cleanup.
-  Every owned child must terminate by T0+4.0 and nothing is
+  Every Core-owned supervisor/pipeline child must terminate by T0+4.0 and nothing is
   awaited afterward. Task 7 must explicitly qualify real adapters for this cancellation contract;
   deliberately cancellation-suppressing ports cannot be bounded or certified orphan-free.
 - Only the `ptt` execution path reserves stdout for the future binary channel: it emits zero stdout,
@@ -557,8 +562,9 @@ uses the runtime's task creation for its coordinator and ordinary children.
   without positive observation stay false.
 - [ ] **Step 5: Implement bounded cancellation-resistant cleanup.** Stop operations finish or time
   out by T+2 seconds; on a valid stream encode/send the resulting truthful receipt by T+2.5 and
-  finish ack wait by T+3.5; keep admission closed and bound transport close plus all adopted task
-  joins by the separate T+4.0 teardown deadline. Missing/
+  finish ack wait by T+3.5; keep admission closed and bound all Core-owned supervisor/pipeline task
+  joins by the separate T+4.0 teardown deadline. Synchronously fence bridge close within that
+  teardown, then let only its nonrenewable S0 escalation continue through S0+3. Missing/
   negative ack or any false field is `cleanup_incomplete`; it never delays local shutdown or prints
   exception payloads. Heartbeat loss after 5 seconds, Edge watchdog, EOF, and unwritable transport
   still run the same local path. Protocol poison follows only the frozen terminal emergency rule;
@@ -602,10 +608,13 @@ Commit: `feat(edge): add supervised Reachy PTT safety loop`
 **Interfaces:**
 - Consumes: fixed input mode; optional `CorePttInputPort`; injected `SpeechToTextPort`,
   `LanguageModelPort`, `TextToSpeechPort`, immutable reviewed `tts_source_format`,
-  `AudioConverterPort`, `ProviderCancellationPort`, async `PttBridgePort`, `RouteAuthorizerPort`,
-  `BudgetPort`, and `MonotonicClock`. Fake route/budget ports are used until Checkpoint A0 exists.
+  `AudioConverterPort`, `ProviderCancellationPort`, `PttBridgePort`, `VoiceAttemptAuthorizerPort`,
+  and `MonotonicClock`. Fake voice-attempt authorizations are used until Checkpoint A0's durable
+  route and budget gates exist. `PttBridgePort.send()` and `close()` are synchronous factories
+  returning bounded awaitables; `send()` resolves to `PttSendCommit`.
 - Produces: redacting `CapturedTurn`, `CorePttEvent(start|submit|cancel)`,
-  `async VoiceTurnPipeline.run(...) -> AsyncIterator[SpeechChunk]`,
+  `VoiceTurnPipeline.run(...) -> AsyncIterator[SpeechChunk]`,
+  `VoiceTurnPipeline.observe_quarantine(deadline=...) -> Awaitable[bool]`,
   `async CorePttSessionSupervisor.run(turn_id) -> PttSessionOutcome`, and bounded cancel. The outcome
   carries no content.
 
@@ -619,10 +628,10 @@ Commit: `feat(edge): add supervised Reachy PTT safety loop`
 - [ ] **Step 2: Run and confirm RED because the coordinator is absent.**
 - [ ] **Step 3: Implement the minimal one-turn pipeline and bounded PCM16 converter.** Keep input,
   source TTS, converted TTS, and text in separate mutable holders; clear all on every exit. Use only
-  injected canonical route/budget ports; fakes provide exact fake authorizations and production DTOs
-  are never invented. Converter tests cover alignment, duration, a known tone resampled from the
-  reviewed source rate to 16 kHz, identity conversion, overflow, cancellation, and deterministic
-  chunking.
+  injected canonical voice-attempt authorization ports; fakes provide exact fake authorizations and
+  production DTOs are never invented. Converter tests cover alignment, duration, a known tone
+  resampled from the reviewed source rate to 16 kHz, identity conversion, overflow, cancellation,
+  and deterministic chunking.
 - [ ] **Step 4: Write failing input-mode and supervisor tests.** Core sends session-open and waits at
   most 5 seconds for the exact mode echo before enabling input. Terminal-toggle requires one
   `CorePttInputPort`, maps START/SUBMIT to wire controls, latches rapid submit while arming, and maps
@@ -645,7 +654,23 @@ Commit: `feat(edge): add supervised Reachy PTT safety loop`
   3.5-second outer bound, then allow Task 4 escalation. Every configured provider adapter must pass cancellation-
   cooperation qualification: swallowing `CancelledError` or remaining live after transport close/
   join makes that adapter unavailable to live mode. The runtime does not claim to contain arbitrary
-  cancellation-suppressing coroutines. Only bounded cleanup is shielded.
+  cancellation-suppressing coroutines. Cancellation fans out to every owned sibling before any
+  bounded join; incomplete work remains owned in its originating deadline quarantine. Core observes
+  both its supervisor quarantine and the pipeline quarantine through T0+4, and any live/error/false
+  result forces `cleanup_incomplete`. Mixed exception groups are contained at adapter/provider
+  boundaries; nested cleanup incompleteness dominates ordinary members. Unclaimed provider audio is
+  wiped exactly once, and abandoned late provider results plus source/converted audio destinations
+  are re-wiped when their owning work settles. Incomplete cleanup cannot be downgraded by a later
+  iterator-close failure. Before the final `safety_ack`, Core fences normal/heartbeat admission and
+  makes terminal input final; exact committed ACK is the clean-EOF boundary, and no frame is emitted
+  afterward. Truncated or malformed bytes still poison the session. Only bounded cleanup is
+  shielded. `PttBridgePort.send(...)` and `PttBridgePort.close()` are synchronous factories that
+  return the awaitable send/close commitment, with `close()` fencing future sends and fixing one
+  nonrenewable transport epoch S0. Start `bridge.close()` at the beginning of teardown (or earlier
+  on hard failure), then observe that transport only through S0+3 so Task 4's stdin/TERM/KILL
+  sequence cannot be truncated by the Core deadline. S0 may outlive T0+4 only for transport already
+  fenced by that first close; it never reopens admission, extends the Core cleanup bound, emits a
+  later frame, or weakens a poisoned-stream outcome.
 - [ ] **Step 7: Add timeout, provider error, transcript/request mismatch, wrong language, oversized/
   non-NFC answer, source and converted chunk/final/aggregate errors, alternate source format,
   converted misalignment/duration drift, duplicate turn, negative/missing ack, and no-orphan tests;
@@ -705,10 +730,13 @@ Commit: `feat(core): coordinate ephemeral PTT voice turns`
   negative/missing ack, cancellation, timeout, Ctrl-C, child exit, and process-group escalation.
   Assert protocol cleanup precedes stdin close/TERM/KILL and stderr is drained into a fixed-size
   content-free classifier.
-- [ ] **Step 4: Implement bounded I/O and idempotent close.** After the 3.5-second PTT cleanup bound,
-  close stdin and wait 1 second; if still alive and still the validated process-group leader, TERM
-  its group and wait 1 second, then KILL and observe for 1 second. Never surface stderr bytes or
-  content; never resume a disconnected turn.
+- [ ] **Step 4: Implement bounded I/O and idempotent close.** The first synchronous close call
+  atomically fences sends and fixes a nonrenewable transport epoch S0. Close stdin immediately and
+  wait only through S0+1; if still alive and still the validated process-group leader, TERM its group
+  and wait only through S0+2, then KILL and observe/reap only through S0+3. Core starts this close at
+  the beginning of final teardown after the safety path, concurrently with its remaining joins, or
+  earlier on hard transport failure. Never surface stderr bytes or content; never resume a
+  disconnected turn.
 - [ ] **Step 5: Add a real loopback OpenSSH integration contract.** Start a non-root temporary sshd
   on a high loopback port with generated host/key files and the same forced-command restriction;
   prove argv order, no remote shell command, exact stdin dispatch, host-key failure, and TERM/KILL

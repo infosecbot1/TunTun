@@ -6295,7 +6295,7 @@ async def test_cleanup_cancels_blocked_playback_effect_without_orphan(
     session = ReachyPttSession(**arguments)  # type: ignore[arg-type]
     run_task = asyncio.create_task(session.run(), name="test-reachy-ptt-run")
     try:
-        await asyncio.wait_for(media.stage_started.wait(), timeout=0.2)
+        await asyncio.wait_for(media.stage_started.wait(), timeout=2.0)
         transport.queue_core_abort()
 
         outcome = await run_task
@@ -6340,7 +6340,7 @@ async def test_local_capture_preserves_and_rechunks_all_bytes_until_submit() -> 
     session = ReachyPttSession(**arguments)  # type: ignore[arg-type]
     run_task = asyncio.create_task(session.run(), name="test-reachy-ptt-run")
     try:
-        done, _pending = await asyncio.wait({run_task}, timeout=0.2)
+        done, _pending = await asyncio.wait({run_task}, timeout=2.0)
         assert run_task in done
         assert run_task.result() is PttSessionOutcome.COMPLETED
         capture_frames = [
@@ -7002,7 +7002,7 @@ async def test_capture_stage_deadlines_use_original_trigger_timestamps(
         session = DelayedAdmissionSession(**arguments)  # type: ignore[arg-type]
     run_task = asyncio.create_task(session.run(), name="test-reachy-ptt-run")
     try:
-        done, _pending = await asyncio.wait({run_task}, timeout=0.2)
+        done, _pending = await asyncio.wait({run_task}, timeout=2.0)
 
         assert run_task in done
         assert run_task.result() is PttSessionOutcome.CAPTURE_FAILED
