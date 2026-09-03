@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from fastapi import FastAPI
@@ -80,12 +80,14 @@ from tuntun_core.services.transactions.protocols import UnitOfWorkProtocol
 from tuntun_core.workflows.contract_workflow import (
     CompletedTurnAudioPort,
     ContractConversationWorkflow,
+    ConversationEngine,
 )
 from tuntun_core.workflows.conversation import (
     ContextWorkflowPorts,
     LinearConversationEngine,
     WorkflowPorts,
 )
+from tuntun_core.workflows.langgraph_adapter import LangGraphConversationEngine
 
 _SIMULATED_GUEST_ROUTE_NAMES = frozenset(
     {"health.ready", "session.simulated_end", "session.simulated_turn"}
@@ -172,6 +174,7 @@ class SimulatedGuestComposition:
     workflow: ContractConversationWorkflow
     dependencies: SimulatedGuestAppDependencies
     linear_engine: LinearConversationEngine | None = None
+    langgraph_engine: LangGraphConversationEngine | None = None
     context_provider: PersonalizedTurnContextProvider | None = None
 
 
@@ -467,7 +470,10 @@ class ProductionContainer:
         profiles: ProfileProjectionPort | None = None,
         prompt_root: Path = Path("prompts"),
         context_provider: PersonalizedTurnContextProvider | None = None,
+        workflow_name: Literal["linear", "langgraph"] = "linear",
     ) -> InstalledSimulatedGuestApp:
+        if type(workflow_name) is not str or workflow_name not in {"linear", "langgraph"}:
+            raise ValueError("unknown workflow")
         if self.simulated_guest_app is not None:
             raise RuntimeError("simulated_guest_app_already_installed")
         if self.turn_coordinator is None or self.session_manager is None:
@@ -485,18 +491,32 @@ class ProductionContainer:
                 self.core.clock,
             )
         self.session_manager.register_session_ended_handler(context_provider.on_session_ended)
-        linear_engine = LinearConversationEngine(
-            ports,
-            context_provider=context_provider,
-            accepts_results=self.session_manager.accepts_results,
-        )
+        linear_engine: LinearConversationEngine | None = None
+        langgraph_engine: LangGraphConversationEngine | None = None
+        if workflow_name == "linear":
+            linear_engine = LinearConversationEngine(
+                ports,
+                context_provider=context_provider,
+                accepts_results=self.session_manager.accepts_results,
+            )
+            engine: ConversationEngine = linear_engine
+        elif workflow_name == "langgraph":
+            langgraph_engine = LangGraphConversationEngine(
+                cast(WorkflowPorts, ports),
+                context_provider=context_provider,
+                accepts_results=self.session_manager.accepts_results,
+            )
+            engine = langgraph_engine
+        else:
+            raise ValueError("unknown workflow")
         workflow = build_workflow(
             ports,
             completed_audio,
             self.turn_coordinator,
             context_provider=context_provider,
-            engine=linear_engine,
+            engine=engine,
             session_manager=self.session_manager,
+            workflow_name=workflow_name,
         )
         dependencies = SimulatedGuestAppDependencies(
             session_manager=self.session_manager,
@@ -520,6 +540,7 @@ class ProductionContainer:
                 workflow=workflow,
                 dependencies=dependencies,
                 linear_engine=linear_engine,
+                langgraph_engine=langgraph_engine,
                 context_provider=context_provider,
             ),
             coordinator=self.turn_coordinator,
@@ -542,17 +563,33 @@ def build_workflow(
     coordinator: TurnCoordinator,
     *,
     context_provider: PersonalizedTurnContextProvider | None = None,
-    engine: LinearConversationEngine | None = None,
+    engine: ConversationEngine | None = None,
     session_manager: SessionManager | None = None,
+    workflow_name: Literal["linear", "langgraph"] = "linear",
 ) -> ContractConversationWorkflow:
+    if type(workflow_name) is not str or workflow_name not in {"linear", "langgraph"}:
+        raise ValueError("unknown workflow")
     cleanup = coordinator if session_manager is None else session_manager
     if engine is None:
-        engine = LinearConversationEngine(
-            ports,
-            context_provider=context_provider,
-            accepts_results=cleanup.accepts_results,
-        )
-    elif engine.context_provider is not context_provider:
+        if workflow_name == "linear":
+            engine = LinearConversationEngine(
+                ports,
+                context_provider=context_provider,
+                accepts_results=cleanup.accepts_results,
+            )
+        elif workflow_name == "langgraph":
+            engine = LangGraphConversationEngine(
+                cast(WorkflowPorts, ports),
+                context_provider=context_provider,
+                accepts_results=cleanup.accepts_results,
+            )
+        else:
+            raise ValueError("unknown workflow")
+    elif (workflow_name == "linear" and type(engine) is not LinearConversationEngine) or (
+        workflow_name == "langgraph" and type(engine) is not LangGraphConversationEngine
+    ):
+        raise TypeError("workflow engine kind mismatch")
+    if getattr(engine, "context_provider", None) is not context_provider:
         raise TypeError("workflow engine context provider mismatch")
     return ContractConversationWorkflow(completed_audio, engine, cleanup)
 

@@ -756,7 +756,10 @@ async def test_simulated_turn_maps_admission_rejections_to_content_free_bodies(
 
 
 @pytest.mark.asyncio
-async def test_production_container_installs_single_guest_app_with_existing_roots() -> None:
+@pytest.mark.parametrize("workflow_name", ("linear", "langgraph"))
+async def test_production_container_installs_single_guest_app_with_existing_roots(
+    workflow_name: str,
+) -> None:
     reachy = _Reachy()
     clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
     coordinator = TurnCoordinator(
@@ -787,16 +790,20 @@ async def test_production_container_installs_single_guest_app_with_existing_root
         loopback_host="127.0.0.1",
         identity=_Identity(uuid4()),
         profiles=_Profiles(),
+        workflow_name=workflow_name,  # type: ignore[arg-type]
     )
 
     assert installed.composition.workflow is installed.composition.dependencies.workflow
     assert installed.composition.context_provider is not None
-    assert installed.composition.linear_engine is not None
-    assert (
-        installed.composition.linear_engine.context_provider
-        is installed.composition.context_provider
+    selected_engine = (
+        installed.composition.linear_engine
+        if workflow_name == "linear"
+        else installed.composition.langgraph_engine
     )
-    assert not hasattr(installed.composition, "langgraph_engine")
+    assert selected_engine is not None
+    assert selected_engine.context_provider is installed.composition.context_provider
+    assert (installed.composition.linear_engine is None) is (workflow_name == "langgraph")
+    assert (installed.composition.langgraph_engine is None) is (workflow_name == "linear")
     assert installed.coordinator is coordinator
     assert installed.session_manager is session_manager
     assert installed.readiness_dependencies == (lifecycle,)
