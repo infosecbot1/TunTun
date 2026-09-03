@@ -1,0 +1,15 @@
+[Unit]
+Description=Install Tuntun emergency firewall before networking
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/lib/reachy-mini-app-assistant/apps/com.tuntun.edge/firewall/current
+ExecStart=/var/lib/reachy-mini-app-assistant/apps/com.tuntun.edge/firewall/current/bin/python -m deploy.reachy.apply_firewall --emergency-baseline
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
+RequiredBy=network-pre.target

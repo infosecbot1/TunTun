@@ -4,6 +4,7 @@ import sys
 
 import typer
 
+from tuntun_edge.cli.managed import managed
 from tuntun_edge.cli.ptt import ptt
 from tuntun_edge.cli.reachy_commission import reachy_app
 
@@ -16,6 +17,7 @@ def _callback() -> None:
 
 
 app.command("ptt")(ptt)
+app.command("managed")(managed)
 app.add_typer(reachy_app, name="reachy")
 
 
