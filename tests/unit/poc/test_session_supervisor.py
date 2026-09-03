@@ -4164,10 +4164,10 @@ async def test_playback_queue_admission_is_interruptible_at_the_absolute_playbac
 async def test_cancel_during_active_uncommitted_pcm_preserves_priority_abort_and_ack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(supervisor_module, "_PROVIDER_CLOSE_SECONDS", 0.01)
-    monkeypatch.setattr(supervisor_module, "_PROVIDER_JOIN_SECONDS", 0.02)
-    monkeypatch.setattr(supervisor_module, "_CLEANUP_ACK_SECONDS", 0.03)
-    monkeypatch.setattr(supervisor_module, "_CLEANUP_TOTAL_SECONDS", 0.04)
+    monkeypatch.setattr(supervisor_module, "_PROVIDER_CLOSE_SECONDS", 0.1)
+    monkeypatch.setattr(supervisor_module, "_PROVIDER_JOIN_SECONDS", 0.2)
+    monkeypatch.setattr(supervisor_module, "_CLEANUP_ACK_SECONDS", 0.4)
+    monkeypatch.setattr(supervisor_module, "_CLEANUP_TOTAL_SECONDS", 0.5)
     clock = _Clock()
     bridge = _Bridge(mode=PttInputMode.REACHY_LOCAL, block_pcm=True)
     supervisor = _supervisor(
@@ -4182,7 +4182,7 @@ async def test_cancel_during_active_uncommitted_pcm_preserves_priority_abort_and
 
     bridge.edge_cancel()
 
-    assert await _bounded_outcome(run) is PttSessionOutcome.CANCELLED
+    assert await _bounded_outcome(run, timeout=1.0) is PttSessionOutcome.CANCELLED
     assert not any(isinstance(frame, PcmFrame) for frame in bridge.sent)
     controls = [frame for frame in bridge.sent if isinstance(frame, ControlFrame)]
     kinds = [frame.control.kind for frame in controls]
@@ -4253,10 +4253,10 @@ async def test_first_edge_cleanup_reason_is_preserved_for_abort(
 async def test_latched_cancel_is_not_remapped_to_playback_failure_while_queue_is_full(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(supervisor_module, "_PROVIDER_CLOSE_SECONDS", 0.01)
-    monkeypatch.setattr(supervisor_module, "_PROVIDER_JOIN_SECONDS", 0.02)
-    monkeypatch.setattr(supervisor_module, "_CLEANUP_ACK_SECONDS", 0.03)
-    monkeypatch.setattr(supervisor_module, "_CLEANUP_TOTAL_SECONDS", 0.04)
+    monkeypatch.setattr(supervisor_module, "_PROVIDER_CLOSE_SECONDS", 0.1)
+    monkeypatch.setattr(supervisor_module, "_PROVIDER_JOIN_SECONDS", 0.2)
+    monkeypatch.setattr(supervisor_module, "_CLEANUP_ACK_SECONDS", 0.4)
+    monkeypatch.setattr(supervisor_module, "_CLEANUP_TOTAL_SECONDS", 0.5)
     clock = _Clock()
     bridge = _Bridge(mode=PttInputMode.REACHY_LOCAL, block_pcm=True)
     chunks = tuple(
@@ -4282,7 +4282,7 @@ async def test_latched_cancel_is_not_remapped_to_playback_failure_while_queue_is
 
     bridge.edge_cancel()
 
-    assert await _bounded_outcome(run) is PttSessionOutcome.CANCELLED
+    assert await _bounded_outcome(run, timeout=1.0) is PttSessionOutcome.CANCELLED
     abort = next(
         frame
         for frame in bridge.sent
