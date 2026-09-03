@@ -1881,6 +1881,15 @@ def _assert_pre_session_failure_observed(
     assert readiness.disconnect_degraded_codes == (expected_code,)
 
 
+def _assert_pre_session_failure_transient(
+    state: FakeState,
+    readiness: FakeReadiness,
+) -> None:
+    assert state.abandoned == ["pre_session_failure"]
+    assert readiness.disconnect_degraded_codes == ()
+    assert readiness.restart_required is False
+
+
 async def _record_sleep(record: list[float], delay: float) -> None:
     record.append(delay)
 
@@ -2508,7 +2517,7 @@ async def test_server_registry_rejection_closes_and_observes_pre_session_failure
 
 
 @pytest.mark.asyncio
-async def test_server_time_handshake_failure_closes_and_observes_pre_session_failure() -> None:
+async def test_server_time_handshake_malformed_request_is_transient_pre_session_noise() -> None:
     from tuntun_core.adapters.reachy.wss_server import ReachyWssServer
 
     signer = Ed25519PrivateKey.generate()
@@ -2537,11 +2546,39 @@ async def test_server_time_handshake_failure_closes_and_observes_pre_session_fai
     assert issuer.requests == []
     assert socket.sent == []
     assert socket.closed == [(1008, "reachy_handshake_failed")]
-    _assert_pre_session_failure_observed(
-        state,
-        readiness,
-        "reachy_pre_session_failed:PermissionError",
+    _assert_pre_session_failure_transient(state, readiness)
+
+
+@pytest.mark.asyncio
+async def test_server_application_malformed_proof_is_transient_pre_session_noise() -> None:
+    from tuntun_core.adapters.reachy.wss_server import ReachyWssServer
+
+    signer = Ed25519PrivateKey.generate()
+    socket = ServerSocket("/v1/reachy", "tuntun.reachy.v1", ["not-json"])
+    state = FakeState()
+    readiness = FakeReadiness()
+    factory = SessionFactory()
+    server = ReachyWssServer(
+        Endpoint(),
+        tls_context=object(),
+        device_registry=DeviceRegistry(),
+        pairing_keys=CorePairingKeys(signer, Ed25519PrivateKey.generate()),
+        state=state,
+        handler=FakeHandler(),
+        sessions=SessionPublisher(),
+        readiness=readiness,
+        time_issuer=TimeIssuer(),
+        clock=Clock(),
+        session_factory=factory,
+        client_certificate_verifier=lambda _socket, expected: ("TLSv1.3", CLIENT_CERTIFICATE_DER),
     )
+
+    with pytest.raises(PermissionError, match="reachy_handshake_json_invalid"):
+        await server.accept(socket)
+
+    assert factory.created == 0
+    assert socket.closed == [(1008, "reachy_handshake_failed")]
+    _assert_pre_session_failure_transient(state, readiness)
 
 
 @pytest.mark.asyncio
@@ -3473,6 +3510,86 @@ async def test_server_accepts_one_current_application_client_and_publishes_sessi
 
 
 @pytest.mark.asyncio
+async def test_server_simultaneous_application_accept_rejects_second_without_queueing() -> None:
+    from tuntun_core.adapters.reachy.wss_server import ReachyWssServer
+
+    signer = Ed25519PrivateKey.generate()
+    first_socket = ServerSocket(
+        "/v1/reachy",
+        "tuntun.reachy.v1",
+        [],
+        proof_signer=signer,
+    )
+    second_socket = ServerSocket(
+        "/v1/reachy",
+        "tuntun.reachy.v1",
+        [],
+        proof_signer=signer,
+    )
+    release_registry = asyncio.Event()
+    registry = BlockingDeviceRegistry(release_registry)
+    release_first_session = asyncio.Event()
+    sessions = SessionPublisher()
+    factory = SessionFactory(release=release_first_session)
+    admission = SimultaneousAdmissionRaceGate()
+    server = ReachyWssServer(
+        Endpoint(),
+        tls_context=object(),
+        device_registry=registry,
+        pairing_keys=CorePairingKeys(signer, Ed25519PrivateKey.generate()),
+        state=FakeState(),
+        handler=FakeHandler(),
+        sessions=sessions,
+        readiness=FakeReadiness(),
+        time_issuer=TimeIssuer(),
+        clock=Clock(),
+        session_factory=factory,
+        client_certificate_verifier=lambda _socket, expected: ("TLSv1.3", CLIENT_CERTIFICATE_DER),
+        nonce_factory=lambda size: b"s" * size,
+    )
+    server._client_lock = admission
+
+    first = asyncio.create_task(server.accept(first_socket))
+    second = asyncio.create_task(server.accept(second_socket))
+    try:
+        await asyncio.wait_for(admission.two_attempts.wait(), timeout=1)
+        await asyncio.wait_for(registry.started.wait(), timeout=1)
+        await asyncio.sleep(0)
+
+        busy_sockets = [
+            socket
+            for socket in (first_socket, second_socket)
+            if socket.closed == [(1013, "commissioned_reachy_already_connected")]
+        ]
+        assert len(busy_sockets) == 1
+        assert factory.created == 0
+
+        release_registry.set()
+        await asyncio.wait_for(factory.created_event.wait(), timeout=1)
+        assert factory.created == 1
+        assert sessions.published == [DEVICE_ID]
+    finally:
+        release_registry.set()
+        release_first_session.set()
+        for task in (first, second):
+            if not task.done():
+                task.cancel()
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(asyncio.gather(first, second), timeout=1)
+
+    replacement = ServerSocket(
+        "/v1/reachy",
+        "tuntun.reachy.v1",
+        [],
+        proof_signer=signer,
+    )
+    await server.accept(replacement)
+    assert factory.created == 2
+    assert sessions.published == [DEVICE_ID, DEVICE_ID]
+    assert sessions.cleared == [DEVICE_ID, DEVICE_ID]
+
+
+@pytest.mark.asyncio
 async def test_server_busy_client_rejection_close_is_bounded() -> None:
     from tuntun_core.adapters.reachy.wss_server import ReachyWssServer
 
@@ -3786,13 +3903,108 @@ async def test_server_close_wait_closed_is_bounded() -> None:
     )
 
     await server.start()
-    await asyncio.wait_for(server.close(), timeout=0.05)
+    with pytest.raises(RuntimeError, match="reachy_server_close_unproven"):
+        await asyncio.wait_for(server.close(), timeout=0.05)
 
     assert hanging_server.close_called is True
     assert hanging_server.wait_started.is_set()
     assert server._server is hanging_server
     assert readiness.disconnect_degraded_codes == ("reachy_server_close:timeout",)
     assert readiness.restart_required is True
+
+
+@pytest.mark.asyncio
+async def test_server_close_failure_retains_bound_server_for_retry() -> None:
+    from tuntun_core.adapters.reachy.wss_server import ReachyWssServer
+
+    class FlakyCloseServer:
+        def __init__(self) -> None:
+            self.close_raises = True
+            self.close_calls = 0
+            self.wait_closed_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_raises:
+                raise RuntimeError("synthetic close failed")
+
+        async def wait_closed(self) -> None:
+            self.wait_closed_calls += 1
+
+    bound_server = FlakyCloseServer()
+
+    async def serve_factory(
+        handler: Callable[[Any], Awaitable[None]],
+        **kwargs: object,
+    ) -> object:
+        assert callable(handler)
+        assert kwargs["host"] == "192.168.50.10"
+        return bound_server
+
+    readiness = FakeReadiness()
+    server = ReachyWssServer(
+        Endpoint(),
+        tls_context=object(),
+        device_registry=DeviceRegistry(),
+        pairing_keys=CorePairingKeys(Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()),
+        state=FakeState(),
+        handler=FakeHandler(),
+        sessions=SessionPublisher(),
+        readiness=readiness,
+        time_issuer=TimeIssuer(),
+        clock=Clock(),
+        session_factory=SessionFactory(),
+        serve_factory=serve_factory,
+    )
+
+    await server.start()
+    with pytest.raises(RuntimeError, match="reachy_server_close_unproven"):
+        await server.close()
+
+    assert server._server is bound_server
+    assert bound_server.close_calls == 1
+    assert bound_server.wait_closed_calls == 0
+    assert readiness.disconnect_degraded_codes == ("reachy_server_close:RuntimeError",)
+    assert readiness.restart_required is True
+
+    bound_server.close_raises = False
+    await server.close()
+
+    assert server._server is None
+    assert bound_server.close_calls == 2
+    assert bound_server.wait_closed_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_server_start_refuses_to_overwrite_retained_bound_server() -> None:
+    from tuntun_core.adapters.reachy.wss_server import ReachyWssServer
+
+    factory = ServeFactory()
+    state = FakeState()
+    server = ReachyWssServer(
+        Endpoint(),
+        tls_context=object(),
+        device_registry=DeviceRegistry(),
+        pairing_keys=CorePairingKeys(Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()),
+        state=state,
+        handler=FakeHandler(),
+        sessions=SessionPublisher(),
+        readiness=FakeReadiness(),
+        time_issuer=TimeIssuer(),
+        clock=Clock(),
+        session_factory=SessionFactory(),
+        serve_factory=factory,
+    )
+
+    await server.start()
+    retained = server._server
+
+    with pytest.raises(RuntimeError, match="reachy_server_already_bound"):
+        await server.start()
+
+    assert server._server is retained
+    assert len(factory.calls) == 1
+    assert state.abandoned == ["restart_recovery"]
 
 
 @pytest.mark.asyncio
@@ -4154,6 +4366,27 @@ class DeviceRegistry:
         return Device()
 
 
+class BlockingDeviceRegistry(DeviceRegistry):
+    def __init__(self, release: asyncio.Event) -> None:
+        super().__init__()
+        self.release = release
+        self.started = asyncio.Event()
+
+    async def require_current_client_certificate(
+        self,
+        observed_sha256: str,
+        expected_sha256: str,
+        endpoint_generation: int,
+    ) -> Device:
+        self.started.set()
+        await self.release.wait()
+        return await super().require_current_client_certificate(
+            observed_sha256,
+            expected_sha256,
+            endpoint_generation,
+        )
+
+
 class MutatingDeviceRegistry(DeviceRegistry):
     def __init__(self, endpoint: MutableEndpoint) -> None:
         super().__init__()
@@ -4306,6 +4539,58 @@ class FailingClearSessionPublisher(SessionPublisher):
         assert device_id == DEVICE_ID
         assert isinstance(session, Session)
         raise RuntimeError("clear failed")
+
+
+class SimultaneousAdmissionRaceGate:
+    def __init__(self) -> None:
+        self.two_attempts = asyncio.Event()
+        self._attempts = 0
+        self._held = False
+        self._queued_lock = asyncio.Lock()
+
+    def _record_attempt(self) -> None:
+        self._attempts += 1
+        if self._attempts >= 2:
+            self.two_attempts.set()
+
+    def locked(self) -> bool:
+        self._record_attempt()
+        return False
+
+    async def __aenter__(self) -> SimultaneousAdmissionRaceGate:
+        await self.two_attempts.wait()
+        await self._queued_lock.acquire()
+        return self
+
+    async def __aexit__(
+        self,
+        _exc_type: object,
+        _exc: object,
+        _traceback: object,
+    ) -> None:
+        self._queued_lock.release()
+
+    def claim(self) -> SimultaneousAdmissionReservation | None:
+        self._record_attempt()
+        if self._held:
+            return None
+        self._held = True
+        return SimultaneousAdmissionReservation(self)
+
+    def release(self) -> None:
+        self._held = False
+
+
+class SimultaneousAdmissionReservation:
+    def __init__(self, gate: SimultaneousAdmissionRaceGate) -> None:
+        self._gate = gate
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._gate.release()
 
 
 class Session:

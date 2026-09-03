@@ -188,6 +188,10 @@ class ReachyTransportSupervisorState:
             )
         self.restart_required = self.restart_required or restart_required
 
+    def require_ready(self) -> None:
+        if not self.ready:
+            raise RuntimeError("reachy_transport_unhealthy")
+
 
 class PersistentCameraGrantClaims:
     def __init__(self, uow_factory: UnitOfWorkFactory, clock: Clock) -> None:

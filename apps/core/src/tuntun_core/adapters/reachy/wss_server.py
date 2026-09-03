@@ -10,6 +10,7 @@ import math
 import secrets
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Final, Protocol, cast
 from uuid import UUID
 
@@ -22,6 +23,7 @@ from tuntun_contracts.reachy_wire import (
     DeviceChallengeV1,
     DeviceProofV1,
 )
+from tuntun_core.adapters.reachy.session import ReachyTransportSupervisorState
 from tuntun_core.adapters.reachy.tls import require_client_certificate_sha256
 
 APP_PATH = "/v1/reachy"
@@ -186,28 +188,45 @@ class _OutboundKeysSnapshot:
     hmac_key_id: str
 
 
-class ReachyTransportSupervisorState:
-    """Shared synchronous readiness latch observed by the process supervisor."""
+class _ClientAdmissionReservation:
+    def __init__(self, gate: _SingleClientAdmissionGate, token: int) -> None:
+        self._gate = gate
+        self._token = token
+        self._released = False
 
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._gate.release(self._token)
+
+
+class _SingleClientAdmissionGate:
     def __init__(self) -> None:
-        self.disconnect_degraded_codes: tuple[str, ...] = ()
-        self.restart_required = False
+        self._guard = Lock()
+        self._held_token: int | None = None
+        self._next_token = 0
 
-    @property
-    def ready(self) -> bool:
-        return not self.disconnect_degraded_codes and not self.restart_required
+    def locked(self) -> bool:
+        with self._guard:
+            return self._held_token is not None
 
-    def latch_disconnect_degraded(
-        self,
-        codes: tuple[str, ...],
-        *,
-        restart_required: bool = False,
-    ) -> None:
-        if codes:
-            self.disconnect_degraded_codes = tuple(
-                dict.fromkeys((*self.disconnect_degraded_codes, *codes))
-            )
-        self.restart_required = self.restart_required or restart_required
+    def claim(self) -> _ClientAdmissionReservation | None:
+        if not self._guard.acquire(blocking=False):
+            return None
+        try:
+            if self._held_token is not None:
+                return None
+            self._next_token += 1
+            self._held_token = self._next_token
+            return _ClientAdmissionReservation(self, self._held_token)
+        finally:
+            self._guard.release()
+
+    def release(self, token: int) -> None:
+        with self._guard:
+            if self._held_token == token:
+                self._held_token = None
 
 
 class ReachyWssServer:
@@ -263,7 +282,8 @@ class ReachyWssServer:
             "pre_session_cleanup_timeout",
             MAX_SOCKET_CLOSE_SECONDS,
         )
-        self._client_lock = asyncio.Lock()
+        self._client_lock = _SingleClientAdmissionGate()
+        self._server_start_lock = asyncio.Lock()
         self._server: object | None = None
         self._background_cleanup_tasks: set[asyncio.Task[Any]] = set()
 
@@ -342,36 +362,49 @@ class ReachyWssServer:
         )
 
     async def start(self) -> None:
-        endpoint = self._capture_endpoint()
-        await self._state.abandon_connection("restart_recovery")
-        server: object | None = None
-        try:
-            server = await self._serve_factory(
-                self.accept,
-                host=endpoint.core_ipv4,
-                port=endpoint.port,
-                ssl=self._tls_context,
-                subprotocols=[TIME_SUBPROTOCOL, APP_SUBPROTOCOL],
-                compression=None,
-                ping_interval=None,
-                max_size=MAX_WSS_MESSAGE_BYTES,
-                max_queue=16,
-                open_timeout=5,
-                close_timeout=2,
-            )
-            self._server = server
-            self._require_unchanged_endpoint(endpoint)
-        except BaseException as error:
-            if server is not None:
-                cancellations = await self._close_bound_server(
-                    server,
-                    failure_prefix="reachy_server_start_close",
-                    timeout_code="reachy_server_start_close:timeout",
-                    clear_state_on_timeout=True,
+        async with self._server_start_lock:
+            if self._server is not None:
+                raise RuntimeError("reachy_server_already_bound")
+            endpoint = self._capture_endpoint()
+            await self._state.abandon_connection("restart_recovery")
+            server: object | None = None
+            try:
+                server = await self._serve_factory(
+                    self.accept,
+                    host=endpoint.core_ipv4,
+                    port=endpoint.port,
+                    ssl=self._tls_context,
+                    subprotocols=[TIME_SUBPROTOCOL, APP_SUBPROTOCOL],
+                    compression=None,
+                    ping_interval=None,
+                    max_size=MAX_WSS_MESSAGE_BYTES,
+                    max_queue=16,
+                    open_timeout=5,
+                    close_timeout=2,
                 )
-                if cancellations:
-                    raise asyncio.CancelledError from error
-            raise
+                self._server = server
+                self._require_unchanged_endpoint(endpoint)
+            except BaseException as error:
+                if server is not None:
+                    try:
+                        cancellations = await self._close_bound_server(
+                            server,
+                            failure_prefix="reachy_server_start_close",
+                            timeout_code="reachy_server_start_close:timeout",
+                            clear_state_on_timeout=True,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException as close_error:
+                        if isinstance(error, asyncio.CancelledError):
+                            raise error from close_error
+                        raise RuntimeError("reachy_server_start_failed") from BaseExceptionGroup(
+                            "reachy_server_start_failed",
+                            [error, close_error],
+                        )
+                    if cancellations:
+                        raise asyncio.CancelledError from error
+                raise
 
     async def close(self) -> None:
         if self._server is None:
@@ -394,13 +427,22 @@ class ReachyWssServer:
         timeout_code: str,
         clear_state_on_timeout: bool,
     ) -> int:
+        del clear_state_on_timeout
         close = getattr(server, "close", None)
         wait_closed = getattr(server, "wait_closed", None)
+        unproven_close: BaseException | None = None
         if callable(close):
-            close()
+            try:
+                close()
+            except Exception as error:
+                unproven_close = error
+                self._readiness.latch_disconnect_degraded(
+                    (f"{failure_prefix}:{type(error).__name__}",),
+                    restart_required=True,
+                )
         cancellations = 0
-        wait_completed = True
-        if callable(wait_closed):
+        wait_completed = unproven_close is None
+        if callable(wait_closed) and unproven_close is None:
             wait_task: asyncio.Task[Any] | None = None
             try:
                 wait_task = _spawn_task_with_direct_fallback(
@@ -417,8 +459,10 @@ class ReachyWssServer:
                 )
             except _TaskFactoryUnavailable:
                 wait_completed = False
+                unproven_close = RuntimeError("reachy_server_close:factory_unavailable")
             except TimeoutError:
                 wait_completed = False
+                unproven_close = RuntimeError(timeout_code)
                 if wait_task is not None:
                     wait_task.cancel()
                     self._retain_background_task(
@@ -440,6 +484,7 @@ class ReachyWssServer:
                 cancellations += 1
             except Exception as error:
                 wait_completed = False
+                unproven_close = error
                 self._readiness.latch_disconnect_degraded(
                     (f"{failure_prefix}:{type(error).__name__}",),
                     restart_required=True,
@@ -448,15 +493,21 @@ class ReachyWssServer:
                 try:
                     wait_task.result()
                 except asyncio.CancelledError:
-                    cancellations += 1
+                    if unproven_close is None:
+                        cancellations += 1
                 except Exception as error:
                     wait_completed = False
+                    unproven_close = error
                     self._readiness.latch_disconnect_degraded(
                         (f"{failure_prefix}:{type(error).__name__}",),
                         restart_required=True,
                     )
-        if self._server is server and (wait_completed or clear_state_on_timeout):
+        if self._server is server and wait_completed and unproven_close is None:
             self._server = None
+        if cancellations:
+            return cancellations
+        if unproven_close is not None:
+            raise RuntimeError("reachy_server_close_unproven") from unproven_close
         return cancellations
 
     async def accept(self, socket: SocketLike) -> None:
@@ -488,7 +539,8 @@ class ReachyWssServer:
             if cancellations:
                 raise asyncio.CancelledError
             return
-        if self._client_lock.locked():
+        reservation = self._client_lock.claim()
+        if reservation is None:
             cancellations = await _close_socket_observing_cancellation(
                 socket,
                 code=1013,
@@ -499,7 +551,7 @@ class ReachyWssServer:
             if cancellations:
                 raise asyncio.CancelledError
             return
-        async with self._client_lock:
+        try:
             endpoint = self._capture_endpoint()
             try:
                 negotiated_tls_version, client_der = self._client_certificate_verifier(
@@ -551,12 +603,14 @@ class ReachyWssServer:
                     socket,
                     code=close_code,
                     reason=close_reason,
-                    readiness_code=f"reachy_pre_session_failed:{type(error).__name__}",
+                    readiness_code=_pre_session_readiness_code(error),
                 )
                 if cancellations:
                     raise asyncio.CancelledError from error
                 raise
             await self._serve_published_session(device_id, session)
+        finally:
+            reservation.release()
 
     async def _handle_pre_session_failure(
         self,
@@ -564,7 +618,7 @@ class ReachyWssServer:
         *,
         code: int,
         reason: str,
-        readiness_code: str,
+        readiness_code: str | None,
     ) -> int:
         close_cancellations = await _close_socket_observing_cancellation(
             socket,
@@ -573,7 +627,8 @@ class ReachyWssServer:
             timeout=self._socket_close_timeout,
             readiness=self._readiness,
         )
-        self._readiness.latch_disconnect_degraded((readiness_code,))
+        if readiness_code is not None:
+            self._readiness.latch_disconnect_degraded((readiness_code,))
         cleanup_cancellations = await self._observe_pre_session_cleanup()
         return close_cancellations + cleanup_cancellations
 
@@ -1031,6 +1086,15 @@ def _parse_handshake_text(model_type: type[Any], raw: str | bytes) -> Any:
         )
     except (TypeError, ValueError) as error:
         raise PermissionError("reachy_handshake_json_invalid") from error
+
+
+def _pre_session_readiness_code(error: BaseException) -> str | None:
+    if isinstance(error, PermissionError) and str(error) in {
+        "reachy_handshake_text_json_required",
+        "reachy_handshake_json_invalid",
+    }:
+        return None
+    return f"reachy_pre_session_failed:{type(error).__name__}"
 
 
 def device_challenge_signing_payload(

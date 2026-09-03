@@ -3,18 +3,50 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from tuntun_contracts.ports import ClockPort, RouteAuthorizerPort
+from tuntun_core.adapters.reachy.authenticated_control import AuthenticatedControlClient
+from tuntun_core.adapters.reachy.current_session import (
+    CoreDisconnectSafetyFacade,
+    CurrentReachySessionChannel,
+)
+from tuntun_core.adapters.reachy.gateway import ReachyGateway
+from tuntun_core.adapters.reachy.session import CoreReachySession, ReachyTransportSupervisorState
+from tuntun_core.adapters.reachy.wss_server import (
+    DeviceRegistry as ReachyDeviceRegistry,
+)
+from tuntun_core.adapters.reachy.wss_server import (
+    DuplexState as ReachyDuplexState,
+)
+from tuntun_core.adapters.reachy.wss_server import (
+    Endpoint as ReachyEndpoint,
+)
+from tuntun_core.adapters.reachy.wss_server import (
+    Handler as ReachyHandler,
+)
+from tuntun_core.adapters.reachy.wss_server import (
+    PairingKeys as ReachyPairingKeys,
+)
+from tuntun_core.adapters.reachy.wss_server import (
+    ReachyWssServer,
+)
+from tuntun_core.adapters.reachy.wss_server import (
+    SessionFactory as ReachySessionFactory,
+)
+from tuntun_core.adapters.reachy.wss_server import (
+    TimeIssuer as ReachyTimeIssuer,
+)
 from tuntun_core.adapters.sqlcipher.async_unit_of_work import AsyncUnitOfWorkFactory
 from tuntun_core.api.app import create_app
 from tuntun_core.api.dependencies import ReadinessDependency, SimulatedGuestAppDependencies
 from tuntun_core.bootstrap.lifecycle import (
     BudgetReconciliationSupervisor,
     CoreProcessLease,
+    ProductionReachyLifecycle,
     StartupTurnRecovery,
 )
 from tuntun_core.services.budget.catalog import PriceCatalog
@@ -168,6 +200,13 @@ class ProductionContainer:
         "budget_reconciler",
         "startup_turn_recovery",
         "budget_lifecycle",
+        "reachy_transport_supervisor",
+        "disconnect_safety",
+        "current_reachy_session",
+        "authenticated_reachy_control",
+        "reachy_gateway",
+        "reachy_wss_server",
+        "reachy_transport_lifecycle",
         "readiness_dependencies",
         "simulated_guest_app",
     )
@@ -182,6 +221,13 @@ class ProductionContainer:
         budget_lifecycle: BudgetReconciliationSupervisor,
         turn_coordinator: TurnCoordinator | None = None,
         session_manager: SessionManager | None = None,
+        reachy_transport_supervisor: ReachyTransportSupervisorState | None = None,
+        disconnect_safety: CoreDisconnectSafetyFacade | None = None,
+        current_reachy_session: CurrentReachySessionChannel | None = None,
+        authenticated_reachy_control: AuthenticatedControlClient | None = None,
+        reachy_gateway: ReachyGateway | None = None,
+        reachy_wss_server: ReachyWssServer | None = None,
+        reachy_transport_lifecycle: ProductionReachyLifecycle | None = None,
     ) -> None:
         if budget_lifecycle.reconciler is not budget_reconciler:
             raise TypeError("production reconciler identity mismatch")
@@ -196,7 +242,35 @@ class ProductionContainer:
         self.budget_reconciler = budget_reconciler
         self.startup_turn_recovery = startup_turn_recovery
         self.budget_lifecycle = budget_lifecycle
-        self.readiness_dependencies = (budget_lifecycle,)
+        self.reachy_transport_supervisor = reachy_transport_supervisor
+        self.disconnect_safety = disconnect_safety
+        self.current_reachy_session = current_reachy_session
+        self.authenticated_reachy_control = authenticated_reachy_control
+        self.reachy_gateway = reachy_gateway
+        self.reachy_wss_server = reachy_wss_server
+        self.reachy_transport_lifecycle = reachy_transport_lifecycle
+        reachy_components = (
+            reachy_transport_supervisor,
+            disconnect_safety,
+            current_reachy_session,
+            authenticated_reachy_control,
+            reachy_gateway,
+            reachy_wss_server,
+            reachy_transport_lifecycle,
+        )
+        if any(component is not None for component in reachy_components):
+            if not all(component is not None for component in reachy_components):
+                raise TypeError("production reachy transport composition incomplete")
+            if reachy_transport_supervisor is None or current_reachy_session is None:
+                raise TypeError("production reachy readiness composition incomplete")
+            readiness_dependencies: tuple[ReadinessDependency, ...] = (
+                reachy_transport_supervisor,
+                current_reachy_session,
+                budget_lifecycle,
+            )
+        else:
+            readiness_dependencies = (budget_lifecycle,)
+        self.readiness_dependencies = readiness_dependencies
         self.simulated_guest_app: InstalledSimulatedGuestApp | None = None
 
     @classmethod
@@ -212,6 +286,16 @@ class ProductionContainer:
         runtime_provider_identities: RuntimeProviderIdentityReader,
         budget_evidence: BudgetEvidenceService,
         provider_defaults_path: Path,
+        reachy_endpoint: Any | None = None,
+        reachy_tls_context: object | None = None,
+        reachy_device_registry: Any | None = None,
+        reachy_pairing_keys: Any | None = None,
+        reachy_duplex_state: Any | None = None,
+        reachy_handler: Any | None = None,
+        reachy_time_issuer: Any | None = None,
+        reachy_serve_factory: Any | None = None,
+        reachy_client_certificate_verifier: Any | None = None,
+        reachy_session_ready_timeout: float = 2.0,
     ) -> ProductionContainer:
         if not configured_state_root.is_absolute():
             raise ValueError("production_state_root_requires_absolute_path")
@@ -220,6 +304,22 @@ class ProductionContainer:
             configured_state_root / "core-process.lock",
         )
         try:
+            required_reachy_transport_parts = (
+                reachy_endpoint,
+                reachy_tls_context,
+                reachy_device_registry,
+                reachy_pairing_keys,
+                reachy_duplex_state,
+                reachy_handler,
+                reachy_time_issuer,
+            )
+            owns_reachy_transport = all(
+                component is not None for component in required_reachy_transport_parts
+            )
+            if any(component is not None for component in required_reachy_transport_parts) and (
+                not owns_reachy_transport
+            ):
+                raise TypeError("production reachy transport composition incomplete")
             provider_reviews = SqlcipherCurrentProviderReviews(
                 runtime_provider_identities,
             )
@@ -232,13 +332,42 @@ class ProductionContainer:
                 budget_evidence=budget_evidence,
                 provider_defaults=provider_defaults,
             )
+            turn_coordinator: TurnCoordinator | None = None
+            if owns_reachy_transport:
+
+                def active_turn_id() -> UUID | None:
+                    if turn_coordinator is None:
+                        return None
+                    return turn_coordinator.active_turn_id()
+
+                async def cancel_turn(turn_id: UUID, reason: str) -> None:
+                    if turn_coordinator is None:
+                        raise RuntimeError("production turn coordinator unavailable")
+                    await turn_coordinator.cancel(turn_id, reason)
+
+                reachy_transport_supervisor = ReachyTransportSupervisorState()
+                disconnect_safety = CoreDisconnectSafetyFacade(
+                    active_turn_id=active_turn_id,
+                    cancel_turn=cancel_turn,
+                )
+                current_reachy_session = CurrentReachySessionChannel(safety=disconnect_safety)
+                authenticated_reachy_control = AuthenticatedControlClient(current_reachy_session)
+                reachy_gateway = ReachyGateway(authenticated_reachy_control, clock)
+                reachy_runtime = reachy_gateway
+            else:
+                reachy_transport_supervisor = None
+                disconnect_safety = None
+                current_reachy_session = None
+                authenticated_reachy_control = None
+                reachy_gateway = None
+                reachy_runtime = reachy
             reconciler = ExpiredBudgetReconciler(
                 sqlcipher_uow_factory,
                 clock,
                 core.budget_guard,
             )
             startup_recovery = StartupTurnRecovery(
-                reachy,
+                reachy_runtime,
                 reconciler,
                 sqlcipher_uow_factory,
                 clock,
@@ -250,9 +379,49 @@ class ProductionContainer:
             )
             turn_coordinator = TurnCoordinator(
                 core.budget_guard,
-                reachy,
+                reachy_runtime,
                 clock,
             )
+            if owns_reachy_transport:
+                if (
+                    reachy_endpoint is None
+                    or reachy_tls_context is None
+                    or reachy_device_registry is None
+                    or reachy_pairing_keys is None
+                    or reachy_duplex_state is None
+                    or reachy_handler is None
+                    or reachy_time_issuer is None
+                    or reachy_transport_supervisor is None
+                    or current_reachy_session is None
+                    or disconnect_safety is None
+                ):
+                    raise TypeError("production reachy transport composition incomplete")
+                reachy_wss_server = ReachyWssServer(
+                    cast(ReachyEndpoint, reachy_endpoint),
+                    tls_context=reachy_tls_context,
+                    device_registry=cast(ReachyDeviceRegistry, reachy_device_registry),
+                    pairing_keys=cast(ReachyPairingKeys, reachy_pairing_keys),
+                    state=cast(ReachyDuplexState, reachy_duplex_state),
+                    handler=cast(ReachyHandler, reachy_handler),
+                    sessions=current_reachy_session,
+                    readiness=reachy_transport_supervisor,
+                    time_issuer=cast(ReachyTimeIssuer, reachy_time_issuer),
+                    clock=clock,
+                    session_factory=cast(ReachySessionFactory, CoreReachySession),
+                    serve_factory=reachy_serve_factory,
+                    client_certificate_verifier=reachy_client_certificate_verifier,
+                )
+                reachy_transport_lifecycle = ProductionReachyLifecycle(
+                    wss_server=reachy_wss_server,
+                    current_session=current_reachy_session,
+                    disconnect_safety=disconnect_safety,
+                    budget_lifecycle=lifecycle,
+                    process_lease=lease,
+                    session_ready_timeout=reachy_session_ready_timeout,
+                )
+            else:
+                reachy_wss_server = None
+                reachy_transport_lifecycle = None
             session_manager = SessionManager(turn_coordinator)
             return cls(
                 core=core,
@@ -262,10 +431,29 @@ class ProductionContainer:
                 budget_reconciler=reconciler,
                 startup_turn_recovery=startup_recovery,
                 budget_lifecycle=lifecycle,
+                reachy_transport_supervisor=reachy_transport_supervisor,
+                disconnect_safety=disconnect_safety,
+                current_reachy_session=current_reachy_session,
+                authenticated_reachy_control=authenticated_reachy_control,
+                reachy_gateway=reachy_gateway,
+                reachy_wss_server=reachy_wss_server,
+                reachy_transport_lifecycle=reachy_transport_lifecycle,
             )
         except BaseException:
             lease.release_after_shutdown()
             raise
+
+    async def start(self) -> None:
+        if self.reachy_transport_lifecycle is not None:
+            await self.reachy_transport_lifecycle.start()
+            return
+        await self.budget_lifecycle.start()
+
+    async def stop(self) -> None:
+        if self.reachy_transport_lifecycle is not None:
+            await self.reachy_transport_lifecycle.stop()
+            return
+        await self.budget_lifecycle.stop()
 
     def install_simulated_guest_app(
         self,
