@@ -599,7 +599,7 @@ class UnavailableLocalInferenceHandle:
             raise ModelVerificationError("local inference unavailable")
         raise LocalInferenceUnavailableError()
 
-    def infer_score(self, _frame: bytes) -> int:
+    def infer_score(self, _frame: bytes) -> float:
         self._raise_unavailable()
 
     def infer_voice_score(self, _frame: bytes) -> int:

@@ -15606,7 +15606,7 @@ def build_local_commissioning_dependencies():
     )
 ```
 
-`ReachyLocalCeremony` is the concrete pinned local transport implemented in `transport/reachy_local_ceremony.py` in this task (and therefore added to this task's file list and staging command). It opens every fixed input owner-only without following symlinks, verifies the delivered Reachy host key before its first request, consumes the physically displayed one-time code once, and carries only CSR/public agreement/signing material. Before publishing operator state, its local-console probe reads the actual non-root POSIX account and `/venvs/apps_venv/bin/python3` facts without environment override, installs a fresh owner SSH key, disables password authentication, proves the default password is rejected, and reopens a pinned-host key-only session whose remote `id -un`, interpreter tuple, and exact bounded installer/managed-app privilege checks match the local observation. It also canonicalizes and hashes the complete `packaging.tags.sys_tags()` result and a closed required-runtime inventory (Reachy SDK, its declared dependency constraints, exact `websockets==15.0.1`, and every native/media import used by edge), proves the SDK metadata accepts that WebSocket version, and proves a scratch venv created by the accepted interpreter with `--system-site-packages` can install only the two pure Tuntun wheels offline with `--no-deps` and import the whole closure. `py3-none-any` must occur in the probed target tag set and be the tag on both Tuntun wheels. PyGObject and other vendor/native dependencies must resolve from the accepted onboard environment; the gate never assumes they have binary wheels. The scratch venv is removed before acceptance. A username is data only after strict POSIX validation and exact acceptance binding; neither `pollen` nor `reachy` is a code default. Its Reachy-side agent invokes `ReachyPrivateMaterialGenerator`; the Mac-side issuer generates/stages the household-CA server leaf/key and X25519 key locally. `from_owner_files` rejects environment overrides, DNS authority, non-RFC1918 endpoints, non-local invocation, missing DHCP receipts, or a config/key/receipt file not owned by the effective user with mode `0600`. The declared office laptop and core host must resolve to the same single 2020 Intel MacBook inventory record; no second “inner Mac” is assumed. Phase 1's recommended topology moves that Mac's active LAN connection to the same trusted ASUS/mesh L2/VLAN as Reachy (for example an ASUS LAN port/switch) and leaves the direct BE800 LAN path disconnected while Tuntun is active. Commissioning verifies one route-bearing user-LAN interface, IP forwarding off, Internet Sharing off, no bridge, WSS bound only to the commissioned address, and negative reachability on every other local address. A dual-homed Mac is rejected in Phase 1 rather than silently treated as two hosts; supporting it later requires a separately reviewed Mac host-firewall/route gate proving the same no-forwarding/no-bridge and outer-interface negative reachability properties. Before accepting exact peer-MAC mode the ceremony also executes the same fixed-binary route qualification as Task 11 and requires the Mac address to resolve without a gateway through a `scope link` prefix on the commissioned Reachy interface; a routed BE800→ASUS/mesh next hop is not the Mac's L2 identity and is rejected. The TLS key is stored as owner-only PKCS#8 PEM for the strict OpenSSL client context; the distinct frame signer and HMAC root remain raw owner-only artifacts. Production TLS and `EdgePairingKeyResolver` load only the exact current state IDs through `OwnerOnlyArtifactStore.require_path/read`, recompute public/root digests, and reject revoked state before use—there is no second generated-key directory or test-only key loader. The builder test must instantiate these concrete types from a temporary fixed-path root and perform commission → process restart/resume → recommission/revocation; a Protocol, mock, service locator, `NotImplementedError`, or import that is only supplied by tests does not satisfy Task 08.
+`ReachyLocalCeremony` is the concrete pinned local transport implemented in `transport/reachy_local_ceremony.py` in this task (and therefore added to this task's file list and staging command). It opens every fixed input owner-only without following symlinks, verifies the delivered Reachy host key before its first request, consumes the physically displayed one-time code once, and carries only CSR/public agreement/signing material. Before publishing operator state, its local-console probe reads the actual non-root POSIX account and `/venvs/apps_venv/bin/python3` facts without environment override, installs a fresh owner SSH key, disables password authentication, proves the default password is rejected, and reopens a pinned-host key-only session whose remote `id -un`, interpreter tuple, and exact bounded installer/managed-app privilege checks match the local observation. It also canonicalizes and hashes the complete duplicate-free `packaging.tags.sys_tags()` result and the ordered canonical `runtime_packages` tuple for `python`, `reachy-mini`, and `websockets`; SDK dependency constraints, exact `websockets==15.0.1`, and every native/media import used by edge are enforced as separate acceptance checks rather than folded into that digest. It proves a scratch venv created by the accepted interpreter with `--system-site-packages` can install only the two pure Tuntun wheels offline with `--no-deps` and import the whole closure. `py3-none-any` must occur in the probed target tag set and be the tag on both Tuntun wheels. PyGObject and other vendor/native dependencies must resolve from the accepted onboard environment; the gate never assumes they have binary wheels. The scratch venv is removed before acceptance. A username is data only after strict POSIX validation and exact acceptance binding; neither `pollen` nor `reachy` is a code default. Its Reachy-side agent invokes `ReachyPrivateMaterialGenerator`; the Mac-side issuer generates/stages the household-CA server leaf/key and X25519 key locally. `from_owner_files` rejects environment overrides, DNS authority, non-RFC1918 endpoints, non-local invocation, missing DHCP receipts, or a config/key/receipt file not owned by the effective user with mode `0600`. The declared office laptop and core host must resolve to the same single 2020 Intel MacBook inventory record; no second “inner Mac” is assumed. Phase 1's recommended topology moves that Mac's active LAN connection to the same trusted ASUS/mesh L2/VLAN as Reachy (for example an ASUS LAN port/switch) and leaves the direct BE800 LAN path disconnected while Tuntun is active. Commissioning verifies one route-bearing user-LAN interface, IP forwarding off, Internet Sharing off, no bridge, WSS bound only to the commissioned address, and negative reachability on every other local address. A dual-homed Mac is rejected in Phase 1 rather than silently treated as two hosts; supporting it later requires a separately reviewed Mac host-firewall/route gate proving the same no-forwarding/no-bridge and outer-interface negative reachability properties. Before accepting exact peer-MAC mode the ceremony also executes the same fixed-binary route qualification as Task 11 and requires the Mac address to resolve without a gateway through a `scope link` prefix on the commissioned Reachy interface; a routed BE800→ASUS/mesh next hop is not the Mac's L2 identity and is rejected. The TLS key is stored as owner-only PKCS#8 PEM for the strict OpenSSL client context; the distinct frame signer and HMAC root remain raw owner-only artifacts. Production TLS and `EdgePairingKeyResolver` load only the exact current state IDs through `OwnerOnlyArtifactStore.require_path/read`, recompute public/root digests, and reject revoked state before use—there is no second generated-key directory or test-only key loader. The builder test must instantiate these concrete types from a temporary fixed-path root and perform commission → process restart/resume → recommission/revocation; a Protocol, mock, service locator, `NotImplementedError`, or import that is only supplied by tests does not satisfy Task 08.
 
 Commissioning is a local physical ceremony: use mDNS only to find an uncommissioned Reachy, verify the pinned SSH host key and a physically displayed one-time code, reserve the same MacBook and Reachy DHCP leases, prove that the commissioned Mac IPv4 is on Reachy's same trusted L2/VLAN, and reject an SSH/remote/non-TTY invocation. In the user's BE800→ASUS/mesh topology, the Phase 1 deployment deliberately connects both the one MacBook and Reachy to the ASUS/mesh trusted LAN and does not keep the Mac simultaneously attached to the direct BE800 LAN. Phase 1 must not record the Mac MAC when `ip route get` actually selects a router/mesh gateway MAC. A future routed mode requires a separately commissioned, generation-bound route/next-hop MAC while mTLS continues to identify the Mac; it is not silently inferred. Generate the household-CA Ed25519 server leaf/key and a generation-bound X25519 agreement key on the Mac with the exact numeric RFC1918 IPv4 SAN. Generate the distinct Reachy client-TLS private key/CSR, Ed25519 device-signing private key, and ephemeral X25519 agreement private key on Reachy. Each side derives the same 32-byte frame-HMAC root through X25519 plus HKDF with generation-bound context, compares its SHA-256 digest, and persists only its local root; only the CSR and public signing/agreement material cross the ceremony. Every Reachy private/root file is owner-only `0600`. The Mac signs the CSR and returns the leaf. The Mac server leaf key is also the pinned core application-frame signer; Reachy's device-signing key signs edge frames and the possession challenge. Fresh random suffixes make failed key-generation retries non-colliding; partial unpublished files and core stages are removed. Core certificate/HMAC material is staged durably first, one atomic owner-only versioned Reachy state replacement publishes a complete generation, and idempotent generation activation follows. If rename succeeded but activation or directory fsync failed, startup rereads the complete state and resumes only that exact staged generation before readiness; it never deletes keys referenced by a visible state. Recommissioning records the old server/client certificates and server/TLS/device-signing/HMAC key IDs as revoked in that same state, then may garbage-collect old private files. Startup accepts only the complete current state and rejects every revoked or generation-mixed artifact. Production never resolves, authorizes, or falls back to the mDNS name.
 
@@ -20707,7 +20707,7 @@ git commit -m "security(edge): protect keys and fail safe on competing control"
 
 **Interfaces:**
 - Consumes: foundation `AudioFormat`, an `AsyncIterator[bytes]` of probed native frames, and activated governed model handles.
-- Produces: public `StreamingAudioConverter.convert(audio, source, target) -> AsyncIterator[bytes]`, private `to_s16le_mono`, `AudioRing`, `WakeDetector.process`, and `VoiceActivityDetector.process`; plus `probe_local_runtime_compatibility(timeout_seconds: int, network: Literal[False]) -> LocalRuntimeCompatibility`. The compatibility probe reopens the exact Task-08 accepted delivered-runtime projection, reads installed distribution metadata and the fixed local daemon API, then independently observes the current interpreter version/ABI, the canonical complete `packaging.tags.sys_tags()` digest, and the closed required-runtime-inventory digest. It accepts only `3.11/cp311` or `3.12/cp312`, only the accepted fixed `/venvs/apps_venv/bin/python3` base interpreter, only `py3-none-any` project wheels, and only exact digest equality with Task 08. It also requires installed `websockets==15.0.1`, verifies that this version satisfies the installed Reachy SDK's declared constraint, and imports every required native/media module from the accepted onboard environment. It never invents a manylinux platform or assumes PyGObject has a wheel. It has one caller-supplied monotonic deadline capped at five seconds and performs no DNS/WAN, listener creation, registration, mutation, environment override, or fallback. It returns the exact closed `sdk|daemon|python_executable|python_version|python_abi|selected_wheel_tag|target_tag_set_sha256|runtime_inventory_sha256` projection or raises on timeout/malformed/unsupported/drifted observations. This task also freezes the delivered assistant lifecycle contract used by release: shared closed `ReachyNetworkCountersV1`, `ReachyBootIdentityV1`, and `ReachyAssistantInventoryV1`; exact fixed-argv `network-counters --json`, `boot-identity --json`, `inventory --json`, device reboot, `stop|unregister --if-present`, durable `recovery-hook verify|verify-absent|unregister`, and app verification semantics. The counter snapshot contains exact commissioning/firewall generations, persistent counter epoch, boot UUID, strictly increasing sample sequence, and cumulative pre-DNS/connect package-download attempt count. Epoch/count/sample state survives reboot and is advanced before an attempted socket/DNS operation; boot UUID comes from the fixed kernel boot source. Qualified absence is distinct from every timeout/transport/permission/malformed state. If any command/schema/persistence rule is unavailable on the delivered revision, release Task 3 is blocked rather than inventing a daemon command.
+- Produces: public `StreamingAudioConverter.convert(audio, source, target) -> AsyncIterator[bytes]`, private `to_s16le_mono`, `AudioRing`, `WakeDetector.process`, `WakeDetector.process_with_score`, `StopDetector.process_with_score`, and `VoiceActivityDetector.process`; plus `probe_local_runtime_compatibility(timeout_seconds: int, network: Literal[False]) -> LocalRuntimeCompatibility`. Wake and stop model handles expose native openWakeWord scores as strict finite floats in `[0.0,1.0]`, and detector thresholds use the same native float units. `WakeDetectedPayload.score_micros` remains the event contract's integer `0..1_000_000` representation; exported `SCORE_FLOOR`/`SCORE_CEILING` keep that legacy/event micros meaning, while `NATIVE_SCORE_FLOOR`/`NATIVE_SCORE_CEILING` name the inference units. The only event-boundary conversion is `native_score_to_micros`, which uses decimal half-up rounding. The compatibility probe is a Reachy-local observation that reads installed distribution metadata and the fixed local daemon API, then independently observes the current interpreter version/ABI, the canonical complete `packaging.tags.sys_tags()` digest after requiring 1..4096 unique tag strings matching `^[A-Za-z0-9_.-]{1,128}$`, and the closed required-runtime-inventory digest. It accepts only `3.11/cp311` or `3.12/cp312`, only the fixed `/venvs/apps_venv/bin/python3` base interpreter, and only `py3-none-any` project wheels; Release Task 3 compares every returned field to the signed compatibility record built from Task 08's accepted Mac-side projection. The Task-08 runtime-inventory digest remains byte-compatible and hashes only the ordered canonical `runtime_packages` tuple for `python`, `reachy-mini`, and `websockets`; the required import closure is represented and enforced separately before returning. It also requires installed `websockets==15.0.1`, verifies that this version satisfies the installed Reachy SDK's declared constraint, and imports every required native/media module from the accepted onboard environment. It never invents a manylinux platform or assumes PyGObject has a wheel. It has one caller-supplied service-level monotonic timeout capped at five seconds, applies bounded socket timeouts and checks around non-preemptible local observations, and does not claim a killable hard deadline without an external service supervisor. It performs no operator-state read, DNS/WAN, proxy or environment resolution, redirect following, listener creation, registration, filesystem mutation, or fallback. The daemon observation is one fixed raw loopback HTTP request, `GET http://127.0.0.1:8000/api/daemon/status`, using literal IPv4 `127.0.0.1`, fixed `Host: 127.0.0.1:8000`, bounded headers/body/JSON depth, strict status/content-type/version checks, and rejection of any `Transfer-Encoding` header plus duplicate, malformed, trailing, oversize, slow-drip, redirect, or nonloopback observations. It returns the exact closed `sdk|daemon|python_executable|python_version|python_abi|selected_wheel_tag|target_tag_set_sha256|runtime_inventory_sha256` projection or raises on timeout/malformed/unsupported/drifted observations. This task also freezes the delivered assistant lifecycle contract used by release: shared closed `ReachyNetworkCountersV1`, `ReachyBootIdentityV1`, and `ReachyAssistantInventoryV1`; exact fixed-argv `network-counters --json`, `boot-identity --json`, `inventory --json`, device reboot, `stop|unregister --if-present`, durable `recovery-hook verify|verify-absent|unregister`, and app verification semantics. The counter snapshot contains exact commissioning/firewall generations, persistent counter epoch, boot UUID, strictly increasing sample sequence, and cumulative pre-DNS/connect package-download attempt count. Epoch/count/sample state survives reboot and is advanced before an attempted socket/DNS operation; boot UUID comes from the fixed kernel boot source. Qualified absence is distinct from every timeout/transport/permission/malformed state. If any command/schema/persistence rule is unavailable on the delivered revision, release Task 3 is blocked rather than inventing a daemon command.
 
 ```python
 # packages/contracts/src/tuntun_contracts/reachy_assistant_qualification.py
@@ -20832,8 +20832,6 @@ Expected: FAIL because `tuntun_edge.audio.converter` and `buffer` do not exist.
 ```python
 # apps/edge/src/tuntun_edge/reachy/probe.py (Task 12 addition)
 from dataclasses import dataclass
-import importlib.metadata
-from pathlib import Path
 import re
 import sys
 import time
@@ -20859,49 +20857,45 @@ def probe_local_runtime_compatibility(
 ) -> LocalRuntimeCompatibility:
     if network is not False or not 1<=timeout_seconds<=5:
         raise ValueError("closed local compatibility-probe arguments required")
-    deadline=time.monotonic()+timeout_seconds
-    accepted=AcceptedReachyRuntimeReader.from_fixed_owner_file().require_current()
-    sdk=importlib.metadata.version("reachy-mini")
-    daemon=LocalDaemonVersionReader.from_fixed_owner_unix_endpoint(
-        Path("/run/reachy-mini-app-assistant/version.sock"),
-    ).read_version(deadline=deadline,max_bytes=256)
-    if time.monotonic()>=deadline:
-        raise TimeoutError("local compatibility probe deadline exceeded")
-    if re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+",sdk) is None:
-        raise RuntimeError("invalid installed Reachy SDK version")
-    if re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+",daemon) is None:
-        raise RuntimeError("invalid local Reachy daemon version")
+    start=time.monotonic()
+    deadline=start+timeout_seconds
+    _require_not_expired(deadline)
     observed_version=f"{sys.version_info.major}.{sys.version_info.minor}"
     observed_abi={"cpython-311":"cp311","cpython-312":"cp312"}.get(
         sys.implementation.cache_tag,
     )
-    target_tag_set_sha256=canonical_target_tag_set_sha256(tuple(sys_tags()))
-    runtime_inventory_sha256=probe_required_runtime_inventory_sha256(
+    if (sys.executable!="/venvs/apps_venv/bin/python3"
+        or (observed_version,observed_abi) not in {
+            ("3.11","cp311"),("3.12","cp312"),
+        }):
+        raise RuntimeError("unsupported Reachy Python runtime")
+    target_tag_set_sha256=canonical_target_tag_set_sha256(sys_tags())
+    _require_not_expired(deadline)
+    runtime_inventory=_probe_required_runtime_inventory(
         deadline=deadline,
+        python_package_version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         required_websockets="15.0.1",
     )
-    if ((observed_version,observed_abi) not in {
-            ("3.11","cp311"),("3.12","cp312"),
-        }
-        or accepted.python_executable!="/venvs/apps_venv/bin/python3"
-        or accepted.python_version!=observed_version
-        or accepted.python_abi!=observed_abi
-        or accepted.selected_wheel_tag!="py3-none-any"
-        or not any(str(tag)==accepted.selected_wheel_tag for tag in sys_tags())
-        or accepted.target_tag_set_sha256!=target_tag_set_sha256
-        or accepted.runtime_inventory_sha256!=runtime_inventory_sha256):
-        raise RuntimeError("unsupported or drifted Reachy Python runtime")
+    _require_not_expired(deadline)
+    daemon=LoopbackDaemonStatusReader.from_fixed_loopback_daemon_status().read_version(
+        deadline=deadline,max_bytes=256,
+    )
+    _require_not_expired(deadline)
+    if re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+",runtime_inventory.sdk) is None:
+        raise RuntimeError("invalid installed Reachy SDK version")
+    if re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+",daemon) is None:
+        raise RuntimeError("invalid local Reachy daemon version")
     return LocalRuntimeCompatibility(
-        sdk=sdk,daemon=daemon,
-        python_executable=accepted.python_executable,
-        python_version=accepted.python_version,python_abi=accepted.python_abi,
-        selected_wheel_tag=accepted.selected_wheel_tag,
+        sdk=runtime_inventory.sdk,daemon=daemon,
+        python_executable=sys.executable,
+        python_version=observed_version,python_abi=observed_abi,
+        selected_wheel_tag="py3-none-any",
         target_tag_set_sha256=target_tag_set_sha256,
-        runtime_inventory_sha256=runtime_inventory_sha256,
+        runtime_inventory_sha256=runtime_inventory.sha256,
     )
 ```
 
-`AcceptedReachyRuntimeReader` and `LocalDaemonVersionReader` are the concrete Task-12-qualified fixed owner-file/Unix-endpoint readers in `probe.py`. The accepted-runtime reader is nofollow, owner/mode/inode/size/canonical-byte checked and requires the current Task-08 commissioning/acceptance generation. `canonical_target_tag_set_sha256` serializes the ordered, duplicate-free full tag strings as canonical JSON before hashing. `probe_required_runtime_inventory_sha256` uses `importlib.metadata` only on a closed distribution allowlist, parses the installed `reachy-mini` requirement for `websockets` with `packaging.requirements.Requirement`, requires exact installed `websockets==15.0.1`, imports each closed Reachy/native/media module under the same deadline, and hashes canonical distribution/version/import-success facts; unknown/missing/duplicate distributions or an unsatisfied SDK constraint fail closed. The daemon reader opens no listener, rejects symlink/non-socket/wrong-owner endpoint metadata, sends one fixed version request, reads at most 256 bytes under the same monotonic deadline, accepts one strict UTF-8 semantic-version line, and closes. Neither resolves a name, opens an IP socket, invokes a subprocess, reads environment/config overrides, or writes state. Unit tests deny every DNS/IP/socket/listener/subprocess/write path, inject slow-drip/oversize/malformed/endpoint-swap, SDK-constraint conflicts, empty/changed tag sets, missing native imports and accepted-runtime drift, and assert the five-second caller deadline covers accepted-state, metadata, imports and daemon observation.
+`LoopbackDaemonStatusReader` is the concrete Task-12-qualified fixed loopback-status reader in `probe.py`; Task 12 does not reopen the Mac-side Task-08 operator projection on Reachy. `canonical_target_tag_set_sha256` requires 1..4096 ordered, duplicate-free full tag strings matching `^[A-Za-z0-9_.-]{1,128}$` and containing `py3-none-any` before serializing them as canonical JSON for hashing. `probe_required_runtime_inventory_sha256` uses `importlib.metadata` only on a closed distribution allowlist, parses the installed `reachy-mini` requirement for `websockets` with `packaging.requirements.Requirement`, requires exact installed `websockets==15.0.1`, imports each closed Reachy/native/media module under the same timeout, and hashes only the Task-08-compatible canonical `runtime_packages` tuple; import closure success is enforced separately and is not folded into that digest. Unknown/missing/duplicate distributions or an unsatisfied SDK constraint fail closed. The daemon reader opens no listener, resolves no name, uses no proxy or environment override, follows no redirect, sends one fixed `GET /api/daemon/status HTTP/1.1` request to literal `127.0.0.1:8000` with fixed Host, reads bounded headers and a body of at most 256 bytes under the same service-level monotonic timeout, rejects any `Transfer-Encoding` header, parses duplicate-free bounded JSON, accepts one strict stable semantic-version `version` field, rejects trailing bytes when observed, and closes. It uses bounded socket timeouts and monotonic checks around non-preemptible local observations rather than claiming a preemptive hard wall; if release requires killable wall-clock enforcement, the packaging/service supervisor owns termination. Release Task 3 compares every returned field to the signed and verified `compatibility.json` copied from Core's accepted Mac-side projection before registration. Unit tests deny DNS/proxy/listener/subprocess/filesystem-write paths, inject transfer-encoding/slow-drip/oversize/malformed/duplicate/trailing/nonloopback/redirect observations, SDK-constraint conflicts, duplicate/empty/changed/oversize/unsafe tag sets, missing native imports and local Python runtime drift, and assert the five-second service timeout covers metadata, imports and daemon observation.
 
 ```python
 # apps/edge/src/tuntun_edge/audio/converter.py
@@ -21018,20 +21012,47 @@ class AudioRing:
 
 ```python
 # apps/edge/src/tuntun_edge/audio/wakeword.py
+from dataclasses import dataclass
+from decimal import Decimal,ROUND_HALF_UP
 from typing import Callable
 
 
+SCORE_FLOOR=0
+SCORE_CEILING=1_000_000
+NATIVE_SCORE_FLOOR=0.0
+NATIVE_SCORE_CEILING=1.0
+
+
+@dataclass(frozen=True,slots=True)
+class WakeFrameDecision:
+    detected:bool
+    score_micros:int
+
+
+def native_score_to_micros(score:float)->int:
+    if type(score) is not float or not NATIVE_SCORE_FLOOR<=score<=NATIVE_SCORE_CEILING:
+        raise ValueError("native-score-contract")
+    return int((Decimal(str(score))*Decimal(SCORE_CEILING)).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
+
+
 class WakeDetector:
-    def __init__(self, infer: Callable[[bytes], int], threshold_micros: int) -> None:
+    def __init__(self, infer: Callable[[bytes], float], threshold: float) -> None:
         self._infer = infer
-        self._threshold = threshold_micros
+        self._threshold = threshold
         self._consecutive = 0
 
     def process(self, frame_1280_s16le: bytes) -> bool:
+        return self.process_with_score(frame_1280_s16le).detected
+
+    def process_with_score(self, frame_1280_s16le: bytes) -> WakeFrameDecision:
         if len(frame_1280_s16le) != 2_560:
             raise ValueError("wake frame must contain exactly 1280 s16 samples")
-        self._consecutive = self._consecutive + 1 if self._infer(frame_1280_s16le) >= self._threshold else 0
-        return self._consecutive >= 2
+        score=self._infer(frame_1280_s16le)
+        self._consecutive = self._consecutive + 1 if score >= self._threshold else 0
+        return WakeFrameDecision(
+            detected=self._consecutive >= 2,
+            score_micros=native_score_to_micros(score),
+        )
 ```
 
 ```python

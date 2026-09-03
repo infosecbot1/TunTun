@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import FrozenInstanceError, dataclass, field
+from typing import Literal, cast
 
 import pytest
 from tuntun_edge.audio import wakeword
@@ -27,15 +27,15 @@ _GOVERNANCE_ATTRIBUTES = (
 
 @dataclass
 class _WakeHandle:
-    scores: list[int]
+    scores: list[object]
     model_id: str = "hello-tuntun-v1"
     activated: bool = True
     runtime_download: bool = False
     frames: list[bytes] = field(default_factory=list)
 
-    def infer_score(self, frame: bytes) -> int:
+    def infer_score(self, frame: bytes) -> float:
         self.frames.append(frame)
-        return self.scores.pop(0)
+        return cast(float, self.scores.pop(0))
 
 
 @dataclass
@@ -57,7 +57,7 @@ class _PrivateWakeFailureHandle:
     activated: bool = True
     runtime_download: bool = False
 
-    def infer_score(self, frame: bytes) -> int:
+    def infer_score(self, frame: bytes) -> float:
         raise RuntimeError("private wake sentinel child voice bytes")
 
 
@@ -67,7 +67,7 @@ class _PrivateWakeBaseFailureHandle:
     activated: bool = True
     runtime_download: bool = False
 
-    def infer_score(self, frame: bytes) -> int:
+    def infer_score(self, frame: bytes) -> float:
         raise BaseException("private wake fatal sentinel")
 
 
@@ -78,7 +78,7 @@ class _WakeControlFlowHandle:
     activated: bool = True
     runtime_download: bool = False
 
-    def infer_score(self, frame: bytes) -> int:
+    def infer_score(self, frame: bytes) -> float:
         raise self.error
 
 
@@ -150,9 +150,9 @@ class _HostileGovernanceHandle:
     def cloud_endpoint(self) -> object:
         return self._read("cloud_endpoint", None)
 
-    def infer_score(self, frame: bytes) -> int:
+    def infer_score(self, frame: bytes) -> float:
         del frame
-        return 0
+        return 0.0
 
     def infer_voice_score(self, frame: bytes) -> int:
         del frame
@@ -191,16 +191,98 @@ def _error_message_for_detector(kind: DetectorKind) -> str:
 
 def _construct_detector(kind: DetectorKind, handle: object) -> object:
     if kind == "wake":
-        return WakeDetector(handle, threshold=500_000)  # type: ignore[arg-type]
+        return WakeDetector(handle, threshold=0.5)  # type: ignore[arg-type]
     if kind == "stop":
-        return wakeword.StopDetector(handle, threshold=500_000)  # type: ignore[arg-type]
+        return wakeword.StopDetector(handle, threshold=0.5)  # type: ignore[arg-type]
     return VoiceActivityDetector(handle, threshold=500_000)  # type: ignore[arg-type]
 
 
-def test_wake_detector_requires_exact_frame_and_two_consecutive_integer_scores() -> None:
+def test_native_wake_score_converts_to_event_score_micros_explicitly() -> None:
+    assert wakeword.SCORE_FLOOR == 0
+    assert type(wakeword.SCORE_FLOOR) is int
+    assert wakeword.SCORE_CEILING == 1_000_000
+    assert type(wakeword.SCORE_CEILING) is int
+    assert wakeword.NATIVE_SCORE_FLOOR == 0.0
+    assert wakeword.NATIVE_SCORE_CEILING == 1.0
+
+    assert wakeword.native_score_to_micros(0.0) == 0
+    assert wakeword.native_score_to_micros(0.0000005) == 1
+    assert wakeword.native_score_to_micros(0.5) == 500_000
+    assert wakeword.native_score_to_micros(0.5000005) == 500_001
+    assert wakeword.native_score_to_micros(0.9) == 900_000
+    assert wakeword.native_score_to_micros(1.0) == 1_000_000
+
+
+@pytest.mark.parametrize(
+    ("bad_score", "error_type"),
+    (
+        (True, TypeError),
+        (1, TypeError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (-0.1, ValueError),
+        (1.1, ValueError),
+    ),
+)
+def test_native_wake_score_to_micros_rejects_non_native_scores(
+    bad_score: object,
+    error_type: type[Exception],
+) -> None:
+    with pytest.raises(error_type, match="native-score-contract"):
+        wakeword.native_score_to_micros(cast(float, bad_score))
+
+
+def test_wake_detector_scored_decision_exposes_exact_event_score_micros() -> None:
     frame = b"\x00" * WAKE_FRAME_BYTES
-    handle = _WakeHandle([900_000, 100_000, 900_000, 900_000, 900_000])
-    detector = WakeDetector(handle, threshold=800_000)
+    detector = WakeDetector(_WakeHandle([0.5000005, 0.5000005]), threshold=0.5)
+
+    first = detector.process_with_score(frame)
+    second = detector.process_with_score(frame)
+
+    assert first == wakeword.WakeFrameDecision(detected=False, score_micros=500_001)
+    assert second == wakeword.WakeFrameDecision(detected=True, score_micros=500_001)
+    with pytest.raises(FrozenInstanceError):
+        second.score_micros = 0  # type: ignore[misc]
+
+
+def test_stop_detector_scored_decision_exposes_exact_event_score_micros() -> None:
+    frame = b"\x00" * WAKE_FRAME_BYTES
+    detector = wakeword.StopDetector(
+        _WakeHandle([0.0000005], model_id="stop-tuntun-v1"),
+        threshold=0.5,
+    )
+
+    assert detector.process_with_score(frame) == wakeword.WakeFrameDecision(
+        detected=False,
+        score_micros=1,
+    )
+
+
+def test_wake_detector_process_delegates_to_scored_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = b"\x00" * WAKE_FRAME_BYTES
+    detector = WakeDetector(_WakeHandle([0.1]), threshold=0.5)
+    calls: list[bytes] = []
+
+    def fake_process_with_score(
+        self: WakeDetector,
+        candidate: bytes,
+    ) -> wakeword.WakeFrameDecision:
+        del self
+        calls.append(candidate)
+        return wakeword.WakeFrameDecision(detected=True, score_micros=123)
+
+    monkeypatch.setattr(WakeDetector, "process_with_score", fake_process_with_score)
+
+    assert detector.process(frame) is True
+    assert calls == [frame]
+
+
+def test_wake_detector_requires_exact_frame_and_two_consecutive_native_scores() -> None:
+    frame = b"\x00" * WAKE_FRAME_BYTES
+    handle = _WakeHandle([0.9, 0.1, 0.9, 0.9, 0.9])
+    detector = WakeDetector(handle, threshold=0.8)
 
     assert detector.process(frame) is False
     assert detector.process(frame) is False
@@ -210,32 +292,86 @@ def test_wake_detector_requires_exact_frame_and_two_consecutive_integer_scores()
     assert handle.frames == [frame, frame, frame, frame, frame]
 
 
-def test_wake_detector_rejects_non_bytes_wrong_lengths_and_bad_scores() -> None:
-    detector = WakeDetector(_WakeHandle([500_000]), threshold=500_000)
+def test_wake_detector_rejects_non_bytes_and_wrong_lengths() -> None:
+    detector = WakeDetector(_WakeHandle([0.5]), threshold=0.5)
 
     with pytest.raises(TypeError):
         detector.process(bytearray(WAKE_FRAME_BYTES))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="wake-frame-contract"):
         detector.process(b"\x00" * (WAKE_FRAME_BYTES - 2))
 
-    bad_score = WakeDetector(_WakeHandle([True]), threshold=500_000)
-    with pytest.raises(TypeError, match="wake-score-contract"):
-        bad_score.process(b"\x00" * WAKE_FRAME_BYTES)
+
+@pytest.mark.parametrize("kind", ("wake", "stop"))
+@pytest.mark.parametrize(
+    ("bad_score", "error_type"),
+    (
+        (True, TypeError),
+        (1, TypeError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (-0.1, ValueError),
+        (1.1, ValueError),
+    ),
+)
+def test_wake_and_stop_detectors_reject_non_native_scores(
+    kind: Literal["wake", "stop"],
+    bad_score: object,
+    error_type: type[Exception],
+) -> None:
+    frame = b"\x00" * WAKE_FRAME_BYTES
+    detector: WakeDetector | wakeword.StopDetector
+    if kind == "wake":
+        detector = WakeDetector(_WakeHandle([bad_score]), threshold=0.5)
+        label = "wake-score-contract"
+    else:
+        detector = wakeword.StopDetector(
+            _WakeHandle([bad_score], model_id="stop-tuntun-v1"),
+            threshold=0.5,
+        )
+        label = "stop-score-contract"
+
+    with pytest.raises(error_type, match=label):
+        detector.process(frame)
+
+
+@pytest.mark.parametrize("kind", ("wake", "stop"))
+@pytest.mark.parametrize(
+    ("bad_threshold", "error_type"),
+    (
+        (True, TypeError),
+        (1, TypeError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (-0.1, ValueError),
+        (1.1, ValueError),
+    ),
+)
+def test_wake_and_stop_detectors_reject_non_native_thresholds(
+    kind: Literal["wake", "stop"],
+    bad_threshold: object,
+    error_type: type[Exception],
+) -> None:
+    handle = _WakeHandle([0.5], model_id=_model_id_for_detector(kind))
+    detector_type = WakeDetector if kind == "wake" else wakeword.StopDetector
+    label = f"{kind}-threshold-contract"
+
+    with pytest.raises(error_type, match=label):
+        detector_type(handle, threshold=bad_threshold)  # type: ignore[arg-type]
 
 
 def test_wake_detector_accepts_only_activated_local_governed_handles() -> None:
-    downloader = _WakeHandle([900_000], activated=True, runtime_download=True)
+    downloader = _WakeHandle([0.9], activated=True, runtime_download=True)
 
     with pytest.raises(ValueError, match="governed-local-inference-handle"):
-        WakeDetector(downloader, threshold=500_000)
+        WakeDetector(downloader, threshold=0.5)
 
     with pytest.raises(TypeError):
-        WakeDetector("/tmp/model.onnx", threshold=500_000)  # type: ignore[arg-type]
+        WakeDetector("/tmp/model.onnx", threshold=0.5)  # type: ignore[arg-type]
 
 
 def test_wake_detector_accepts_only_hello_model_identity() -> None:
     frame = b"\x00" * WAKE_FRAME_BYTES
-    detector = WakeDetector(_WakeHandle([900_000, 900_000]), threshold=800_000)
+    detector = WakeDetector(_WakeHandle([0.9, 0.9]), threshold=0.8)
 
     assert detector.process(frame) is False
     assert detector.process(frame) is True
@@ -248,13 +384,13 @@ def test_wake_detector_accepts_only_hello_model_identity() -> None:
     )
     for model_id in rejected_model_ids:
         with pytest.raises(ValueError, match="governed-local-inference-handle"):
-            WakeDetector(_WakeHandle([900_000], model_id=model_id), threshold=800_000)
+            WakeDetector(_WakeHandle([0.9], model_id=model_id), threshold=0.8)
 
 
 def test_stop_detector_accepts_only_stop_identity_and_fires_on_first_frame() -> None:
     frame = b"\x00" * WAKE_FRAME_BYTES
-    handle = _WakeHandle([900_000, 0], model_id="stop-tuntun-v1")
-    detector = wakeword.StopDetector(handle, threshold=800_000)
+    handle = _WakeHandle([0.9, 0.0], model_id="stop-tuntun-v1")
+    detector = wakeword.StopDetector(handle, threshold=0.8)
 
     assert detector.process(frame) is True
     assert detector.process(frame) is False
@@ -269,15 +405,15 @@ def test_stop_detector_accepts_only_stop_identity_and_fires_on_first_frame() -> 
     for model_id in rejected_model_ids:
         with pytest.raises(ValueError, match="governed-local-inference-handle"):
             wakeword.StopDetector(
-                _WakeHandle([900_000], model_id=model_id),
-                threshold=800_000,
+                _WakeHandle([0.9], model_id=model_id),
+                threshold=0.8,
             )
 
 
 def test_stop_detector_translates_failures_without_private_leakage() -> None:
     detector = wakeword.StopDetector(
         _PrivateWakeFailureHandle(model_id="stop-tuntun-v1"),
-        threshold=500_000,
+        threshold=0.5,
     )
 
     with pytest.raises(wakeword.StopDetectionError, match="^stop-inference-rejected$") as raised:
@@ -303,7 +439,7 @@ def test_stop_detector_translates_failures_without_private_leakage() -> None:
 def test_stop_detector_preserves_control_flow_base_exceptions(error: BaseException) -> None:
     detector = wakeword.StopDetector(
         _WakeControlFlowHandle(error, model_id="stop-tuntun-v1"),
-        threshold=500_000,
+        threshold=0.5,
     )
 
     with pytest.raises(type(error)):
@@ -346,7 +482,7 @@ def test_vad_rejects_strict_types_wrong_lengths_and_runtime_downloads() -> None:
 
 
 def test_wake_detector_translates_inference_failures_without_private_leakage() -> None:
-    detector = WakeDetector(_PrivateWakeFailureHandle(), threshold=500_000)
+    detector = WakeDetector(_PrivateWakeFailureHandle(), threshold=0.5)
 
     with pytest.raises(WakeDetectionError, match="^wake-inference-rejected$") as raised:
         detector.process(b"\x00" * WAKE_FRAME_BYTES)
@@ -360,7 +496,7 @@ def test_wake_detector_translates_inference_failures_without_private_leakage() -
 
 
 def test_wake_detector_translates_non_control_base_exception_without_private_leakage() -> None:
-    detector = WakeDetector(_PrivateWakeBaseFailureHandle(), threshold=500_000)
+    detector = WakeDetector(_PrivateWakeBaseFailureHandle(), threshold=0.5)
 
     with pytest.raises(WakeDetectionError, match="^wake-inference-rejected$") as raised:
         detector.process(b"\x00" * WAKE_FRAME_BYTES)
@@ -383,7 +519,7 @@ def test_wake_detector_translates_non_control_base_exception_without_private_lea
     ),
 )
 def test_wake_detector_preserves_control_flow_base_exceptions(error: BaseException) -> None:
-    detector = WakeDetector(_WakeControlFlowHandle(error), threshold=500_000)
+    detector = WakeDetector(_WakeControlFlowHandle(error), threshold=0.5)
 
     with pytest.raises(type(error)):
         detector.process(b"\x00" * WAKE_FRAME_BYTES)
