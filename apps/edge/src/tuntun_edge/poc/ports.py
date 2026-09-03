@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from tuntun_contracts.speech import AudioFormat
 
@@ -33,6 +33,7 @@ class EdgeStopInputPort(Protocol):
     async def wait_for_stop(self) -> None: ...
 
 
+@runtime_checkable
 class ReachyLocalMediaPort(Protocol):
     async def open_capture(
         self,

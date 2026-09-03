@@ -305,27 +305,29 @@ for name, frequency in (("confirm", 660), ("unavailable", 220)):
 (root / "manifest.json").write_text(json.dumps({"version": 1, "assets": entries}, indent=2) + "\n")
 ```
 
-In `apps/core/pyproject.toml`, add exactly `vosk==0.3.45` to the existing `[project].dependencies` array without replacing its other entries, then regenerate `uv.lock` with the command below.
+In `apps/core/pyproject.toml`, add exactly `vosk==0.3.44` to the existing `[project].dependencies` array without replacing its other entries, then regenerate `uv.lock` with the command below. Use 0.3.44 rather than 0.3.45 because 0.3.45 does not publish a macOS wheel or sdist, while Phase 1 local ASR must install on the Intel Mac control host and macOS CI runners.
 
 ```yaml
 # models/manifest.yaml entries
 - id: vosk-small-en-us-0.15
   purpose: offline_command
   license: Apache-2.0
-  sha256: 30f26242c4eb449f948e42cb302dd8a686cb29a3423a8367f99ff41780942498
+  sha256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
   runtime_max_bytes: 256000000
 - id: vosk-small-hi-0.22
   purpose: offline_command
   license: Apache-2.0
-  sha256: 7d1e5d1373f70278f21d4cf2770a4c2f1517d1283da4171b00250f4f6015c2c4
+  sha256: 7c50a10866889f0ac21d912c20537a055a597ed09fc1d3e5bcd798f9f0017e48
   runtime_max_bytes: 384000000
 ```
+
+Official model archive bytes were verified before implementation: English size 41,205,931 with the `30f262...42498` SHA-256 above, and Hindi size 44,458,845 with the `7c50a1...17e48` SHA-256 above. Do not leave downloaded archives in the repository.
 
 Run: `uv lock && uv run python scripts/build_offline_tones.py`
 
 - [ ] **Step 4: Run green**
 
-Run: `uv run pytest tests/unit/offline/test_local_asr.py tests/unit/offline/test_prompts.py tests/unit/models -q && uv run ruff check apps/core/src/tuntun_core/offline apps/core/src/tuntun_core/adapters/local_audio scripts/build_offline_tones.py && uv run mypy apps/core/src`
+Run: `uv run pytest tests/unit/offline/test_grammar.py tests/unit/offline/test_local_asr.py tests/unit/offline/test_prompts.py tests/security/test_model_governance.py::test_non_install_model_cli_commands_never_open_network tests/security/test_model_governance.py::test_model_install_cli_uses_exact_alphacephei_allowlist_for_root_and_packaged_manifests tests/security/test_model_governance.py::test_vosk_runtime_lock_contains_macos_universal2_wheel -q && uv run ruff check apps/core/src/tuntun_core/offline apps/core/src/tuntun_core/adapters/local_audio scripts/build_offline_tones.py && uv run mypy apps/core/src`
 Expected: PASS; the two named offline tests report `2 passed` and the model registry rejects uninstalled hashes.
 
 - [ ] **Step 5: Commit exact paths**

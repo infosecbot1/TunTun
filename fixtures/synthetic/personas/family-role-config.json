@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "examples": [
+    {
+      "example_label": "synthetic security architect",
+      "projection": {
+        "role": "owner",
+        "context": "technical_security",
+        "tone": "precise",
+        "depth": "detailed",
+        "learning_level": "none"
+      }
+    },
+    {
+      "example_label": "synthetic homemaker",
+      "projection": {
+        "role": "adult",
+        "context": "household_practical",
+        "tone": "practical",
+        "depth": "standard",
+        "learning_level": "none"
+      }
+    },
+    {
+      "example_label": "synthetic K2 learner",
+      "projection": {
+        "role": "k2",
+        "context": "early_learning",
+        "tone": "warm",
+        "depth": "brief",
+        "learning_level": "k2"
+      }
+    },
+    {
+      "example_label": "synthetic N1 learner",
+      "projection": {
+        "role": "n1",
+        "context": "early_learning",
+        "tone": "warm",
+        "depth": "brief",
+        "learning_level": "n1"
+      }
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import functools
 import gc
 import inspect
 import io
+import json
 import os
 import socket
 import stat
@@ -15,10 +16,14 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
+import yaml
+from jsonschema import Draft202012Validator
+from model_governance_cases import EXPECTED_BYTES, EXPECTED_SHA256, ScriptedModelTransport
 from tuntun_core.cli.commands import models as models_command
 from tuntun_core.cli.main import app
 from tuntun_core.services.models import fs as fs_module
@@ -283,6 +288,335 @@ def test_empty_registry_never_downloads(tmp_path: Path) -> None:
         registry.activate("missing")
 
 
+def _legacy_model_entry() -> dict[str, object]:
+    return {
+        "id": "legacy-model-v1",
+        "revision": "a" * 40,
+        "license": "Apache-2.0",
+        "provenance": "legacy local fixture",
+        "redistribution": "allowed",
+        "approved_purpose": "legacy local test only",
+        "runtime": "onnxruntime",
+        "architecture": "legacy fixture",
+        "input_contract": "bytes",
+        "output_contract": "bytes",
+        "benchmark_gate": "tests/security/test_model_governance.py",
+        "review_date": "2026-09-03",
+        "files": [
+            {
+                "path": "legacy.onnx",
+                "size": len(EXPECTED_BYTES),
+                "sha256": EXPECTED_SHA256,
+                "url": "https://models.example.test/legacy.onnx",
+            }
+        ],
+    }
+
+
+def _task12_wake_model_entry(model_id: str = "hello-tuntun-v1") -> dict[str, object]:
+    return {
+        "id": model_id,
+        "revision": "a" * 40,
+        "license": "Apache-2.0",
+        "provenance": "synthetic non-family calibration fixture",
+        "redistribution": "weights omitted until redistribution is approved",
+        "approved_purpose": f"local {model_id} detection only",
+        "runtime": "onnxruntime",
+        "architecture": "openwakeword-compatible fixture",
+        "input_contract": "exactly 1280 signed 16-bit little-endian mono samples at 16000 Hz",
+        "output_contract": "integer score in micros from 0 through 1000000",
+        "benchmark_gate": "tests/hardware/bench_wakeword.py",
+        "calibration_report_sha256": EXPECTED_SHA256,
+        "runtime_download": False,
+        "review_date": "2026-09-03",
+        "files": [
+            {
+                "path": "hello-tuntun.onnx",
+                "size": len(EXPECTED_BYTES),
+                "sha256": EXPECTED_SHA256,
+                "url": "https://models.example.test/hello-tuntun.onnx",
+            },
+            {
+                "path": "calibration-report.json",
+                "size": len(EXPECTED_BYTES),
+                "sha256": EXPECTED_SHA256,
+                "url": "https://models.example.test/calibration-report.json",
+            },
+        ],
+    }
+
+
+def _manifest_schema() -> dict[str, object]:
+    schema_path = Path(__file__).parents[2] / "models" / "manifest.schema.json"
+    return json.loads(schema_path.read_text(encoding="utf-8"))
+
+
+def _schema_errors(document: dict[str, object]) -> list[str]:
+    validator = Draft202012Validator(_manifest_schema())
+    return [error.message for error in validator.iter_errors(document)]
+
+
+def _schema_calibration_rule() -> dict[str, object]:
+    model_schema = _manifest_schema()["$defs"]["model"]  # type: ignore[index]
+    for rule in model_schema["allOf"]:
+        if rule.get("if") == {"required": ["calibration_report_sha256"]}:
+            return rule
+    raise AssertionError("calibration schema rule missing")
+
+
+def test_empty_registry_never_downloads_after_task12_metadata_change(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text('schema_version: "1.0"\nmodels: []\n', encoding="utf-8")
+    registry = ModelRegistry.load(manifest)
+    assert registry.models == ()
+
+
+def test_schema_version_1_0_legacy_entries_do_not_require_task12_metadata() -> None:
+    document = {"schema_version": "1.0", "models": [_legacy_model_entry()]}
+
+    assert _schema_errors(document) == []
+    registry = ModelRegistry.from_document(document)
+    entry = registry.entry("legacy-model-v1")
+    assert entry.calibration_report_sha256 is None
+    assert entry.runtime_download is None
+
+
+def test_task12_model_metadata_is_closed_runtime_download_disabled_and_bound() -> None:
+    registry = ModelRegistry.from_document(
+        {"schema_version": "1.0", "models": [_task12_wake_model_entry()]}
+    )
+    entry = registry.entry("hello-tuntun-v1")
+    assert entry.calibration_report_sha256 == EXPECTED_SHA256
+    assert entry.runtime_download is False
+    assert tuple(item.path for item in entry.files).count("calibration-report.json") == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("calibration_report_sha256", "B" * 64),
+        ("calibration_report_sha256", "b" * 63),
+        ("calibration_report_sha256", None),
+        ("runtime_download", True),
+        ("runtime_download", 0),
+        ("runtime_download", "false"),
+    ),
+)
+def test_task12_model_metadata_rejects_unqualified_or_downloadable_entries(
+    field: str, value: object
+) -> None:
+    entry = _task12_wake_model_entry()
+    entry[field] = value
+    with pytest.raises(ValueError, match="invalid model manifest"):
+        ModelRegistry.from_document({"schema_version": "1.0", "models": [entry]})
+
+
+@pytest.mark.parametrize("model_id", ("hello-tuntun-v1", "stop-tuntun-v1"))
+@pytest.mark.parametrize("missing", ("calibration_report_sha256", "runtime_download"))
+def test_task12_model_metadata_is_mandatory_only_for_exact_wake_ids(
+    model_id: str, missing: str
+) -> None:
+    task12_entry = _task12_wake_model_entry(model_id)
+    del task12_entry[missing]
+    document = {"schema_version": "1.0", "models": [task12_entry]}
+    with pytest.raises(ValueError, match="invalid model manifest"):
+        ModelRegistry.from_document(document)
+    assert _schema_errors(document)
+
+
+@pytest.mark.parametrize("field", ("calibration_report_sha256", "runtime_download"))
+def test_partial_task12_metadata_is_rejected_on_legacy_entries(field: str) -> None:
+    entry = _legacy_model_entry()
+    if field == "calibration_report_sha256":
+        entry[field] = EXPECTED_SHA256
+    else:
+        entry[field] = False
+
+    with pytest.raises(ValueError, match="invalid model manifest"):
+        ModelRegistry.from_document({"schema_version": "1.0", "models": [entry]})
+
+
+@pytest.mark.parametrize(
+    ("calibration_report_sha256", "runtime_download"),
+    ((None, None), (None, False), (EXPECTED_SHA256, None)),
+)
+def test_present_task12_metadata_keys_reject_null_values_on_legacy_entries(
+    calibration_report_sha256: object, runtime_download: object
+) -> None:
+    entry = _legacy_model_entry()
+    entry["calibration_report_sha256"] = calibration_report_sha256
+    entry["runtime_download"] = runtime_download
+    document = {"schema_version": "1.0", "models": [entry]}
+
+    assert _schema_errors(document)
+    with pytest.raises(ValueError, match="invalid model manifest"):
+        ModelRegistry.from_document(document)
+
+
+@pytest.mark.parametrize(
+    "mutation", ("missing_calibration_artifact", "mismatched_calibration_hash")
+)
+def test_calibration_metadata_on_any_model_requires_bound_report(mutation: str) -> None:
+    entry = _legacy_model_entry()
+    entry["calibration_report_sha256"] = EXPECTED_SHA256
+    entry["runtime_download"] = False
+    if mutation == "mismatched_calibration_hash":
+        files = entry["files"]
+        assert isinstance(files, list)
+        files.append(
+            {
+                "path": "calibration-report.json",
+                "size": len(EXPECTED_BYTES),
+                "sha256": "0" * 64,
+                "url": "https://models.example.test/calibration-report.json",
+            }
+        )
+
+    with pytest.raises(ValueError, match="invalid model manifest"):
+        ModelRegistry.from_document({"schema_version": "1.0", "models": [entry]})
+    if mutation == "missing_calibration_artifact":
+        assert _schema_errors({"schema_version": "1.0", "models": [entry]})
+
+
+def test_manifest_checker_authoritatively_rejects_schema_valid_calibration_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    entry = _legacy_model_entry()
+    entry["calibration_report_sha256"] = EXPECTED_SHA256
+    entry["runtime_download"] = False
+    files = entry["files"]
+    assert isinstance(files, list)
+    files.append(
+        {
+            "path": "calibration-report.json",
+            "size": len(EXPECTED_BYTES),
+            "sha256": "0" * 64,
+            "url": "https://models.example.test/calibration-report.json",
+        }
+    )
+    document = {"schema_version": "1.0", "models": [entry]}
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+
+    assert _schema_errors(document) == []
+    calibration_comment = _schema_calibration_rule()["$comment"]
+    assert "sha256 equality" in calibration_comment
+    assert "ModelRegistry" in calibration_comment
+    assert "scripts/check_model_manifest.py" in calibration_comment
+    result = subprocess.run(
+        [sys.executable, "scripts/check_model_manifest.py", str(manifest)],
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "invalid model manifest" in result.stderr
+
+
+def test_calibration_metadata_on_legacy_model_accepts_exact_bound_report() -> None:
+    entry = _legacy_model_entry()
+    entry["calibration_report_sha256"] = EXPECTED_SHA256
+    entry["runtime_download"] = False
+    files = entry["files"]
+    assert isinstance(files, list)
+    files.append(
+        {
+            "path": "calibration-report.json",
+            "size": len(EXPECTED_BYTES),
+            "sha256": EXPECTED_SHA256,
+            "url": "https://models.example.test/calibration-report.json",
+        }
+    )
+
+    assert _schema_errors({"schema_version": "1.0", "models": [entry]}) == []
+    registry = ModelRegistry.from_document({"schema_version": "1.0", "models": [entry]})
+    assert registry.entry("legacy-model-v1").calibration_report_sha256 == EXPECTED_SHA256
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_calibration_artifact",
+        "duplicate_calibration_artifact",
+        "mismatched_calibration_hash",
+    ),
+)
+def test_task12_calibration_report_file_is_exactly_bound(mutation: str) -> None:
+    entry = _task12_wake_model_entry()
+    files = entry["files"]
+    assert isinstance(files, list)
+    if mutation == "missing_calibration_artifact":
+        entry["files"] = [item for item in files if item["path"] != "calibration-report.json"]
+    elif mutation == "duplicate_calibration_artifact":
+        files.append(dict(files[-1]))
+    elif mutation == "mismatched_calibration_hash":
+        entry["calibration_report_sha256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="invalid model manifest"):
+        ModelRegistry.from_document({"schema_version": "1.0", "models": [entry]})
+
+
+def test_manifest_schema_publishes_conditional_task12_model_metadata() -> None:
+    model_schema = _manifest_schema()["$defs"]["model"]  # type: ignore[index]
+    assert "calibration_report_sha256" not in model_schema["required"]
+    assert "runtime_download" not in model_schema["required"]
+    assert model_schema["dependentRequired"] == {
+        "calibration_report_sha256": ["runtime_download"],
+        "runtime_download": ["calibration_report_sha256"],
+    }
+    assert model_schema["properties"]["calibration_report_sha256"] == {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$",
+    }
+    assert model_schema["properties"]["runtime_download"] == {"const": False}
+    assert model_schema["allOf"]
+
+
+def test_activated_task12_model_exposes_fail_closed_local_inference_boundary(
+    tmp_path: Path,
+) -> None:
+    registry = ModelRegistry.from_document(
+        {"schema_version": "1.0", "models": [_task12_wake_model_entry()]},
+        model_root=tmp_path / "models",
+    )
+    activated = ModelInstaller(registry, {"models.example.test"}, ScriptedModelTransport()).install(
+        "hello-tuntun-v1"
+    )
+    try:
+        with pytest.raises(ModelVerificationError, match="local inference unavailable"):
+            activated.unavailable_local_inference_handle(expected_model_id="stop-tuntun-v1")
+        handle = activated.unavailable_local_inference_handle(expected_model_id="hello-tuntun-v1")
+        assert handle.model_id == "hello-tuntun-v1"
+        assert handle.activated is True
+        assert handle.runtime_download is False
+        assert handle.calibration_report_sha256 == EXPECTED_SHA256
+        assert getattr(handle, "download", None) is None
+        assert getattr(handle, "download_model", None) is None
+        assert getattr(handle, "cloud_endpoint", None) is None
+        unavailable_error = getattr(registry_module, "LocalInferenceUnavailableError", RuntimeError)
+        with pytest.raises(unavailable_error, match="local-inference-runtime-unavailable"):
+            handle.infer_score(b"\x00" * 2_560)
+    finally:
+        activated.close()
+
+
+def test_legacy_model_cannot_claim_local_inference_without_calibration(tmp_path: Path) -> None:
+    registry = ModelRegistry.from_document(
+        {"schema_version": "1.0", "models": [_legacy_model_entry()]},
+        model_root=tmp_path / "models",
+    )
+    activated = ModelInstaller(registry, {"models.example.test"}, ScriptedModelTransport()).install(
+        "legacy-model-v1"
+    )
+    try:
+        with pytest.raises(ModelVerificationError, match="local inference unavailable"):
+            activated.unavailable_local_inference_handle(expected_model_id="legacy-model-v1")
+    finally:
+        activated.close()
+
+
 def test_fifo_manifest_is_rejected_without_blocking(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.yaml"
     ready = tmp_path / "child-ready"
@@ -479,6 +813,46 @@ def test_runtime_loader_receipt_is_authenticated_and_exact_bound(
     with pytest.raises(ModelVerificationError, match="runtime model receipt mismatch"):
         activated.load_with(runtime_adapter, runtime_receipt_verifier)
     assert runtime_adapter.open_duplicate_fd_count == 0  # type: ignore[attr-defined]
+    assert runtime_adapter.abort_calls == 1  # type: ignore[attr-defined]
+
+
+def test_archive_backed_model_runtime_load_fails_closed_without_bounded_archive_adapter(
+    governed_model_case: object,
+    runtime_adapter: object,
+    runtime_receipt_verifier: object,
+) -> None:
+    document = yaml.safe_load(
+        governed_model_case.manifest.read_text(encoding="utf-8")  # type: ignore[attr-defined]
+    )
+    archive_model_id = "vosk-small-en-us-0.15"
+    entry = document["models"][0]
+    entry["id"] = archive_model_id
+    entry["approved_purpose"] = "offline_command"
+    entry["runtime"] = "vosk==0.3.44"
+    entry["runtime_max_bytes"] = 256_000_000
+    entry["architecture"] = "Vosk/Kaldi small-model ZIP archive"
+    entry["input_contract"] = "PCM16 mono post-wake bytes"
+    entry["output_contract"] = "bounded offline command transcript"
+    entry["benchmark_gate"] = "tests/unit/offline/test_local_asr.py"
+    entry["files"][0]["path"] = "vosk-model-small-en-us-0.15.zip"
+    entry["files"][0]["url"] = "https://models.example.test/vosk-model-small-en-us-0.15.zip"
+    governed_model_case.manifest.write_text(  # type: ignore[attr-defined]
+        yaml.safe_dump(document, sort_keys=False),
+        encoding="utf-8",
+    )
+    governed_model_case.manifest.chmod(0o600)  # type: ignore[attr-defined]
+
+    activated = governed_model_case._installer().install(archive_model_id)  # type: ignore[attr-defined]
+
+    try:
+        with pytest.raises(ModelVerificationError, match="bounded archive runtime"):
+            activated.load_with(runtime_adapter, runtime_receipt_verifier)
+    finally:
+        activated.close()
+
+    assert runtime_adapter.open_duplicate_fd_count == 0  # type: ignore[attr-defined]
+    assert runtime_adapter.pending_runtime_count == 0  # type: ignore[attr-defined]
+    assert runtime_adapter.published_runtime_count == 0  # type: ignore[attr-defined]
     assert runtime_adapter.abort_calls == 1  # type: ignore[attr-defined]
 
 
@@ -5069,7 +5443,150 @@ def test_non_install_model_cli_commands_never_open_network(
     monkeypatch.setattr(socket, "socket", blocked_socket)
     result = CliRunner().invoke(app, ["models", *command])
     assert result.exit_code == 0, result.output
-    assert result.stdout == "[]\n"
+    payload = json.loads(result.stdout)
+    if command == ("list",):
+        assert payload == [
+            {
+                "id": "vosk-small-en-us-0.15",
+                "revision": "30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498",
+                "runtime": "vosk==0.3.44",
+                "files": [
+                    {
+                        "path": "vosk-model-small-en-us-0.15.zip",
+                        "size": 41205931,
+                        "sha256": (
+                            "30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498"
+                        ),
+                    }
+                ],
+            },
+            {
+                "id": "vosk-small-hi-0.22",
+                "revision": "7c50a10866889f0ac21d912c20537a055a597ed09fc1d3e5bcd798f9f0017e48",
+                "runtime": "vosk==0.3.44",
+                "files": [
+                    {
+                        "path": "vosk-model-small-hi-0.22.zip",
+                        "size": 44458845,
+                        "sha256": (
+                            "7c50a10866889f0ac21d912c20537a055a597ed09fc1d3e5bcd798f9f0017e48"
+                        ),
+                    }
+                ],
+            },
+        ]
+    else:
+        assert payload == []
+
+
+@pytest.mark.parametrize(
+    ("repository_manifest_exists", "model_id"),
+    (
+        (True, "vosk-small-en-us-0.15"),
+        (False, "vosk-small-hi-0.22"),
+    ),
+    ids=("repository-manifest", "packaged-manifest"),
+)
+def test_model_install_cli_uses_exact_alphacephei_allowlist_for_root_and_packaged_manifests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repository_manifest_exists: bool,
+    model_id: str,
+) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_bytes(Path("models/manifest.yaml").read_bytes())
+    missing_manifest = tmp_path / "missing.yaml"
+    model_root = tmp_path / "models"
+    calls: list[tuple[str, frozenset[str], str, Path]] = []
+
+    class _Activated:
+        all_files_verified = True
+
+        def close(self) -> None:
+            return None
+
+    class _InstallProbe:
+        def __init__(self, registry: ModelRegistry, allowed_hosts: frozenset[str]) -> None:
+            self._registry = registry
+            self._allowed_hosts = frozenset(allowed_hosts)
+
+        def install(self, requested_model_id: str) -> _Activated:
+            entry = self._registry.entry(requested_model_id)
+            assert len(entry.files) == 1
+            expected_url = f"https://alphacephei.com/vosk/models/{entry.files[0].path}"
+            if self._allowed_hosts != frozenset({"alphacephei.com"}):
+                raise RuntimeError("model download allowlist mismatch")
+            if entry.files[0].url != expected_url:
+                raise RuntimeError("model download URL mismatch")
+            calls.append(
+                (
+                    requested_model_id,
+                    self._allowed_hosts,
+                    entry.files[0].url,
+                    self._registry._root,
+                )
+            )
+            return _Activated()
+
+    monkeypatch.setattr(
+        models_command,
+        "_REPOSITORY_MANIFEST",
+        manifest if repository_manifest_exists else missing_manifest,
+    )
+    monkeypatch.setattr(
+        models_command,
+        "_PACKAGED_MANIFEST",
+        missing_manifest if repository_manifest_exists else manifest,
+    )
+    monkeypatch.setattr(models_command, "_MODEL_ROOT", model_root)
+    monkeypatch.setattr(models_command, "ModelInstaller", _InstallProbe)
+
+    result = CliRunner().invoke(app, ["models", "install", model_id, "--approve"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["id"] == model_id
+    assert calls == [
+        (
+            model_id,
+            frozenset({"alphacephei.com"}),
+            f"https://alphacephei.com/vosk/models/vosk-model-{model_id.removeprefix('vosk-')}.zip",
+            model_root,
+        )
+    ]
+
+
+def test_manifest_schema_rejects_zip_backed_offline_asr_with_extra_file() -> None:
+    document = json.loads(json.dumps({"schema_version": "1.0", "models": []}))
+    entry = yaml.safe_load(Path("models/manifest.yaml").read_text(encoding="utf-8"))["models"][0]
+    entry["files"].append(
+        {
+            "path": "metadata.json",
+            "size": 2,
+            "sha256": "0" * 64,
+            "url": "https://alphacephei.com/vosk/models/metadata.json",
+        }
+    )
+    document["models"] = [entry]
+
+    assert _schema_errors(document)
+
+
+def test_manifest_schema_rejects_zip_backed_offline_asr_runtime_bound_drift() -> None:
+    document = yaml.safe_load(Path("models/manifest.yaml").read_text(encoding="utf-8"))
+    document["models"][0]["runtime_max_bytes"] = 123_456_789
+
+    assert _schema_errors(document)
+
+
+def test_vosk_runtime_lock_contains_macos_universal2_wheel() -> None:
+    lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
+    packages = tuple(package for package in lock["package"] if package["name"] == "vosk")
+
+    assert len(packages) == 1
+    assert packages[0]["version"] == "0.3.44"
+    wheel_urls = tuple(wheel["url"] for wheel in packages[0]["wheels"])
+    assert any("macosx_10_6_universal2" in url for url in wheel_urls)
+    assert all("0.3.45" not in url for url in wheel_urls)
 
 
 def test_installed_cli_uses_the_packaged_governed_manifest(

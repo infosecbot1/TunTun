@@ -18,7 +18,7 @@ pytest_plugins = ("tests.fixtures.provider_egress",)
 
 @pytest.mark.asyncio
 async def test_receipt_commit_precedes_final_gateway_result(
-    route, consumption, redaction_receipt_id, clock
+    route, consumption, redaction_receipt_id, route_clock
 ) -> None:
     events = []
 
@@ -71,7 +71,7 @@ async def test_receipt_commit_precedes_final_gateway_result(
         Budget(),
         Calls(),
         Evidence(),
-        clock,
+        route_clock,
     ).send(route, consumption, redaction_receipt_id, network, observe)
     events.append("returned")
     assert result.value == "ok" and result.provider_usage_receipt_id is not None
@@ -95,7 +95,7 @@ async def test_commit_then_cancel_retries_only_the_exact_success_terminalization
     route,
     consumption,
     redaction_receipt_id,
-    clock,
+    route_clock,
     receipt_present,
 ) -> None:
     class Authorizer:
@@ -135,7 +135,7 @@ async def test_commit_then_cancel_retries_only_the_exact_success_terminalization
             return SimpleNamespace(receipt_id=uuid4())
 
     calls = Calls()
-    gateway = ProviderGateway(Authorizer(), Budget(), calls, Evidence(), clock)
+    gateway = ProviderGateway(Authorizer(), Budget(), calls, Evidence(), route_clock)
 
     async def network() -> str:
         return "ok"
@@ -163,7 +163,7 @@ async def test_task05_preserves_typed_pre_network_mark_sent_failure(
     route,
     consumption,
     redaction_receipt_id,
-    clock,
+    route_clock,
 ) -> None:
     events = []
 
@@ -187,7 +187,7 @@ async def test_task05_preserves_typed_pre_network_mark_sent_failure(
     class Evidence:
         pass
 
-    gateway = ProviderGateway(Authorizer(), Budget(), Calls(), Evidence(), clock)
+    gateway = ProviderGateway(Authorizer(), Budget(), Calls(), Evidence(), route_clock)
 
     async def network() -> str:
         events.append("network")

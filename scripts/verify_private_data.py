@@ -13,10 +13,11 @@ import tempfile
 import time
 import zipfile
 import zlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, BinaryIO, Literal, Protocol
 
 FORBIDDEN_SUFFIXES = {
@@ -35,6 +36,18 @@ FORBIDDEN_SUFFIXES = {
     ".onnx",
     ".safetensors",
 }
+ALLOWED_DETERMINISTIC_OFFLINE_WAVS: Mapping[PurePosixPath, tuple[int, str]] = MappingProxyType(
+    {
+        PurePosixPath("assets/offline-prompts/confirm.wav"): (
+            12_044,
+            "90a1d8db8ce933937181954b71c8d28acff657e60e1ad0e67425211f8f2af822",
+        ),
+        PurePosixPath("assets/offline-prompts/unavailable.wav"): (
+            12_044,
+            "768cb24891237a6a70d2dd9c3642998db27bfa6739b7924587b827cc2e57ed35",
+        ),
+    }
+)
 PATTERNS = (
     ("credential-pattern", re.compile(rb"(?:sk-proj-|AKIA)[A-Za-z0-9_-]{16,}")),
     ("private-key", re.compile(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
@@ -65,6 +78,9 @@ GIT_FD_EXEC_HELPER = (
 )
 MAX_GIT_INVENTORY_BYTES = 64 * 1024 * 1024
 MAX_GIT_STDERR_BYTES = 1024 * 1024
+MAX_HISTORY_COMMITS = 10_000
+MAX_HISTORY_INVENTORY_SECONDS = 60.0
+MAX_HISTORY_BLOB_PATHS = 128
 STREAM_CHUNK_BYTES = 1024 * 1024
 MAX_GIT_BATCH_BUFFER_BYTES = 2 * STREAM_CHUNK_BYTES
 PATTERN_OVERLAP_BYTES = 256
@@ -333,23 +349,35 @@ def _patterns_stream(
     expanded: bool = False,
     initial: bytes = b"",
     sink: BinaryIO | None = None,
+    repository_relative_path: PurePosixPath | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
-    if Path(path.name.split("!", 1)[-1]).suffix.lower() in FORBIDDEN_SUFFIXES:
+    suffix = Path(path.name.split("!", 1)[-1]).suffix.lower()
+    deferred_wav_check = suffix == ".wav"
+    if suffix in FORBIDDEN_SUFFIXES and not deferred_wav_check:
         findings.append(Finding(path, "forbidden-extension"))
     if expected_size is not None and expected_size > byte_limit:
+        if deferred_wav_check:
+            findings.insert(0, Finding(path, "forbidden-extension"))
         return [*findings, Finding(path, limit_reason)]
     total = 0
     tail = b""
     matched: set[str] = set()
     pending = initial
+    wav_digest = hashlib.sha256() if deferred_wav_check else None
     while pending or (pending := source.read(STREAM_CHUNK_BYTES)):
         chunk = pending
         pending = b""
         total += len(chunk)
+        if wav_digest is not None:
+            wav_digest.update(chunk)
         if total > byte_limit:
+            if deferred_wav_check:
+                findings.insert(0, Finding(path, "forbidden-extension"))
             return [*findings, Finding(path, limit_reason)]
         if expected_size is not None and total > expected_size:
+            if deferred_wav_check:
+                findings.insert(0, Finding(path, "forbidden-extension"))
             return [*findings, Finding(path, "archive-read-failed")]
         if budget is not None and expanded:
             budget.expanded(path, len(chunk))
@@ -363,7 +391,55 @@ def _patterns_stream(
         tail = window[-PATTERN_OVERLAP_BYTES:]
     if expected_size is not None and total != expected_size:
         findings.append(Finding(path, "archive-read-failed"))
+    if deferred_wav_check:
+        assert wav_digest is not None
+        if not _is_allowed_deterministic_offline_wav(
+            path,
+            repository_relative_path,
+            total,
+            wav_digest.hexdigest(),
+        ):
+            findings.insert(0, Finding(path, "forbidden-extension"))
     return findings
+
+
+def _is_allowed_deterministic_offline_wav(
+    display_path: Path,
+    repository_relative_path: PurePosixPath | None,
+    size_bytes: int,
+    sha256: str,
+) -> bool:
+    if "!" in display_path.as_posix() or repository_relative_path is None:
+        return False
+    if (
+        repository_relative_path.is_absolute()
+        or repository_relative_path.as_posix() != str(repository_relative_path)
+        or any(part in {"", ".", ".."} for part in repository_relative_path.parts)
+    ):
+        return False
+    expected = ALLOWED_DETERMINISTIC_OFFLINE_WAVS.get(repository_relative_path)
+    return expected == (size_bytes, sha256)
+
+
+def _repository_relative_path(path: Path) -> PurePosixPath | None:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    for parent in absolute.parents:
+        try:
+            marker = os.stat(parent / ".git", follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        if stat.S_ISLNK(marker.st_mode) or not (
+            stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)
+        ):
+            return None
+        try:
+            relative = absolute.relative_to(parent)
+        except ValueError:
+            return None
+        return PurePosixPath(relative.as_posix())
+    return None
 
 
 def _archive_intent(name: str, prefix: bytes) -> str | None:
@@ -375,6 +451,10 @@ def _archive_intent(name: str, prefix: bytes) -> str | None:
     if name.endswith(".tar") or prefix[257:262] == b"ustar":
         return "tar"
     return None
+
+
+def _is_audio_like_bytes(prefix: bytes) -> bool:
+    return len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WAVE"
 
 
 def _zip_member_count(source: Any, display: Path, budget: ScanBudget) -> None:
@@ -655,6 +735,7 @@ def _scan_file(
     display: Path,
     budget: ScanBudget,
     candidate: OpenedCandidate | None = None,
+    repository_relative_path: PurePosixPath | None = None,
 ) -> list[Finding]:
     try:
         metadata = path.lstat() if candidate is None else candidate.metadata
@@ -703,6 +784,7 @@ def _scan_file(
                     expected_size=opened.st_size,
                     byte_limit=input_limit,
                     limit_reason="compressed-byte-limit",
+                    repository_relative_path=repository_relative_path,
                 )
                 frozen.seek(0)
                 findings.extend(_scan_archive(frozen, intent, display, budget, 0))
@@ -713,6 +795,7 @@ def _scan_file(
                     expected_size=opened.st_size,
                     byte_limit=MAX_RAW_FILE_BYTES,
                     limit_reason="raw-byte-limit",
+                    repository_relative_path=repository_relative_path,
                 )
             final = os.fstat(source.fileno())
             opened_identity = (
@@ -1041,6 +1124,21 @@ def _wait_process(process: subprocess.Popen[bytes], deadline: float, path: Path)
         raise GitInventoryError(path, "git-inventory-timeout") from error
 
 
+def _bounded_git_deadline(path: Path, deadline: float | None = None) -> float:
+    now = time.monotonic()
+    effective_deadline = now + GIT_TIMEOUT_SECONDS
+    if deadline is not None:
+        effective_deadline = min(effective_deadline, deadline)
+    if effective_deadline <= now:
+        raise GitInventoryError(path, "git-inventory-timeout")
+    return effective_deadline
+
+
+def _ensure_git_deadline(path: Path, deadline: float) -> None:
+    if deadline - time.monotonic() <= 0:
+        raise GitInventoryError(path, "git-inventory-timeout")
+
+
 def _kill_and_reap(process: subprocess.Popen[bytes], path: Path) -> None:
     if process.poll() is None:
         process.kill()
@@ -1056,8 +1154,10 @@ def _run_git(
     *,
     max_bytes: int,
     allowed_returncodes: tuple[int, ...] = (0,),
+    deadline: float | None = None,
 ) -> tuple[int, bytes]:
     repository.revalidate()
+    effective_deadline = _bounded_git_deadline(repository.path, deadline)
     process = subprocess.Popen(
         _git_argv(repository, arguments),
         stdin=subprocess.DEVNULL,
@@ -1073,10 +1173,9 @@ def _run_git(
     selector.register(process.stderr, selectors.EVENT_READ, "stderr")
     output = bytearray()
     errors = bytearray()
-    deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
     try:
         while selector.get_map():
-            remaining = deadline - time.monotonic()
+            remaining = effective_deadline - time.monotonic()
             if remaining <= 0:
                 raise GitInventoryError(repository.path, "git-inventory-timeout")
             ready = selector.select(remaining)
@@ -1092,7 +1191,7 @@ def _run_git(
                 limit = max_bytes if key.data == "stdout" else MAX_GIT_STDERR_BYTES
                 if len(target) > limit:
                     raise GitInventoryError(repository.path, "git-inventory-output-limit")
-        returncode = _wait_process(process, deadline, repository.path)
+        returncode = _wait_process(process, effective_deadline, repository.path)
         if returncode not in allowed_returncodes or errors:
             raise GitInventoryError(repository.path, "git-inventory-failed")
         repository.revalidate()
@@ -1109,8 +1208,9 @@ def _git_output(
     arguments: Sequence[str],
     *,
     max_bytes: int,
+    deadline: float | None = None,
 ) -> bytes:
-    return _run_git(repository, arguments, max_bytes=max_bytes)[1]
+    return _run_git(repository, arguments, max_bytes=max_bytes, deadline=deadline)[1]
 
 
 def _repository_for(root: RootBinding) -> RepositoryBinding | None:
@@ -1880,6 +1980,109 @@ def _parse_history_header(
     return raw_oid.decode("ascii"), object_type, int(raw_size)
 
 
+def _parse_history_commit_inventory(
+    raw: bytes,
+    repository: Path,
+    object_format: str | None,
+) -> tuple[str, ...]:
+    if object_format not in {"sha1", "sha256"}:
+        raise GitInventoryError(repository, "git-object-format-unsupported")
+    oid_width = 40 if object_format == "sha1" else 64
+    commits = raw.splitlines()
+    if any(
+        len(commit) != oid_width or re.fullmatch(rb"[0-9a-f]+", commit) is None
+        for commit in commits
+    ):
+        raise GitInventoryError(repository, "git-inventory-malformed")
+    return tuple(commit.decode("ascii") for commit in commits)
+
+
+def _parse_history_tree_inventory(
+    raw: bytes,
+    repository: Path,
+    object_format: str | None,
+    budget: ScanBudget,
+) -> dict[str, set[PurePosixPath]]:
+    if object_format not in {"sha1", "sha256"}:
+        raise GitInventoryError(repository, "git-object-format-unsupported")
+    oid_width = 40 if object_format == "sha1" else 64
+    result: dict[str, set[PurePosixPath]] = {}
+    for record in _nul_records(raw, repository):
+        try:
+            header, raw_path = record.split(b"\t", 1)
+            raw_mode, object_type, raw_oid = header.split(b" ")
+        except ValueError as error:
+            raise GitInventoryError(repository, "git-inventory-malformed") from error
+        if (
+            raw_mode not in {b"100644", b"100755", b"120000", b"160000"}
+            or object_type not in {b"blob", b"commit"}
+            or len(raw_oid) != oid_width
+            or re.fullmatch(rb"[0-9a-f]+", raw_oid) is None
+        ):
+            raise GitInventoryError(repository, "git-inventory-malformed")
+        relative = _canonical_git_path(raw_path, repository, PurePosixPath("."))
+        budget.path_entry(Path("<git-history>") / Path(relative.as_posix()))
+        if object_type != b"blob":
+            continue
+        oid = raw_oid.decode("ascii")
+        oid_paths = result.setdefault(oid, set())
+        oid_paths.add(relative)
+        if len(oid_paths) > MAX_HISTORY_BLOB_PATHS:
+            raise GitInventoryError(
+                Path("<git-history>") / oid,
+                "history-blob-path-fanout-limit",
+            )
+    return result
+
+
+def _history_path_inventory(
+    repository: RepositoryBinding,
+    budget: ScanBudget,
+) -> dict[str, frozenset[PurePosixPath]]:
+    deadline = time.monotonic() + MAX_HISTORY_INVENTORY_SECONDS
+    remaining = MAX_GIT_INVENTORY_BYTES
+    commits_raw = _git_output(
+        repository,
+        ("rev-list", "--all"),
+        max_bytes=remaining,
+        deadline=deadline,
+    )
+    remaining -= len(commits_raw)
+    commits = _parse_history_commit_inventory(
+        commits_raw,
+        repository.path,
+        repository.object_format,
+    )
+    if len(commits) > MAX_HISTORY_COMMITS:
+        raise GitInventoryError(repository.path, "git-history-commit-limit")
+    paths: dict[str, set[PurePosixPath]] = {}
+    for commit in commits:
+        if remaining <= 0:
+            raise GitInventoryError(repository.path, "git-inventory-output-limit")
+        _ensure_git_deadline(repository.path, deadline)
+        tree_raw = _git_output(
+            repository,
+            ("ls-tree", "-rz", "-r", "--full-tree", commit),
+            max_bytes=remaining,
+            deadline=deadline,
+        )
+        remaining -= len(tree_raw)
+        for oid, tree_paths in _parse_history_tree_inventory(
+            tree_raw,
+            repository.path,
+            repository.object_format,
+            budget,
+        ).items():
+            oid_paths = paths.setdefault(oid, set())
+            oid_paths.update(tree_paths)
+            if len(oid_paths) > MAX_HISTORY_BLOB_PATHS:
+                raise GitInventoryError(
+                    Path("<git-history>") / oid,
+                    "history-blob-path-fanout-limit",
+                )
+    return {oid: frozenset(tree_paths) for oid, tree_paths in paths.items()}
+
+
 class GitHistoryStream:
     def __init__(self, repository: RepositoryBinding, process: subprocess.Popen[bytes]) -> None:
         self.repository = repository
@@ -1955,7 +2158,7 @@ class GitHistoryStream:
     def objects(
         self,
         budget: ScanBudget,
-    ) -> Iterator[tuple[FrozenFileView, int, Path, bytes]]:
+    ) -> Iterator[tuple[str, FrozenFileView, int, Path, bytes]]:
         seen: set[str] = set()
         while True:
             self.deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
@@ -1986,7 +2189,13 @@ class GitHistoryStream:
                 if digest.hexdigest() != oid:
                     raise GitInventoryError(display, "git-batch-content-oid-mismatch")
                 source.seek(0)
-                yield FrozenFileView(source, declared_size), declared_size, display, object_type
+                yield (
+                    oid,
+                    FrozenFileView(source, declared_size),
+                    declared_size,
+                    display,
+                    object_type,
+                )
 
     def _finish(self) -> None:
         self.deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
@@ -2097,6 +2306,7 @@ def _scan_index_blob(
             limit_reason=(
                 "compressed-byte-limit" if intent in {"zip", "compressed_tar"} else "raw-byte-limit"
             ),
+            repository_relative_path=entry.path,
         )
         if intent is not None:
             source.seek(0)
@@ -2109,23 +2319,55 @@ def _scan_git_history(
     budget: ScanBudget,
 ) -> list[Finding]:
     findings: list[Finding] = []
+    history_paths: Mapping[str, frozenset[PurePosixPath]]
+    history_inventory_finding: Finding | None = None
+    try:
+        history_paths = _history_path_inventory(repository, budget)
+    except GitInventoryError as error:
+        history_paths = {}
+        history_inventory_finding = Finding(error.path, error.reason)
     with _start_git_history(repository) as stream:
-        for source, declared_size, display, object_type in stream.objects(budget):
+        for oid, source, declared_size, display, object_type in stream.objects(budget):
             prefix = source.read(512)
             source.seek(0)
-            intent = _archive_intent(display.name, prefix) if object_type == b"blob" else None
-            findings.extend(
-                _patterns_stream(
-                    display,
-                    source,
-                    expected_size=declared_size,
-                    byte_limit=MAX_RAW_FILE_BYTES,
-                    limit_reason="raw-byte-limit",
+            paths = history_paths.get(oid, frozenset()) if object_type == b"blob" else frozenset()
+            if len(paths) > MAX_HISTORY_BLOB_PATHS:
+                raise ScanLimit(display, "history-blob-path-fanout-limit")
+            displays: tuple[tuple[Path, PurePosixPath | None], ...] = (
+                tuple(
+                    (Path("<git-history>") / Path(path.as_posix()), path)
+                    for path in sorted(paths, key=lambda item: item.as_posix())
                 )
+                if paths
+                else ((display, None),)
             )
-            if intent is not None:
+            for history_display, repository_relative_path in displays:
                 source.seek(0)
-                findings.extend(_scan_archive(source, intent, display, budget, 0))
+                intent = (
+                    _archive_intent(history_display.name, prefix)
+                    if object_type == b"blob"
+                    else None
+                )
+                if repository_relative_path is not None:
+                    budget.file(history_display)
+                    budget.input(history_display, declared_size)
+                findings.extend(
+                    _patterns_stream(
+                        history_display,
+                        source,
+                        expected_size=declared_size,
+                        byte_limit=MAX_RAW_FILE_BYTES,
+                        limit_reason="raw-byte-limit",
+                        repository_relative_path=repository_relative_path,
+                    )
+                )
+                if intent is not None:
+                    source.seek(0)
+                    findings.extend(_scan_archive(source, intent, history_display, budget, 0))
+            if object_type == b"blob" and not paths and _is_audio_like_bytes(prefix):
+                findings.append(Finding(display, "forbidden-audio-bytes"))
+    if history_inventory_finding is not None:
+        findings.append(history_inventory_finding)
     try:
         connectivity = _history_connectivity_finding(repository)
     except GitInventoryError as error:
@@ -2172,7 +2414,15 @@ def _scan_source(
             expected_identity,
         ):
             display = _source_display(root, repository, relative, index=False)
-            findings.extend(_scan_file(candidate.path, display, budget, candidate))
+            findings.extend(
+                _scan_file(
+                    candidate.path,
+                    display,
+                    budget,
+                    candidate,
+                    repository_relative_path=relative,
+                )
+            )
         if _terminal_limit(findings):
             return findings
     final = _capture_source_snapshot(repository, scope)
@@ -2269,7 +2519,15 @@ def scan(
                             display = (
                                 path.relative_to(bound_root.path) if bound_root.directory else path
                             )
-                            findings.extend(_scan_file(path, display, budget, candidate))
+                            findings.extend(
+                                _scan_file(
+                                    path,
+                                    display,
+                                    budget,
+                                    candidate,
+                                    repository_relative_path=_repository_relative_path(path),
+                                )
+                            )
                             if _terminal_limit(findings):
                                 return tuple(findings)
                     finally:

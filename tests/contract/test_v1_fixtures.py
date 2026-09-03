@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # The import split below deliberately bootstraps the uninstalled root namespace.
 # ruff: noqa: E402
+import importlib
 import json
 import os
 import subprocess
@@ -9,7 +10,7 @@ import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import ModuleType
-from typing import cast
+from typing import Any, cast
 
 # The root project is not an installed package; preserve package-import coverage
 # without changing workspace metadata or adding a suite-wide import side effect.
@@ -20,15 +21,14 @@ if str(ROOT) not in sys.path:
 import pytest
 from tuntun_contracts import (
     actions,
-    audit,
     budget,
     events,
     identity,
     memory,
     policy,
-    ports,
     provider,
     reachy,
+    reachy_assistant_qualification,
     speech,
 )
 from tuntun_contracts.base import (
@@ -52,17 +52,22 @@ from scripts.contract_fixture_builders import (
 from scripts.contract_generator_common import open_generated_directory_snapshot
 
 FIXTURE_ROOT = ROOT / "packages/contracts/fixtures/v1"
-EXPECTED_GROUP_MODULES: Mapping[str, tuple[ModuleType, ...]] = {
-    "actions": (actions,),
-    "audit": (audit,),
-    "budget": (budget,),
-    "events": (events, ports),
-    "identity": (identity,),
-    "memory": (memory,),
-    "policy": (policy,),
-    "provider": (provider,),
-    "reachy": (reachy,),
-    "speech": (speech,),
+EXPECTED_GROUP_MODULES: Mapping[str, tuple[str, ...]] = {
+    "actions": ("actions",),
+    "audit": ("audit",),
+    "budget": ("budget",),
+    "events": ("events", "ports"),
+    "identity": ("identity",),
+    "memory": ("memory",),
+    "policy": ("policy",),
+    "provider": ("provider",),
+    "reachy": (
+        "reachy",
+        "reachy_assistant_qualification",
+        "reachy_operator",
+        "reachy_time",
+    ),
+    "speech": ("speech",),
 }
 EXPECTED_GROUP_COUNTS = {
     "actions": 23,
@@ -73,64 +78,71 @@ EXPECTED_GROUP_COUNTS = {
     "memory": 14,
     "policy": 10,
     "provider": 9,
-    "reachy": 7,
+    "reachy": 14,
     "speech": 6,
 }
-EXPECTED_SEMANTIC_MODELS = frozenset(
-    {
-        Commitment,
-        events.EventEnvelope,
-        events.SignedEventEnvelope,
-        speech.AuthorizedTranscriptionRequest,
-        speech.AuthorizedSynthesisRequest,
-        identity.IdentityEvidence,
-        identity.IdentityRequest,
-        identity.IdentityDecision,
-        memory.EpisodicContent,
-        memory.MemoryProposalDraft,
-        memory.MemoryProposal,
-        memory.MemoryRecord,
-        memory.MemoryQuery,
-        memory.ApprovedMemory,
-        memory.DecideMemoryProposal,
-        actions.TimerCreateActionDraft,
-        actions.TimerTargetActionDraft,
-        actions.SafetyActionDraft,
-        actions.PrivacyReductionActionDraft,
-        actions.ComponentStatusActionDraft,
-        actions.DiagnosticActionDraft,
-        actions.MemoryActionDraft,
-        actions.ProfileActionDraft,
-        actions.ConsentActionDraft,
-        actions.IdentityActionDraft,
-        actions.ProviderActionDraft,
-        actions.CredentialActionDraft,
-        actions.AuditActionDraft,
-        actions.BackupActionDraft,
-        actions.SearchActionDraft,
-        actions.SecurityFindingActionDraft,
-        actions.ReleaseP1R0ActionDraft,
-        actions.LatencyDeviationActionDraft,
-        actions.FamilyStageReviewActionDraft,
-        actions.ValidatedActionProposal,
-        policy.PolicyRequest,
-        policy.PolicyDecision,
-        policy.AuthenticationRequest,
-        policy.AuthenticationChallenge,
-        policy.AuthGrant,
-        policy.AuthContext,
-        policy.AdminSessionPrincipal,
-        policy.TimerIntent,
-        provider.SanitizedProviderRequest,
-        provider.RedactionReceipt,
-        budget.BudgetReservationRequest,
-        budget.BudgetReservation,
-        budget.BudgetAccountingContext,
-        budget.ProviderUsageReceiptV1,
-        budget.BudgetReconciliationRequest,
-        reachy.ReachyCommand,
-        reachy.CameraWindowGrant,
-    }
+EXPECTED_SEMANTIC_MODELS = cast(
+    frozenset[type[ContractModel]],
+    frozenset(
+        {
+            Commitment,
+            events.EventEnvelope,
+            events.SignedEventEnvelope,
+            speech.AuthorizedTranscriptionRequest,
+            speech.AuthorizedSynthesisRequest,
+            identity.IdentityEvidence,
+            identity.IdentityRequest,
+            identity.IdentityDecision,
+            memory.EpisodicContent,
+            memory.MemoryProposalDraft,
+            memory.MemoryProposal,
+            memory.MemoryRecord,
+            memory.MemoryQuery,
+            memory.ApprovedMemory,
+            memory.DecideMemoryProposal,
+            actions.TimerCreateActionDraft,
+            actions.TimerTargetActionDraft,
+            actions.SafetyActionDraft,
+            actions.PrivacyReductionActionDraft,
+            actions.ComponentStatusActionDraft,
+            actions.DiagnosticActionDraft,
+            actions.MemoryActionDraft,
+            actions.ProfileActionDraft,
+            actions.ConsentActionDraft,
+            actions.IdentityActionDraft,
+            actions.ProviderActionDraft,
+            actions.CredentialActionDraft,
+            actions.AuditActionDraft,
+            actions.BackupActionDraft,
+            actions.SearchActionDraft,
+            actions.SecurityFindingActionDraft,
+            actions.ReleaseP1R0ActionDraft,
+            actions.LatencyDeviationActionDraft,
+            actions.FamilyStageReviewActionDraft,
+            actions.ValidatedActionProposal,
+            policy.PolicyRequest,
+            policy.PolicyDecision,
+            policy.AuthenticationRequest,
+            policy.AuthenticationChallenge,
+            policy.AuthGrant,
+            policy.AuthContext,
+            policy.AdminSessionPrincipal,
+            policy.TimerIntent,
+            provider.SanitizedProviderRequest,
+            provider.RedactionReceipt,
+            budget.BudgetReservationRequest,
+            budget.BudgetReservation,
+            budget.BudgetAccountingContext,
+            budget.ProviderUsageReceiptV1,
+            budget.BudgetReconciliationRequest,
+            reachy.ReachyCommand,
+            reachy.CameraWindowGrant,
+            reachy_assistant_qualification.ReachyAssistantInventoryV1,
+        }
+    ),
+)
+EXPECTED_TASK08_SEMANTIC_MODEL_NAMES = frozenset(
+    {"tuntun_contracts.reachy_operator.ReachyOperatorStateV1"}
 )
 EXPECTED_PRIVACY_HEADINGS = (
     "## Assets",
@@ -157,6 +169,36 @@ def _mapping(value: object) -> dict[str, object]:
     assert isinstance(value, dict)
     assert all(isinstance(key, str) for key in value)
     return cast(dict[str, object], value)
+
+
+def _module_by_name(module_name: str) -> ModuleType:
+    try:
+        return importlib.import_module(f"tuntun_contracts.{module_name}")
+    except ModuleNotFoundError as error:
+        raise AssertionError(
+            f"missing fixture contract module tuntun_contracts.{module_name}"
+        ) from error
+
+
+def _contract_model_by_name(qualified_name: str) -> type[ContractModel]:
+    module_name, _, model_name = qualified_name.rpartition(".")
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as error:
+        raise AssertionError(f"missing fixture contract module {module_name}") from error
+    value = getattr(module, model_name, None)
+    if not (
+        isinstance(value, type) and issubclass(value, ContractModel) and value is not ContractModel
+    ):
+        raise AssertionError(f"missing fixture ContractModel {qualified_name}")
+    return value
+
+
+def _expected_semantic_models() -> frozenset[type[ContractModel]]:
+    models: set[type[ContractModel]] = set(EXPECTED_SEMANTIC_MODELS)
+    for model_name in EXPECTED_TASK08_SEMANTIC_MODEL_NAMES:
+        models.add(_contract_model_by_name(model_name))
+    return frozenset(models)
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -209,9 +251,10 @@ def _walk_schema_nodes(value: object) -> Iterator[dict[str, object]]:
 
 def _independent_fixture_registry() -> dict[str, dict[str, type[ContractModel]]]:
     result: dict[str, dict[str, type[ContractModel]]] = {}
-    for group, owning_modules in EXPECTED_GROUP_MODULES.items():
+    for group, owning_module_names in EXPECTED_GROUP_MODULES.items():
         models: dict[str, type[ContractModel]] = {}
-        for module in owning_modules:
+        for module_name in owning_module_names:
+            module = _module_by_name(module_name)
             for name, value in vars(module).items():
                 if (
                     isinstance(value, type)
@@ -226,30 +269,34 @@ def _independent_fixture_registry() -> dict[str, dict[str, type[ContractModel]]]
     return dict(sorted(result.items()))
 
 
-def test_fixture_registry_matches_the_independent_95_model_oracle() -> None:
+def test_fixture_registry_matches_the_independent_102_model_oracle() -> None:
     preview = FixtureFactory.preview()
     assert preview.uuid_json() == "00000000-0000-0000-0000-000000000001"
     assert preview.time_json() == "2026-08-27T00:00:00+00:00"
     expected = _independent_fixture_registry()
     expected_models = {model_type for models in expected.values() for model_type in models.values()}
     assert {name: len(models) for name, models in expected.items()} == EXPECTED_GROUP_COUNTS
-    assert len(expected_models) == 95
+    assert len(expected_models) == 102
     assert expected_models == set(registered_contract_models())
     assert fixture_registry() == expected
     assert set(BUILDERS) == expected_models
 
 
 def test_semantic_partition_matches_an_independent_exact_oracle() -> None:
-    assert len(EXPECTED_SEMANTIC_MODELS) == 52
-    assert len(SCHEMA_ONLY_MODELS) == 43
-    assert set(semantic_specs()) == set(EXPECTED_SEMANTIC_MODELS)
-    assert set(REQUIRED_SEMANTIC_MODELS) == set(EXPECTED_SEMANTIC_MODELS)
+    expected_semantic_models = _expected_semantic_models()
+    assert len(expected_semantic_models) == 54
+    assert len(SCHEMA_ONLY_MODELS) == 48
+    assert set(semantic_specs()) == set(expected_semantic_models)
+    assert set(REQUIRED_SEMANTIC_MODELS) == set(expected_semantic_models)
     assert not (set(REQUIRED_SEMANTIC_MODELS) & set(SCHEMA_ONLY_MODELS))
     assert set(REQUIRED_SEMANTIC_MODELS) | set(SCHEMA_ONLY_MODELS) == set(BUILDERS)
 
 
 def test_repaired_task5_correlations_are_explicit_and_valid() -> None:
     specs = semantic_specs()
+    operator_state_type = _contract_model_by_name(
+        "tuntun_contracts.reachy_operator.ReachyOperatorStateV1"
+    )
     expected_fields: dict[type[ContractModel], frozenset[str]] = {
         speech.AuthorizedTranscriptionRequest: frozenset(
             {"request_id", "turn_id", "audio_commitment", "language_hints", "route"}
@@ -301,6 +348,12 @@ def test_repaired_task5_correlations_are_explicit_and_valid() -> None:
                 "issued_at",
                 "expires_at",
             }
+        ),
+        reachy_assistant_qualification.ReachyAssistantInventoryV1: frozenset(
+            {"managed_app_ids", "recovery_hook_ids"}
+        ),
+        operator_state_type: frozenset(
+            {"ssh_username", "reachy_ipv4", "core_ipv4", "accepted_capability"}
         ),
         memory.MemoryProposalDraft: frozenset(
             {
@@ -420,6 +473,7 @@ def test_repaired_task5_correlations_are_explicit_and_valid() -> None:
 
     usage = factory.build(budget.ProviderUsageReceiptV1)
     camera = factory.build(reachy.CameraWindowGrant)
+    operator_state = cast(Any, factory.build(operator_state_type))
     proposal_draft = factory.build(memory.MemoryProposalDraft)
     memory_record = factory.build(memory.MemoryRecord)
     approved = factory.build(memory.ApprovedMemory)
@@ -429,6 +483,9 @@ def test_repaired_task5_correlations_are_explicit_and_valid() -> None:
         "identity.enroll",
         "explicit_enrollment",
     )
+    assert operator_state.reachy_ipv4 != operator_state.core_ipv4
+    assert operator_state.accepted_capability is not None
+    assert operator_state.ssh_username == operator_state.accepted_capability.ssh_username
     assert memory_record.version == 1
     assert len(proposal_draft.source_receipt_ids) == len(set(proposal_draft.source_receipt_ids))
     assert len(approved.source_receipt_ids) == len(set(approved.source_receipt_ids))
@@ -439,7 +496,7 @@ def test_semantic_misclassification_fails_before_output_creation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    semantic_model = next(iter(EXPECTED_SEMANTIC_MODELS))
+    semantic_model = next(iter(_expected_semantic_models()))
     monkeypatch.setattr(
         contract_fixture_builders,
         "SCHEMA_ONLY_MODELS",
@@ -451,7 +508,7 @@ def test_semantic_misclassification_fails_before_output_creation(
     assert not output.exists()
 
 
-def test_all_95_schemas_use_the_exact_supported_keyword_and_format_matrix() -> None:
+def test_all_102_schemas_use_the_exact_supported_keyword_and_format_matrix() -> None:
     keywords: set[str] = set()
     schema_types: set[str] = set()
     formats: set[str] = set()
@@ -507,6 +564,15 @@ def test_schema_builder_executes_every_claimed_shape_and_format() -> None:
             "type": "array",
         }
     ) == [False]
+    with pytest.raises(contract_fixture_builders.FixtureBuildError):
+        value(
+            {
+                "items": {"type": "boolean"},
+                "maxItems": 256,
+                "minItems": 0,
+                "type": "array",
+            }
+        )
     assert value({"maxLength": 2, "minLength": 2, "type": "string"}) == "xx"
     assert value({"default": "ignored", "title": "Text", "type": "string"}) == "x"
     for pattern, witness in contract_fixture_builders._PATTERN_VALUES.items():
@@ -589,6 +655,24 @@ def test_fixture_file_is_closed_complete_and_byte_deterministic(name: str) -> No
             ).decode("utf-8")
             == canonical
         )
+
+
+def test_reachy_fixture_uses_neutral_synthetic_non_root_ssh_principal() -> None:
+    _, document = _fixture_document("reachy")
+    examples = _mapping(document["examples"])
+    canonical_examples = _mapping(document["canonical_examples"])
+    accepted = _mapping(examples["ReachyAcceptedCapabilityV1"])
+    operator_state = _mapping(examples["ReachyOperatorStateV1"])
+    nested_accepted = _mapping(operator_state["accepted_capability"])
+
+    assert accepted["ssh_username"] == "tuntunops"
+    assert operator_state["ssh_username"] == "tuntunops"
+    assert nested_accepted["ssh_username"] == "tuntunops"
+    for model_name in ("ReachyAcceptedCapabilityV1", "ReachyOperatorStateV1"):
+        canonical = canonical_examples[model_name]
+        assert isinstance(canonical, str)
+        assert '"ssh_username":"tuntunops"' in canonical
+        assert '"ssh_username":"reachy"' not in canonical
 
 
 def test_binary_speech_fixture_uses_strict_json_ingress() -> None:

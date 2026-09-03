@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import stat
 import struct
 import subprocess
@@ -26,7 +27,7 @@ if str(ROOT) not in sys.path:
 
 import pytest
 import tuntun_contracts
-import yaml  # type: ignore[import-untyped]  # PyYAML 6 has no py.typed marker.
+import yaml
 from tuntun_contracts.base import ContractModel, registered_contract_models
 
 from scripts import contract_generator_common, generate_openapi, generate_schemas
@@ -49,6 +50,52 @@ REQUIRED_TASK4_MODELS = frozenset(
         "tuntun_contracts.events.WakeDetectedPayload",
     }
 )
+EXPECTED_REACHY_NON_ROOT_USERNAME_SAFETY = {
+    "constraint": "non-root-posix-username",
+    "forbidden_values": ["root"],
+    "runtime_authoritative": True,
+}
+EXPECTED_REACHY_RFC1918_IPV4_SAFETY = {
+    "allowed_cidrs": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+    "constraint": "canonical-explicit-rfc1918-ipv4",
+    "runtime_authoritative": True,
+}
+EXPECTED_CORE_TIME_UTC_SAFETY = {
+    "canonical_serialization_offset": "Z",
+    "constraint": "utc-offset-zero-datetime",
+    "required_utc_offset_seconds": 0,
+    "runtime_authoritative": True,
+}
+EXPECTED_REACHY_ACCEPTED_CROSS_FIELD_INVARIANTS = [
+    {
+        "allowed_pairs": [["3.11", "cp311"], ["3.12", "cp312"]],
+        "constraint": "supported-reachy-interpreter-abi-pair",
+        "fields": ["python_version", "python_abi"],
+        "runtime_authoritative": True,
+    }
+]
+EXPECTED_REACHY_OPERATOR_CROSS_FIELD_INVARIANTS = [
+    {
+        "constraint": "distinct-rfc1918-operator-endpoints",
+        "fields": ["reachy_ipv4", "core_ipv4"],
+        "relation": "not_equal",
+        "runtime_authoritative": True,
+    },
+    {
+        "constraint": "accepted-capability-username-match",
+        "fields": ["ssh_username", "accepted_capability.ssh_username"],
+        "relation": "equal_when_present",
+        "runtime_authoritative": True,
+    },
+]
+EXPECTED_REACHY_ASSISTANT_INVENTORY_CROSS_FIELD_INVARIANTS = [
+    {
+        "constraint": "sorted-unique-reachy-assistant-inventory-id-arrays",
+        "fields": ["managed_app_ids", "recovery_hook_ids"],
+        "relation": "each_array_sorted_unique",
+        "runtime_authoritative": True,
+    }
+]
 
 
 class _GeneratorModule(Protocol):
@@ -300,6 +347,100 @@ def test_every_generated_local_reference_resolves() -> None:
         for reference in references:
             assert reference.startswith("#/")
             assert _resolve_local_ref(document, reference) is not None
+
+
+def test_generated_reachy_schemas_publish_machine_readable_safety_constraints() -> None:
+    documents = (
+        _mapping(json.loads(generate_schemas.render())["models"]),
+        _mapping(yaml.safe_load(generate_openapi.render())["components"]["schemas"]),
+        _mapping(
+            json.loads(read_regular_file(ROOT / SCHEMA_OUTPUT, max_bytes=4 * 1024 * 1024))["models"]
+        ),
+        _mapping(
+            yaml.safe_load(read_regular_file(ROOT / OPENAPI_OUTPUT, max_bytes=4 * 1024 * 1024))[
+                "components"
+            ]["schemas"]
+        ),
+    )
+    for models in documents:
+        accepted = _mapping(models["tuntun_contracts.reachy_operator.ReachyAcceptedCapabilityV1"])
+        accepted_properties = _mapping(accepted["properties"])
+        operator = _mapping(models["tuntun_contracts.reachy_operator.ReachyOperatorStateV1"])
+        operator_properties = _mapping(operator["properties"])
+        nested_accepted = _mapping(_mapping(operator["$defs"])["ReachyAcceptedCapabilityV1"])
+        core_time_proof = _mapping(models["tuntun_contracts.reachy_time.CoreTimeProofV1"])
+        core_time_proof_properties = _mapping(core_time_proof["properties"])
+
+        for accepted_schema in (accepted, nested_accepted):
+            assert (
+                accepted_schema["x-tuntun-cross-field-invariants"]
+                == EXPECTED_REACHY_ACCEPTED_CROSS_FIELD_INVARIANTS
+            )
+        assert (
+            operator["x-tuntun-cross-field-invariants"]
+            == EXPECTED_REACHY_OPERATOR_CROSS_FIELD_INVARIANTS
+        )
+        assert (
+            _mapping(core_time_proof_properties["core_utc"])["x-tuntun-field-safety"]
+            == EXPECTED_CORE_TIME_UTC_SAFETY
+        )
+        for field_name in ("sdk_version", "daemon_version"):
+            version_schema = _mapping(accepted_properties[field_name])
+            assert version_schema["minLength"] == 5
+            assert version_schema["maxLength"] == 32
+
+        for field_schema in (
+            _mapping(accepted_properties["ssh_username"]),
+            _mapping(operator_properties["ssh_username"]),
+        ):
+            username_pattern = field_schema["pattern"]
+            assert isinstance(username_pattern, str)
+            assert re.fullmatch(username_pattern, "tuntunops")
+            assert re.fullmatch(username_pattern, "root") is None
+            assert field_schema["x-tuntun-field-safety"] == EXPECTED_REACHY_NON_ROOT_USERNAME_SAFETY
+
+        for field_name in ("reachy_ipv4", "core_ipv4"):
+            field_schema = _mapping(operator_properties[field_name])
+            ipv4_pattern = field_schema["pattern"]
+            assert isinstance(ipv4_pattern, str)
+            assert re.fullmatch(ipv4_pattern, "10.0.0.1")
+            assert re.fullmatch(ipv4_pattern, "172.16.0.1")
+            assert re.fullmatch(ipv4_pattern, "172.31.255.255")
+            assert re.fullmatch(ipv4_pattern, "192.168.10.20")
+            assert re.fullmatch(ipv4_pattern, "8.8.8.8") is None
+            assert re.fullmatch(ipv4_pattern, "100.64.0.1") is None
+            assert re.fullmatch(ipv4_pattern, "192.168.010.020") is None
+            assert field_schema["x-tuntun-field-safety"] == EXPECTED_REACHY_RFC1918_IPV4_SAFETY
+
+
+def test_generated_reachy_assistant_inventory_schema_publishes_item_bounds_and_ordering() -> None:
+    documents = (
+        _mapping(json.loads(generate_schemas.render())["models"]),
+        _mapping(yaml.safe_load(generate_openapi.render())["components"]["schemas"]),
+        _mapping(
+            json.loads(read_regular_file(ROOT / SCHEMA_OUTPUT, max_bytes=4 * 1024 * 1024))["models"]
+        ),
+        _mapping(
+            yaml.safe_load(read_regular_file(ROOT / OPENAPI_OUTPUT, max_bytes=4 * 1024 * 1024))[
+                "components"
+            ]["schemas"]
+        ),
+    )
+    for models in documents:
+        inventory = _mapping(
+            models["tuntun_contracts.reachy_assistant_qualification.ReachyAssistantInventoryV1"]
+        )
+        assert (
+            inventory["x-tuntun-cross-field-invariants"]
+            == EXPECTED_REACHY_ASSISTANT_INVENTORY_CROSS_FIELD_INVARIANTS
+        )
+        properties = _mapping(inventory["properties"])
+        for field_name in ("managed_app_ids", "recovery_hook_ids"):
+            field_schema = _mapping(properties[field_name])
+            item_schema = _mapping(field_schema["items"])
+            assert field_schema["maxItems"] == 256
+            assert item_schema["minLength"] == 1
+            assert item_schema["maxLength"] == 128
 
 
 def test_schema_reference_rewrite_is_limited_to_supported_reference_positions() -> None:

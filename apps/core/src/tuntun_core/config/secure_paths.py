@@ -24,7 +24,6 @@ LINUX_POSIX_ACL_FILESYSTEM_MAGICS = frozenset(
         0xF2F52010,  # F2FS
     }
 )
-LINUX_POSIX_ACL_ATTRIBUTES = frozenset({b"system.posix_acl_access", b"system.posix_acl_default"})
 DARWIN_ACL_TYPE_EXTENDED = 0x00000100
 DARWIN_ACL_FIRST_ENTRY = 0
 DARWIN_ACL_NEXT_ENTRY = -1
@@ -144,9 +143,11 @@ def _require_supported_linux_acl_filesystem_magic(magic: int) -> None:
         raise _AclInspectionError(f"unsupported Linux filesystem ACL semantics: 0x{magic:x}")
 
 
-def _classify_linux_acl_attribute(attribute: bytes) -> Literal["posix", "other"]:
-    if attribute in LINUX_POSIX_ACL_ATTRIBUTES:
-        return "posix"
+def _classify_linux_acl_attribute(attribute: bytes) -> Literal["access", "default", "other"]:
+    if attribute == b"system.posix_acl_access":
+        return "access"
+    if attribute == b"system.posix_acl_default":
+        return "default"
     normalized = attribute.lower()
     if normalized.startswith((b"system.", b"security.", b"trusted.")) and b"acl" in normalized:
         raise _AclInspectionError(
@@ -282,31 +283,61 @@ def _darwin_descriptor_has_unsafe_acl(
 def _linux_descriptor_has_unsafe_acl(
     library: ctypes.CDLL,
     descriptor: int,
+    *,
+    reject_default_acl: bool = True,
 ) -> bool:
     magic = _linux_filesystem_magic(library, descriptor)
     _require_supported_linux_acl_filesystem_magic(magic)
-    return any(
-        _classify_linux_acl_attribute(attribute) == "posix"
-        for attribute in _linux_extended_attribute_names(library, descriptor)
-    )
+    for attribute in _linux_extended_attribute_names(library, descriptor):
+        acl_kind = _classify_linux_acl_attribute(attribute)
+        if acl_kind == "access" or (reject_default_acl and acl_kind == "default"):
+            return True
+    return False
 
 
-def _descriptor_has_unsafe_acl(descriptor: int) -> bool:
+def _descriptor_has_unsafe_acl(
+    descriptor: int,
+    *,
+    reject_default_acl: bool = True,
+) -> bool:
     library = ctypes.CDLL(None, use_errno=True)
     if sys.platform == "darwin":
         return _darwin_descriptor_has_unsafe_acl(library, descriptor)
     if sys.platform.startswith("linux"):
-        return _linux_descriptor_has_unsafe_acl(library, descriptor)
+        return _linux_descriptor_has_unsafe_acl(
+            library,
+            descriptor,
+            reject_default_acl=reject_default_acl,
+        )
     raise _AclInspectionError("ACL inspection is unsupported")
 
 
-def _require_no_unsafe_acl(descriptor: int, message: str) -> None:
+def require_no_unsafe_acl(
+    descriptor: int,
+    message: str,
+    *,
+    reject_default_acl: bool = True,
+) -> None:
+    """Fail closed on current-access ACLs and, when requested, inheritable ACLs."""
+
     try:
-        has_unsafe_acl = _descriptor_has_unsafe_acl(descriptor)
+        if reject_default_acl:
+            has_unsafe_acl = _descriptor_has_unsafe_acl(descriptor)
+        else:
+            has_unsafe_acl = _descriptor_has_unsafe_acl(
+                descriptor,
+                reject_default_acl=False,
+            )
     except Exception:
         raise PermissionError(message) from None
     if has_unsafe_acl:
         raise PermissionError(message)
+
+
+def _require_no_unsafe_acl(descriptor: int, message: str) -> None:
+    """Compatibility alias for existing internal callers."""
+
+    require_no_unsafe_acl(descriptor, message)
 
 
 def _ancestor_mode_is_safe(owner: int, mode: int) -> bool:
@@ -332,7 +363,11 @@ def _require_directory(
         or (leaf_private and (owner != os.geteuid() or stat.S_IMODE(opened.st_mode) != 0o700))
     ):
         raise PermissionError("unsafe application path")
-    _require_no_unsafe_acl(descriptor, "unsafe application path")
+    require_no_unsafe_acl(
+        descriptor,
+        "unsafe application path",
+        reject_default_acl=leaf_private,
+    )
 
 
 @dataclass(slots=True)
@@ -429,6 +464,11 @@ def _walk_directory(
             except FileNotFoundError:
                 if not create:
                     raise
+                require_no_unsafe_acl(
+                    parent_fd,
+                    "unsafe application path",
+                    reject_default_acl=True,
+                )
                 _mkdir_directory_at(part, parent_fd)
                 child = _acquire_owned_descriptor(
                     partial(_open_directory_at, part, parent_fd),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 import traceback as traceback_module
 from contextlib import suppress
@@ -7,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import tuntun_core.cli.commands.talk as talk_module
-from tuntun_core.cli.commands.talk import read_synthetic_wav
+from tuntun_core.cli.commands.talk import read_synthetic_wav, run_synthetic_turn
 from tuntun_core.cli.main import app
 from typer.testing import CliRunner
 
@@ -49,6 +50,12 @@ def test_talk_command_is_registered_without_starting_provider_or_server_stack() 
 
     assert result.exit_code == 0
     assert "synthetic WAV" in result.stdout
+
+
+def test_run_synthetic_turn_requires_explicit_personalized_context_provider() -> None:
+    parameter = inspect.signature(run_synthetic_turn).parameters["context_provider"]
+
+    assert parameter.default is inspect.Parameter.empty
 
 
 def test_read_synthetic_wav_uses_single_link_regular_descriptor(tmp_path: Path) -> None:

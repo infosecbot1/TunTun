@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import errno
 import fcntl
+import math
 import os
 import stat
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from tuntun_contracts.reachy import SafetyReceipt
 from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
+from tuntun_core.services.identity.subject_revocation_processor import POST_COMMIT_FAMILIES
 from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
 from tuntun_core.services.storage_time import utc_storage
 
@@ -472,3 +474,331 @@ class BudgetReconciliationSupervisor:
         primary = await self._stop_cleanup_uninterrupted(caller_task)
         if primary is not None:
             raise primary
+
+
+class ProductionReachyLifecycle:
+    """Own production Reachy listener/authentication before budget readiness."""
+
+    def __init__(
+        self,
+        *,
+        wss_server: Any,
+        current_session: Any,
+        disconnect_safety: Any,
+        budget_lifecycle: BudgetReconciliationSupervisor,
+        process_lease: CoreProcessLease,
+        session_ready_timeout: float,
+    ) -> None:
+        self._wss_server = wss_server
+        self._current_session = current_session
+        self._disconnect_safety = disconnect_safety
+        self._budget_lifecycle = budget_lifecycle
+        self._process_lease = process_lease
+        self._session_ready_timeout = _bounded_session_ready_timeout(session_ready_timeout)
+        self._start_task: asyncio.Task[Any] | None = None
+        self._started = False
+        self._state_lock = asyncio.Lock()
+        self._stop_lock = asyncio.Lock()
+        self._stopping = False
+        self._cleanup_pending = False
+
+    async def start(self) -> None:
+        owner = asyncio.current_task()
+        if owner is None:
+            raise RuntimeError("reachy_production_lifecycle_start_owner_missing")
+        async with self._state_lock:
+            if self._stopping:
+                raise RuntimeError("reachy_production_lifecycle_stop_in_progress")
+            if self._cleanup_pending:
+                raise RuntimeError("reachy_production_lifecycle_cleanup_pending")
+            if self._started:
+                raise RuntimeError("reachy_production_lifecycle_already_started")
+            if self._start_task is not None and not self._start_task.done():
+                raise RuntimeError("reachy_production_lifecycle_start_in_progress")
+            self._start_task = owner
+        try:
+            self._process_lease.require_held()
+            await self._open_publication_generation()
+            await self._wss_server.start()
+            await self._current_session.wait_authenticated(self._session_ready_timeout)
+            await self._budget_lifecycle.start()
+            async with self._state_lock:
+                self._started = True
+                self._cleanup_pending = False
+        except BaseException as error:
+            cleanup_error, cleanup_cancelled = await self._cleanup_failed_start_uninterrupted()
+            if cleanup_error is not None:
+                async with self._state_lock:
+                    self._cleanup_pending = True
+                if isinstance(error, asyncio.CancelledError):
+                    _raise_start_cancelled_after_cleanup_error(error, cleanup_error)
+                if cleanup_cancelled:
+                    _raise_start_cancelled_after_cleanup_error(error, cleanup_error)
+                _raise_start_failure_with_cleanup_error(error, cleanup_error)
+            if cleanup_cancelled:
+                _raise_start_cancelled_after_cleanup(error)
+            raise
+        finally:
+            async with self._state_lock:
+                if self._start_task is owner:
+                    self._start_task = None
+
+    async def stop(self) -> None:
+        async with self._state_lock:
+            if self._stopping:
+                raise RuntimeError("reachy_production_lifecycle_stop_in_progress")
+            self._stopping = True
+        async with self._stop_lock:
+            try:
+                caller_task = asyncio.current_task()
+                if self._start_task is caller_task:
+                    raise RuntimeError("reachy_production_lifecycle_stop_from_start_task")
+                primary, cleanup_cancelled = await self._stop_cleanup_uninterrupted(caller_task)
+                if primary is None:
+                    async with self._state_lock:
+                        self._started = False
+                        self._cleanup_pending = False
+                else:
+                    async with self._state_lock:
+                        self._cleanup_pending = True
+                if cleanup_cancelled:
+                    _raise_stop_cancelled_after_cleanup(primary)
+                if primary is not None:
+                    raise primary
+            finally:
+                async with self._state_lock:
+                    self._stopping = False
+
+    async def _open_publication_generation(self) -> None:
+        open_publication_generation = getattr(
+            self._current_session,
+            "open_publication_generation",
+            None,
+        )
+        if callable(open_publication_generation):
+            await open_publication_generation()
+            return
+        await self._current_session.withdraw_authority()
+
+    async def _begin_shutdown_drain(self) -> None:
+        begin_shutdown_drain = getattr(self._current_session, "begin_shutdown_drain", None)
+        if callable(begin_shutdown_drain):
+            await begin_shutdown_drain()
+            return
+        self._current_session.withdraw_readiness()
+
+    async def _cancel_and_observe_start(
+        self,
+        caller_task: asyncio.Task[Any] | None,
+    ) -> BaseException | None:
+        start_task = self._start_task
+        if start_task is None or start_task is caller_task:
+            return None
+        if start_task.done():
+            try:
+                start_task.result()
+            except asyncio.CancelledError:
+                return None
+            except BaseException as error:
+                return error
+            return None
+        start_task.cancel()
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(start_task),
+                timeout=self._session_ready_timeout,
+            )
+        except TimeoutError as error:
+            unobserved = RuntimeError("reachy_production_start_stop_unobserved")
+            unobserved.__cause__ = error
+            return unobserved
+        except asyncio.CancelledError:
+            return None
+        except BaseException as error:
+            return error
+        if isinstance(result, asyncio.CancelledError):
+            return None
+        if isinstance(result, BaseException):
+            return result
+        return None
+
+    async def _cleanup_failed_start(self) -> BaseException | None:
+        primary: BaseException | None = None
+        primary = await _record_async_cleanup_error(primary, self._begin_shutdown_drain)
+        primary = await _record_async_cleanup_error(
+            primary,
+            self._disconnect_safety.close_media_stop_playback_motion_and_forget_turn,
+        )
+        primary = await _record_async_cleanup_error(primary, self._wss_server.close)
+        if primary is not None:
+            return primary
+        primary = await _record_async_cleanup_error(
+            primary, self._current_session.withdraw_authority
+        )
+        primary = await _record_async_cleanup_error(primary, self._budget_lifecycle.stop)
+        return primary
+
+    async def _cleanup_failed_start_uninterrupted(self) -> tuple[BaseException | None, bool]:
+        cleanup = cast(
+            asyncio.Task[BaseException | None],
+            self._budget_lifecycle.startup_recovery._spawn_owned(
+                self._cleanup_failed_start,
+                "reachy-production-start-cleanup",
+            ),
+        )
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        try:
+            primary = cleanup.result()
+        except BaseException as error:
+            primary = error
+        return primary, cancelled
+
+    async def _stop_cleanup(
+        self,
+        caller_task: asyncio.Task[Any] | None,
+    ) -> BaseException | None:
+        primary = await self._cancel_and_observe_start(caller_task)
+        primary = await _record_async_cleanup_error(primary, self._begin_shutdown_drain)
+        primary = await _record_async_cleanup_error(
+            primary,
+            self._disconnect_safety.close_media_stop_playback_motion_and_forget_turn,
+        )
+        primary = await _record_async_cleanup_error(primary, self._wss_server.close)
+        if primary is not None:
+            return primary
+        primary = await _record_async_cleanup_error(
+            primary, self._current_session.withdraw_authority
+        )
+        primary = await _record_async_cleanup_error(primary, self._budget_lifecycle.stop)
+        return primary
+
+    async def _stop_cleanup_uninterrupted(
+        self,
+        caller_task: asyncio.Task[Any] | None,
+    ) -> tuple[BaseException | None, bool]:
+        cleanup = cast(
+            asyncio.Task[BaseException | None],
+            self._budget_lifecycle.startup_recovery._spawn_owned(
+                lambda: self._stop_cleanup(caller_task),
+                "reachy-production-stop-cleanup",
+            ),
+        )
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        try:
+            primary = cleanup.result()
+        except BaseException as error:
+            primary = error
+        return primary, cancelled
+
+
+async def _record_async_cleanup_error(
+    primary: BaseException | None,
+    operation: Callable[[], Coroutine[Any, Any, Any]],
+) -> BaseException | None:
+    try:
+        await operation()
+    except asyncio.CancelledError:
+        if primary is None:
+            return asyncio.CancelledError()
+    except BaseException as error:
+        if primary is None:
+            return error
+    return primary
+
+
+def _raise_start_failure_with_cleanup_error(
+    start_error: BaseException,
+    cleanup_error: BaseException,
+) -> None:
+    raise RuntimeError("reachy_production_start_failed") from BaseExceptionGroup(
+        "reachy_production_start_failed",
+        [start_error, cleanup_error],
+    )
+
+
+def _raise_start_cancelled_after_cleanup_error(
+    start_error: BaseException,
+    cleanup_error: BaseException,
+) -> None:
+    cancellation = asyncio.CancelledError()
+    raise cancellation from BaseExceptionGroup(
+        "reachy_production_start_failed",
+        [start_error, cleanup_error],
+    )
+
+
+def _raise_start_cancelled_after_cleanup(start_error: BaseException) -> None:
+    cancellation = asyncio.CancelledError()
+    raise cancellation from start_error
+
+
+def _raise_stop_cancelled_after_cleanup(cleanup_error: BaseException | None) -> None:
+    cancellation = asyncio.CancelledError()
+    if cleanup_error is not None:
+        raise cancellation from cleanup_error
+    raise cancellation
+
+
+def _bounded_session_ready_timeout(value: float) -> float:
+    if type(value) not in {float, int}:
+        raise TypeError("reachy_session_ready_timeout_invalid")
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > 30:
+        raise ValueError("reachy_session_ready_timeout_invalid")
+    return timeout
+
+
+class _IdentityStopEventPort(Protocol):
+    def is_set(self) -> bool: ...
+
+
+class _IdentityRevocationWorkerPort(Protocol):
+    @property
+    def available(self) -> bool: ...
+
+    async def recover_and_drain_before_ready(self) -> None: ...
+
+    async def run_periodically(
+        self,
+        stop: _IdentityStopEventPort,
+        on_fatal: Callable[[BaseException], object],
+    ) -> None: ...
+
+    async def wait_running(self) -> None: ...
+
+
+class _IdentityTaskGroupPort(Protocol):
+    def create_task(self, coroutine: Coroutine[object, object, None]) -> object: ...
+
+
+async def start_identity_runtime(
+    handler_registry: Mapping[str, object],
+    revocation_worker: _IdentityRevocationWorkerPort,
+    readiness: asyncio.Event,
+    task_group: _IdentityTaskGroupPort,
+    stop: _IdentityStopEventPort,
+) -> None:
+    if set(handler_registry) != set(POST_COMMIT_FAMILIES):
+        raise RuntimeError("complete_post_commit_revocation_handlers_required")
+    readiness.clear()
+    if revocation_worker is None or not revocation_worker.available:
+        raise RuntimeError("subject revocation worker unavailable")
+    await revocation_worker.recover_and_drain_before_ready()
+    task_group.create_task(
+        revocation_worker.run_periodically(
+            stop,
+            lambda _error: readiness.clear(),
+        )
+    )
+    await revocation_worker.wait_running()
+    readiness.set()

@@ -13,7 +13,7 @@ _REPOSITORY_ROOT = Path(__file__).parents[6]
 _REPOSITORY_MANIFEST = _REPOSITORY_ROOT / "models" / "manifest.yaml"
 _PACKAGED_MANIFEST = Path(__file__).parents[2] / "resources" / "model-manifest.yaml"
 _MODEL_ROOT = Path(user_data_path("Tuntun", appauthor=False)) / "models"
-_DOWNLOAD_HOSTS = frozenset({"huggingface.co"})
+_DOWNLOAD_HOSTS = frozenset({"alphacephei.com"})
 
 
 def _manifest_path() -> Path:
@@ -29,7 +29,7 @@ def _registry() -> ModelRegistry:
 
 
 def _public_entry(entry: ModelEntry) -> dict[str, object]:
-    return {
+    public_entry: dict[str, object] = {
         "id": entry.model_id,
         "revision": entry.revision,
         "runtime": entry.runtime,
@@ -37,6 +37,10 @@ def _public_entry(entry: ModelEntry) -> dict[str, object]:
             {"path": item.path, "size": item.size, "sha256": item.sha256} for item in entry.files
         ],
     }
+    if entry.calibration_report_sha256 is not None and entry.runtime_download is not None:
+        public_entry["calibration_report_sha256"] = entry.calibration_report_sha256
+        public_entry["runtime_download"] = entry.runtime_download
+    return public_entry
 
 
 @models_app.command("list")
@@ -51,6 +55,8 @@ def verify() -> None:
     registry = _registry()
     verified: list[dict[str, object]] = []
     for entry in registry.models:
+        if not (_MODEL_ROOT / entry.model_id).is_dir():
+            continue
         activated = registry.activate(entry.model_id)
         try:
             if not activated.all_files_verified:

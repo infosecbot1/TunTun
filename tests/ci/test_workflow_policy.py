@@ -1,8 +1,15 @@
+import importlib.util
+import io
+import json
 import re
+import subprocess
+import sys
+import tarfile
 import tomllib
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import yaml
@@ -79,7 +86,7 @@ CONTRACT_STEPS = [
         "run": (
             "/usr/bin/env -u PYTHONPATH .venv-contracts-edge-py311/bin/python -m pytest "
             "tests/contract/test_v1_types_and_ports.py tests/unit/poc/test_framing.py "
-            "tests/unit/edge/test_reachy_ptt.py -q"
+            "tests/unit/edge/test_reachy_ptt.py --confcutdir=tests/contract -q"
         ),
     },
     {
@@ -92,6 +99,133 @@ CONTRACT_STEPS = [
             'importlib.util.find_spec(name) is not None]; assert not found, found"'
         ),
     },
+]
+OPENSSH_LOCK_PATH = Path(".github/ci/openssh-ubuntu-24.04.lock")
+OPENSSH_DOWNLOAD_ROOT = "/tmp/t4-openssh-${{ github.run_id }}-${{ github.run_attempt }}"
+OPENSSH_VERIFY_DOWNLOAD_COMMAND = (
+    "python .github/ci/verify_openssh_ubuntu_lock.py verify-download "
+    "--lock-path .github/ci/openssh-ubuntu-24.04.lock "
+    f"--download-root {OPENSSH_DOWNLOAD_ROOT}"
+)
+OPENSSH_INSTALL_COMMAND = (
+    "sudo /usr/bin/python3 .github/ci/verify_openssh_ubuntu_lock.py install "
+    "--lock-path .github/ci/openssh-ubuntu-24.04.lock "
+    f"--download-root {OPENSSH_DOWNLOAD_ROOT}"
+)
+OPENSSH_VERIFY_INSTALLED_COMMAND = (
+    "python .github/ci/verify_openssh_ubuntu_lock.py verify-installed "
+    "--lock-path .github/ci/openssh-ubuntu-24.04.lock"
+)
+OPENSSH_CONTRACT_COMMAND = (
+    "PYTEST_ADDOPTS=--basetemp=/tmp/t4-openssh-test-${{ github.run_id }}-"
+    "${{ github.run_attempt }} .venv/bin/pytest "
+    "tests/integration/test_ssh_forced_command_local.py -q"
+)
+BOOTSTRAP_KEYRING_TAR_PATH = "usr/share/keyrings/ubuntu-archive-keyring.gpg"
+OPENSSH_SNAPSHOT_ID = "20260903T143000Z"
+OPENSSH_SNAPSHOT_BASE_URL = f"https://snapshot.ubuntu.com/ubuntu/{OPENSSH_SNAPSHOT_ID}/"
+
+
+def _load_openssh_verifier() -> ModuleType:
+    module_name = f"_tuntun_openssh_verifier_under_test_{len(sys.modules)}"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        Path(".github/ci/verify_openssh_ubuntu_lock.py"),
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _ar_member(name: str, body: bytes) -> bytes:
+    header = (f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{0o100644:<8}{len(body):<10}`\n").encode("ascii")
+    return header + body + (b"\n" if len(body) % 2 else b"")
+
+
+def _bootstrap_keyring_deb_stub() -> bytes:
+    return (
+        b"!<arch>\n"
+        + _ar_member("debian-binary", b"2.0\n")
+        + _ar_member(
+            "data.tar.zst",
+            b"synthetic-compressed-tar",
+        )
+    )
+
+
+def _tar_file(
+    name: str,
+    body: bytes = b"keyring",
+    *,
+    mode: int = 0o644,
+    uid: int = 0,
+    gid: int = 0,
+) -> tuple[tarfile.TarInfo, bytes | None]:
+    member = tarfile.TarInfo(name)
+    member.type = tarfile.REGTYPE
+    member.mode = mode
+    member.uid = uid
+    member.gid = gid
+    member.size = len(body)
+    return member, body
+
+
+def _tar_special(
+    name: str,
+    member_type: bytes,
+    *,
+    linkname: str = "",
+) -> tuple[tarfile.TarInfo, bytes | None]:
+    member = tarfile.TarInfo(name)
+    member.type = member_type
+    member.mode = 0o644
+    member.uid = 0
+    member.gid = 0
+    member.linkname = linkname
+    member.size = 0
+    return member, None
+
+
+def _tar_raw(*members: tuple[tarfile.TarInfo, bytes | None]) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for member, body in members:
+            archive.addfile(member, None if body is None else io.BytesIO(body))
+    return output.getvalue()
+
+
+def _install_bootstrap_keyring_fakes(
+    module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tar_raw: bytes,
+) -> None:
+    monkeypatch.setattr(module, "fetch_url", lambda _url: _bootstrap_keyring_deb_stub())
+
+    def fake_run(
+        argv: Sequence[str],
+        *,
+        check: bool,
+        capture_output: bool,
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert argv[:2] == ["zstd", "-dc"]
+        assert check is True
+        assert capture_output is True
+        return subprocess.CompletedProcess(argv, 0, stdout=tar_raw)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+
+OPENSSH_STEPS = [
+    {"uses": CHECKOUT_ACTION},
+    {"uses": SETUP_UV_ACTION, "with": {"version": "0.8.13", "enable-cache": True}},
+    {"shell": ARCHITECTURE_CHECK_SHELL, "run": "uv sync --all-packages --locked --managed-python"},
+    {"shell": ARCHITECTURE_CHECK_SHELL, "run": OPENSSH_VERIFY_DOWNLOAD_COMMAND},
+    {"shell": ARCHITECTURE_CHECK_SHELL, "run": OPENSSH_INSTALL_COMMAND},
+    {"shell": ARCHITECTURE_CHECK_SHELL, "run": OPENSSH_VERIFY_INSTALLED_COMMAND},
+    {"shell": ARCHITECTURE_CHECK_SHELL, "run": OPENSSH_CONTRACT_COMMAND},
 ]
 CHECK_STEPS = [
     {
@@ -125,10 +259,13 @@ def test_edge_package_exposes_only_frozen_runtime_dependencies_and_script() -> N
     edge_project = tomllib.loads(Path("apps/edge/pyproject.toml").read_text(encoding="utf-8"))
 
     assert edge_project["project"]["dependencies"] == [
+        "cryptography>=45,<46",
+        "packaging>=26,<27",
         "tuntun-contracts==0.1.0.dev0",
         "typer>=0.16,<1",
+        "websockets==15.0.1",
     ]
-    assert edge_project["project"]["scripts"] == {"tuntun-edge": "tuntun_edge.cli.main:app"}
+    assert edge_project["project"]["scripts"] == {"tuntun-edge": "tuntun_edge.cli.main:main"}
     assert edge_project["tool"]["uv"]["sources"] == {"tuntun-contracts": {"workspace": True}}
 
 
@@ -338,12 +475,17 @@ def _assert_workflow_policy(path: Path) -> None:
     _assert_permissions(workflow, required=True)
     _assert_no_secret_channel(workflow)
     jobs = workflow["jobs"]
-    assert set(jobs) == {"contracts-edge-python311", "check"}
+    assert set(jobs) == {"contracts-edge-python311", "openssh-forced-command-local", "check"}
     contract_job = jobs["contracts-edge-python311"]
+    openssh_job = jobs["openssh-forced-command-local"]
     check_job = jobs["check"]
     assert contract_job == {
         "runs-on": "ubuntu-24.04",
         "steps": CONTRACT_STEPS,
+    }
+    assert openssh_job == {
+        "runs-on": "ubuntu-24.04",
+        "steps": OPENSSH_STEPS,
     }
     assert set(check_job) == {"strategy", "runs-on", "steps"}
     assert check_job["runs-on"] == MATRIX_RUNNER
@@ -372,6 +514,425 @@ def test_ci_matrix_remains_exact() -> None:
     assert workflow["jobs"]["check"]["strategy"]["matrix"] == {
         "os": ["ubuntu-24.04", "macos-26", "macos-15-intel"],
     }
+
+
+def test_openssh_lock_freezes_signed_ubuntu_origin_and_openssh_package_set() -> None:
+    lock = json.loads(OPENSSH_LOCK_PATH.read_text(encoding="utf-8"))
+
+    assert lock["schema_version"] == "tuntun.openssh-ubuntu-24.04.lock.v2"
+    assert lock["runner"] == "ubuntu-24.04"
+    assert lock["snapshot_id"] == OPENSSH_SNAPSHOT_ID
+    closure_scope = lock["closure_scope"]
+    assert closure_scope == {
+        "locked_package_set": (
+            "Complete transitive Depends/Pre-Depends closure for openssh-client, "
+            "openssh-server, and openssh-sftp-server on Ubuntu 24.04 amd64 from signed "
+            "main archive pockets."
+        ),
+        "closure_status": "complete_signed_packages_closure",
+        "root_packages": ["openssh-client", "openssh-server", "openssh-sftp-server"],
+        "dependency_fields": ["Pre-Depends", "Depends"],
+        "components": ["main"],
+        "architectures": ["amd64", "all"],
+        "suites": ["noble", "noble-updates", "noble-security"],
+    }
+    assert "base_dependency_policy" not in closure_scope
+    assert "blocker" not in closure_scope
+
+    signed_origins = lock["signed_origins"]
+    assert isinstance(signed_origins, list)
+    assert {origin["suite"] for origin in signed_origins} == {
+        "noble",
+        "noble-updates",
+        "noble-security",
+    }
+    for origin in signed_origins:
+        assert set(origin) == {
+            "id",
+            "origin",
+            "suite",
+            "component",
+            "architecture",
+            "base_url",
+            "inrelease_url",
+            "inrelease_size_bytes",
+            "inrelease_sha256",
+        }
+        assert origin["origin"] == "Ubuntu"
+        assert origin["component"] == "main"
+        assert origin["architecture"] == "amd64"
+        assert origin["base_url"] == OPENSSH_SNAPSHOT_BASE_URL
+        assert origin["inrelease_url"] == (f"{origin['base_url']}dists/{origin['suite']}/InRelease")
+        assert isinstance(origin["inrelease_size_bytes"], int)
+        assert origin["inrelease_size_bytes"] > 0
+        assert re.fullmatch(r"[0-9a-f]{64}", origin["inrelease_sha256"])
+
+    package_indexes = lock["package_indexes"]
+    assert isinstance(package_indexes, list)
+    assert {index["suite"] for index in package_indexes} == {
+        "noble",
+        "noble-updates",
+        "noble-security",
+    }
+    origin_ids = {origin["id"] for origin in signed_origins}
+    for index in package_indexes:
+        assert set(index) == {
+            "id",
+            "origin_id",
+            "suite",
+            "component",
+            "architecture",
+            "relative_path",
+            "url",
+            "size_bytes",
+            "sha256",
+            "compression",
+        }
+        assert index["origin_id"] in origin_ids
+        assert index["component"] == "main"
+        assert index["architecture"] == "amd64"
+        assert index["relative_path"] == "main/binary-amd64/Packages.xz"
+        assert index["url"].endswith(f"dists/{index['suite']}/main/binary-amd64/Packages.xz")
+        assert isinstance(index["size_bytes"], int)
+        assert index["size_bytes"] > 0
+        assert re.fullmatch(r"[0-9a-f]{64}", index["sha256"])
+        assert index["compression"] == "xz"
+
+    packages = lock["packages"]
+    assert isinstance(packages, list)
+    assert len(packages) > 3
+    names = [package["name"] for package in packages]
+    assert names == sorted(names)
+    assert {"openssh-client", "openssh-server", "openssh-sftp-server"}.issubset(names)
+    index_ids = {index["id"] for index in package_indexes}
+    for package in packages:
+        assert set(package) == {
+            "name",
+            "version",
+            "architecture",
+            "source_index_id",
+            "filename",
+            "url",
+            "size_bytes",
+            "sha256",
+            "record_sha256",
+            "pre_depends",
+            "depends",
+            "provides",
+        }
+        assert package["architecture"] in {"amd64", "all"}
+        assert package["source_index_id"] in index_ids
+        assert package["filename"].startswith("pool/main/")
+        assert package["url"].startswith(f"{OPENSSH_SNAPSHOT_BASE_URL}pool/main/")
+        assert package["url"].endswith(package["filename"])
+        assert package["filename"].endswith(".deb")
+        assert isinstance(package["size_bytes"], int) and package["size_bytes"] > 0
+        assert re.fullmatch(r"[0-9a-f]{64}", package["sha256"])
+        assert re.fullmatch(r"[0-9a-f]{64}", package["record_sha256"])
+        assert isinstance(package["pre_depends"], list)
+        assert isinstance(package["depends"], list)
+        assert isinstance(package["provides"], list)
+
+
+def test_openssh_lock_has_no_unresolved_dependency_names() -> None:
+    lock = json.loads(OPENSSH_LOCK_PATH.read_text(encoding="utf-8"))
+    package_names = {package["name"] for package in lock["packages"]}
+    provided_names = {
+        provided.split(" ", 1)[0]
+        for package in lock["packages"]
+        for provided in package["provides"]
+    }
+    satisfied_names = package_names | provided_names
+    unresolved: set[str] = set()
+    relation_pattern = re.compile(r"^\s*([A-Za-z0-9.+-]+)")
+    for package in lock["packages"]:
+        for field in ("pre_depends", "depends"):
+            for relation_group in package[field]:
+                alternatives = relation_group.split("|")
+                if not any(
+                    (match := relation_pattern.match(alternative))
+                    and match.group(1) in satisfied_names
+                    for alternative in alternatives
+                ):
+                    unresolved.add(f"{package['name']}: {relation_group}")
+    assert unresolved == set()
+
+
+def test_openssh_verifier_script_is_present_for_signed_metadata_and_closure_checks() -> None:
+    script = Path(".github/ci/verify_openssh_ubuntu_lock.py")
+    text = script.read_text(encoding="utf-8")
+
+    for required in (
+        "gpgv",
+        "InRelease",
+        "Packages.xz",
+        "verify_complete_dependency_closure",
+        "verify_package_records",
+        "download_packages",
+        "verify_installed_packages",
+    ):
+        assert required in text
+
+
+def test_openssh_snapshot_sources_are_exact_and_invalid_ids_are_rejected() -> None:
+    verifier = _load_openssh_verifier()
+
+    sources = verifier.snapshot_source_order(OPENSSH_SNAPSHOT_ID)
+
+    assert [source["suite"] for source in sources] == [
+        "noble",
+        "noble-updates",
+        "noble-security",
+    ]
+    assert {source["base_url"] for source in sources} == {
+        OPENSSH_SNAPSHOT_BASE_URL,
+    }
+    for invalid in (
+        "",
+        "20260903",
+        "20260903T143000",
+        "2026-09-03T14:30:00Z",
+        "../../archive",
+        "20260903T143000Z/extra",
+    ):
+        with pytest.raises(SystemExit, match="invalid Ubuntu snapshot id"):
+            verifier.snapshot_source_order(invalid)
+
+
+def test_openssh_lock_rejects_mixed_or_live_archive_sources() -> None:
+    verifier = _load_openssh_verifier()
+    lock = json.loads(OPENSSH_LOCK_PATH.read_text(encoding="utf-8"))
+    lock["signed_origins"][1]["base_url"] = "https://archive.ubuntu.com/ubuntu/"
+
+    with pytest.raises(SystemExit, match="Ubuntu snapshot source mismatch"):
+        verifier.verify_complete_dependency_closure(lock)
+
+
+def test_openssh_lock_derivation_requires_an_explicit_snapshot() -> None:
+    verifier = _load_openssh_verifier()
+    parser = verifier.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["derive-lock"])
+
+    args = parser.parse_args(["derive-lock", "--snapshot-id", OPENSSH_SNAPSHOT_ID])
+    assert args.snapshot_id == OPENSSH_SNAPSHOT_ID
+
+
+def test_locked_package_install_replays_only_the_verified_closure_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_openssh_verifier()
+    packages = (
+        {"filename": "pool/main/libpam-modules-bin.deb"},
+        {"filename": "pool/main/libpam-modules.deb"},
+    )
+    calls: list[tuple[list[str], bool]] = []
+
+    monkeypatch.setattr(
+        verifier,
+        "verify_downloaded_packages",
+        lambda _lock, *, download_root: None,
+    )
+    monkeypatch.setattr(verifier, "package_install_order", lambda _lock: packages)
+
+    def fake_run(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, check))
+        return subprocess.CompletedProcess(argv, 1 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(verifier.subprocess, "run", fake_run)
+
+    verifier.install_packages({"packages": []}, download_root=tmp_path)
+
+    expected_argv = [
+        "dpkg",
+        "-i",
+        str(tmp_path / "libpam-modules-bin.deb"),
+        str(tmp_path / "libpam-modules.deb"),
+    ]
+    assert calls == [(expected_argv, False), (expected_argv, True)]
+
+
+def test_locked_package_install_does_not_replay_a_successful_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_openssh_verifier()
+    packages = ({"filename": "pool/main/libpam-modules-bin.deb"},)
+    calls: list[tuple[list[str], bool]] = []
+
+    monkeypatch.setattr(
+        verifier,
+        "verify_downloaded_packages",
+        lambda _lock, *, download_root: None,
+    )
+    monkeypatch.setattr(verifier, "package_install_order", lambda _lock: packages)
+
+    def fake_run(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, check))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(verifier.subprocess, "run", fake_run)
+
+    verifier.install_packages({"packages": []}, download_root=tmp_path)
+
+    assert calls == [(["dpkg", "-i", str(tmp_path / "libpam-modules-bin.deb")], False)]
+
+
+def test_identity_fixture_plugin_is_registered_only_at_test_root() -> None:
+    root_conftest = Path("tests/conftest.py").read_text(encoding="utf-8")
+    assert 'pytest_plugins = ("tests.identity_support",)' in root_conftest
+    assert not Path("tests/unit/identity/conftest.py").exists()
+    assert not Path("tests/integration/identity/conftest.py").exists()
+
+
+def test_bootstrap_keyring_tar_extraction_extracts_only_required_keyring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_openssh_verifier()
+    tar_raw = _tar_raw(
+        _tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"synthetic-keyring"),
+        _tar_file("usr/share/doc/ubuntu-keyring/changelog", b"doc"),
+    )
+    _install_bootstrap_keyring_fakes(verifier, monkeypatch, tar_raw)
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+
+    keyring = verifier.extract_bootstrap_keyring(work_root=work_root)
+
+    assert keyring == work_root / BOOTSTRAP_KEYRING_TAR_PATH
+    assert keyring.read_bytes() == b"synthetic-keyring"
+    assert not (work_root / "usr/share/doc/ubuntu-keyring/changelog").exists()
+
+
+@pytest.mark.parametrize(
+    "hostile_member",
+    (
+        _tar_file("../escape", b"x"),
+        _tar_special("usr/share/doc/link", tarfile.SYMTYPE, linkname="../escape"),
+        _tar_special(
+            "usr/share/doc/hardlink",
+            tarfile.LNKTYPE,
+            linkname=BOOTSTRAP_KEYRING_TAR_PATH,
+        ),
+        _tar_special("usr/share/doc/fifo", tarfile.FIFOTYPE),
+        _tar_special("usr/share/doc/device", tarfile.CHRTYPE),
+        _tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"synthetic-keyring", mode=0o666),
+        _tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"synthetic-keyring", uid=501),
+    ),
+)
+def test_bootstrap_keyring_tar_extraction_rejects_unsafe_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hostile_member: tuple[tarfile.TarInfo, bytes | None],
+) -> None:
+    verifier = _load_openssh_verifier()
+    members = [hostile_member]
+    if hostile_member[0].name != BOOTSTRAP_KEYRING_TAR_PATH:
+        members.insert(0, _tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"synthetic-keyring"))
+    tar_raw = _tar_raw(*members)
+    _install_bootstrap_keyring_fakes(verifier, monkeypatch, tar_raw)
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+
+    with pytest.raises(SystemExit, match="unsafe bootstrap keyring tar member"):
+        verifier.extract_bootstrap_keyring(work_root=work_root)
+
+    assert not (tmp_path / "escape").exists()
+
+
+def test_bootstrap_keyring_tar_extraction_rejects_absolute_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_openssh_verifier()
+    absolute_escape = tmp_path / "absolute-escape"
+    tar_raw = _tar_raw(
+        _tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"synthetic-keyring"),
+        _tar_file(str(absolute_escape), b"x"),
+    )
+    _install_bootstrap_keyring_fakes(verifier, monkeypatch, tar_raw)
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+
+    with pytest.raises(SystemExit, match="unsafe bootstrap keyring tar member"):
+        verifier.extract_bootstrap_keyring(work_root=work_root)
+
+    assert not absolute_escape.exists()
+
+
+def test_bootstrap_keyring_tar_extraction_rejects_duplicate_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_openssh_verifier()
+    tar_raw = _tar_raw(
+        _tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"one"),
+        _tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"two"),
+    )
+    _install_bootstrap_keyring_fakes(verifier, monkeypatch, tar_raw)
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+
+    with pytest.raises(SystemExit, match="duplicate bootstrap keyring tar member"):
+        verifier.extract_bootstrap_keyring(work_root=work_root)
+
+
+def test_bootstrap_keyring_tar_extraction_rejects_member_count_and_byte_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_openssh_verifier()
+    monkeypatch.setattr(verifier, "BOOTSTRAP_KEYRING_MAX_TAR_MEMBERS", 1, raising=False)
+    tar_raw = _tar_raw(
+        _tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"synthetic-keyring"),
+        _tar_file("usr/share/doc/ubuntu-keyring/changelog", b"doc"),
+    )
+    _install_bootstrap_keyring_fakes(verifier, monkeypatch, tar_raw)
+    work_root = tmp_path / "work"
+    work_root.mkdir()
+
+    with pytest.raises(SystemExit, match="bootstrap keyring tar member count exceeded"):
+        verifier.extract_bootstrap_keyring(work_root=work_root)
+
+    verifier = _load_openssh_verifier()
+    monkeypatch.setattr(verifier, "BOOTSTRAP_KEYRING_MAX_FILE_BYTES", 8, raising=False)
+    tar_raw = _tar_raw(_tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"123456789"))
+    _install_bootstrap_keyring_fakes(verifier, monkeypatch, tar_raw)
+    with pytest.raises(SystemExit, match="bootstrap keyring tar member size exceeded"):
+        verifier.extract_bootstrap_keyring(work_root=work_root)
+
+    verifier = _load_openssh_verifier()
+    monkeypatch.setattr(verifier, "BOOTSTRAP_KEYRING_MAX_TOTAL_BYTES", 8, raising=False)
+    tar_raw = _tar_raw(
+        _tar_file(BOOTSTRAP_KEYRING_TAR_PATH, b"1234567"),
+        _tar_file("usr/share/doc/ubuntu-keyring/changelog", b"89"),
+    )
+    _install_bootstrap_keyring_fakes(verifier, monkeypatch, tar_raw)
+    with pytest.raises(SystemExit, match="bootstrap keyring tar total size exceeded"):
+        verifier.extract_bootstrap_keyring(work_root=work_root)
+
+
+def test_openssh_contract_job_uses_only_the_locked_closure() -> None:
+    workflow = yaml.safe_load((WORKFLOW_ROOT / "ci.yml").read_text())
+    job = workflow["jobs"]["openssh-forced-command-local"]
+
+    assert job == {
+        "runs-on": "ubuntu-24.04",
+        "steps": OPENSSH_STEPS,
+    }
+    rendered_commands = "\n".join(
+        step.get("run", "") for step in job["steps"] if isinstance(step, Mapping)
+    ).casefold()
+    assert "apt install" not in rendered_commands
+    assert "apt-get install" not in rendered_commands
+    assert "ubuntu-latest" not in rendered_commands
+    assert "openssh-server" not in rendered_commands.replace(
+        "openssh-ubuntu-24.04.lock",
+        "",
+    )
 
 
 def test_ci_check_asserts_expected_architectures_before_dependency_installation() -> None:

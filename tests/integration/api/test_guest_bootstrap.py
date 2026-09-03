@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -7,14 +8,20 @@ import httpx
 import pytest
 from fastapi.routing import APIRoute
 from tuntun_contracts.budget import BudgetReconciliationRequest
+from tuntun_contracts.identity import IdentityDecision, IdentityStatus, PersonaProjection
 from tuntun_contracts.ports import TurnInput, TurnOutput
 from tuntun_contracts.reachy import SafetyReceipt
 from tuntun_core.api.app import create_app
 from tuntun_core.api.dependencies import SimulatedGuestAppDependencies
 from tuntun_core.bootstrap.container import ProductionContainer
+from tuntun_core.services.personalized_turn_context import ProviderTurnContext, TranscribedTurn
 from tuntun_core.services.sessions.manager import SessionAdmission, SessionRejected
 from tuntun_core.services.sessions.manager import SessionManager as RealSessionManager
 from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
+from tuntun_core.workflows.conversation import (
+    SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    ProviderEgressAuthorizer,
+)
 from tuntun_testing.fake_clock import FakeClock
 
 
@@ -57,14 +64,29 @@ class _Reachy:
 
 class _SessionManager:
     def __init__(self) -> None:
-        self.opens: list[tuple[UUID, UUID]] = []
+        self.opens: list[tuple[UUID, UUID, UUID | None]] = []
+        self.ended_context_sessions: list[UUID] = []
         self.rejection: SessionRejected | None = None
 
-    async def open(self, household_id: UUID, turn_id: UUID) -> SessionAdmission:
-        self.opens.append((household_id, turn_id))
+    async def open(
+        self,
+        household_id: UUID,
+        turn_id: UUID,
+        *,
+        context_session_id: UUID | None = None,
+    ) -> SessionAdmission:
+        self.opens.append((household_id, turn_id, context_session_id))
         if self.rejection is not None:
             raise self.rejection
-        return SessionAdmission(household_id=household_id, turn_id=turn_id)
+        return SessionAdmission(
+            household_id=household_id,
+            turn_id=turn_id,
+            context_session_id=context_session_id,
+        )
+
+    async def end_context_session(self, context_session_id: UUID) -> bool:
+        self.ended_context_sessions.append(context_session_id)
+        return True
 
 
 class _Workflow:
@@ -94,17 +116,17 @@ class _Ports:
         del turn_id
         self.events.append("ports.start")
 
-    async def transcribe(self, wav_bytes: bytes) -> str:
+    async def transcribe(self, wav_bytes: bytes) -> TranscribedTurn:
         assert wav_bytes == b"RIFFsynthetic"
         self.events.append("ports.transcribe")
-        return "namaste"
+        return TranscribedTurn(text="namaste", stt_language="hi")
 
     async def guest_identity(self) -> str:
-        self.events.append("ports.identity")
-        return "Guest"
+        raise AssertionError("production route must not use legacy guest identity")
 
-    async def generate(self, transcript: str, identity: str) -> str:
-        assert (transcript, identity) == ("namaste", "Guest")
+    async def generate(self, context: ProviderTurnContext) -> str:
+        assert "Reply in Romanized Hindi" in context.messages[0]["content"]
+        assert context.messages[1]["content"] == "namaste"
         self.events.append("ports.generate")
         return "namaste ji"
 
@@ -123,9 +145,172 @@ class _Ports:
         self.events.append("ports.finish")
 
 
+class _LanguagePorts:
+    def __init__(self, transcripts: tuple[TranscribedTurn, ...]) -> None:
+        self._transcripts = list(transcripts)
+        self.reply_modes: list[str] = []
+
+    async def start(self, turn_id: UUID) -> None:
+        del turn_id
+
+    async def transcribe(self, wav_bytes: bytes) -> TranscribedTurn:
+        assert wav_bytes == b"RIFFsynthetic"
+        return self._transcripts.pop(0)
+
+    async def guest_identity(self) -> str:
+        raise AssertionError("production route must not use legacy guest identity")
+
+    async def generate(self, context: ProviderTurnContext) -> str:
+        self.reply_modes.append(context.reply_mode)
+        return "safe answer"
+
+    async def synthesize(self, answer: str) -> bytes:
+        assert answer == "safe answer"
+        return b"pcm"
+
+    async def play(self, turn_id: UUID, pcm: bytes) -> None:
+        del turn_id
+        assert pcm == b"pcm"
+
+    async def finish(self, turn_id: UUID) -> None:
+        del turn_id
+
+
 class _Startup:
     def __init__(self, process_lease: object) -> None:
         self.process_lease = process_lease
+
+
+class _Core:
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+
+
+class _Identity:
+    def __init__(self, subject_id: UUID) -> None:
+        self.subject_id = subject_id
+
+    async def require_current_for_turn(self, turn_id: UUID) -> IdentityDecision:
+        del turn_id
+        return IdentityDecision(
+            status=IdentityStatus.VERIFIED,
+            subject_id=self.subject_id,
+            reason_code="test-verified",
+            expires_at=datetime(2026, 8, 27, 0, 5, tzinfo=UTC),
+        )
+
+
+class _Profiles:
+    async def get_persona_projection(
+        self,
+        household_id: UUID,
+        subject_id: UUID | None,
+        observed_at: datetime,
+    ) -> PersonaProjection:
+        assert type(household_id) is UUID
+        assert type(subject_id) is UUID
+        assert observed_at == datetime(2026, 8, 27, tzinfo=UTC)
+        return PersonaProjection(
+            role="guest",
+            context="general",
+            tone="neutral",
+            depth="brief",
+            learning_level="none",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ConsentEvidence:
+    receipt_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderRouteDraft:
+    household_id: UUID
+    subject_id: UUID | None
+    session_id: UUID
+    required_consent_purposes: tuple[str, ...]
+    consent_receipt_ids: tuple[UUID, ...] = ()
+
+    def with_consent_receipt_ids(self, receipt_ids: tuple[UUID, ...]) -> _ProviderRouteDraft:
+        return replace(self, consent_receipt_ids=receipt_ids)
+
+    def to_route_authorization_request(self) -> _ProviderRouteDraft:
+        return self
+
+
+class _ProviderRouteDraftSource:
+    def __init__(self, draft: _ProviderRouteDraft) -> None:
+        self._draft = draft
+        self.contexts: list[ProviderTurnContext] = []
+
+    async def provider_route_draft(self, context: ProviderTurnContext) -> _ProviderRouteDraft:
+        self.contexts.append(context)
+        return self._draft
+
+
+class _ProviderConsentEvidence:
+    def __init__(self, receipt_id: UUID) -> None:
+        self.receipt_id = receipt_id
+        self.calls: list[tuple[UUID, UUID | None, UUID, tuple[str, ...], datetime]] = []
+
+    async def require(
+        self,
+        household_id: UUID,
+        subject_id: UUID | None,
+        session_id: UUID,
+        purposes: tuple[str, ...],
+        now: datetime,
+    ) -> tuple[_ConsentEvidence, ...]:
+        self.calls.append((household_id, subject_id, session_id, purposes, now))
+        return (_ConsentEvidence(self.receipt_id),)
+
+
+class _ProviderRouteAuthorizer:
+    def __init__(self, expected_receipt_id: UUID) -> None:
+        self.expected_receipt_id = expected_receipt_id
+        self.requests: list[_ProviderRouteDraft] = []
+
+    async def authorize(self, request: _ProviderRouteDraft) -> object:
+        self.requests.append(request)
+        if request.consent_receipt_ids != (self.expected_receipt_id,):
+            raise PermissionError("consent_required:cloud_reasoning")
+        return object()
+
+
+class _ProviderRouteAuthorizationBinder:
+    def __init__(self) -> None:
+        self.authorizations: list[object] = []
+
+    async def bind_route_authorization(
+        self,
+        context: ProviderTurnContext,
+        authorization: object,
+    ) -> ProviderTurnContext:
+        self.authorizations.append(authorization)
+        return context
+
+
+def _provider_egress(
+    *,
+    receipt_id: UUID | None = None,
+    expected_receipt_id: UUID | None = None,
+) -> ProviderEgressAuthorizer:
+    attached_receipt_id = receipt_id or uuid4()
+    return ProviderEgressAuthorizer(
+        route_drafts=_ProviderRouteDraftSource(
+            _ProviderRouteDraft(
+                household_id=uuid4(),
+                subject_id=uuid4(),
+                session_id=uuid4(),
+                required_consent_purposes=("cloud_reasoning",),
+            )
+        ),
+        consent_evidence=_ProviderConsentEvidence(attached_receipt_id),
+        route_authorizer=_ProviderRouteAuthorizer(expected_receipt_id or attached_receipt_id),
+        binder=_ProviderRouteAuthorizationBinder(),
+        clock=FakeClock(datetime(2026, 8, 27, tzinfo=UTC)),
+    )
 
 
 class _Lifecycle:
@@ -205,9 +390,7 @@ async def _asgi_exchange(
     )
     start = next(message for message in sent if message["type"] == "http.response.start")
     body = b"".join(
-        message.get("body", b"")
-        for message in sent
-        if message["type"] == "http.response.body"
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
     )
     return int(start["status"]), dict(start["headers"]), body, receive_calls
 
@@ -217,7 +400,11 @@ async def test_installed_guest_app_has_only_first_owned_routes() -> None:
     deps, _session, _workflow, _readiness = _dependencies()
     app = create_app(deps)
 
-    assert _owned_route_names(app) == {"health.ready", "session.simulated_turn"}
+    assert _owned_route_names(app) == {
+        "health.ready",
+        "session.simulated_end",
+        "session.simulated_turn",
+    }
     transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 42_000))
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         openapi = await client.get("/openapi.json")
@@ -266,12 +453,43 @@ async def test_simulated_turn_is_empty_loopback_only_and_uses_server_side_identi
     assert accepted.headers["Cache-Control"] == "no-store"
     body = accepted.json()
     assert body == {"turn_id": str(workflow.turns[0].turn_id), "outcome": "completed"}
-    assert session.opens == [(deps.household_id, workflow.turns[0].turn_id)]
+    assert session.opens == [
+        (
+            deps.household_id,
+            workflow.turns[0].turn_id,
+            deps.context_session_id,
+        )
+    ]
     assert workflow.turns == [
         TurnInput(
             turn_id=workflow.turns[0].turn_id,
             household_id=deps.household_id,
             device_id=deps.device_id,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_simulated_end_rotates_server_side_context_without_returning_ids() -> None:
+    deps, session, workflow, _readiness = _dependencies()
+    original_context_session_id = deps.context_session_id
+    transport = httpx.ASGITransport(app=create_app(deps), client=("127.0.0.1", 42_000))
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        ended = await client.post("/session/simulated-end", json={})
+        next_turn = await client.post("/session/simulated-turn", json={})
+
+    assert ended.status_code == 200
+    assert ended.json() == {"status": "ended"}
+    assert str(original_context_session_id) not in ended.text
+    assert session.ended_context_sessions == [original_context_session_id]
+    assert deps.context_session_id != original_context_session_id
+    assert next_turn.status_code == 200
+    assert session.opens == [
+        (
+            deps.household_id,
+            workflow.turns[0].turn_id,
+            deps.context_session_id,
         )
     ]
 
@@ -497,7 +715,13 @@ async def test_content_length_allows_equal_numeric_duplicates_and_sp_htab_ows() 
     )
     assert body == expected_body
     assert receive_calls == 1
-    assert session.opens == [(deps.household_id, workflow.turns[0].turn_id)]
+    assert session.opens == [
+        (
+            deps.household_id,
+            workflow.turns[0].turn_id,
+            deps.context_session_id,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -631,12 +855,16 @@ async def test_simulated_turn_maps_admission_rejections_to_content_free_bodies(
 
 
 @pytest.mark.asyncio
-async def test_production_container_installs_single_guest_app_with_existing_roots() -> None:
+@pytest.mark.parametrize("workflow_name", ("linear", "langgraph"))
+async def test_production_container_installs_single_guest_app_with_existing_roots(
+    workflow_name: str,
+) -> None:
     reachy = _Reachy()
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
     coordinator = TurnCoordinator(
         budget=_Budget(),
         reachy=reachy,
-        clock=FakeClock(datetime(2026, 8, 27, tzinfo=UTC)),
+        clock=clock,
     )
     session_manager = RealSessionManager(coordinator)
     process_lease = object()
@@ -644,7 +872,7 @@ async def test_production_container_installs_single_guest_app_with_existing_root
     reconciler = object()
     lifecycle = _Lifecycle(reconciler, startup)
     container = ProductionContainer(
-        core=object(),  # type: ignore[arg-type]
+        core=_Core(clock),  # type: ignore[arg-type]
         core_process_lease=process_lease,  # type: ignore[arg-type]
         budget_reconciler=reconciler,  # type: ignore[arg-type]
         startup_turn_recovery=startup,  # type: ignore[arg-type]
@@ -659,14 +887,32 @@ async def test_production_container_installs_single_guest_app_with_existing_root
         household_id=uuid4(),
         device_id=uuid4(),
         loopback_host="127.0.0.1",
+        identity=_Identity(uuid4()),
+        profiles=_Profiles(),
+        provider_egress=_provider_egress(),
+        workflow_name=workflow_name,  # type: ignore[arg-type]
     )
 
     assert installed.composition.workflow is installed.composition.dependencies.workflow
+    assert installed.composition.context_provider is not None
+    selected_engine = (
+        installed.composition.linear_engine
+        if workflow_name == "linear"
+        else installed.composition.langgraph_engine
+    )
+    assert selected_engine is not None
+    assert selected_engine.context_provider is installed.composition.context_provider
+    assert (installed.composition.linear_engine is None) is (workflow_name == "langgraph")
+    assert (installed.composition.langgraph_engine is None) is (workflow_name == "linear")
     assert installed.coordinator is coordinator
     assert installed.session_manager is session_manager
     assert installed.readiness_dependencies == (lifecycle,)
     assert type(installed.route_ids) is set
-    assert installed.route_ids == {"health.ready", "session.simulated_turn"}
+    assert installed.route_ids == {
+        "health.ready",
+        "session.simulated_end",
+        "session.simulated_turn",
+    }
     assert type(installed.duplicate_route_ids) is tuple
     assert installed.duplicate_route_ids == ()
     assert installed.listener_bindings == frozenset({"loopback"})
@@ -684,7 +930,6 @@ async def test_production_container_installs_single_guest_app_with_existing_root
     assert ports.events == [
         "ports.start",
         "ports.transcribe",
-        "ports.identity",
         "ports.generate",
         "ports.synthesize",
         "ports.play",
@@ -697,4 +942,166 @@ async def test_production_container_installs_single_guest_app_with_existing_root
             household_id=uuid4(),
             device_id=uuid4(),
             loopback_host="127.0.0.1",
+            identity=_Identity(uuid4()),
+            profiles=_Profiles(),
+            provider_egress=_provider_egress(),
         )
+
+
+@pytest.mark.parametrize("provider_egress", (None, SYNTHETIC_NO_PROVIDER_TRANSPORT))
+def test_production_container_install_requires_provider_egress_authorizer(
+    provider_egress,
+) -> None:
+    reachy = _Reachy()
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    coordinator = TurnCoordinator(
+        budget=_Budget(),
+        reachy=reachy,
+        clock=clock,
+    )
+    session_manager = RealSessionManager(coordinator)
+    process_lease = object()
+    startup = _Startup(process_lease)
+    reconciler = object()
+    lifecycle = _Lifecycle(reconciler, startup)
+    container = ProductionContainer(
+        core=_Core(clock),  # type: ignore[arg-type]
+        core_process_lease=process_lease,  # type: ignore[arg-type]
+        budget_reconciler=reconciler,  # type: ignore[arg-type]
+        startup_turn_recovery=startup,  # type: ignore[arg-type]
+        budget_lifecycle=lifecycle,  # type: ignore[arg-type]
+        turn_coordinator=coordinator,
+        session_manager=session_manager,
+    )
+
+    with pytest.raises(TypeError, match="production provider egress authorizer required"):
+        container.install_simulated_guest_app(
+            ports=_Ports(),
+            completed_audio=_CompletedAudio(),
+            household_id=uuid4(),
+            device_id=uuid4(),
+            loopback_host="127.0.0.1",
+            identity=_Identity(uuid4()),
+            profiles=_Profiles(),
+            provider_egress=provider_egress,
+        )
+
+
+@pytest.mark.asyncio
+async def test_production_provider_egress_wrong_consent_cannot_reach_generate() -> None:
+    reachy = _Reachy()
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    coordinator = TurnCoordinator(
+        budget=_Budget(),
+        reachy=reachy,
+        clock=clock,
+    )
+    session_manager = RealSessionManager(coordinator)
+    process_lease = object()
+    startup = _Startup(process_lease)
+    reconciler = object()
+    lifecycle = _Lifecycle(reconciler, startup)
+    container = ProductionContainer(
+        core=_Core(clock),  # type: ignore[arg-type]
+        core_process_lease=process_lease,  # type: ignore[arg-type]
+        budget_reconciler=reconciler,  # type: ignore[arg-type]
+        startup_turn_recovery=startup,  # type: ignore[arg-type]
+        budget_lifecycle=lifecycle,  # type: ignore[arg-type]
+        turn_coordinator=coordinator,
+        session_manager=session_manager,
+    )
+    ports = _Ports()
+    installed = container.install_simulated_guest_app(
+        ports=ports,
+        completed_audio=_CompletedAudio(),
+        household_id=uuid4(),
+        device_id=uuid4(),
+        loopback_host="127.0.0.1",
+        identity=_Identity(uuid4()),
+        profiles=_Profiles(),
+        provider_egress=_provider_egress(
+            receipt_id=uuid4(),
+            expected_receipt_id=uuid4(),
+        ),
+    )
+    transport = httpx.ASGITransport(
+        app=installed.composition.app,
+        client=("127.0.0.1", 42_000),
+    )
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/session/simulated-turn", json={})
+
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "denied"
+    assert "ports.generate" not in ports.events
+    assert reachy.stopped_turns
+
+
+@pytest.mark.asyncio
+async def test_production_api_language_prior_survives_turn_finish_until_explicit_context_end() -> (
+    None
+):
+    reachy = _Reachy()
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    coordinator = TurnCoordinator(
+        budget=_Budget(),
+        reachy=reachy,
+        clock=clock,
+    )
+    session_manager = RealSessionManager(coordinator)
+    process_lease = object()
+    startup = _Startup(process_lease)
+    reconciler = object()
+    lifecycle = _Lifecycle(reconciler, startup)
+    container = ProductionContainer(
+        core=_Core(clock),  # type: ignore[arg-type]
+        core_process_lease=process_lease,  # type: ignore[arg-type]
+        budget_reconciler=reconciler,  # type: ignore[arg-type]
+        startup_turn_recovery=startup,  # type: ignore[arg-type]
+        budget_lifecycle=lifecycle,  # type: ignore[arg-type]
+        turn_coordinator=coordinator,
+        session_manager=session_manager,
+    )
+    ports = _LanguagePorts(
+        (
+            TranscribedTurn(text="बारिश", stt_language="hi"),
+            TranscribedTurn(text="hmm", stt_language="unknown"),
+            TranscribedTurn(text="okay", stt_language="unknown"),
+            TranscribedTurn(text="hmm", stt_language="unknown"),
+            TranscribedTurn(text="hmm", stt_language="unknown"),
+        )
+    )
+    installed = container.install_simulated_guest_app(
+        ports=ports,
+        completed_audio=_CompletedAudio(),
+        household_id=uuid4(),
+        device_id=uuid4(),
+        loopback_host="127.0.0.1",
+        identity=_Identity(uuid4()),
+        profiles=_Profiles(),
+        provider_egress=_provider_egress(),
+    )
+    first_context_session_id = installed.composition.dependencies.context_session_id
+    transport = httpx.ASGITransport(
+        app=installed.composition.app,
+        client=("127.0.0.1", 42_000),
+    )
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        for _ in range(4):
+            response = await client.post("/session/simulated-turn", json={})
+            assert response.status_code == 200
+
+        assert ports.reply_modes == ["hi", "hi", "hi", "en"]
+
+        ended = await client.post("/session/simulated-end", json={})
+        assert ended.status_code == 200
+        assert ended.json() == {"status": "ended"}
+        assert str(first_context_session_id) not in ended.text
+        assert installed.composition.dependencies.context_session_id != first_context_session_id
+
+        response = await client.post("/session/simulated-turn", json={})
+        assert response.status_code == 200
+
+    assert ports.reply_modes == ["hi", "hi", "hi", "en", "en"]

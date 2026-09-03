@@ -515,7 +515,12 @@ def test_settings_file_acl_inspection_brackets_the_stable_read(
             read_started = True
         return original_read(descriptor, size)
 
-    def has_unsafe_acl(descriptor: int) -> bool:
+    def has_unsafe_acl(
+        descriptor: int,
+        *,
+        reject_default_acl: bool = True,
+    ) -> bool:
+        del reject_default_acl
         metadata = os.fstat(descriptor)
         if (metadata.st_dev, metadata.st_ino) != identity:
             return False
@@ -544,7 +549,12 @@ def test_settings_unsafe_acl_inspection_failure_is_content_free(
     _write_private(config, "{}\n")
     identity = (config.stat().st_dev, config.stat().st_ino)
 
-    def fail_inspection(descriptor: int) -> bool:
+    def fail_inspection(
+        descriptor: int,
+        *,
+        reject_default_acl: bool = True,
+    ) -> bool:
+        del reject_default_acl
         metadata = os.fstat(descriptor)
         if (metadata.st_dev, metadata.st_ino) == identity:
             raise OSError("sensitive native ACL diagnostic")

@@ -63,10 +63,16 @@ stop/go gate. A simulator or media-only run is progress, not accepted A0.5.
 
 **Interfaces:**
 - Consumes: the delivered Reachy daemon `/docs` and status endpoints, installed SDK metadata, exact on-robot interpreter, and physically supervised read-only observations.
-- Produces: `ReachyCapabilityReportV1`,
+- Produces: current v2 `CapabilityReport`/`ReachyCapabilityEvidenceV2` qualification evidence,
   `CapabilityDecision(accepted|conditional_mac_key|rejected)`, a sanitized local
   `var/hardware/reachy-a05-capability.json`, private commissioning material under the login home's
   `.local/share/tuntun/reachy-a05/`, and the exact facts Tasks 2, 4, and 7 may use.
+
+Capability report v2 is required because Reachy SDK-native audio facts are float32 stereo
+descriptors while the Tuntun transport remains fixed s16le mono. Legacy v1 reports remain parseable
+only as normalized pre-acceptance evidence; no physical v1 artifact was accepted, and v1 cannot
+qualify native media or satisfy current hardware acceptance without a future closed migration and
+requalification path.
 
 Limitation codes are exactly
 `aec_unavailable|doa_unavailable|local_input_unavailable|rtc_unqualified`. Rejection reason codes

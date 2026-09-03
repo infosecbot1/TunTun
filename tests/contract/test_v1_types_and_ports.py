@@ -1,11 +1,16 @@
 # tests/contract/test_v1_types_and_ports.py
 from __future__ import annotations
 
+import base64
+import importlib
 import inspect
+import json
+import re
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
-from typing import Literal, Protocol, TypeVar, get_origin
+from ipaddress import IPv4Address
+from typing import Any, Literal, Protocol, TypeVar, cast, get_origin
 from uuid import UUID
 
 import pytest
@@ -34,6 +39,7 @@ from tuntun_contracts.base import (
     ContractModel,
     Sensitivity,
     canonical_bytes,
+    canonical_mapping_bytes,
     registered_contract_models,
 )
 from tuntun_contracts.budget import (
@@ -112,6 +118,37 @@ from tuntun_contracts.speech import (
 )
 
 _T = TypeVar("_T")
+VALID_TASK08_NONCE = base64.b64encode(bytes(range(32))).decode("ascii")
+VALID_TASK08_SIGNATURE = base64.b64encode(bytes(range(64))).decode("ascii")
+
+
+def _task08_model(module_name: str, model_name: str) -> type[ContractModel]:
+    try:
+        module = importlib.import_module(f"tuntun_contracts.{module_name}")
+    except ModuleNotFoundError as error:
+        raise AssertionError(f"missing contract module tuntun_contracts.{module_name}") from error
+    value = getattr(module, model_name, None)
+    if not (
+        isinstance(value, type) and issubclass(value, ContractModel) and value is not ContractModel
+    ):
+        raise AssertionError(f"missing public ContractModel {module_name}.{model_name}")
+    return value
+
+
+def _core_time_request_type() -> type[ContractModel]:
+    return _task08_model("reachy_time", "CoreTimeRequestV1")
+
+
+def _core_time_proof_type() -> type[ContractModel]:
+    return _task08_model("reachy_time", "CoreTimeProofV1")
+
+
+def _accepted_capability_type() -> type[ContractModel]:
+    return _task08_model("reachy_operator", "ReachyAcceptedCapabilityV1")
+
+
+def _operator_state_type() -> type[ContractModel]:
+    return _task08_model("reachy_operator", "ReachyOperatorStateV1")
 
 
 def _test_commitment(key_id: str = "contract-test-v1") -> Commitment:
@@ -170,6 +207,49 @@ def _test_binding(subject_id: UUID | None) -> ActionBinding:
         session_id=UUID(int=1_107),
         subject_id=subject_id,
     )
+
+
+def _valid_accepted_capability_payload(*, username: str = "tuntunops") -> dict[str, object]:
+    return {
+        "capability_report_sha256": "0" * 64,
+        "acceptance_receipt_sha256": "1" * 64,
+        "sdk_version": "1.2.3",
+        "daemon_version": "2.3.4",
+        "ssh_username": username,
+        "python_executable": "/venvs/apps_venv/bin/python3",
+        "python_version": "3.12",
+        "python_abi": "cp312",
+        "selected_wheel_tag": "py3-none-any",
+        "target_tag_set_sha256": "2" * 64,
+        "runtime_inventory_sha256": "3" * 64,
+    }
+
+
+def _valid_operator_state_payload(*, username: str = "tuntunops") -> dict[str, object]:
+    return {
+        "schema_version": "tuntun.reachy-operator-state.v1",
+        "commissioning_generation": 1,
+        "commissioning_state_sha256": "4" * 64,
+        "ssh_username": username,
+        "reachy_ipv4": "192.168.10.20",
+        "core_ipv4": "192.168.10.10",
+        "pinned_ssh_host_key_sha256": "5" * 64,
+        "dhcp_receipt_sha256": "6" * 64,
+        "accepted_capability": _valid_accepted_capability_payload(username=username),
+    }
+
+
+def _valid_time_proof_payload() -> dict[str, object]:
+    return {
+        "schema_version": "tuntun.core-time-proof.v1",
+        "endpoint_generation": 1,
+        "time_sequence": 2,
+        "request_nonce_b64": VALID_TASK08_NONCE,
+        "core_utc": datetime(2026, 8, 27, 1, 2, 3, 4, tzinfo=UTC),
+        "authority_health_generation": 3,
+        "signing_key_id": "ed25519:reachy-time:v1",
+        "signature_b64": VALID_TASK08_SIGNATURE,
+    }
 
 
 class _PlannedExecutable(Protocol):
@@ -256,8 +336,8 @@ def test_every_registered_contract_model_is_strict_closed_and_frozen() -> None:
 def test_root_exports_registry_and_public_type_families_are_exact() -> None:
     exports = tuntun_contracts.__all__
     assert type(exports) is tuple
-    assert len(exports) == len(set(exports)) == 138
-    assert len(registered_contract_models()) == 95
+    assert len(exports) == len(set(exports)) == 145
+    assert len(registered_contract_models()) == 102
 
     enum_names = {
         name
@@ -317,6 +397,275 @@ def test_root_exports_registry_and_public_type_families_are_exact() -> None:
         "MAX_WEB_SEARCH_CALLS",
         "usage_total",
     }.isdisjoint(exports)
+
+    expected_task08_exports = {
+        "CoreTimeProofV1",
+        "CoreTimeRequestV1",
+        "ReachyAcceptedCapabilityV1",
+        "ReachyOperatorStateV1",
+    }
+    assert expected_task08_exports <= set(exports)
+    assert all(
+        isinstance(getattr(tuntun_contracts, name), type)
+        and issubclass(getattr(tuntun_contracts, name), ContractModel)
+        for name in expected_task08_exports
+    )
+
+    expected_task12_exports = {
+        "ReachyAssistantInventoryV1",
+        "ReachyBootIdentityV1",
+        "ReachyNetworkCountersV1",
+    }
+    assert expected_task12_exports <= set(exports)
+    assert all(
+        isinstance(getattr(tuntun_contracts, name), type)
+        and issubclass(getattr(tuntun_contracts, name), ContractModel)
+        for name in expected_task12_exports
+    )
+
+
+def test_task08_reachy_registry_order_is_between_existing_reachy_and_speech() -> None:
+    names = tuple(
+        f"{model.__module__}.{model.__qualname__}" for model in registered_contract_models()
+    )
+    assert names[
+        names.index("tuntun_contracts.reachy.StopSignal") + 1 : names.index(
+            "tuntun_contracts.speech.AudioFormat"
+        )
+    ] == (
+        "tuntun_contracts.reachy_assistant_qualification.ReachyAssistantInventoryV1",
+        "tuntun_contracts.reachy_assistant_qualification.ReachyBootIdentityV1",
+        "tuntun_contracts.reachy_assistant_qualification.ReachyNetworkCountersV1",
+        "tuntun_contracts.reachy_operator.ReachyAcceptedCapabilityV1",
+        "tuntun_contracts.reachy_operator.ReachyOperatorStateV1",
+        "tuntun_contracts.reachy_time.CoreTimeProofV1",
+        "tuntun_contracts.reachy_time.CoreTimeRequestV1",
+    )
+
+
+def test_core_time_contracts_require_canonical_nonce_and_signature_bytes() -> None:
+    request_type = _core_time_request_type()
+    proof_type = _core_time_proof_type()
+    request = cast(
+        Any,
+        request_type.model_validate(
+            {
+                "schema_version": "tuntun.core-time-request.v1",
+                "request_nonce_b64": VALID_TASK08_NONCE,
+            }
+        ),
+    )
+    assert request.request_nonce_b64 == VALID_TASK08_NONCE
+
+    proof = cast(Any, proof_type.model_validate(_valid_time_proof_payload()))
+    assert proof.request_nonce_b64 == VALID_TASK08_NONCE
+    assert proof.signature_b64 == VALID_TASK08_SIGNATURE
+
+    bad_nonces = (
+        base64.b64encode(bytes(31)).decode("ascii"),
+        base64.b64encode(bytes(33)).decode("ascii"),
+        VALID_TASK08_NONCE.rstrip("="),
+        base64.urlsafe_b64encode(bytes([255]) * 32).decode("ascii"),
+        "A" * 43 + "A",
+    )
+    for nonce in bad_nonces:
+        with pytest.raises(ValidationError, match="nonce"):
+            request_type.model_validate(
+                {
+                    "schema_version": "tuntun.core-time-request.v1",
+                    "request_nonce_b64": nonce,
+                }
+            )
+        with pytest.raises(ValidationError, match="nonce"):
+            proof_type.model_validate(_valid_time_proof_payload() | {"request_nonce_b64": nonce})
+
+    for signature in (
+        base64.b64encode(bytes(63)).decode("ascii"),
+        base64.b64encode(bytes(65)).decode("ascii"),
+        VALID_TASK08_SIGNATURE.rstrip("="),
+        base64.urlsafe_b64encode(bytes([255]) * 64).decode("ascii"),
+        "A" * 86 + "=A",
+    ):
+        with pytest.raises(ValidationError, match="signature"):
+            proof_type.model_validate(_valid_time_proof_payload() | {"signature_b64": signature})
+
+
+def test_core_time_proof_signing_payload_is_the_canonical_unsigned_mapping() -> None:
+    proof = cast(Any, _core_time_proof_type().model_validate(_valid_time_proof_payload()))
+    dumped = proof.model_dump(mode="python", exclude={"signature_b64"})
+    expected = canonical_mapping_bytes(dumped)
+    assert proof.signing_payload() == expected
+    assert b"signature_b64" not in expected
+    assert b"signing_key_id" in expected
+
+
+def test_core_time_proof_requires_utc_offset_zero_and_publishes_runtime_metadata() -> None:
+    proof_type = _core_time_proof_type()
+    proof = cast(Any, proof_type.model_validate(_valid_time_proof_payload()))
+    assert b'"core_utc":"2026-08-27T01:02:03.000004Z"' in proof.signing_payload()
+
+    schema = proof_type.model_json_schema()["properties"]
+    assert schema["core_utc"]["x-tuntun-field-safety"] == {
+        "canonical_serialization_offset": "Z",
+        "constraint": "utc-offset-zero-datetime",
+        "required_utc_offset_seconds": 0,
+        "runtime_authoritative": True,
+    }
+
+    for core_utc in (
+        "2026-08-27T01:02:03.000004Z",
+        "2026-08-27T01:02:03.000004+00:00",
+    ):
+        parsed = cast(
+            Any,
+            proof_type.model_validate_json(
+                json.dumps(_valid_time_proof_payload() | {"core_utc": core_utc})
+            ),
+        )
+        assert parsed.core_utc.utcoffset() == timedelta(0)
+        assert b'"core_utc":"2026-08-27T01:02:03.000004Z"' in parsed.signing_payload()
+
+    with pytest.raises(ValidationError, match="UTC"):
+        proof_type.model_validate(
+            _valid_time_proof_payload()
+            | {
+                "core_utc": datetime(
+                    2026,
+                    8,
+                    27,
+                    9,
+                    2,
+                    3,
+                    4,
+                    tzinfo=timezone(timedelta(hours=8)),
+                )
+            }
+        )
+    with pytest.raises(ValidationError, match="UTC"):
+        proof_type.model_validate_json(
+            json.dumps(
+                _valid_time_proof_payload() | {"core_utc": "2026-08-27T09:02:03.000004+08:00"}
+            )
+        )
+
+
+def test_reachy_accepted_capability_pins_exact_runtime_tuple() -> None:
+    model_type = _accepted_capability_type()
+    accepted = cast(Any, model_type.model_validate(_valid_accepted_capability_payload()))
+    assert accepted.ssh_username == "tuntunops"
+    assert accepted.python_executable == "/venvs/apps_venv/bin/python3"
+    assert (accepted.python_version, accepted.python_abi) == (
+        "3.12",
+        "cp312",
+    )
+    assert accepted.selected_wheel_tag == "py3-none-any"
+
+    schema = model_type.model_json_schema()["properties"]
+    username_schema = schema["ssh_username"]
+    username_pattern = username_schema["pattern"]
+    assert isinstance(username_pattern, str)
+    assert re.fullmatch(username_pattern, "tuntunops")
+    assert re.fullmatch(username_pattern, "root") is None
+    assert username_schema["x-tuntun-field-safety"] == {
+        "constraint": "non-root-posix-username",
+        "forbidden_values": ["root"],
+        "runtime_authoritative": True,
+    }
+    for field_name in ("sdk_version", "daemon_version"):
+        version_schema = schema[field_name]
+        assert version_schema["minLength"] == 5
+        assert version_schema["maxLength"] == 32
+    assert model_type.model_json_schema()["x-tuntun-cross-field-invariants"] == [
+        {
+            "allowed_pairs": [["3.11", "cp311"], ["3.12", "cp312"]],
+            "constraint": "supported-reachy-interpreter-abi-pair",
+            "fields": ["python_version", "python_abi"],
+            "runtime_authoritative": True,
+        }
+    ]
+
+    invalid_mutations = (
+        {"capability_report_sha256": "A" * 64},
+        {"sdk_version": "1.2.3rc1"},
+        {"sdk_version": f"{'1' * 31}.2.3"},
+        {"daemon_version": "01.2.3"},
+        {"daemon_version": f"1.2.{'3' * 29}"},
+        {"ssh_username": "root"},
+        {"python_executable": "/usr/bin/python3"},
+        {"python_version": "3.11", "python_abi": "cp312"},
+        {"python_version": "3.12", "python_abi": "cp311"},
+        {"selected_wheel_tag": "cp312-cp312-manylinux_aarch64"},
+    )
+    for mutation in invalid_mutations:
+        with pytest.raises(ValidationError):
+            model_type.model_validate(_valid_accepted_capability_payload() | mutation)
+
+
+def test_reachy_operator_state_uses_distinct_canonical_rfc1918_string_hosts() -> None:
+    model_type = _operator_state_type()
+    state = cast(Any, model_type.model_validate(_valid_operator_state_payload()))
+    assert state.ssh_username == "tuntunops"
+    assert state.reachy_ipv4 == "192.168.10.20"
+    assert state.core_ipv4 == "192.168.10.10"
+    assert model_type.model_json_schema()["x-tuntun-cross-field-invariants"] == [
+        {
+            "constraint": "distinct-rfc1918-operator-endpoints",
+            "fields": ["reachy_ipv4", "core_ipv4"],
+            "relation": "not_equal",
+            "runtime_authoritative": True,
+        },
+        {
+            "constraint": "accepted-capability-username-match",
+            "fields": ["ssh_username", "accepted_capability.ssh_username"],
+            "relation": "equal_when_present",
+            "runtime_authoritative": True,
+        },
+    ]
+
+    schema = model_type.model_json_schema()["properties"]
+    username_schema = schema["ssh_username"]
+    username_pattern = username_schema["pattern"]
+    assert isinstance(username_pattern, str)
+    assert re.fullmatch(username_pattern, "tuntunops")
+    assert re.fullmatch(username_pattern, "root") is None
+    assert username_schema["x-tuntun-field-safety"] == {
+        "constraint": "non-root-posix-username",
+        "forbidden_values": ["root"],
+        "runtime_authoritative": True,
+    }
+    for field_name in ("reachy_ipv4", "core_ipv4"):
+        field_schema = schema[field_name]
+        assert field_schema["type"] == "string"
+        ipv4_pattern = field_schema["pattern"]
+        assert isinstance(ipv4_pattern, str)
+        assert re.fullmatch(ipv4_pattern, "10.0.0.1")
+        assert re.fullmatch(ipv4_pattern, "172.16.0.1")
+        assert re.fullmatch(ipv4_pattern, "172.31.255.255")
+        assert re.fullmatch(ipv4_pattern, "192.168.10.20")
+        assert re.fullmatch(ipv4_pattern, "8.8.8.8") is None
+        assert re.fullmatch(ipv4_pattern, "100.64.0.1") is None
+        assert re.fullmatch(ipv4_pattern, "192.168.010.020") is None
+        assert field_schema["x-tuntun-field-safety"] == {
+            "allowed_cidrs": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+            "constraint": "canonical-explicit-rfc1918-ipv4",
+            "runtime_authoritative": True,
+        }
+        assert "format" not in field_schema
+
+    invalid_mutations = (
+        {"reachy_ipv4": "192.168.10.10"},
+        {"reachy_ipv4": "8.8.8.8"},
+        {"core_ipv4": "172.15.0.1"},
+        {"core_ipv4": "100.64.0.1"},
+        {"reachy_ipv4": "192.168.010.020"},
+        {"core_ipv4": "192.168.10.010"},
+        {"reachy_ipv4": IPv4Address("192.168.10.20")},
+        {"ssh_username": "root"},
+        {"accepted_capability": _valid_accepted_capability_payload(username="other")},
+    )
+    for mutation in invalid_mutations:
+        with pytest.raises(ValidationError):
+            model_type.model_validate(_valid_operator_state_payload() | mutation)
 
 
 def test_public_contract_collection_schemas_are_never_variadic() -> None:

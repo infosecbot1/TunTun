@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 from uuid import UUID
 
 from tuntun_core.domain.conversation import Transition
+from tuntun_core.services.personalized_turn_context import ActiveSessionContext
 from tuntun_core.services.sessions.turn_coordinator import (
     CoordinatorState,
     TurnCoordinator,
@@ -21,6 +23,18 @@ _MAX_RETAINED_OPERATIONS = 4
 class SessionAdmission:
     household_id: UUID
     turn_id: UUID
+    context_session_id: UUID | None = None
+    one_turn_context: bool = True
+
+    def __post_init__(self) -> None:
+        _require_uuid(self.household_id, name="household_id")
+        _require_uuid(self.turn_id, name="turn_id")
+        if self.context_session_id is None:
+            object.__setattr__(self, "context_session_id", self.turn_id)
+        else:
+            _require_uuid(self.context_session_id, name="context_session_id")
+        if type(self.one_turn_context) is not bool:
+            raise TypeError("one_turn_context must be an exact bool")
 
 
 class SessionRejected(RuntimeError):
@@ -47,6 +61,18 @@ class SessionManager:
         self._deferred_for_turn: UUID | None = None
         self._operations: dict[tuple[UUID, _OperationKind], asyncio.Task[Any]] = {}
         self._lock = asyncio.Lock()
+        self._lease_condition = asyncio.Condition(self._lock)
+        self._context_leases: dict[UUID, int] = {}
+        self._context_lease_sessions: dict[UUID, UUID] = {}
+        self._turn_context_sessions: dict[UUID, UUID] = {}
+        self._known_context_sessions: set[UUID] = set()
+        self._context_session_households: dict[UUID, UUID] = {}
+        self._one_turn_context_turns: set[UUID] = set()
+        self._ending_turns: set[UUID] = set()
+        self._ending_context_sessions: set[UUID] = set()
+        self._ended_context_sessions: set[UUID] = set()
+        self._notified_context_sessions: set[UUID] = set()
+        self._session_end_handlers: tuple[Callable[[UUID], Awaitable[None]], ...] = ()
 
     @property
     def active(self) -> SessionAdmission | None:
@@ -61,11 +87,81 @@ class SessionManager:
     def inflight_operation_count(self) -> int:
         return len(self._operations)
 
-    async def open(self, household_id: UUID, turn_id: UUID) -> SessionAdmission:
-        _require_uuid(household_id, name="household_id")
+    def track_task(self, turn_id: UUID, task: asyncio.Task[Any]) -> None:
+        self._coordinator.track_task(turn_id, task)
+
+    def untrack_task(self, turn_id: UUID, task: asyncio.Task[Any]) -> None:
+        self._coordinator.untrack_task(turn_id, task)
+
+    def accepts_results(self, turn_id: UUID) -> bool:
+        return self._coordinator.accepts_results(turn_id)
+
+    def register_session_ended_handler(
+        self,
+        handler: Callable[[UUID], Awaitable[None]],
+    ) -> None:
+        if not callable(handler):
+            raise TypeError("session ended handler must be callable")
+        self._session_end_handlers = (*self._session_end_handlers, handler)
+
+    @asynccontextmanager
+    async def active_context_lease(self, turn_id: UUID) -> AsyncIterator[ActiveSessionContext]:
         _require_uuid(turn_id, name="turn_id")
         async with self._lock:
             self._synchronize_release()
+            if self._active is None:
+                raise RuntimeError("session_context_unavailable")
+            context_session_id = _admission_context_session_id(self._active)
+            if (
+                self._active.turn_id != turn_id
+                or turn_id in self._ending_turns
+                or context_session_id in self._ending_context_sessions
+                or context_session_id in self._ended_context_sessions
+                or not self._coordinator.accepts_results(turn_id)
+            ):
+                raise RuntimeError("session_context_unavailable")
+            session = ActiveSessionContext(
+                id=context_session_id,
+                household_id=self._active.household_id,
+            )
+            self._context_leases[turn_id] = self._context_leases.get(turn_id, 0) + 1
+            self._context_lease_sessions[turn_id] = context_session_id
+        try:
+            yield session
+        finally:
+            async with self._lock:
+                remaining = self._context_leases.get(turn_id, 0) - 1
+                if remaining > 0:
+                    self._context_leases[turn_id] = remaining
+                else:
+                    self._context_leases.pop(turn_id, None)
+                    self._context_lease_sessions.pop(turn_id, None)
+                self._lease_condition.notify_all()
+
+    async def open(
+        self,
+        household_id: UUID,
+        turn_id: UUID,
+        *,
+        context_session_id: UUID | None = None,
+    ) -> SessionAdmission:
+        _require_uuid(household_id, name="household_id")
+        _require_uuid(turn_id, name="turn_id")
+        one_turn_context = context_session_id is None
+        context_id = turn_id if context_session_id is None else context_session_id
+        _require_uuid(context_id, name="context_session_id")
+        async with self._lock:
+            self._synchronize_release()
+            if (
+                context_id in self._ending_context_sessions
+                or context_id in self._ended_context_sessions
+            ):
+                raise RuntimeError("context_session_unavailable")
+            existing_household_id = self._context_session_households.get(context_id)
+            if existing_household_id is not None and existing_household_id != household_id:
+                raise RuntimeError("context_session_unavailable")
+            if self._ending_context_sessions:
+                raise SessionRejected(reason="busy", retry_after_ms=1_000)
             if self._coordinator.state is CoordinatorState.SAFETY_BLOCKED:
                 raise SessionRejected(
                     reason="safety_blocked",
@@ -78,8 +174,18 @@ class SessionManager:
                 await self._coordinator.start(turn_id)
             except RuntimeError as error:
                 raise self._current_rejection() from error
-            admission = SessionAdmission(household_id=household_id, turn_id=turn_id)
+            admission = SessionAdmission(
+                household_id=household_id,
+                turn_id=turn_id,
+                context_session_id=context_id,
+                one_turn_context=one_turn_context,
+            )
             self._active = admission
+            self._turn_context_sessions[turn_id] = context_id
+            self._known_context_sessions.add(context_id)
+            self._context_session_households[context_id] = household_id
+            if one_turn_context:
+                self._one_turn_context_turns.add(turn_id)
             return admission
 
     async def finish(self, turn_id: UUID) -> bool:
@@ -90,55 +196,119 @@ class SessionManager:
             return False
         operation = self._operations.get((turn_id, "finish"))
         if operation is None:
-            self._synchronize_release()
-            if self._active is None or self._active.turn_id != turn_id:
-                return False
-            try:
-                operation = self._spawn_operation(
-                    turn_id,
-                    "finish",
-                    lambda: self._finish_and_finalize(turn_id),
-                    name=f"session_finish:{turn_id}",
-                )
-            except BaseException:
+            fallback = False
+            async with self._lock:
+                operation = self._operations.get((turn_id, "finish"))
+                if operation is None:
+                    self._synchronize_release()
+                    if self._active is None or self._active.turn_id != turn_id:
+                        return False
+                    self._ending_turns.add(turn_id)
+                    try:
+                        operation = self._spawn_operation(
+                            turn_id,
+                            "finish",
+                            lambda: self._finish_and_finalize(turn_id),
+                            name=f"session_finish:{turn_id}",
+                        )
+                    except BaseException:
+                        fallback = True
+            if fallback:
                 return await self._finish_and_finalize(turn_id)
+        if operation is None:
+            return False
         result = await asyncio.shield(operation)
         if type(result) is not bool:
             raise RuntimeError("invalid manager finish result")
         return result
 
     async def _finish_and_finalize(self, turn_id: UUID) -> bool:
-        finished = await self._coordinator.finish(turn_id)
-        async with self._lock:
-            self._synchronize_release()
+        finished = False
+        context_session_id, one_turn_context = await self._turn_context_for_finalize(turn_id)
+        try:
+            finished = await self._coordinator.finish(turn_id)
             if finished:
-                await self._admit_deferred_if_safe_locked(turn_id)
-        return finished
+                await self._wait_for_context_leases(turn_id)
+                if context_session_id is not None and one_turn_context:
+                    await self._notify_context_session_ended_once(context_session_id)
+            return finished
+        finally:
+            async with self._lock:
+                self._ending_turns.discard(turn_id)
+                self._lease_condition.notify_all()
+                self._synchronize_release()
+                if finished:
+                    self._cleanup_turn_context_locked(turn_id)
+                    await self._admit_deferred_if_safe_locked(turn_id)
 
     async def cancel(self, turn_id: UUID, reason: str) -> None:
         _require_uuid(turn_id, name="turn_id")
         operation = self._operations.get((turn_id, "cancel"))
         if operation is None:
-            self._synchronize_release()
-            if self._active is None or self._active.turn_id != turn_id:
-                return
-            try:
-                operation = self._spawn_operation(
-                    turn_id,
-                    "cancel",
-                    lambda: self._cancel_and_finalize(turn_id, reason),
-                    name=f"session_cancel:{turn_id}",
-                )
-            except BaseException:
+            fallback = False
+            async with self._lock:
+                operation = self._operations.get((turn_id, "cancel"))
+                if operation is None:
+                    self._synchronize_release()
+                    if self._active is None or self._active.turn_id != turn_id:
+                        return
+                    self._ending_turns.add(turn_id)
+                    try:
+                        operation = self._spawn_operation(
+                            turn_id,
+                            "cancel",
+                            lambda: self._cancel_and_finalize(turn_id, reason),
+                            name=f"session_cancel:{turn_id}",
+                        )
+                    except BaseException:
+                        fallback = True
+            if fallback:
                 await self._cancel_and_finalize(turn_id, reason)
                 return
+        if operation is None:
+            return
         await asyncio.shield(operation)
 
     async def _cancel_and_finalize(self, turn_id: UUID, reason: str) -> None:
-        await self._coordinator.cancel(turn_id, reason)
+        released = False
+        context_session_id, one_turn_context = await self._turn_context_for_finalize(turn_id)
+        try:
+            await self._coordinator.cancel(turn_id, reason)
+            released = not self._coordinator.is_current(turn_id)
+            if released:
+                await self._wait_for_context_leases(turn_id)
+                if context_session_id is not None and one_turn_context:
+                    await self._notify_context_session_ended_once(context_session_id)
+        finally:
+            async with self._lock:
+                self._ending_turns.discard(turn_id)
+                self._lease_condition.notify_all()
+                self._synchronize_release()
+                if released:
+                    self._cleanup_turn_context_locked(turn_id)
+                    await self._admit_deferred_if_safe_locked(turn_id)
+
+    async def end(self, turn_id: UUID) -> bool:
+        return await self.finish(turn_id)
+
+    async def end_context_session(self, context_session_id: UUID) -> bool:
+        _require_uuid(context_session_id, name="context_session_id")
         async with self._lock:
-            self._synchronize_release()
-            await self._admit_deferred_if_safe_locked(turn_id)
+            if context_session_id in self._ended_context_sessions:
+                return False
+            if context_session_id not in self._known_context_sessions:
+                raise RuntimeError("context_session_unavailable")
+            self._ending_context_sessions.add(context_session_id)
+            self._lease_condition.notify_all()
+        try:
+            await self._wait_for_context_session_idle(context_session_id)
+            await self._notify_context_session_ended_once(context_session_id)
+            return True
+        finally:
+            async with self._lock:
+                self._ending_context_sessions.discard(context_session_id)
+                self._ended_context_sessions.add(context_session_id)
+                self._lease_condition.notify_all()
 
     async def queue_deferred_wake_from_transition(
         self,
@@ -170,9 +340,17 @@ class SessionManager:
                 raise RuntimeError("turn no longer accepts results")
             if self._deferred is not None:
                 return False
+            context_session_id = _admission_context_session_id(self._active)
+            if (
+                context_session_id in self._ending_context_sessions
+                or context_session_id in self._ended_context_sessions
+            ):
+                raise RuntimeError("context_session_unavailable")
             self._deferred = SessionAdmission(
                 household_id=household_id,
                 turn_id=deferred_turn_id,
+                context_session_id=context_session_id,
+                one_turn_context=self._active.one_turn_context,
             )
             self._deferred_for_turn = active_turn_id
             return True
@@ -194,15 +372,87 @@ class SessionManager:
         ):
             return None
         deferred = self._deferred
+        context_session_id = _admission_context_session_id(deferred)
+        if (
+            context_session_id in self._ending_context_sessions
+            or context_session_id in self._ended_context_sessions
+        ):
+            self._deferred = None
+            self._deferred_for_turn = None
+            return None
         await self._coordinator.start(deferred.turn_id)
         self._active = deferred
+        self._turn_context_sessions[deferred.turn_id] = context_session_id
+        self._known_context_sessions.add(context_session_id)
+        self._context_session_households[context_session_id] = deferred.household_id
+        if deferred.one_turn_context:
+            self._one_turn_context_turns.add(deferred.turn_id)
         self._deferred = None
         self._deferred_for_turn = None
         return deferred
 
     def _synchronize_release(self) -> None:
-        if self._active is not None and not self._coordinator.is_current(self._active.turn_id):
+        if (
+            self._active is not None
+            and not self._coordinator.is_current(self._active.turn_id)
+            and self._active.turn_id not in self._ending_turns
+            and self._context_leases.get(self._active.turn_id, 0) == 0
+        ):
             self._active = None
+
+    async def _wait_for_context_leases(self, turn_id: UUID) -> None:
+        async with self._lease_condition:
+            while self._context_leases.get(turn_id, 0) > 0:
+                await self._lease_condition.wait()
+
+    async def _wait_for_context_session_idle(self, context_session_id: UUID) -> None:
+        async with self._lease_condition:
+            while self._context_session_has_live_turn_or_lease(context_session_id):
+                await self._lease_condition.wait()
+
+    def _context_session_has_live_turn_or_lease(self, context_session_id: UUID) -> bool:
+        if self._active is not None and (
+            _admission_context_session_id(self._active) == context_session_id
+        ):
+            return True
+        for turn_id in self._ending_turns:
+            if self._turn_context_sessions.get(turn_id) == context_session_id:
+                return True
+        return context_session_id in self._context_lease_sessions.values()
+
+    async def _turn_context_for_finalize(self, turn_id: UUID) -> tuple[UUID | None, bool]:
+        async with self._lock:
+            return (
+                self._turn_context_sessions.get(turn_id),
+                turn_id in self._one_turn_context_turns,
+            )
+
+    def _cleanup_turn_context_locked(self, turn_id: UUID) -> None:
+        self._turn_context_sessions.pop(turn_id, None)
+        self._one_turn_context_turns.discard(turn_id)
+
+    async def _notify_context_session_ended_once(self, context_session_id: UUID) -> None:
+        async with self._lock:
+            if context_session_id in self._notified_context_sessions:
+                return
+            self._notified_context_sessions.add(context_session_id)
+        await self._notify_session_ended(context_session_id)
+
+    async def _notify_session_ended(self, session_id: UUID) -> None:
+        primary_error: BaseException | None = None
+        for handler in self._session_end_handlers:
+            try:
+                await handler(session_id)
+            except asyncio.CancelledError as error:
+                self._coordinator.health.record_barrier_exception(error)
+                if not isinstance(primary_error, asyncio.CancelledError):
+                    primary_error = asyncio.CancelledError("session_end_handler_cancelled")
+            except BaseException as error:
+                self._coordinator.health.record_barrier_exception(error)
+                if primary_error is None:
+                    primary_error = RuntimeError("session_end_handler_failed")
+        if primary_error is not None:
+            raise primary_error
 
     def _current_rejection(self) -> SessionRejected:
         if self._coordinator.state is CoordinatorState.SAFETY_BLOCKED:
@@ -266,3 +516,9 @@ class SessionManager:
 def _require_uuid(value: object, *, name: str) -> None:
     if type(value) is not UUID:
         raise TypeError(f"{name} must be an exact UUID")
+
+
+def _admission_context_session_id(admission: SessionAdmission) -> UUID:
+    if admission.context_session_id is None:
+        raise RuntimeError("context_session_unavailable")
+    return admission.context_session_id

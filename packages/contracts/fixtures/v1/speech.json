@@ -1,11 +1,11 @@
 {
   "canonical_examples": {
     "AudioFormat": "{\"channel_layout\":\"mono\",\"channels\":1,\"interleaved\":false,\"sample_format\":\"float32_le\",\"sample_rate_hz\":8000}",
-    "AuthorizedSynthesisRequest": "{\"dlp_receipt_id\":\"00000000-0000-0000-0000-00000000020e\",\"language\":\"en\",\"request_id\":\"00000000-0000-0000-0000-000000000203\",\"route\":{\"attempt_id\":\"00000000-0000-0000-0000-000000000204\",\"authorization_id\":\"00000000-0000-0000-0000-000000000202\",\"budget_reservation_id\":\"00000000-0000-0000-0000-00000000020b\",\"consent_receipt_ids\":[\"00000000-0000-0000-0000-00000000020a\"],\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-000000000205\",\"max_input_bytes\":1,\"max_input_units\":1,\"maximum_sensitivity\":\"public\",\"model\":\"fixture-tts\",\"privacy_receipt_id\":\"00000000-0000-0000-0000-000000000209\",\"provider\":\"openai\",\"purpose\":\"cloud_tts\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-000000000203\",\"session_id\":\"00000000-0000-0000-0000-000000000207\",\"subject_id\":\"00000000-0000-0000-0000-000000000206\",\"turn_id\":\"00000000-0000-0000-0000-000000000208\"},\"segment_count\":1,\"segment_index\":0,\"text\":\"x\",\"text_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"turn_id\":\"00000000-0000-0000-0000-000000000208\"}",
-    "AuthorizedTranscriptionRequest": "{\"audio_bytes\":1,\"audio_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"audio_format\":{\"channel_layout\":\"mono\",\"channels\":1,\"interleaved\":false,\"sample_format\":\"float32_le\",\"sample_rate_hz\":8000},\"duration_ms\":1,\"language_hints\":[\"en\",\"hi\"],\"request_id\":\"00000000-0000-0000-0000-00000000021a\",\"route\":{\"attempt_id\":\"00000000-0000-0000-0000-00000000021b\",\"authorization_id\":\"00000000-0000-0000-0000-000000000219\",\"budget_reservation_id\":\"00000000-0000-0000-0000-000000000222\",\"consent_receipt_ids\":[\"00000000-0000-0000-0000-000000000221\"],\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-00000000021c\",\"max_input_bytes\":1,\"max_input_units\":1,\"maximum_sensitivity\":\"public\",\"model\":\"fixture-stt\",\"privacy_receipt_id\":\"00000000-0000-0000-0000-000000000220\",\"provider\":\"openai\",\"purpose\":\"cloud_stt\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-00000000021a\",\"session_id\":\"00000000-0000-0000-0000-00000000021e\",\"subject_id\":\"00000000-0000-0000-0000-00000000021d\",\"turn_id\":\"00000000-0000-0000-0000-00000000021f\"},\"turn_id\":\"00000000-0000-0000-0000-00000000021f\"}",
-    "OfflineSynthesisRequest": "{\"language\":\"en\",\"request_id\":\"00000000-0000-0000-0000-00000000022f\",\"text\":\"x\",\"turn_id\":\"00000000-0000-0000-0000-000000000230\"}",
-    "SpeechChunk": "{\"final\":false,\"pcm\":\"\",\"request_id\":\"00000000-0000-0000-0000-000000000231\",\"sequence\":0}",
-    "TranscriptResult": "{\"duration_ms\":0,\"language\":\"en\",\"request_id\":\"00000000-0000-0000-0000-000000000232\",\"text\":\"x\"}"
+    "AuthorizedSynthesisRequest": "{\"dlp_receipt_id\":\"00000000-0000-0000-0000-000000000210\",\"language\":\"en\",\"request_id\":\"00000000-0000-0000-0000-000000000205\",\"route\":{\"attempt_id\":\"00000000-0000-0000-0000-000000000206\",\"authorization_id\":\"00000000-0000-0000-0000-000000000204\",\"budget_reservation_id\":\"00000000-0000-0000-0000-00000000020d\",\"consent_receipt_ids\":[\"00000000-0000-0000-0000-00000000020c\"],\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-000000000207\",\"max_input_bytes\":1,\"max_input_units\":1,\"maximum_sensitivity\":\"public\",\"model\":\"fixture-tts\",\"privacy_receipt_id\":\"00000000-0000-0000-0000-00000000020b\",\"provider\":\"openai\",\"purpose\":\"cloud_tts\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-000000000205\",\"session_id\":\"00000000-0000-0000-0000-000000000209\",\"subject_id\":\"00000000-0000-0000-0000-000000000208\",\"turn_id\":\"00000000-0000-0000-0000-00000000020a\"},\"segment_count\":1,\"segment_index\":0,\"text\":\"x\",\"text_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"turn_id\":\"00000000-0000-0000-0000-00000000020a\"}",
+    "AuthorizedTranscriptionRequest": "{\"audio_bytes\":1,\"audio_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"audio_format\":{\"channel_layout\":\"mono\",\"channels\":1,\"interleaved\":false,\"sample_format\":\"float32_le\",\"sample_rate_hz\":8000},\"duration_ms\":1,\"language_hints\":[\"en\",\"hi\"],\"request_id\":\"00000000-0000-0000-0000-00000000021c\",\"route\":{\"attempt_id\":\"00000000-0000-0000-0000-00000000021d\",\"authorization_id\":\"00000000-0000-0000-0000-00000000021b\",\"budget_reservation_id\":\"00000000-0000-0000-0000-000000000224\",\"consent_receipt_ids\":[\"00000000-0000-0000-0000-000000000223\"],\"expires_at\":\"2026-08-27T00:00:00.000000Z\",\"household_id\":\"00000000-0000-0000-0000-00000000021e\",\"max_input_bytes\":1,\"max_input_units\":1,\"maximum_sensitivity\":\"public\",\"model\":\"fixture-stt\",\"privacy_receipt_id\":\"00000000-0000-0000-0000-000000000222\",\"provider\":\"openai\",\"purpose\":\"cloud_stt\",\"request_commitment\":{\"algorithm\":\"HMAC-SHA-256\",\"key_id\":\"fixture-v1\",\"value_b64\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"},\"request_id\":\"00000000-0000-0000-0000-00000000021c\",\"session_id\":\"00000000-0000-0000-0000-000000000220\",\"subject_id\":\"00000000-0000-0000-0000-00000000021f\",\"turn_id\":\"00000000-0000-0000-0000-000000000221\"},\"turn_id\":\"00000000-0000-0000-0000-000000000221\"}",
+    "OfflineSynthesisRequest": "{\"language\":\"en\",\"request_id\":\"00000000-0000-0000-0000-000000000231\",\"text\":\"x\",\"turn_id\":\"00000000-0000-0000-0000-000000000232\"}",
+    "SpeechChunk": "{\"final\":false,\"pcm\":\"\",\"request_id\":\"00000000-0000-0000-0000-000000000233\",\"sequence\":0}",
+    "TranscriptResult": "{\"duration_ms\":0,\"language\":\"en\",\"request_id\":\"00000000-0000-0000-0000-000000000234\",\"text\":\"x\"}"
   },
   "examples": {
     "AudioFormat": {
@@ -16,23 +16,23 @@
       "sample_rate_hz": 8000
     },
     "AuthorizedSynthesisRequest": {
-      "dlp_receipt_id": "00000000-0000-0000-0000-00000000020e",
+      "dlp_receipt_id": "00000000-0000-0000-0000-000000000210",
       "language": "en",
-      "request_id": "00000000-0000-0000-0000-000000000203",
+      "request_id": "00000000-0000-0000-0000-000000000205",
       "route": {
-        "attempt_id": "00000000-0000-0000-0000-000000000204",
-        "authorization_id": "00000000-0000-0000-0000-000000000202",
-        "budget_reservation_id": "00000000-0000-0000-0000-00000000020b",
+        "attempt_id": "00000000-0000-0000-0000-000000000206",
+        "authorization_id": "00000000-0000-0000-0000-000000000204",
+        "budget_reservation_id": "00000000-0000-0000-0000-00000000020d",
         "consent_receipt_ids": [
-          "00000000-0000-0000-0000-00000000020a"
+          "00000000-0000-0000-0000-00000000020c"
         ],
         "expires_at": "2026-08-27T00:00:00Z",
-        "household_id": "00000000-0000-0000-0000-000000000205",
+        "household_id": "00000000-0000-0000-0000-000000000207",
         "max_input_bytes": 1,
         "max_input_units": 1,
         "maximum_sensitivity": "public",
         "model": "fixture-tts",
-        "privacy_receipt_id": "00000000-0000-0000-0000-000000000209",
+        "privacy_receipt_id": "00000000-0000-0000-0000-00000000020b",
         "provider": "openai",
         "purpose": "cloud_tts",
         "request_commitment": {
@@ -40,10 +40,10 @@
           "key_id": "fixture-v1",
           "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         },
-        "request_id": "00000000-0000-0000-0000-000000000203",
-        "session_id": "00000000-0000-0000-0000-000000000207",
-        "subject_id": "00000000-0000-0000-0000-000000000206",
-        "turn_id": "00000000-0000-0000-0000-000000000208"
+        "request_id": "00000000-0000-0000-0000-000000000205",
+        "session_id": "00000000-0000-0000-0000-000000000209",
+        "subject_id": "00000000-0000-0000-0000-000000000208",
+        "turn_id": "00000000-0000-0000-0000-00000000020a"
       },
       "segment_count": 1,
       "segment_index": 0,
@@ -53,7 +53,7 @@
         "key_id": "fixture-v1",
         "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
       },
-      "turn_id": "00000000-0000-0000-0000-000000000208"
+      "turn_id": "00000000-0000-0000-0000-00000000020a"
     },
     "AuthorizedTranscriptionRequest": {
       "audio_bytes": 1,
@@ -74,21 +74,21 @@
         "en",
         "hi"
       ],
-      "request_id": "00000000-0000-0000-0000-00000000021a",
+      "request_id": "00000000-0000-0000-0000-00000000021c",
       "route": {
-        "attempt_id": "00000000-0000-0000-0000-00000000021b",
-        "authorization_id": "00000000-0000-0000-0000-000000000219",
-        "budget_reservation_id": "00000000-0000-0000-0000-000000000222",
+        "attempt_id": "00000000-0000-0000-0000-00000000021d",
+        "authorization_id": "00000000-0000-0000-0000-00000000021b",
+        "budget_reservation_id": "00000000-0000-0000-0000-000000000224",
         "consent_receipt_ids": [
-          "00000000-0000-0000-0000-000000000221"
+          "00000000-0000-0000-0000-000000000223"
         ],
         "expires_at": "2026-08-27T00:00:00Z",
-        "household_id": "00000000-0000-0000-0000-00000000021c",
+        "household_id": "00000000-0000-0000-0000-00000000021e",
         "max_input_bytes": 1,
         "max_input_units": 1,
         "maximum_sensitivity": "public",
         "model": "fixture-stt",
-        "privacy_receipt_id": "00000000-0000-0000-0000-000000000220",
+        "privacy_receipt_id": "00000000-0000-0000-0000-000000000222",
         "provider": "openai",
         "purpose": "cloud_stt",
         "request_commitment": {
@@ -96,29 +96,29 @@
           "key_id": "fixture-v1",
           "value_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
         },
-        "request_id": "00000000-0000-0000-0000-00000000021a",
-        "session_id": "00000000-0000-0000-0000-00000000021e",
-        "subject_id": "00000000-0000-0000-0000-00000000021d",
-        "turn_id": "00000000-0000-0000-0000-00000000021f"
+        "request_id": "00000000-0000-0000-0000-00000000021c",
+        "session_id": "00000000-0000-0000-0000-000000000220",
+        "subject_id": "00000000-0000-0000-0000-00000000021f",
+        "turn_id": "00000000-0000-0000-0000-000000000221"
       },
-      "turn_id": "00000000-0000-0000-0000-00000000021f"
+      "turn_id": "00000000-0000-0000-0000-000000000221"
     },
     "OfflineSynthesisRequest": {
       "language": "en",
-      "request_id": "00000000-0000-0000-0000-00000000022f",
+      "request_id": "00000000-0000-0000-0000-000000000231",
       "text": "x",
-      "turn_id": "00000000-0000-0000-0000-000000000230"
+      "turn_id": "00000000-0000-0000-0000-000000000232"
     },
     "SpeechChunk": {
       "final": false,
       "pcm": "",
-      "request_id": "00000000-0000-0000-0000-000000000231",
+      "request_id": "00000000-0000-0000-0000-000000000233",
       "sequence": 0
     },
     "TranscriptResult": {
       "duration_ms": 0,
       "language": "en",
-      "request_id": "00000000-0000-0000-0000-000000000232",
+      "request_id": "00000000-0000-0000-0000-000000000234",
       "text": "x"
     }
   },

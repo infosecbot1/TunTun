@@ -73,6 +73,8 @@ INCOMPLETE_REASONS = {
     "git-inventory-timeout",
     "git-inventory-output-limit",
     "git-inventory-malformed",
+    "git-history-commit-limit",
+    "history-blob-path-fanout-limit",
     "git-history-object-missing",
     "git-object-format-unsupported",
     "git-process-reap-timeout",

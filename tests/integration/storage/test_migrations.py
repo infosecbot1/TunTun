@@ -46,9 +46,22 @@ EXPECTED_TABLES = {
     "reachy_duplex_correlations",
 }
 EXPECTED_TRIGGERS = {"audit_receipts_no_update", "audit_receipts_no_delete"}
+TASK1_TABLES = {
+    "subjects",
+    "current_owner_authority",
+    "consent_receipts",
+    "guest_disclosure_challenges",
+    "guest_session_consent_receipts",
+    "enrollment_sessions",
+    "biometric_templates",
+    "subject_revocation_outbox",
+    "subject_revocation_effects",
+}
+EXPECTED_HEAD_TABLES = EXPECTED_TABLES | TASK1_TABLES
 MAX_QUOTE_MICROS_SGD = 1_000_000_000_000
 
 assert len(EXPECTED_TABLES) == 17
+assert len(EXPECTED_HEAD_TABLES) == 26
 
 
 def _private_path(tmp_path: Path, name: str) -> Path:
@@ -451,7 +464,7 @@ def test_foundation_upgrade_downgrade_upgrade(tmp_path: Path) -> None:
 
     command.upgrade(config, "head")
     db = open_sqlcipher(path, KEY)
-    assert _non_sqlite_tables(db) == EXPECTED_TABLES
+    assert _non_sqlite_tables(db) == EXPECTED_HEAD_TABLES
     assert _triggers(db) == EXPECTED_TRIGGERS
     db.close()
 
@@ -529,10 +542,87 @@ def test_downgrade_ddl_is_atomic_when_revision_fails(
         command.downgrade(config, "base")
 
     db = open_sqlcipher(path, KEY)
-    assert _non_sqlite_tables(db) == EXPECTED_TABLES
+    assert _non_sqlite_tables(db) == EXPECTED_HEAD_TABLES
     assert _triggers(db) == EXPECTED_TRIGGERS
     assert db.execute("SELECT version_num FROM alembic_version").fetchall() == [
-        ("0001_foundation",)
+        ("0003_biometric_template_enrollment_binding",)
+    ]
+    db.close()
+
+
+def test_enrollment_template_binding_columns_are_migrated(
+    tmp_path: Path,
+) -> None:
+    path = _private_path(tmp_path, "biometric-template-binding.db")
+    command.upgrade(_config(path), "head")
+    db = open_sqlcipher(path, KEY)
+
+    template_columns = {
+        str(row[1]): tuple(row) for row in db.execute("PRAGMA table_info('biometric_templates')")
+    }
+    enrollment_columns = {
+        str(row[1]): tuple(row) for row in db.execute("PRAGMA table_info('enrollment_sessions')")
+    }
+    foreign_keys = {
+        (str(row[2]), str(row[3]), str(row[4]))
+        for row in db.execute("PRAGMA foreign_key_list('biometric_templates')")
+    }
+    template_indexes = {
+        str(row[1]) for row in db.execute("PRAGMA index_list('biometric_templates')")
+    }
+    enrollment_indexes = {
+        str(row[1]): tuple(row) for row in db.execute("PRAGMA index_list('enrollment_sessions')")
+    }
+    enrollment_schema = str(
+        db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='enrollment_sessions'"
+        ).fetchone()[0]
+    )
+
+    assert "enrollment_session_id" in template_columns
+    assert template_columns["enrollment_session_id"][2] == "VARCHAR(36)"
+    assert "synthetic_template_id" in enrollment_columns
+    assert enrollment_columns["synthetic_template_id"][2] == "VARCHAR(36)"
+    assert "synthetic_template_id IS NULL OR length(synthetic_template_id)=36" in (
+        enrollment_schema
+    )
+    assert (
+        "enrollment_sessions",
+        "enrollment_session_id",
+        "id",
+    ) in foreign_keys
+    assert "ix_biometric_templates_enrollment_session" in template_indexes
+    assert "ux_enrollment_sessions_synthetic_template_id" in enrollment_indexes
+    assert enrollment_indexes["ux_enrollment_sessions_synthetic_template_id"][2] == 1
+    db.close()
+
+    command.downgrade(_config(path), "0002_profiles_consent_enrollment")
+    db = open_sqlcipher(path, KEY)
+    downgraded_template_columns = {
+        str(row[1]): tuple(row) for row in db.execute("PRAGMA table_info('biometric_templates')")
+    }
+    downgraded_enrollment_columns = {
+        str(row[1]): tuple(row) for row in db.execute("PRAGMA table_info('enrollment_sessions')")
+    }
+    assert "enrollment_session_id" not in downgraded_template_columns
+    assert "synthetic_template_id" not in downgraded_enrollment_columns
+    assert db.execute("SELECT version_num FROM alembic_version").fetchall() == [
+        ("0002_profiles_consent_enrollment",)
+    ]
+    db.close()
+
+    command.upgrade(_config(path), "head")
+    db = open_sqlcipher(path, KEY)
+    reupgraded_template_columns = {
+        str(row[1]): tuple(row) for row in db.execute("PRAGMA table_info('biometric_templates')")
+    }
+    reupgraded_enrollment_columns = {
+        str(row[1]): tuple(row) for row in db.execute("PRAGMA table_info('enrollment_sessions')")
+    }
+    assert "enrollment_session_id" in reupgraded_template_columns
+    assert "synthetic_template_id" in reupgraded_enrollment_columns
+    assert db.execute("SELECT version_num FROM alembic_version").fetchall() == [
+        ("0003_biometric_template_enrollment_binding",)
     ]
     db.close()
 

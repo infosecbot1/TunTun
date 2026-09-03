@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
-import yaml  # type: ignore[import-untyped]  # PyYAML 6 has no py.typed marker.
+import yaml
 from tuntun_contracts.base import registered_contract_models
 
 if TYPE_CHECKING:
@@ -33,15 +33,12 @@ def render() -> bytes:
             )
         },
     }
-    rendered = cast(
-        str,
-        yaml.safe_dump(
-            document,
-            allow_unicode=True,
-            default_flow_style=False,
-            sort_keys=False,
-            width=100,
-        ),
+    rendered = yaml.safe_dump(
+        document,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+        width=100,
     )
     return rendered.encode("utf-8")
 

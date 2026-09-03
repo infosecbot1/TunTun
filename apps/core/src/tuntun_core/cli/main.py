@@ -1,5 +1,6 @@
 import typer
 from tuntun_core.cli.commands.models import models_app
+from tuntun_core.cli.commands.reachy import reachy_app
 from tuntun_core.cli.commands.simulate import simulate
 from tuntun_core.cli.commands.storage_probe import storage_app
 from tuntun_core.cli.commands.talk import talk
@@ -21,4 +22,5 @@ def version() -> None:
 app.command("simulate")(simulate)
 app.command("talk")(talk)
 app.add_typer(models_app, name="models")
+app.add_typer(reachy_app, name="reachy")
 app.add_typer(storage_app, name="storage")

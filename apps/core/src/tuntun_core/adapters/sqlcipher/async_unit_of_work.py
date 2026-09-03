@@ -61,6 +61,25 @@ def _valid_repository_facade_factory(value: object) -> bool:
     return callable(value.bind) and not inspect.iscoroutinefunction(value.bind)
 
 
+def _invalid_repository_facade_names(
+    repository_facades: Mapping[str, _RepositoryFacadeFactory],
+    *,
+    existing: set[str] | None = None,
+) -> set[str]:
+    reserved = set(dir(AsyncUnitOfWork))
+    occupied = set() if existing is None else existing
+    return {
+        name
+        for name, facade in repository_facades.items()
+        if type(name) is not str
+        or not name.isidentifier()
+        or name.startswith("_")
+        or name in reserved
+        or name in occupied
+        or not _valid_repository_facade_factory(facade)
+    }
+
+
 class AsyncUnitOfWork:
     def __init__(
         self,
@@ -434,16 +453,7 @@ class AsyncUnitOfWorkFactory:
     ) -> None:
         self._engine = engine
         self._repository_facades = dict(repository_facades or {})
-        reserved = set(dir(AsyncUnitOfWork))
-        invalid = {
-            name
-            for name, facade in self._repository_facades.items()
-            if type(name) is not str
-            or not name.isidentifier()
-            or name.startswith("_")
-            or name in reserved
-            or not _valid_repository_facade_factory(facade)
-        }
+        invalid = _invalid_repository_facade_names(self._repository_facades)
         if invalid:
             raise ValueError("invalid repository facade registration")
         self._commit_signals: dict[str, _CommitSignal] = {}
@@ -465,8 +475,33 @@ class AsyncUnitOfWorkFactory:
         self._quarantined_result_total = 0
         self._quarantine_overflowed = False
 
+    def register_repository_facades(
+        self,
+        repository_facades: Mapping[str, _RepositoryFacadeFactory],
+    ) -> None:
+        if (
+            self._registration_closed
+            or self._closing
+            or self._closed
+            or self._active_owner is not None
+        ):
+            raise RuntimeError("repository facade registration closed")
+        additions = dict(repository_facades)
+        invalid = _invalid_repository_facade_names(
+            additions,
+            existing=set(self._repository_facades),
+        )
+        if invalid:
+            raise ValueError("invalid repository facade registration")
+        self._repository_facades.update(additions)
+
     def register_commit_signal(self, name: str, target: _CommitSignal) -> None:
-        if self._registration_closed or self._closing or self._closed:
+        if (
+            self._registration_closed
+            or self._closing
+            or self._closed
+            or self._active_owner is not None
+        ):
             raise RuntimeError("post-commit signal registration closed")
         offer_nowait = target.offer_nowait if isinstance(target, _CommitSignal) else None
         if (

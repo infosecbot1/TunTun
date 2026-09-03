@@ -9,9 +9,9 @@ pytest_plugins = ("tests.fixtures.provider_egress",)
 
 @pytest.mark.asyncio
 async def test_receipt_record_is_content_minimized_and_restart_visible(
-    async_uow_factory, clock, finalized_redaction_receipt
+    async_uow_factory, route_clock, finalized_redaction_receipt
 ) -> None:
-    repository = RedactionReceiptRepository(async_uow_factory, clock)
+    repository = RedactionReceiptRepository(async_uow_factory, route_clock)
     await repository.record(finalized_redaction_receipt)
 
     def select_row(db):

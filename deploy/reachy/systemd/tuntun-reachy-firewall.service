@@ -1,0 +1,14 @@
+[Unit]
+Description=Atomically apply and attest the Tuntun Reachy firewall table
+Requires=tuntun-reachy-firewall-baseline.service
+Wants=network-online.target
+After=tuntun-reachy-firewall-baseline.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/lib/reachy-mini-app-assistant/apps/com.tuntun.edge/firewall/current
+ExecStart=/var/lib/reachy-mini-app-assistant/apps/com.tuntun.edge/firewall/current/bin/python -m deploy.reachy.apply_firewall --boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

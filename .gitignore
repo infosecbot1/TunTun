@@ -21,6 +21,10 @@ test-results/
 *.key
 *.crt
 *.wav
+!assets/
+!assets/offline-prompts/
+!assets/offline-prompts/confirm.wav
+!assets/offline-prompts/unavailable.wav
 *.mp3
 *.mp4
 *.png

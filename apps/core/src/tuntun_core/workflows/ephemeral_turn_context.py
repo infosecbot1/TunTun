@@ -25,9 +25,23 @@ class EphemeralTurnContext[T]:
         _require_uuid(turn_id, name="turn_id")
         self._items.pop(turn_id, None)
 
+    def discard(self, turn_id: UUID) -> None:
+        """Independent terminal-cleanup fallback that never returns content."""
+
+        _require_uuid(turn_id, name="turn_id")
+        self._items.pop(turn_id, None)
+
     def contains(self, turn_id: UUID) -> bool:
         _require_uuid(turn_id, name="turn_id")
         return turn_id in self._items
+
+    def count(self) -> int:
+        """Return only the active-item count; never expose stored content."""
+
+        return len(self._items)
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(active={len(self._items)})"
 
 
 def _require_uuid(value: object, *, name: str) -> None:

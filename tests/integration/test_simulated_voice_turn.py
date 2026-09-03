@@ -3,14 +3,27 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 import pytest
-from tuntun_core.workflows.conversation import LinearConversationEngine, TurnRequest
+from tuntun_core.workflows.conversation import (
+    SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    LinearConversationEngine,
+    TurnRequest,
+)
 from tuntun_testing.scenario import guest_hinglish_scenario
+
+
+def test_linear_engine_requires_personalized_context_provider_by_default() -> None:
+    with pytest.raises(TypeError, match="personalized context_provider required"):
+        LinearConversationEngine(object())
 
 
 @pytest.mark.asyncio
 async def test_guest_turn_orders_effects_and_clears_content() -> None:
     scenario = guest_hinglish_scenario()
-    workflow = LinearConversationEngine(scenario.ports)
+    workflow = LinearConversationEngine(
+        scenario.ports,
+        allow_legacy_guest_identity=True,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    )
     turn_id = uuid4()
 
     outcome = await workflow.run(TurnRequest(turn_id=turn_id, wav_bytes=scenario.wav_bytes))
@@ -69,6 +82,8 @@ async def test_late_result_gate_prevents_playback_and_clears_content() -> None:
 
     workflow = LinearConversationEngine(
         RevokingPorts(),
+        allow_legacy_guest_identity=True,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
         accepts_results=lambda active_turn_id: accepts_results and active_turn_id == turn_id,
     )
 
@@ -151,9 +166,9 @@ async def test_acceptance_gate_runs_before_each_downstream_content_stage(
     )
     workflow = LinearConversationEngine(
         ports,
-        accepts_results=lambda active_turn_id: (
-            active_turn_id == turn_id and ports.accepting
-        ),
+        allow_legacy_guest_identity=True,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+        accepts_results=lambda active_turn_id: active_turn_id == turn_id and ports.accepting,
     )
 
     outcome = await workflow.run(TurnRequest(turn_id=turn_id, wav_bytes=b"synthetic-wav"))

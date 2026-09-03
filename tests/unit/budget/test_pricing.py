@@ -12,8 +12,8 @@ from tuntun_core.services.budget.pricing import Pricing
 pytest_plugins = ("tests.fixtures.provider_egress",)
 
 
-def test_exact_native_and_fx_integer_formulas(catalog, clock) -> None:
-    pricing = Pricing(catalog, clock)
+def test_exact_native_and_fx_integer_formulas(catalog, route_clock) -> None:
+    pricing = Pricing(catalog, route_clock)
     assert (
         pricing.quote(
             "openai",
@@ -99,8 +99,10 @@ def test_price_and_fx_control_files_are_frozen_strict_and_bounded(tmp_path, muta
         PriceCatalog.load(price, fx)
 
 
-def test_qwen_input_token_tiers_are_exact_and_snapshot_reselects_actual(catalog, clock) -> None:
-    pricing = Pricing(catalog, clock)
+def test_qwen_input_token_tiers_are_exact_and_snapshot_reselects_actual(
+    catalog, route_clock
+) -> None:
+    pricing = Pricing(catalog, route_clock)
     low = pricing.quote(
         "qwen",
         "qwen3.7-plus",
@@ -161,26 +163,26 @@ def test_qwen_tier_schedule_gap_overlap_or_source_substitution_is_rejected(
         PriceCatalog(prices=(*other, qwen[0], changed), fx=catalog.fx)
 
 
-def test_missing_stale_price_or_fx_denies(catalog, clock) -> None:
+def test_missing_stale_price_or_fx_denies(catalog, route_clock) -> None:
     usage = LlmUsageUnits(category="llm", input_tokens=1, output_tokens=1)
     for mutation in (
         catalog.without_price(),
         catalog.with_expired_price(),
         catalog.without_fx(),
         catalog.with_expired_fx(),
-        catalog.with_expiry_equal(clock.now()),
+        catalog.with_expiry_equal(route_clock.now()),
     ):
         with pytest.raises(PermissionError, match="missing_or_stale_(price|fx)"):
-            Pricing(mutation, clock).quote("openai", "gpt-5.6-sol", usage)
+            Pricing(mutation, route_clock).quote("openai", "gpt-5.6-sol", usage)
 
 
-def test_provider_is_part_of_price_identity_and_digests_are_canonical(catalog, clock) -> None:
+def test_provider_is_part_of_price_identity_and_digests_are_canonical(catalog, route_clock) -> None:
     collision = catalog.with_cross_provider_collision(
         provider="qwen",
         model="gpt-5.6-sol",
         input_micro_usd_per_million=1,
     )
-    openai = Pricing(collision, clock).quote(
+    openai = Pricing(collision, route_clock).quote(
         "openai",
         "gpt-5.6-sol",
         LlmUsageUnits(category="llm", input_tokens=1, output_tokens=0),
@@ -189,7 +191,7 @@ def test_provider_is_part_of_price_identity_and_digests_are_canonical(catalog, c
     assert openai.provider == "openai"
     assert len(openai.price_source_sha256) == len(openai.fx_source_sha256) == 64
     with pytest.raises(PermissionError, match="missing_or_stale_price"):
-        Pricing(catalog, clock).quote(
+        Pricing(catalog, route_clock).quote(
             "qwen",
             "gpt-5.6-sol",
             LlmUsageUnits(category="llm", input_tokens=1, output_tokens=0),
