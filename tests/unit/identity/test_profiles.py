@@ -6,14 +6,11 @@ from uuid import uuid4
 
 import pytest
 from tuntun_contracts.identity import PersonaTraits
+from tuntun_core.adapters.sqlcipher.profile_crypto import ProfileCrypto
 from tuntun_core.domain.profile import ProfileClass, UpdatePersonaTraits
 from tuntun_core.services.actions.parameter_binding import ActionBindingVerifier
 from tuntun_core.services.identity.consent import ConsentDenied
-from tuntun_core.services.identity.profiles import (
-    ProfileCrypto,
-    StaleProfileVersion,
-    require_fresh_passkey,
-)
+from tuntun_core.services.identity.profiles import StaleProfileVersion, require_fresh_passkey
 
 from tests.identity_support import _profile_create_command, _revoke_profile_command
 

@@ -49,6 +49,7 @@ from tuntun_core.adapters.sqlcipher.identity_repositories import (
     SqlProviderCallsRevocationPort,
     task1_identity_repository_facades,
 )
+from tuntun_core.adapters.sqlcipher.profile_crypto import ProfileCrypto
 from tuntun_core.adapters.sqlcipher.subject_revocation_effect_repository import (
     SubjectRevocationEffectRepository,
 )
@@ -86,7 +87,7 @@ from tuntun_core.services.identity.enrollment import (
     EnrollmentMutationCoordinator,
     EnrollmentService,
 )
-from tuntun_core.services.identity.profiles import ProfileCrypto, ProfileService
+from tuntun_core.services.identity.profiles import ProfileService
 from tuntun_core.services.identity.revocation_handlers import BiometricConsentRevocationHandler
 from tuntun_core.services.identity.runtime import (
     HmacReceiptSigner,

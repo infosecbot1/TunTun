@@ -31,6 +31,7 @@ from tuntun_contracts.policy import AssuranceLevel, AuthContext, CurrentOwnerAut
 from tuntun_contracts.provider import RouteAuthorizationRequest, Sensitivity
 from tuntun_core.adapters.sqlcipher.async_unit_of_work import AsyncUnitOfWorkFactory
 from tuntun_core.adapters.sqlcipher.foundation_0001 import FOUNDATION_0001_METADATA
+from tuntun_core.adapters.sqlcipher.profile_crypto import ProfileCrypto
 from tuntun_core.adapters.sqlcipher.subject_revocation_effect_repository import (
     DownstreamEffectReceipt,
     EffectClaim,
@@ -93,7 +94,7 @@ from tuntun_core.services.identity.enrollment import (
 from tuntun_core.services.identity.profiles import (
     MutationScopePort as ProfileMutationScopePort,
 )
-from tuntun_core.services.identity.profiles import ProfileCrypto, ProfileService
+from tuntun_core.services.identity.profiles import ProfileService
 from tuntun_core.services.identity.revocation_handlers import (
     BiometricConsentRevocationHandler as EnrollmentBiometricConsentRevocationHandler,
 )

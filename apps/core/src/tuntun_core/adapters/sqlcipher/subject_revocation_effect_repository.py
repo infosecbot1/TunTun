@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 from uuid import UUID, uuid5
 
+from tuntun_core.services.identity.subject_revocation_handlers import (
+    DownstreamEffectReceipt as DownstreamEffectReceipt,
+)
+from tuntun_core.services.identity.subject_revocation_handlers import (
+    EffectClaim as EffectClaim,
+)
 from tuntun_core.services.storage_time import parse_utc_storage, utc_storage
 from tuntun_core.services.transactions.identity_uow import IdentityUnitOfWorkFactory
 from tuntun_core.services.transactions.protocols import AsyncUnitOfWorkProtocol
@@ -14,27 +19,6 @@ from tuntun_core.services.transactions.protocols import AsyncUnitOfWorkProtocol
 class _RowMappingSource(Protocol):
     @property
     def _mapping(self) -> Mapping[str, object]: ...
-
-
-@dataclass(frozen=True, slots=True)
-class DownstreamEffectReceipt:
-    id: UUID
-    idempotency_key: UUID
-    event_id: UUID
-    family: str
-    subject_id: UUID
-    through_generation: int
-    disposition: str
-
-
-@dataclass(frozen=True, slots=True)
-class EffectClaim:
-    status: Literal["acquired", "busy", "completed"]
-    id: UUID
-    idempotency_key: UUID
-    fencing_token: int | None
-    leased_until: datetime | None
-    downstream: DownstreamEffectReceipt | None = None
 
 
 def _row_value(row: Mapping[str, object] | _RowMappingSource, key: str) -> object:

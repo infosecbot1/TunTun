@@ -7,10 +7,6 @@ from datetime import datetime, timedelta
 from typing import Literal, Protocol, cast
 from uuid import UUID, uuid5
 
-from tuntun_core.adapters.sqlcipher.subject_revocation_effect_repository import (
-    DownstreamEffectReceipt,
-    EffectClaim,
-)
 from tuntun_core.services.identity.subject_revocation import CapabilityStagePort
 from tuntun_core.services.transactions.identity_uow import (
     IdentityUnitOfWork,
@@ -31,6 +27,27 @@ ALLOWED_DOWNSTREAM_DISPOSITIONS = frozenset(
 @dataclass(frozen=True, slots=True)
 class DeferredEffect:
     leased_until: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DownstreamEffectReceipt:
+    id: UUID
+    idempotency_key: UUID
+    event_id: UUID
+    family: str
+    subject_id: UUID
+    through_generation: int
+    disposition: str
+
+
+@dataclass(frozen=True, slots=True)
+class EffectClaim:
+    status: Literal["acquired", "busy", "completed"]
+    id: UUID
+    idempotency_key: UUID
+    fencing_token: int | None
+    leased_until: datetime | None
+    downstream: DownstreamEffectReceipt | None = None
 
 
 class LeaseFenceLost(RuntimeError):
