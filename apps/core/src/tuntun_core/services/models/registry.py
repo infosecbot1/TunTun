@@ -10,7 +10,7 @@ import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 from urllib.parse import urlsplit
 
 from .fs import (
@@ -35,11 +35,14 @@ REVISION = re.compile(r"^[0-9a-f]{40,64}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 FILE_PATH = re.compile(r"^[A-Za-z0-9_.-]+\.(?:onnx|json|txt|tflite|safetensors)$")
 MODEL_URL = re.compile(r"^https://[^/?#:@]+(?::443)?(?:/[^?#]*)$")
+CALIBRATION_REPORT_PATH = "calibration-report.json"
 MAX_MODEL_FILE_BYTES = 4_000_000_000
 MAX_MODEL_REVISION_BYTES = 8_000_000_000
 MAX_MODEL_FILES = 64
 MAX_MODELS = 256
-_ENTRY_KEYS = frozenset(
+_TASK12_LOCAL_INFERENCE_MODEL_IDS = frozenset({"hello-tuntun-v1", "stop-tuntun-v1"})
+_TASK12_METADATA_KEYS = frozenset({"calibration_report_sha256", "runtime_download"})
+_BASE_ENTRY_KEYS = frozenset(
     {
         "id",
         "revision",
@@ -56,11 +59,17 @@ _ENTRY_KEYS = frozenset(
         "files",
     }
 )
+_ENTRY_KEYS = _BASE_ENTRY_KEYS | _TASK12_METADATA_KEYS
 _FILE_KEYS = frozenset({"path", "size", "sha256", "url"})
 
 
 class ModelVerificationError(PermissionError):
     pass
+
+
+class LocalInferenceUnavailableError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("local-inference-runtime-unavailable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +128,8 @@ class ModelEntry:
     input_contract: str
     output_contract: str
     benchmark_gate: str
+    calibration_report_sha256: str | None
+    runtime_download: bool | None
     review_date: str
     files: tuple[ModelFile, ...]
 
@@ -138,10 +149,31 @@ class ModelEntry:
             self.review_date,
         )
         names = tuple(item.path for item in self.files)
+        metadata_present = (
+            self.calibration_report_sha256 is not None or self.runtime_download is not None
+        )
+        task12_model = self.model_id in _TASK12_LOCAL_INFERENCE_MODEL_IDS
+        task12_metadata_invalid = metadata_present and (
+            not isinstance(self.calibration_report_sha256, str)
+            or DIGEST.fullmatch(self.calibration_report_sha256) is None
+            or self.runtime_download is not False
+        )
+        calibration_files = tuple(
+            item for item in self.files if item.path == CALIBRATION_REPORT_PATH
+        )
         if (
             any(not isinstance(value, str) for value in scalar_values)
             or MODEL_ID.fullmatch(self.model_id) is None
             or REVISION.fullmatch(self.revision) is None
+            or task12_metadata_invalid
+            or (not metadata_present and task12_model)
+            or (
+                metadata_present
+                and (
+                    len(calibration_files) != 1
+                    or calibration_files[0].sha256 != self.calibration_report_sha256
+                )
+            )
             or not 1 <= len(self.files) <= MAX_MODEL_FILES
             or len(set(names)) != len(names)
             or sum(item.size for item in self.files) > MAX_MODEL_REVISION_BYTES
@@ -434,6 +466,8 @@ class VerifiedModelFile:
 class ActivatedModel:
     model_id: str
     revision: str
+    runtime_download: bool | None
+    calibration_report_sha256: str | None
     __files: tuple[VerifiedModelFile, ...]
     __manifest_files: tuple[tuple[str, int, str], ...]
     __closed: list[bool] = field(default_factory=lambda: [False], compare=False, repr=False)
@@ -452,7 +486,14 @@ class ActivatedModel:
         observed = tuple((item.path, item.size, item.sha256) for item in files)
         if not files or observed != expected:
             raise ModelVerificationError("activated model is not manifest-bound")
-        owner_slot.owner = cls(entry.model_id, entry.revision, files, expected)
+        owner_slot.owner = cls(
+            entry.model_id,
+            entry.revision,
+            entry.runtime_download,
+            entry.calibration_report_sha256,
+            files,
+            expected,
+        )
 
     @property
     def files(self) -> tuple[VerifiedModelFile, ...]:
@@ -465,6 +506,33 @@ class ActivatedModel:
                 not self.__closed[0]
                 and bool(self.__files)
                 and all(item.verified() for item in self.__files)
+            )
+
+    def unavailable_local_inference_handle(
+        self,
+        *,
+        expected_model_id: str,
+    ) -> UnavailableLocalInferenceHandle:
+        with self.__lock:
+            calibration_files = tuple(
+                item for item in self.__manifest_files if item[0] == CALIBRATION_REPORT_PATH
+            )
+            if (
+                type(expected_model_id) is not str
+                or self.__closed[0]
+                or self.model_id != expected_model_id
+                or self.runtime_download is not False
+                or self.calibration_report_sha256 is None
+                or len(calibration_files) != 1
+                or calibration_files[0][2] != self.calibration_report_sha256
+                or not self.all_files_verified
+            ):
+                raise ModelVerificationError("local inference unavailable")
+            return UnavailableLocalInferenceHandle(
+                self,
+                self.model_id,
+                False,
+                self.calibration_report_sha256,
             )
 
     def load_with(
@@ -515,6 +583,29 @@ class ActivatedModel:
             self.__closed[0] = True
 
 
+@dataclass(frozen=True, slots=True)
+class UnavailableLocalInferenceHandle:
+    _activation: ActivatedModel = field(compare=False, repr=False)
+    model_id: str
+    runtime_download: bool
+    calibration_report_sha256: str
+
+    @property
+    def activated(self) -> bool:
+        return self._activation.all_files_verified
+
+    def _raise_unavailable(self) -> NoReturn:
+        if not self.activated:
+            raise ModelVerificationError("local inference unavailable")
+        raise LocalInferenceUnavailableError()
+
+    def infer_score(self, _frame: bytes) -> int:
+        self._raise_unavailable()
+
+    def infer_voice_score(self, _frame: bytes) -> int:
+        self._raise_unavailable()
+
+
 class _ActivatedModelOwnerSlot:
     """Transaction-visible ownership for one unreturned activated model."""
 
@@ -546,9 +637,20 @@ class ModelRegistry:
             raise ValueError("invalid model manifest")
         entries: dict[str, ModelEntry] = {}
         for raw_entry in raw_models:
+            if not isinstance(raw_entry, dict):
+                raise ValueError("invalid model manifest")
+            entry_keys = frozenset(raw_entry)
+            metadata_keys = entry_keys & _TASK12_METADATA_KEYS
             if (
-                not isinstance(raw_entry, dict)
-                or set(raw_entry) != _ENTRY_KEYS
+                not _BASE_ENTRY_KEYS <= entry_keys <= _ENTRY_KEYS
+                or (metadata_keys and metadata_keys != _TASK12_METADATA_KEYS)
+                or (
+                    metadata_keys == _TASK12_METADATA_KEYS
+                    and (
+                        raw_entry.get("calibration_report_sha256") is None
+                        or raw_entry.get("runtime_download") is None
+                    )
+                )
                 or not isinstance(raw_entry.get("files"), list)
                 or not 1 <= len(raw_entry["files"]) <= MAX_MODEL_FILES
             ):
@@ -561,7 +663,13 @@ class ModelRegistry:
                 entry = ModelEntry(
                     model_id=raw_entry["id"],
                     files=files,
-                    **{key: raw_entry[key] for key in _ENTRY_KEYS if key not in {"id", "files"}},
+                    **{
+                        key: raw_entry[key]
+                        for key in _BASE_ENTRY_KEYS
+                        if key not in {"id", "files"}
+                    },
+                    calibration_report_sha256=raw_entry.get("calibration_report_sha256"),
+                    runtime_download=raw_entry.get("runtime_download"),
                 )
             except (KeyError, TypeError, ValueError, OverflowError) as error:
                 raise ValueError("invalid model manifest") from error

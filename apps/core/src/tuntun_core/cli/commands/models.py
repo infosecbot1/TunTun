@@ -29,7 +29,7 @@ def _registry() -> ModelRegistry:
 
 
 def _public_entry(entry: ModelEntry) -> dict[str, object]:
-    return {
+    public_entry: dict[str, object] = {
         "id": entry.model_id,
         "revision": entry.revision,
         "runtime": entry.runtime,
@@ -37,6 +37,10 @@ def _public_entry(entry: ModelEntry) -> dict[str, object]:
             {"path": item.path, "size": item.size, "sha256": item.sha256} for item in entry.files
         ],
     }
+    if entry.calibration_report_sha256 is not None and entry.runtime_download is not None:
+        public_entry["calibration_report_sha256"] = entry.calibration_report_sha256
+        public_entry["runtime_download"] = entry.runtime_download
+    return public_entry
 
 
 @models_app.command("list")
