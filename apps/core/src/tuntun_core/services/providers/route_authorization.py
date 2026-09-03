@@ -214,6 +214,30 @@ class ConsentEvidenceVerifier(Protocol):
     ) -> None: ...
 
 
+class ConsentEvidenceReceipt(Protocol):
+    receipt_id: UUID
+
+
+class ConsentEvidenceReader(Protocol):
+    async def require(
+        self,
+        household_id: UUID,
+        subject_id: UUID | None,
+        session_id: UUID,
+        purposes: tuple[str, ...],
+        now: datetime,
+    ) -> tuple[ConsentEvidenceReceipt, ...]: ...
+
+
+class ConsentReceiptAttachable(Protocol):
+    household_id: UUID
+    subject_id: UUID | None
+    session_id: UUID
+    required_consent_purposes: tuple[str, ...]
+
+    def with_consent_receipt_ids(self, receipt_ids: tuple[UUID, ...]) -> Self: ...
+
+
 class QwenActivationStore(Protocol):
     def require_current_in_transaction(
         self,
@@ -257,6 +281,21 @@ def _parse_persisted_route_envelope(raw: object) -> RouteAuthorizationEnvelopeV1
         )
     except (ContractParseError, UnicodeError, ValueError):
         raise PermissionError("route_authorization_corrupt") from None
+
+
+async def attach_current_consent_receipts(
+    draft: ConsentReceiptAttachable,
+    consent_evidence: ConsentEvidenceReader,
+    now: datetime,
+) -> ConsentReceiptAttachable:
+    evidence = await consent_evidence.require(
+        draft.household_id,
+        draft.subject_id,
+        draft.session_id,
+        draft.required_consent_purposes,
+        now,
+    )
+    return draft.with_consent_receipt_ids(tuple(item.receipt_id for item in evidence))
 
 
 def _select_text_setting(
@@ -533,6 +572,11 @@ class SqlRoutePrerequisites:
                 purpose,
                 receipt_ids,
             )
+        except PermissionError as exc:
+            message = str(exc)
+            if message.startswith(("consent_required:", "guest_session_consent_required:")):
+                raise PermissionError(message) from None
+            raise PermissionError("route_invalidated:consent") from None
         except Exception:
             raise PermissionError("route_invalidated:consent") from None
 

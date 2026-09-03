@@ -9,7 +9,13 @@ from uuid import UUID
 from langchain_core.tracers.context import _tracing_v2_is_enabled
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from tuntun_core.workflows.conversation import TurnOutcome, TurnRequest, WorkflowPorts
+from tuntun_core.workflows.conversation import (
+    ProviderEgressBoundary,
+    TurnOutcome,
+    TurnRequest,
+    WorkflowPorts,
+    _require_provider_egress,
+)
 from tuntun_core.workflows.ephemeral_turn_context import EphemeralTurnContext
 from tuntun_core.workflows.nodes import GraphNodeFailure, build_nodes, recover_node_error
 from tuntun_core.workflows.state import GraphState
@@ -22,6 +28,7 @@ NODE_ORDER: Final = (
     "authorize_recall",
     "retrieve_context",
     "sanitize_and_reserve",
+    "authorize_provider_egress",
     "generate",
     "validate",
     "synthesize",
@@ -61,11 +68,20 @@ def build_graph(
     lifecycle: TurnLifecycleRegistry,
     is_cancelled: Callable[[UUID], bool],
     *,
+    provider_egress: ProviderEgressBoundary | None,
     checkpointer: InMemorySaver | None = None,
 ) -> Any:
+    checked_provider_egress = _require_provider_egress(provider_egress)
     saver = checkpointer if checkpointer is not None else InMemorySaver()
     builder = StateGraph(GraphState)
-    nodes = build_nodes(ports, context_provider, ephemeral, lifecycle, is_cancelled)
+    nodes = build_nodes(
+        ports,
+        context_provider,
+        ephemeral,
+        lifecycle,
+        is_cancelled,
+        provider_egress=checked_provider_egress,
+    )
     for name in NODE_ORDER:
         builder.add_node(name, cast(Any, nodes[name]))
     builder.add_edge(START, NODE_ORDER[0])
@@ -107,12 +123,15 @@ class LangGraphConversationEngine:
         ports: WorkflowPorts,
         context_provider: Any,
         *,
+        provider_egress: ProviderEgressBoundary | None = None,
         accepts_results: Callable[[UUID], bool] | None = None,
     ) -> None:
         if context_provider is None:
             raise TypeError("personalized context_provider required")
+        checked_provider_egress = _require_provider_egress(provider_egress)
         self._ports = ports
         self._context_provider = context_provider
+        self._provider_egress = checked_provider_egress
         self._accepts_results = accepts_results or (lambda _: True)
         self.ephemeral: EphemeralTurnContext[dict[str, object]] = EphemeralTurnContext()
         self.lifecycle = TurnLifecycleRegistry()
@@ -126,6 +145,7 @@ class LangGraphConversationEngine:
             self.ephemeral,
             self.lifecycle,
             self._is_cancelled,
+            provider_egress=checked_provider_egress,
             checkpointer=self._checkpointer,
         )
 

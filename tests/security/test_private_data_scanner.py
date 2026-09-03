@@ -1,4 +1,6 @@
 import dataclasses
+import hashlib
+import json
 import os
 import socket
 import subprocess
@@ -34,6 +36,27 @@ def _source_repository(root: Path) -> Path:
     return root
 
 
+def _commit(root: Path, message: str) -> None:
+    _git(
+        root,
+        "-c",
+        "user.name=synthetic",
+        "-c",
+        "user.email=synthetic@example.invalid",
+        "commit",
+        "-qm",
+        message,
+    )
+
+
+def _prompt_wav(prompt_id: str) -> Path:
+    return Path("assets/offline-prompts") / f"{prompt_id}.wav"
+
+
+def _other_prompt_id(prompt_id: str) -> str:
+    return "unavailable" if prompt_id == "confirm" else "confirm"
+
+
 def test_scanner_rejects_secret_and_database(tmp_path: Path) -> None:
     credential = _credential().decode("ascii")
     (tmp_path / "leak.txt").write_text(credential, encoding="utf-8")
@@ -49,6 +72,151 @@ def test_scanner_allows_declared_synthetic_text(tmp_path: Path) -> None:
     fixture.mkdir(parents=True)
     (fixture / "case.json").write_text('{"speaker":"synthetic-guest"}', encoding="utf-8")
     assert scan(tmp_path) == ()
+
+
+def test_scanner_allows_only_deterministic_offline_prompt_tones(tmp_path: Path) -> None:
+    from scripts.build_offline_tones import build_offline_tones
+
+    root = _source_repository(tmp_path)
+    build_offline_tones(root)
+    _git(
+        root,
+        "add",
+        "assets/offline-prompts/manifest.json",
+        "assets/offline-prompts/confirm.wav",
+        "assets/offline-prompts/unavailable.wav",
+    )
+
+    assert scan(root) == ()
+
+    extra = root / "assets" / "offline-prompts" / "private-turn.wav"
+    extra.write_bytes((root / "assets" / "offline-prompts" / "confirm.wav").read_bytes())
+    assert any(
+        finding.path == Path("assets/offline-prompts/private-turn.wav")
+        and finding.reason == "forbidden-extension"
+        for finding in scan(root)
+    )
+
+    (root / "assets" / "offline-prompts" / "confirm.wav").write_bytes(_credential())
+    assert any(
+        finding.path == Path("assets/offline-prompts/confirm.wav")
+        and finding.reason == "credential-pattern"
+        for finding in scan(root)
+    )
+
+
+@pytest.mark.parametrize("prompt_id", ("confirm", "unavailable"))
+def test_offline_prompt_allowname_rejects_arbitrary_worktree_wav_bytes(
+    tmp_path: Path,
+    prompt_id: str,
+) -> None:
+    from scripts.build_offline_tones import build_offline_tones, tone_bytes
+
+    root = _source_repository(tmp_path)
+    build_offline_tones(root)
+    prompt_path = root / _prompt_wav(prompt_id)
+    prompt_path.write_bytes(tone_bytes(_other_prompt_id(prompt_id)))
+
+    assert any(
+        finding.path == _prompt_wav(prompt_id) and finding.reason == "forbidden-extension"
+        for finding in scan(root)
+    )
+
+
+@pytest.mark.parametrize("prompt_id", ("confirm", "unavailable"))
+def test_offline_prompt_allowname_rejects_arbitrary_staged_wav_bytes(
+    tmp_path: Path,
+    prompt_id: str,
+) -> None:
+    from scripts.build_offline_tones import build_offline_tones, tone_bytes
+
+    root = _source_repository(tmp_path)
+    build_offline_tones(root)
+    relative = _prompt_wav(prompt_id)
+    prompt_path = root / relative
+    prompt_path.write_bytes(tone_bytes(_other_prompt_id(prompt_id)))
+    _git(root, "add", str(relative))
+    prompt_path.write_bytes(tone_bytes(prompt_id))
+
+    assert any(
+        finding.path == Path("<git-index>") / relative and finding.reason == "forbidden-extension"
+        for finding in scan(root)
+    )
+
+
+@pytest.mark.parametrize("prompt_id", ("confirm", "unavailable"))
+def test_offline_prompt_allowname_rejects_arbitrary_explicit_wav_file(
+    tmp_path: Path,
+    prompt_id: str,
+) -> None:
+    from scripts.build_offline_tones import build_offline_tones, tone_bytes
+
+    root = _source_repository(tmp_path)
+    build_offline_tones(root)
+    prompt_path = root / _prompt_wav(prompt_id)
+    prompt_path.write_bytes(tone_bytes(_other_prompt_id(prompt_id)))
+
+    assert any(
+        finding.path == prompt_path and finding.reason == "forbidden-extension"
+        for finding in scan(prompt_path)
+    )
+
+
+def test_canonical_offline_prompt_tones_pass_root_file_and_directory_scans(
+    tmp_path: Path,
+) -> None:
+    from scripts.build_offline_tones import build_offline_tones
+
+    root = _source_repository(tmp_path)
+    build_offline_tones(root)
+    _git(
+        root,
+        "add",
+        "assets/offline-prompts/manifest.json",
+        "assets/offline-prompts/confirm.wav",
+        "assets/offline-prompts/unavailable.wav",
+    )
+
+    assert scan(root) == ()
+    assert scan(root / _prompt_wav("confirm")) == ()
+    assert scan(root / _prompt_wav("unavailable")) == ()
+    assert scan(root / "assets" / "offline-prompts") == ()
+
+
+def test_canonical_offline_prompt_tones_pass_explicit_ignored_directory_scan(
+    tmp_path: Path,
+) -> None:
+    from scripts.build_offline_tones import build_offline_tones
+
+    root = _source_repository(tmp_path)
+    (root / ".gitignore").write_text("assets/offline-prompts/\n", encoding="utf-8")
+    _git(root, "add", ".gitignore")
+    build_offline_tones(root)
+
+    assert scan(root / "assets" / "offline-prompts") == ()
+
+
+def test_offline_prompt_wav_allowlist_matches_generator_manifest_and_files() -> None:
+    from scripts.build_offline_tones import build_manifest_document, tone_bytes
+
+    expected = {}
+    manifest = json.loads(Path("assets/offline-prompts/manifest.json").read_text(encoding="utf-8"))
+    generated_manifest = build_manifest_document()
+    assert manifest == generated_manifest
+    for entry in manifest["assets"]:
+        assert isinstance(entry["id"], str)
+        assert isinstance(entry["path"], str)
+        relative = Path("assets/offline-prompts") / entry["path"]
+        payload = relative.read_bytes()
+        generated_payload = tone_bytes(entry["id"])
+        assert payload == generated_payload
+        expected[PurePosixPath(relative.as_posix())] = (
+            len(generated_payload),
+            hashlib.sha256(generated_payload).hexdigest(),
+        )
+        assert entry["size_bytes"] == len(generated_payload)
+        assert entry["sha256"] == hashlib.sha256(generated_payload).hexdigest()
+    assert expected == private_data_scanner.ALLOWED_DETERMINISTIC_OFFLINE_WAVS
 
 
 def test_source_root_omits_git_ignored_tool_cache_and_pnpm_outputs(
@@ -623,6 +791,407 @@ def test_history_mode_uses_descriptor_bound_git_and_closed_environment(
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
     assert environment["http_proxy"] == environment["https_proxy"] == ""
     assert pass_fds == (int(argv[5]),)
+
+
+def test_history_mode_rejects_committed_then_deleted_private_wav_path(
+    tmp_path: Path,
+) -> None:
+    from scripts.build_offline_tones import tone_bytes
+
+    root = _source_repository(tmp_path)
+    private = root / "private.wav"
+    private.write_bytes(tone_bytes("confirm"))
+    _git(root, "add", "private.wav")
+    _commit(root, "add private wav")
+    private.unlink()
+    _git(root, "add", "private.wav")
+    _commit(root, "delete private wav")
+
+    findings = scan(root, include_git_history=True)
+
+    assert (
+        Path("<git-history>/private.wav"),
+        "forbidden-extension",
+    ) in {(finding.path, finding.reason) for finding in findings}
+
+
+def test_history_mode_rejects_non_wave_bytes_committed_under_wav_suffix(
+    tmp_path: Path,
+) -> None:
+    root = _source_repository(tmp_path)
+    private = root / "private.wav"
+    private.write_bytes(b"synthetic historical bytes without wave magic or secrets\n")
+    _git(root, "add", "private.wav")
+    _commit(root, "add private wav")
+    private.unlink()
+    _git(root, "add", "private.wav")
+    _commit(root, "delete private wav")
+
+    findings = scan(root, include_git_history=True)
+
+    assert (
+        Path("<git-history>/private.wav"),
+        "forbidden-extension",
+    ) in {(finding.path, finding.reason) for finding in findings}
+
+
+def test_history_mode_disallowed_path_cannot_be_laundered_by_allowed_duplicate(
+    tmp_path: Path,
+) -> None:
+    from scripts.build_offline_tones import build_offline_tones
+
+    root = _source_repository(tmp_path)
+    build_offline_tones(root)
+    private = root / "private.wav"
+    private.write_bytes((root / _prompt_wav("confirm")).read_bytes())
+    _git(
+        root,
+        "add",
+        "assets/offline-prompts/manifest.json",
+        "assets/offline-prompts/confirm.wav",
+        "assets/offline-prompts/unavailable.wav",
+        "private.wav",
+    )
+    _commit(root, "add duplicate wav paths")
+    private.unlink()
+    _git(root, "add", "private.wav")
+    _commit(root, "delete private duplicate")
+
+    findings = scan(root, include_git_history=True)
+
+    assert (
+        Path("<git-history>/private.wav"),
+        "forbidden-extension",
+    ) in {(finding.path, finding.reason) for finding in findings}
+
+
+def test_history_mode_bounds_duplicate_blob_path_fanout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    payload = b"same historical payload\n"
+    for index in range(3):
+        path = root / f"duplicate-{index}.txt"
+        path.write_bytes(payload)
+        _git(root, "add", path.name)
+    _commit(root, "add duplicate blob paths")
+    for index in range(3):
+        path = root / f"duplicate-{index}.txt"
+        path.unlink()
+        _git(root, "add", path.name)
+    _commit(root, "delete duplicate blob paths")
+    monkeypatch.setattr(private_data_scanner, "MAX_HISTORY_BLOB_PATHS", 2, raising=False)
+
+    findings = scan(root, include_git_history=True)
+
+    assert any(finding.reason == "history-blob-path-fanout-limit" for finding in findings)
+
+
+def test_history_mode_charges_each_duplicate_blob_rescan_before_patterns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    root = _source_repository(tmp_path)
+    oid = "0" * 40
+    payload = b"bounded duplicate payload"
+    paths = frozenset(PurePosixPath(f"duplicate-{index}.txt") for index in range(3))
+
+    class FakeHistoryStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def objects(self, budget):
+            display = Path("<git-history>") / oid
+            budget.path_entry(display)
+            budget.file(display)
+            budget.input(display, len(payload))
+            yield (
+                oid,
+                private_data_scanner.FrozenFileView(io.BytesIO(payload), len(payload)),
+                len(payload),
+                display,
+                b"blob",
+            )
+
+    def fail_patterns(*_args, **_kwargs):
+        pytest.fail("_patterns_stream ran before duplicate history rescan budget charge")
+
+    monkeypatch.setattr(
+        private_data_scanner, "_history_path_inventory", lambda *_args: {oid: paths}
+    )
+    monkeypatch.setattr(
+        private_data_scanner, "_start_git_history", lambda *_args: FakeHistoryStream()
+    )
+    monkeypatch.setattr(private_data_scanner, "_history_connectivity_finding", lambda *_args: None)
+    monkeypatch.setattr(private_data_scanner, "MAX_HISTORY_BLOB_PATHS", 10, raising=False)
+    monkeypatch.setattr(private_data_scanner, "MAX_TOTAL_INPUT_BYTES", len(payload))
+    monkeypatch.setattr(private_data_scanner, "_patterns_stream", fail_patterns)
+
+    findings = scan(root, include_git_history=True)
+
+    assert findings[-1].reason == "total-input-byte-limit"
+
+
+def test_history_mode_rejects_unmapped_audio_like_orphan_blob(tmp_path: Path) -> None:
+    from scripts.build_offline_tones import tone_bytes
+
+    root = _source_repository(tmp_path)
+    oid = (
+        _git(root, "hash-object", "-w", "--stdin", input_bytes=tone_bytes("confirm"))
+        .strip()
+        .decode("ascii")
+    )
+
+    findings = scan(root, include_git_history=True)
+
+    assert (
+        Path("<git-history>") / oid,
+        "forbidden-audio-bytes",
+    ) in {(finding.path, finding.reason) for finding in findings}
+
+
+def test_history_mode_rejects_wav_archive_members_without_secrets(
+    tmp_path: Path,
+) -> None:
+    import io
+    import zipfile
+
+    root = _source_repository(tmp_path)
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+        output.writestr("recordings/private.wav", b"synthetic member bytes without secrets")
+    oid = (
+        _git(root, "hash-object", "-w", "--stdin", input_bytes=archive.getvalue())
+        .strip()
+        .decode("ascii")
+    )
+
+    findings = scan(root, include_git_history=True)
+
+    assert (
+        Path(str(Path("<git-history>") / oid) + "!recordings/private.wav"),
+        "forbidden-extension",
+    ) in {(finding.path, finding.reason) for finding in findings}
+
+
+def test_history_mode_rejects_non_utf8_reachable_paths_without_surrogates(
+    tmp_path: Path,
+) -> None:
+    root = _source_repository(tmp_path)
+    blob = _git(root, "hash-object", "-w", "--stdin", input_bytes=b"synthetic\n").strip()
+    _git(
+        root,
+        "update-index",
+        "-z",
+        "--index-info",
+        input_bytes=b"100644 " + blob + b" 0\tprivate-\xff.wav\0",
+    )
+    tree = _git(root, "write-tree").strip().decode("ascii")
+    commit = (
+        _git(
+            root,
+            "-c",
+            "user.name=synthetic",
+            "-c",
+            "user.email=synthetic@example.invalid",
+            "commit-tree",
+            tree,
+            "-m",
+            "non-utf8 path",
+        )
+        .strip()
+        .decode("ascii")
+    )
+    _git(root, "update-ref", "refs/heads/main", commit)
+    _git(root, "read-tree", "--empty")
+
+    findings = scan(root, include_git_history=True)
+
+    assert any(finding.reason == "git-inventory-malformed" for finding in findings)
+
+
+def test_history_path_inventory_commit_limit_stops_before_tree_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    binding = private_data_scanner.RootBinding.open(root)
+    repository = private_data_scanner._repository_for(binding)
+    assert repository is not None
+    calls = []
+    commits = tuple(f"{index + 1:040x}" for index in range(3))
+
+    def fake_git_output(_repository, arguments, *, max_bytes, deadline=None):
+        del max_bytes, deadline
+        calls.append(tuple(arguments))
+        if tuple(arguments) == ("rev-list", "--all"):
+            return ("\n".join(commits) + "\n").encode("ascii")
+        pytest.fail("ls-tree spawned after the history commit limit")
+
+    monkeypatch.setattr(private_data_scanner, "MAX_HISTORY_COMMITS", 2, raising=False)
+    monkeypatch.setattr(private_data_scanner, "_git_output", fake_git_output)
+    try:
+        with pytest.raises(private_data_scanner.GitInventoryError) as captured:
+            private_data_scanner._history_path_inventory(
+                repository,
+                private_data_scanner.ScanBudget(),
+            )
+    finally:
+        repository.close()
+        binding.close()
+
+    assert captured.value.reason == "git-history-commit-limit"
+    assert calls == [("rev-list", "--all")]
+
+
+def test_history_path_inventory_shares_one_absolute_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    binding = private_data_scanner.RootBinding.open(root)
+    repository = private_data_scanner._repository_for(binding)
+    assert repository is not None
+    deadlines = []
+    commit = "1" * 40
+
+    def fake_git_output(_repository, arguments, *, max_bytes, deadline=None):
+        del max_bytes
+        deadlines.append((tuple(arguments), deadline))
+        if tuple(arguments) == ("rev-list", "--all"):
+            return f"{commit}\n".encode("ascii")
+        return b""
+
+    monkeypatch.setattr(private_data_scanner, "_git_output", fake_git_output)
+    try:
+        private_data_scanner._history_path_inventory(
+            repository,
+            private_data_scanner.ScanBudget(),
+        )
+    finally:
+        repository.close()
+        binding.close()
+
+    assert deadlines == [
+        (("rev-list", "--all"), deadlines[0][1]),
+        (("ls-tree", "-rz", "-r", "--full-tree", commit), deadlines[0][1]),
+    ]
+    assert deadlines[0][1] is not None
+
+
+def test_history_path_inventory_deadline_stops_later_tree_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    binding = private_data_scanner.RootBinding.open(root)
+    repository = private_data_scanner._repository_for(binding)
+    assert repository is not None
+    commits = ("1" * 40, "2" * 40)
+    calls = []
+    ticks = iter((100.0, 100.5, 102.0))
+
+    def fake_monotonic() -> float:
+        return next(ticks)
+
+    def fake_git_output(_repository, arguments, *, max_bytes, deadline=None):
+        del max_bytes, deadline
+        calls.append(tuple(arguments))
+        if tuple(arguments) == ("rev-list", "--all"):
+            return ("\n".join(commits) + "\n").encode("ascii")
+        if tuple(arguments) == ("ls-tree", "-rz", "-r", "--full-tree", commits[0]):
+            return b""
+        pytest.fail("history inventory spawned after aggregate deadline expired")
+
+    monkeypatch.setattr(private_data_scanner, "MAX_HISTORY_INVENTORY_SECONDS", 1.0, raising=False)
+    monkeypatch.setattr(private_data_scanner.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(private_data_scanner, "_git_output", fake_git_output)
+    try:
+        with pytest.raises(private_data_scanner.GitInventoryError) as captured:
+            private_data_scanner._history_path_inventory(
+                repository,
+                private_data_scanner.ScanBudget(),
+            )
+    finally:
+        repository.close()
+        binding.close()
+
+    assert captured.value.reason == "git-inventory-timeout"
+    assert calls == [
+        ("rev-list", "--all"),
+        ("ls-tree", "-rz", "-r", "--full-tree", commits[0]),
+    ]
+
+
+def test_git_output_expired_deadline_fails_before_spawning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    binding = private_data_scanner.RootBinding.open(root)
+    repository = private_data_scanner._repository_for(binding)
+    assert repository is not None
+
+    def fail_spawn(*_args, **_kwargs):
+        pytest.fail("git subprocess spawned after aggregate deadline expired")
+
+    monkeypatch.setattr(private_data_scanner.subprocess, "Popen", fail_spawn)
+    try:
+        with pytest.raises(private_data_scanner.GitInventoryError) as captured:
+            private_data_scanner._git_output(
+                repository,
+                ("rev-list", "--all"),
+                max_bytes=1,
+                deadline=private_data_scanner.time.monotonic() - 1.0,
+            )
+    finally:
+        repository.close()
+        binding.close()
+
+    assert captured.value.reason == "git-inventory-timeout"
+
+
+def test_git_output_deadline_timeout_reaps_spawned_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _source_repository(tmp_path)
+    binding = private_data_scanner.RootBinding.open(root)
+    repository = private_data_scanner._repository_for(binding)
+    assert repository is not None
+    reaped = []
+    ticks = iter((100.0, 102.0))
+    real_reap = private_data_scanner._kill_and_reap
+
+    def fake_monotonic() -> float:
+        return next(ticks)
+
+    def record_reap(process, path):
+        reaped.append(path)
+        return real_reap(process, path)
+
+    monkeypatch.setattr(private_data_scanner.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(private_data_scanner, "_kill_and_reap", record_reap)
+    try:
+        with pytest.raises(private_data_scanner.GitInventoryError) as captured:
+            private_data_scanner._git_output(
+                repository,
+                ("rev-list", "--all"),
+                max_bytes=private_data_scanner.MAX_GIT_INVENTORY_BYTES,
+                deadline=101.0,
+            )
+    finally:
+        repository.close()
+        binding.close()
+
+    assert captured.value.reason == "git-inventory-timeout"
+    assert reaped == [root]
 
 
 def test_history_mode_scans_compressed_archive_objects_with_the_shared_engine(

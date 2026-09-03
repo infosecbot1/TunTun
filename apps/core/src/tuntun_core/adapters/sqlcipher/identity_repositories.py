@@ -19,14 +19,18 @@ from tuntun_core.adapters.sqlcipher.subject_revocation_outbox_repository import 
     SubjectRevocationOutboxUnitOfWorkFacade,
 )
 from tuntun_core.domain.profile import (
+    BiometricTemplate,
     ConsentPurpose,
     ConsentReceipt,
+    EnrollmentSession,
     GrantConsent,
     GuestConsentPurpose,
     GuestDisclosureChallenge,
     GuestSessionConsentReceipt,
+    Modality,
     Profile,
     ProfileClass,
+    RequestEnrollment,
 )
 from tuntun_core.services.identity.consent import ConsentDenied
 from tuntun_core.services.providers.route_authorization import (
@@ -71,6 +75,10 @@ def task1_identity_repository_facades(
         "profiles": _FacadeFactory(lambda uow: SqlProfileRepository(uow, audit_commitments)),
         "consent_receipts": _FacadeFactory(
             lambda uow: SqlConsentReceiptRepository(uow, audit_commitments)
+        ),
+        "enrollments": _FacadeFactory(lambda uow: SqlEnrollmentRepository(uow, audit_commitments)),
+        "biometric_templates": _FacadeFactory(
+            lambda uow: SqlBiometricTemplateRepository(uow, audit_commitments)
         ),
         "guest_disclosure_challenges": _FacadeFactory(SqlGuestDisclosureChallengeRepository),
         "guest_session_consents": _FacadeFactory(
@@ -273,6 +281,57 @@ def _guest_receipt_from_row(row: Mapping[str, object]) -> GuestSessionConsentRec
     )
 
 
+def _enrollment_from_row(row: Mapping[str, object]) -> EnrollmentSession:
+    profile_class = ProfileClass(str(row["profile_class"]))
+    modality = Modality(str(row["modality"]))
+    return EnrollmentSession(
+        id=_uuid_field(row["id"], "enrollment id corrupt"),
+        household_id=_uuid_field(row["household_id"], "enrollment household id corrupt"),
+        subject_id=_uuid_field(row["subject_id"], "enrollment subject id corrupt"),
+        modality=modality,
+        state=cast(
+            Literal["requested", "capturing", "calibrating", "approved", "cancelled", "expired"],
+            str(row["state"]),
+        ),
+        consent_receipt_id=_uuid_field(
+            row["consent_receipt_id"],
+            "enrollment consent receipt id corrupt",
+        ),
+        reenrollment_days=int(str(row["reenrollment_days"])),
+        subject_is_child=profile_class in {ProfileClass.K2, ProfileClass.N1},
+        synthetic_template_id=_optional_uuid_field(
+            row.get("synthetic_template_id"),
+            "enrollment synthetic template id corrupt",
+        ),
+        created_at=parse_utc_storage(str(row["created_at"])),
+        expires_at=parse_utc_storage(str(row["expires_at"])),
+        closed_at=_optional_time(row["closed_at"]),
+        next_reenrollment_reminder_at=_optional_time(row["next_reenrollment_reminder_at"]),
+        biometric_hard_expires_at=_optional_time(row["biometric_hard_expires_at"]),
+    )
+
+
+def _template_from_row(row: Mapping[str, object]) -> BiometricTemplate:
+    return BiometricTemplate(
+        id=_uuid_field(row["id"], "biometric template id corrupt"),
+        enrollment_session_id=_optional_uuid_field(
+            row.get("enrollment_session_id"),
+            "biometric template enrollment session id corrupt",
+        ),
+        household_id=_uuid_field(row["household_id"], "biometric template household id corrupt"),
+        subject_id=_uuid_field(row["subject_id"], "biometric template subject id corrupt"),
+        modality=Modality(str(row["modality"])),
+        model_version=str(row["model_version"]),
+        consent_receipt_id=_uuid_field(
+            row["consent_receipt_id"],
+            "biometric template consent receipt id corrupt",
+        ),
+        created_at=parse_utc_storage(str(row["created_at"])),
+        expires_at=_optional_time(row["expires_at"]),
+        revoked_at=_optional_time(row["revoked_at"]),
+    )
+
+
 def _guest_disclosure_presentation_event_type(
     purpose: GuestConsentPurpose,
     disclosure_version: str,
@@ -306,6 +365,34 @@ def _audit(
         event_id=resolved_event_id,
         occurred_at=auth.consumed_at,
         actor_pseudonym=_audit_actor_pseudonym(auth, audit_commitments),
+        action_code=action_code,
+        outcome="recorded",
+        reason_code="ok",
+        correlation_id=uuid4(),
+        payload_commitment=audit_commitments.commit_private("audit.payload", payload),
+    )
+
+
+def _system_audit(
+    action_code: str,
+    audit_commitments: AuditCommitmentPort,
+    *,
+    occurred_at: datetime,
+    private_fields: Mapping[str, object],
+) -> AuditDraft:
+    payload = json.dumps(
+        {
+            "action": action_code,
+            "actor": "system",
+            "private": _audit_private_json(private_fields),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return AuditDraft(
+        event_id=uuid4(),
+        occurred_at=occurred_at,
+        actor_pseudonym="actor:system:identity",
         action_code=action_code,
         outcome="recorded",
         reason_code="ok",
@@ -555,6 +642,43 @@ class SqlProfileRepository:
             )
         )
         return None if row is None else _profile_from_row(row)
+
+    async def list_children_due_for_reenrollment_reminder(
+        self,
+        household_id: UUID,
+        now: datetime,
+    ) -> tuple[Profile, ...]:
+        timestamp = utc_storage(now)
+        rows = await self._uow.run_sync(
+            lambda tx: tuple(
+                _row_to_dict(row)
+                for row in tx.exec_driver_sql(
+                    "SELECT * FROM subjects WHERE household_id=? AND active=1 "
+                    "AND revoked_at IS NULL AND profile_class IN ('k2','n1') "
+                    "AND next_reenrollment_reminder_at IS NOT NULL "
+                    "AND next_reenrollment_reminder_at<=? "
+                    "ORDER BY next_reenrollment_reminder_at,id",
+                    (str(household_id), timestamp),
+                ).fetchall()
+            )
+        )
+        return tuple(_profile_from_row(row) for row in rows if row is not None)
+
+    async def disable_biometric_identity(
+        self,
+        subject_id: UUID,
+        now: object,
+    ) -> None:
+        timestamp = utc_storage(cast(datetime, now))
+        await self._uow.run_sync(
+            lambda tx: (
+                tx.exec_driver_sql(
+                    "UPDATE subjects SET next_reenrollment_reminder_at=NULL,updated_at=? "
+                    "WHERE id=? AND profile_class IN ('k2','n1')",
+                    (timestamp, str(subject_id)),
+                ).rowcount
+            )
+        )
 
     async def require_current_owner_guardian_generation(
         self,
@@ -848,6 +972,569 @@ class SqlConsentReceiptRepository:
                 ).rowcount
             )
         )
+
+
+class SqlEnrollmentRepository:
+    def __init__(
+        self,
+        uow: AsyncUnitOfWorkProtocol,
+        audit_commitments: AuditCommitmentPort,
+    ) -> None:
+        self._uow = uow
+        self._audit_commitments = audit_commitments
+
+    async def create(
+        self,
+        command: RequestEnrollment,
+        auth: AuthContext,
+        *,
+        household_id: UUID,
+        consent_receipt_id: UUID,
+        subject_is_child: bool,
+        now: object,
+        expires_at: object,
+        synthetic_template_id: UUID,
+    ) -> EnrollmentSession:
+        if auth.grant_id is None:
+            raise RuntimeError("enrollment_auth_receipt_required")
+        created_at = cast(datetime, now)
+        expires = cast(datetime, expires_at)
+        enrollment_id = uuid4()
+        changed = await self._uow.run_sync(
+            lambda tx: (
+                tx.exec_driver_sql(
+                    "INSERT INTO enrollment_sessions "
+                    "(id,subject_id,modality,state,auth_receipt_id,consent_receipt_id,"
+                    "reenrollment_days,created_at,expires_at,synthetic_template_id,closed_at) "
+                    "VALUES (?,?,?,'requested',?,?,?,?,?,?,NULL)",
+                    (
+                        str(enrollment_id),
+                        str(command.subject_id),
+                        command.modality.value,
+                        str(auth.grant_id),
+                        str(consent_receipt_id),
+                        command.reenrollment_days,
+                        utc_storage(created_at),
+                        utc_storage(expires),
+                        str(synthetic_template_id),
+                    ),
+                ).rowcount
+            )
+        )
+        if changed != 1:
+            raise RuntimeError("enrollment_insert_lost_ownership")
+        return EnrollmentSession(
+            id=enrollment_id,
+            household_id=household_id,
+            subject_id=command.subject_id,
+            modality=command.modality,
+            state="requested",
+            consent_receipt_id=consent_receipt_id,
+            reenrollment_days=command.reenrollment_days,
+            subject_is_child=subject_is_child,
+            synthetic_template_id=synthetic_template_id,
+            created_at=created_at,
+            expires_at=expires,
+        )
+
+    async def require_for_update(self, enrollment_id: UUID) -> EnrollmentSession:
+        row = await self._uow.run_sync(lambda tx: self._select_enrollment(tx, enrollment_id))
+        if row is None:
+            raise KeyError(enrollment_id)
+        return _enrollment_from_row(row)
+
+    async def require_state(
+        self,
+        enrollment_id: UUID,
+        states: str | tuple[str, ...],
+    ) -> EnrollmentSession:
+        allowed = (states,) if type(states) is str else states
+        session = await self.require_for_update(enrollment_id)
+        if session.state not in allowed:
+            raise RuntimeError("enrollment_state_mismatch")
+        return session
+
+    async def begin_capture(self, enrollment_id: UUID, now: object) -> EnrollmentSession:
+        del now
+        row = await self._uow.run_sync(
+            lambda tx: self._transition_state(
+                tx,
+                enrollment_id,
+                from_state="requested",
+                to_state="capturing",
+            )
+        )
+        if row is None:
+            raise RuntimeError("enrollment_capture_transition_lost_ownership")
+        return _enrollment_from_row(row)
+
+    async def mark_calibrating(self, enrollment_id: UUID, now: object) -> EnrollmentSession:
+        del now
+        row = await self._uow.run_sync(
+            lambda tx: self._transition_state(
+                tx,
+                enrollment_id,
+                from_state="capturing",
+                to_state="calibrating",
+            )
+        )
+        if row is None:
+            raise RuntimeError("enrollment_calibration_transition_lost_ownership")
+        return _enrollment_from_row(row)
+
+    async def cancel_pending(self, enrollment_id: UUID, now: object) -> EnrollmentSession:
+        timestamp = utc_storage(cast(datetime, now))
+        row = await self._uow.run_sync(
+            lambda tx: self._cancel_pending(tx, enrollment_id, timestamp)
+        )
+        if row is None:
+            raise RuntimeError("enrollment_cancel_lost_ownership")
+        return _enrollment_from_row(row)
+
+    async def approve(
+        self,
+        enrollment_id: UUID,
+        template_ids: tuple[UUID, ...],
+        reminder_at: object | None,
+        hard_expires_at: object | None,
+        now: object,
+    ) -> EnrollmentSession:
+        timestamp = utc_storage(cast(datetime, now))
+        reminder = None if reminder_at is None else utc_storage(cast(datetime, reminder_at))
+        hard_expiry = (
+            None if hard_expires_at is None else utc_storage(cast(datetime, hard_expires_at))
+        )
+        row = await self._uow.run_sync(
+            lambda tx: self._approve(
+                tx,
+                enrollment_id,
+                template_ids,
+                reminder,
+                hard_expiry,
+                timestamp,
+            )
+        )
+        if row is None:
+            raise RuntimeError("enrollment_approval_lost_ownership")
+        return _enrollment_from_row(row)
+
+    async def cancel_subject_modality(
+        self,
+        subject_id: UUID,
+        modality: str,
+        now: object,
+    ) -> int:
+        timestamp = utc_storage(cast(datetime, now))
+        return await self._uow.run_sync(
+            lambda tx: (
+                tx.exec_driver_sql(
+                    "UPDATE enrollment_sessions SET state='cancelled',closed_at=? "
+                    "WHERE subject_id=? AND modality=? AND closed_at IS NULL "
+                    "AND state IN ('requested','capturing','calibrating')",
+                    (timestamp, str(subject_id), modality),
+                ).rowcount
+            )
+        )
+
+    def requested_audit(self, session: EnrollmentSession, auth: AuthContext) -> AuditDraft:
+        return _audit(
+            "identity.enrollment.requested",
+            auth,
+            self._audit_commitments,
+            subject_id=session.subject_id,
+            private_fields={
+                "consent_receipt_id": session.consent_receipt_id,
+                "enrollment_id": session.id,
+                "modality": session.modality,
+            },
+        )
+
+    def cancelled_audit(self, session: EnrollmentSession, auth: AuthContext) -> AuditDraft:
+        return _audit(
+            "identity.enrollment.cancelled",
+            auth,
+            self._audit_commitments,
+            subject_id=session.subject_id,
+            private_fields={"enrollment_id": session.id, "modality": session.modality},
+        )
+
+    def approved_audit(self, session: EnrollmentSession) -> AuditDraft:
+        return _system_audit(
+            "identity.enrollment.approved",
+            self._audit_commitments,
+            occurred_at=_session_event_time(session),
+            private_fields={
+                "enrollment_id": session.id,
+                "modality": session.modality,
+                "subject_id": session.subject_id,
+            },
+        )
+
+    def expiry_batch_audit(
+        self,
+        templates: tuple[BiometricTemplate, ...],
+        now: object,
+    ) -> AuditDraft:
+        return _system_audit(
+            "identity.biometric_template.expired",
+            self._audit_commitments,
+            occurred_at=cast(datetime, now),
+            private_fields={
+                "subject_ids": tuple(dict.fromkeys(template.subject_id for template in templates)),
+                "template_ids": tuple(template.id for template in templates),
+            },
+        )
+
+    @staticmethod
+    def _select_enrollment(
+        tx: UnitOfWorkProtocol,
+        enrollment_id: UUID,
+    ) -> dict[str, object] | None:
+        row = _row_to_dict(
+            tx.exec_driver_sql(
+                "SELECT enrollment.*,subject.household_id,subject.profile_class,"
+                "subject.next_reenrollment_reminder_at,"
+                "(SELECT MIN(template.expires_at) FROM biometric_templates AS template "
+                "WHERE template.subject_id=enrollment.subject_id "
+                "AND template.modality=enrollment.modality "
+                "AND template.consent_receipt_id=enrollment.consent_receipt_id "
+                "AND template.enrollment_session_id=enrollment.id "
+                "AND template.id=enrollment.synthetic_template_id "
+                "AND template.revoked_at IS NULL) AS biometric_hard_expires_at "
+                "FROM enrollment_sessions AS enrollment "
+                "JOIN subjects AS subject ON subject.id=enrollment.subject_id "
+                "WHERE enrollment.id=?",
+                (str(enrollment_id),),
+            ).fetchone()
+        )
+        return row
+
+    def _transition_state(
+        self,
+        tx: UnitOfWorkProtocol,
+        enrollment_id: UUID,
+        *,
+        from_state: str,
+        to_state: str,
+    ) -> dict[str, object] | None:
+        row = self._select_enrollment(tx, enrollment_id)
+        if row is None:
+            return None
+        if row["closed_at"] is not None or str(row["state"]) != from_state:
+            return None
+        expected_template_id = _optional_uuid_field(
+            row.get("synthetic_template_id"),
+            "enrollment synthetic template id corrupt",
+        )
+        if expected_template_id is None:
+            raise RuntimeError("enrollment_expected_template_required")
+        changed = tx.exec_driver_sql(
+            "UPDATE enrollment_sessions SET state=? "
+            "WHERE id=? AND synthetic_template_id=? AND closed_at IS NULL AND state=?",
+            (to_state, str(enrollment_id), str(expected_template_id), from_state),
+        ).rowcount
+        if changed != 1:
+            return None
+        return self._select_enrollment(tx, enrollment_id)
+
+    def _cancel_pending(
+        self,
+        tx: UnitOfWorkProtocol,
+        enrollment_id: UUID,
+        timestamp: str,
+    ) -> dict[str, object] | None:
+        changed = tx.exec_driver_sql(
+            "UPDATE enrollment_sessions SET state='cancelled',closed_at=? "
+            "WHERE id=? AND closed_at IS NULL "
+            "AND state IN ('requested','capturing','calibrating')",
+            (timestamp, str(enrollment_id)),
+        ).rowcount
+        if changed != 1:
+            return None
+        return self._select_enrollment(tx, enrollment_id)
+
+    def _approve(
+        self,
+        tx: UnitOfWorkProtocol,
+        enrollment_id: UUID,
+        template_ids: tuple[UUID, ...],
+        reminder_at: str | None,
+        hard_expires_at: str | None,
+        timestamp: str,
+    ) -> dict[str, object] | None:
+        row = self._select_enrollment(tx, enrollment_id)
+        if row is None:
+            return None
+        if str(row["state"]) != "calibrating":
+            return None
+        expected_template_id = _optional_uuid_field(
+            row.get("synthetic_template_id"),
+            "enrollment synthetic template id corrupt",
+        )
+        if expected_template_id is None or template_ids != (expected_template_id,):
+            return None
+        if not self._approved_template_is_linkable(tx, expected_template_id, row):
+            return None
+        changed = tx.exec_driver_sql(
+            "UPDATE enrollment_sessions SET state='approved',closed_at=? "
+            "WHERE id=? AND synthetic_template_id=? "
+            "AND closed_at IS NULL AND state='calibrating'",
+            (timestamp, str(enrollment_id), str(expected_template_id)),
+        ).rowcount
+        if changed != 1:
+            return None
+        if reminder_at is not None:
+            profile_changed = tx.exec_driver_sql(
+                "UPDATE subjects SET next_reenrollment_reminder_at=?,updated_at=? "
+                "WHERE id=? AND profile_class IN ('k2','n1') AND active=1 "
+                "AND revoked_at IS NULL",
+                (reminder_at, timestamp, row["subject_id"]),
+            ).rowcount
+            if profile_changed != 1:
+                raise RuntimeError("child_reenrollment_profile_update_lost_ownership")
+        for template_id in template_ids:
+            self._link_approved_template(
+                tx,
+                template_id,
+                row,
+                hard_expires_at,
+                timestamp,
+            )
+        return self._select_enrollment(tx, enrollment_id)
+
+    @staticmethod
+    def _link_approved_template(
+        tx: UnitOfWorkProtocol,
+        template_id: UUID,
+        row: Mapping[str, object],
+        hard_expires_at: str | None,
+        timestamp: str,
+    ) -> None:
+        del timestamp
+        changed = tx.exec_driver_sql(
+            "UPDATE biometric_templates SET expires_at=? "
+            "WHERE id=? AND enrollment_session_id=? AND subject_id=? "
+            "AND modality=? AND consent_receipt_id=? "
+            "AND id=? "
+            "AND expires_at IS NULL AND revoked_at IS NULL",
+            (
+                hard_expires_at,
+                str(template_id),
+                row["id"],
+                row["subject_id"],
+                row["modality"],
+                row["consent_receipt_id"],
+                row["synthetic_template_id"],
+            ),
+        ).rowcount
+        if changed != 1:
+            raise RuntimeError("biometric_template_link_lost_ownership")
+
+    @staticmethod
+    def _approved_template_is_linkable(
+        tx: UnitOfWorkProtocol,
+        template_id: UUID,
+        row: Mapping[str, object],
+    ) -> bool:
+        return (
+            tx.exec_driver_sql(
+                "SELECT 1 FROM biometric_templates "
+                "WHERE id=? AND enrollment_session_id=? AND subject_id=? "
+                "AND modality=? AND consent_receipt_id=? "
+                "AND expires_at IS NULL AND revoked_at IS NULL",
+                (
+                    str(template_id),
+                    row["id"],
+                    row["subject_id"],
+                    row["modality"],
+                    row["consent_receipt_id"],
+                ),
+            ).fetchone()
+            is not None
+        )
+
+
+class SqlBiometricTemplateRepository:
+    def __init__(
+        self,
+        uow: AsyncUnitOfWorkProtocol,
+        audit_commitments: AuditCommitmentPort,
+    ) -> None:
+        self._uow = uow
+        self._audit_commitments = audit_commitments
+
+    async def require_ready_for_approval(
+        self,
+        template_ids: tuple[UUID, ...],
+        *,
+        enrollment_session_id: UUID,
+        expected_template_id: UUID,
+        household_id: UUID,
+        subject_id: UUID,
+        modality: str,
+        consent_receipt_id: UUID,
+    ) -> tuple[BiometricTemplate, ...]:
+        if template_ids != (expected_template_id,):
+            raise RuntimeError("biometric_template_scope_mismatch")
+        rows = await self._uow.run_sync(lambda tx: self._select_templates(tx, template_ids))
+        templates = tuple(_template_from_row(row) for row in rows)
+        if len(templates) != 1:
+            raise KeyError("biometric_template_missing")
+        for template in templates:
+            if (
+                template.id != expected_template_id
+                or template.household_id != household_id
+                or template.enrollment_session_id != enrollment_session_id
+                or template.subject_id != subject_id
+                or template.modality.value != modality
+                or template.consent_receipt_id != consent_receipt_id
+                or template.expires_at is not None
+                or template.revoked_at is not None
+            ):
+                raise RuntimeError("biometric_template_scope_mismatch")
+        return templates
+
+    async def list_child_templates_past_hard_expiry(
+        self,
+        household_id: UUID,
+        now: object,
+    ) -> tuple[BiometricTemplate, ...]:
+        timestamp = utc_storage(cast(datetime, now))
+        rows = await self._uow.run_sync(
+            lambda tx: tuple(
+                _row_to_dict(row)
+                for row in tx.exec_driver_sql(
+                    "SELECT template.*,subject.household_id "
+                    "FROM biometric_templates AS template "
+                    "JOIN subjects AS subject ON subject.id=template.subject_id "
+                    "WHERE subject.household_id=? AND subject.active=1 "
+                    "AND subject.revoked_at IS NULL AND subject.profile_class IN ('k2','n1') "
+                    "AND template.revoked_at IS NULL AND template.expires_at IS NOT NULL "
+                    "AND template.expires_at<=? ORDER BY template.expires_at,template.id",
+                    (str(household_id), timestamp),
+                ).fetchall()
+            )
+        )
+        return tuple(_template_from_row(row) for row in rows if row is not None)
+
+    async def expire_template(self, template_id: UUID, now: object) -> None:
+        timestamp = utc_storage(cast(datetime, now))
+        await self._uow.run_sync(
+            lambda tx: (
+                tx.exec_driver_sql(
+                    "UPDATE biometric_templates SET revoked_at=?,"
+                    "expires_at=CASE WHEN expires_at IS NULL OR expires_at>? "
+                    "THEN ? ELSE expires_at END "
+                    "WHERE id=? AND revoked_at IS NULL",
+                    (timestamp, timestamp, timestamp, str(template_id)),
+                ).rowcount
+            )
+        )
+
+    async def revoke_subject_modality(
+        self,
+        subject_id: UUID,
+        modality: str,
+        now: object,
+    ) -> tuple[BiometricTemplate, ...]:
+        timestamp = utc_storage(cast(datetime, now))
+        rows = await self._uow.run_sync(
+            lambda tx: self._revoke_subject_modality(tx, subject_id, modality, timestamp)
+        )
+        return tuple(_template_from_row(row) for row in rows)
+
+    async def revoke_subject_authorities_in_uow(
+        self,
+        subject_id: UUID,
+        through_generation: int,
+        reason: str,
+        now: object,
+    ) -> None:
+        del through_generation, reason
+        timestamp = utc_storage(cast(datetime, now))
+        await self._uow.run_sync(
+            lambda tx: self._revoke_subject_modality(tx, subject_id, "%", timestamp)
+        )
+
+    def managed_erasure_requested_audit(
+        self,
+        template: BiometricTemplate,
+        *,
+        stores: tuple[str, ...],
+        requested_at: object,
+    ) -> AuditDraft:
+        return _system_audit(
+            "identity.biometric_template.erasure_requested",
+            self._audit_commitments,
+            occurred_at=cast(datetime, requested_at),
+            private_fields={
+                "modality": template.modality,
+                "stores": stores,
+                "subject_id": template.subject_id,
+                "template_id": template.id,
+            },
+        )
+
+    @staticmethod
+    def _select_templates(
+        tx: UnitOfWorkProtocol,
+        template_ids: tuple[UUID, ...],
+    ) -> tuple[dict[str, object], ...]:
+        placeholders = ",".join("?" for _ in template_ids)
+        rows = tx.exec_driver_sql(
+            "SELECT template.*,subject.household_id "
+            "FROM biometric_templates AS template "
+            "JOIN subjects AS subject ON subject.id=template.subject_id "
+            f"WHERE template.id IN ({placeholders})",
+            tuple(str(template_id) for template_id in template_ids),
+        ).fetchall()
+        return tuple(row for row in (_row_to_dict(row) for row in rows) if row is not None)
+
+    @staticmethod
+    def _revoke_subject_modality(
+        tx: UnitOfWorkProtocol,
+        subject_id: UUID,
+        modality: str,
+        timestamp: str,
+    ) -> tuple[dict[str, object], ...]:
+        if modality == "%":
+            modality_clause = ""
+            parameters: tuple[object, ...] = (str(subject_id),)
+        else:
+            modality_clause = "AND template.modality=? "
+            parameters = (str(subject_id), modality)
+        rows = tuple(
+            _row_to_dict(row)
+            for row in tx.exec_driver_sql(
+                "SELECT template.*,subject.household_id "
+                "FROM biometric_templates AS template "
+                "JOIN subjects AS subject ON subject.id=template.subject_id "
+                "WHERE template.subject_id=? "
+                + modality_clause
+                + "AND template.revoked_at IS NULL ORDER BY template.id",
+                parameters,
+            ).fetchall()
+        )
+        tx.exec_driver_sql(
+            "UPDATE biometric_templates SET revoked_at=?,"
+            "expires_at=CASE WHEN expires_at IS NULL OR expires_at>? THEN ? ELSE expires_at END "
+            "WHERE subject_id=? "
+            + ("" if modality == "%" else "AND modality=? ")
+            + "AND revoked_at IS NULL",
+            (
+                (timestamp, timestamp, timestamp, str(subject_id))
+                if modality == "%"
+                else (timestamp, timestamp, timestamp, str(subject_id), modality)
+            ),
+        )
+        return tuple(row for row in rows if row is not None)
+
+
+def _session_event_time(session: EnrollmentSession) -> datetime:
+    occurred_at = session.closed_at or session.created_at
+    if occurred_at is None:
+        raise RuntimeError("enrollment_session_event_time_required")
+    return occurred_at
 
 
 @dataclass(frozen=True, slots=True)

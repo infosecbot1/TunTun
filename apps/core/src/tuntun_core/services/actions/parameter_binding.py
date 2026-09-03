@@ -11,7 +11,13 @@ from tuntun_contracts.actions import ActionBinding
 from tuntun_contracts.base import Commitment
 from tuntun_contracts.commitments import commit_private
 from tuntun_contracts.identity import PersonaTraits
-from tuntun_core.domain.profile import ConsentPurpose, GrantConsent, ProfileClass, RevokeConsent
+from tuntun_core.domain.profile import (
+    ConsentPurpose,
+    GrantConsent,
+    Modality,
+    ProfileClass,
+    RevokeConsent,
+)
 
 
 class _ProfileCreateCommand(Protocol):
@@ -46,7 +52,7 @@ class _ConsentCommand(Protocol):
 
 class _EnrollmentRequestCommand(Protocol):
     subject_id: UUID
-    modality: object
+    modality: Modality
     expected_profile_version: int
     expected_consent_receipt_id: UUID
     reenrollment_days: int

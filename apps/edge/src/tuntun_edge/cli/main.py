@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import sys
+from typing import Annotated
 
 import typer
 
 from tuntun_edge.cli.managed import managed
 from tuntun_edge.cli.ptt import ptt
 from tuntun_edge.cli.reachy_commission import reachy_app
+from tuntun_edge.poc.simulator import main as simulator_main
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
@@ -19,6 +21,33 @@ def _callback() -> None:
 app.command("ptt")(ptt)
 app.command("managed")(managed)
 app.add_typer(reachy_app, name="reachy")
+
+
+@app.command("simulate-ptt")
+def simulate_ptt(
+    turn_id: Annotated[
+        str | None,
+        typer.Option("--turn-id", help="Turn UUID shared with the Core fake supervisor."),
+    ] = None,
+    input_mode: Annotated[
+        str,
+        typer.Option("--input-mode", help="SDK-free simulated input owner."),
+    ] = "core_terminal_toggle",
+    capture_hex: Annotated[
+        str,
+        typer.Option("--capture-hex", help="Hex-encoded transport PCM for the fake turn."),
+    ] = "0100020003000400",
+) -> None:
+    """Run the SDK-free binary PTT simulator over stdin/stdout."""
+
+    from tuntun_contracts.poc.framing import PttInputMode
+
+    try:
+        mode = PttInputMode(input_mode)
+    except ValueError:
+        sys.stderr.write("simulate-ptt-rejected\n")
+        raise typer.Exit(code=70) from None
+    raise typer.Exit(code=simulator_main(turn_id=turn_id, input_mode=mode, capture_hex=capture_hex))
 
 
 def main(argv: list[str] | None = None) -> int:

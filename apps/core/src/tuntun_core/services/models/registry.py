@@ -29,11 +29,11 @@ from .fs import (
     require_publication_commit,
 )
 
-SAFE_SUFFIXES = {".json", ".onnx", ".safetensors", ".tflite", ".txt"}
+SAFE_SUFFIXES = {".json", ".onnx", ".safetensors", ".tflite", ".txt", ".zip"}
 MODEL_ID = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 REVISION = re.compile(r"^[0-9a-f]{40,64}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
-FILE_PATH = re.compile(r"^[A-Za-z0-9_.-]+\.(?:onnx|json|txt|tflite|safetensors)$")
+FILE_PATH = re.compile(r"^[A-Za-z0-9_.-]+\.(?:onnx|json|txt|tflite|safetensors|zip)$")
 MODEL_URL = re.compile(r"^https://[^/?#:@]+(?::443)?(?:/[^?#]*)$")
 CALIBRATION_REPORT_PATH = "calibration-report.json"
 MAX_MODEL_FILE_BYTES = 4_000_000_000
@@ -42,6 +42,13 @@ MAX_MODEL_FILES = 64
 MAX_MODELS = 256
 _TASK12_LOCAL_INFERENCE_MODEL_IDS = frozenset({"hello-tuntun-v1", "stop-tuntun-v1"})
 _TASK12_METADATA_KEYS = frozenset({"calibration_report_sha256", "runtime_download"})
+_OFFLINE_ASR_ARCHIVE_RUNTIME = "vosk==0.3.44"
+_OFFLINE_ASR_ARCHIVE_PURPOSE = "offline_command"
+_OFFLINE_ASR_RUNTIME_MAX_BYTES_BY_MODEL = {
+    "vosk-small-en-us-0.15": 256_000_000,
+    "vosk-small-hi-0.22": 384_000_000,
+}
+_OFFLINE_ASR_METADATA_KEYS = frozenset({"runtime_max_bytes"})
 _BASE_ENTRY_KEYS = frozenset(
     {
         "id",
@@ -59,7 +66,7 @@ _BASE_ENTRY_KEYS = frozenset(
         "files",
     }
 )
-_ENTRY_KEYS = _BASE_ENTRY_KEYS | _TASK12_METADATA_KEYS
+_ENTRY_KEYS = _BASE_ENTRY_KEYS | _TASK12_METADATA_KEYS | _OFFLINE_ASR_METADATA_KEYS
 _FILE_KEYS = frozenset({"path", "size", "sha256", "url"})
 
 
@@ -130,6 +137,7 @@ class ModelEntry:
     benchmark_gate: str
     calibration_report_sha256: str | None
     runtime_download: bool | None
+    runtime_max_bytes: int | None
     review_date: str
     files: tuple[ModelFile, ...]
 
@@ -161,6 +169,20 @@ class ModelEntry:
         calibration_files = tuple(
             item for item in self.files if item.path == CALIBRATION_REPORT_PATH
         )
+        zip_files = tuple(item for item in self.files if Path(item.path).suffix == ".zip")
+        offline_asr_archive_invalid = bool(zip_files) and (
+            len(self.files) != 1
+            or len(zip_files) != 1
+            or self.approved_purpose != _OFFLINE_ASR_ARCHIVE_PURPOSE
+            or self.runtime != _OFFLINE_ASR_ARCHIVE_RUNTIME
+            or type(self.runtime_max_bytes) is not int
+            or self.runtime_max_bytes != _OFFLINE_ASR_RUNTIME_MAX_BYTES_BY_MODEL.get(self.model_id)
+            or sum(item.size for item in self.files) > self.runtime_max_bytes
+        )
+        runtime_bound_invalid = self.runtime_max_bytes is not None and (
+            type(self.runtime_max_bytes) is not int
+            or not 1 <= self.runtime_max_bytes <= MAX_MODEL_REVISION_BYTES
+        )
         if (
             any(not isinstance(value, str) for value in scalar_values)
             or MODEL_ID.fullmatch(self.model_id) is None
@@ -177,6 +199,8 @@ class ModelEntry:
             or not 1 <= len(self.files) <= MAX_MODEL_FILES
             or len(set(names)) != len(names)
             or sum(item.size for item in self.files) > MAX_MODEL_REVISION_BYTES
+            or runtime_bound_invalid
+            or offline_asr_archive_invalid
             or any(not value or len(value) > 4096 for value in scalar_values[2:])
         ):
             raise ValueError("invalid model manifest")
@@ -419,6 +443,8 @@ class VerifiedModelFile:
         return True
 
     def load_with(self, adapter: RuntimeAdapter) -> RuntimeFileReceipt:
+        if Path(self.__expected.path).suffix == ".zip":
+            raise ModelVerificationError("bounded archive runtime unavailable")
         duplicate_slot = _FileDescriptorOwnerSlot()
         reader_slot = _PreadOnlyModelReaderOwnerSlot()
         try:
@@ -641,9 +667,14 @@ class ModelRegistry:
                 raise ValueError("invalid model manifest")
             entry_keys = frozenset(raw_entry)
             metadata_keys = entry_keys & _TASK12_METADATA_KEYS
+            offline_asr_metadata_keys = entry_keys & _OFFLINE_ASR_METADATA_KEYS
             if (
                 not _BASE_ENTRY_KEYS <= entry_keys <= _ENTRY_KEYS
                 or (metadata_keys and metadata_keys != _TASK12_METADATA_KEYS)
+                or (
+                    offline_asr_metadata_keys
+                    and offline_asr_metadata_keys != _OFFLINE_ASR_METADATA_KEYS
+                )
                 or (
                     metadata_keys == _TASK12_METADATA_KEYS
                     and (
@@ -670,6 +701,7 @@ class ModelRegistry:
                     },
                     calibration_report_sha256=raw_entry.get("calibration_report_sha256"),
                     runtime_download=raw_entry.get("runtime_download"),
+                    runtime_max_bytes=raw_entry.get("runtime_max_bytes"),
                 )
             except (KeyError, TypeError, ValueError, OverflowError) as error:
                 raise ValueError("invalid model manifest") from error
@@ -729,6 +761,20 @@ class ModelRegistry:
             if not isinstance(error, Exception):
                 raise
             raise RuntimeError("model is not installed and verified") from error
+
+    def require_activated(self, model_id: str, purpose: str) -> ActivatedModel:
+        if (
+            type(model_id) is not str
+            or MODEL_ID.fullmatch(model_id) is None
+            or type(purpose) is not str
+            or not purpose
+            or len(purpose) > 4096
+        ):
+            raise ValueError("invalid model activation request")
+        entry = self.entry(model_id)
+        if entry.approved_purpose != purpose:
+            raise PermissionError("model purpose mismatch")
+        return self.activate(model_id)
 
     @staticmethod
     def _activate_from_open_model(

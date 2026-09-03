@@ -9,12 +9,15 @@ from uuid import UUID
 from tuntun_contracts.audit import AuditDraft
 from tuntun_contracts.policy import AuthContext
 from tuntun_core.domain.profile import (
+    BiometricTemplate,
     ConsentPurpose,
     ConsentReceipt,
+    EnrollmentSession,
     GuestConsentPurpose,
     GuestDisclosureChallenge,
     GuestSessionConsentReceipt,
     Profile,
+    RequestEnrollment,
 )
 from tuntun_core.services.transactions.protocols import AsyncUnitOfWorkProtocol, UnitOfWorkProtocol
 
@@ -29,6 +32,18 @@ class ProfileRepositoryPort(Protocol):
     async def get_scoped(self, household_id: UUID, subject_id: UUID) -> Profile: ...
 
     async def get_optional_scoped(self, household_id: UUID, subject_id: UUID) -> Profile | None: ...
+
+    async def list_children_due_for_reenrollment_reminder(
+        self,
+        household_id: UUID,
+        now: datetime,
+    ) -> tuple[Profile, ...]: ...
+
+    async def disable_biometric_identity(
+        self,
+        subject_id: UUID,
+        now: object,
+    ) -> None: ...
 
     async def require_current_owner_guardian_generation(
         self,
@@ -129,6 +144,108 @@ class ConsentReceiptRepositoryPort(Protocol):
         reason: str,
         now: object,
     ) -> None: ...
+
+
+class EnrollmentRepositoryPort(Protocol):
+    async def create(
+        self,
+        command: RequestEnrollment,
+        auth: AuthContext,
+        *,
+        household_id: UUID,
+        consent_receipt_id: UUID,
+        subject_is_child: bool,
+        now: object,
+        expires_at: object,
+        synthetic_template_id: UUID,
+    ) -> EnrollmentSession: ...
+
+    async def require_for_update(self, enrollment_id: UUID) -> EnrollmentSession: ...
+
+    async def require_state(
+        self,
+        enrollment_id: UUID,
+        states: str | tuple[str, ...],
+    ) -> EnrollmentSession: ...
+
+    async def begin_capture(self, enrollment_id: UUID, now: object) -> EnrollmentSession: ...
+
+    async def mark_calibrating(self, enrollment_id: UUID, now: object) -> EnrollmentSession: ...
+
+    async def cancel_pending(self, enrollment_id: UUID, now: object) -> EnrollmentSession: ...
+
+    async def approve(
+        self,
+        enrollment_id: UUID,
+        template_ids: tuple[UUID, ...],
+        reminder_at: object | None,
+        hard_expires_at: object | None,
+        now: object,
+    ) -> EnrollmentSession: ...
+
+    async def cancel_subject_modality(
+        self,
+        subject_id: UUID,
+        modality: str,
+        now: object,
+    ) -> int: ...
+
+    def requested_audit(self, session: EnrollmentSession, auth: AuthContext) -> AuditDraft: ...
+
+    def cancelled_audit(self, session: EnrollmentSession, auth: AuthContext) -> AuditDraft: ...
+
+    def approved_audit(self, session: EnrollmentSession) -> AuditDraft: ...
+
+    def expiry_batch_audit(
+        self,
+        templates: tuple[BiometricTemplate, ...],
+        now: object,
+    ) -> AuditDraft: ...
+
+
+class BiometricTemplateRepositoryPort(Protocol):
+    async def require_ready_for_approval(
+        self,
+        template_ids: tuple[UUID, ...],
+        *,
+        enrollment_session_id: UUID,
+        expected_template_id: UUID,
+        household_id: UUID,
+        subject_id: UUID,
+        modality: str,
+        consent_receipt_id: UUID,
+    ) -> tuple[BiometricTemplate, ...]: ...
+
+    async def list_child_templates_past_hard_expiry(
+        self,
+        household_id: UUID,
+        now: object,
+    ) -> tuple[BiometricTemplate, ...]: ...
+
+    async def expire_template(self, template_id: UUID, now: object) -> None: ...
+
+    async def revoke_subject_modality(
+        self,
+        subject_id: UUID,
+        modality: str,
+        now: object,
+    ) -> tuple[BiometricTemplate, ...]: ...
+
+    async def revoke_subject_authorities_in_uow(
+        self,
+        subject_id: UUID,
+        through_generation: int,
+        reason: str,
+        now: object,
+    ) -> None: ...
+
+    def managed_erasure_requested_audit(
+        self,
+        template: BiometricTemplate,
+        *,
+        stores: tuple[str, ...],
+        requested_at: object,
+    ) -> AuditDraft: ...
 
 
 class GuestDisclosureChallengeRepositoryPort(Protocol):
@@ -263,6 +380,8 @@ class BudgetReservationsRevocationPort(Protocol):
 class IdentityUnitOfWork(AsyncUnitOfWorkProtocol, Protocol):
     profiles: ProfileRepositoryPort
     consent_receipts: ConsentReceiptRepositoryPort
+    enrollments: EnrollmentRepositoryPort
+    biometric_templates: BiometricTemplateRepositoryPort
     guest_session_consents: GuestSessionConsentRepositoryPort
     guest_disclosure_challenges: GuestDisclosureChallengeRepositoryPort
     sessions: SessionIdentityRepositoryPort

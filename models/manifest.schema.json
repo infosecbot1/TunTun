@@ -26,7 +26,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
-          "pattern": "^[A-Za-z0-9_.-]+\\.(onnx|json|txt|tflite|safetensors)$"
+          "pattern": "^[A-Za-z0-9_.-]+\\.(onnx|json|txt|tflite|safetensors|zip)$"
         },
         "size": {"type": "integer", "minimum": 1, "maximum": 4000000000},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -79,6 +79,7 @@
         "benchmark_gate": {"$ref": "#/$defs/nonEmptyString"},
         "calibration_report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "runtime_download": {"const": false},
+        "runtime_max_bytes": {"type": "integer", "minimum": 1, "maximum": 8000000000},
         "review_date": {"$ref": "#/$defs/nonEmptyString"},
         "files": {
           "type": "array",
@@ -108,6 +109,33 @@
                 },
                 "minContains": 1,
                 "maxContains": 1
+              }
+            }
+          }
+        },
+        {
+          "$comment": "ZIP-backed local ASR archives require one total file plus exact purpose/runtime/bounds; ModelRegistry is the authoritative validator for model-id-specific runtime_max_bytes.",
+          "if": {
+            "properties": {
+              "files": {
+                "contains": {
+                  "properties": {"path": {"pattern": "\\.zip$"}},
+                  "required": ["path"]
+                },
+                "minContains": 1
+              }
+            },
+            "required": ["files"]
+          },
+          "then": {
+            "required": ["runtime_max_bytes"],
+            "properties": {
+              "approved_purpose": {"const": "offline_command"},
+              "runtime": {"const": "vosk==0.3.44"},
+              "runtime_max_bytes": {"enum": [256000000, 384000000]},
+              "files": {
+                "minItems": 1,
+                "maxItems": 1
               }
             }
           }

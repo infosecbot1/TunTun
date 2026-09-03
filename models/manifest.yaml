@@ -1,2 +1,38 @@
 schema_version: "1.0"
-models: []
+models:
+  - id: vosk-small-en-us-0.15
+    revision: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+    license: Apache-2.0
+    provenance: "Alphacep Vosk small English model list; local command use reviewed 2026-09-03"
+    redistribution: "external governed model archive; not bundled in source or wheel"
+    approved_purpose: offline_command
+    runtime: vosk==0.3.44
+    runtime_max_bytes: 256000000
+    architecture: "Vosk/Kaldi small English model ZIP archive"
+    input_contract: "PCM16 mono post-wake audio at 16000 Hz, bounded to 8388608 bytes"
+    output_contract: "bounded hypothesis text parsed only by tuntun_core.offline.grammar"
+    benchmark_gate: tests/unit/offline/test_local_asr.py
+    review_date: "2026-09-03"
+    files:
+      - path: vosk-model-small-en-us-0.15.zip
+        size: 41205931
+        sha256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+        url: https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+  - id: vosk-small-hi-0.22
+    revision: 7c50a10866889f0ac21d912c20537a055a597ed09fc1d3e5bcd798f9f0017e48
+    license: Apache-2.0
+    provenance: "Alphacep Vosk small Hindi model list; local command use reviewed 2026-09-03"
+    redistribution: "external governed model archive; not bundled in source or wheel"
+    approved_purpose: offline_command
+    runtime: vosk==0.3.44
+    runtime_max_bytes: 384000000
+    architecture: "Vosk/Kaldi small Hindi model ZIP archive"
+    input_contract: "PCM16 mono post-wake audio at 16000 Hz, bounded to 8388608 bytes"
+    output_contract: "bounded hypothesis text parsed only by tuntun_core.offline.grammar"
+    benchmark_gate: tests/unit/offline/test_local_asr.py
+    review_date: "2026-09-03"
+    files:
+      - path: vosk-model-small-hi-0.22.zip
+        size: 44458845
+        sha256: 7c50a10866889f0ac21d912c20537a055a597ed09fc1d3e5bcd798f9f0017e48
+        url: https://alphacephei.com/vosk/models/vosk-model-small-hi-0.22.zip

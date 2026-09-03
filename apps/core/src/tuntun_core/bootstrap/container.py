@@ -76,14 +76,18 @@ from tuntun_core.services.budget.guard import BudgetGuard
 from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
 from tuntun_core.services.context_builder import ContextBuilder
 from tuntun_core.services.identity.consent import (
-    BiometricConsentRevocationHandler,
     CloudRouteConsentRevocationHandler,
     ConsentRevocationCascade,
     ConsentService,
     GuestSessionConsentService,
     IdentityMutationCoordinator,
 )
+from tuntun_core.services.identity.enrollment import (
+    EnrollmentMutationCoordinator,
+    EnrollmentService,
+)
 from tuntun_core.services.identity.profiles import ProfileCrypto, ProfileService
+from tuntun_core.services.identity.revocation_handlers import BiometricConsentRevocationHandler
 from tuntun_core.services.identity.runtime import (
     HmacReceiptSigner,
     IdentityAuditLedger,
@@ -130,6 +134,7 @@ from tuntun_core.services.personalized_turn_context import (
     SessionLanguageRegistry,
 )
 from tuntun_core.services.providers.call_repository import ProviderCallRepository
+from tuntun_core.services.providers.consent_guard import ConsentEvidenceService, ConsentHmacVerifier
 from tuntun_core.services.providers.defaults import (
     ProviderDefaultsDocumentV1,
     load_provider_defaults,
@@ -161,6 +166,8 @@ from tuntun_core.workflows.contract_workflow import (
 from tuntun_core.workflows.conversation import (
     ContextWorkflowPorts,
     LinearConversationEngine,
+    ProviderEgressAuthorizer,
+    ProviderEgressBoundary,
     WorkflowPorts,
 )
 from tuntun_core.workflows.langgraph_adapter import LangGraphConversationEngine
@@ -177,6 +184,8 @@ TASK1_REQUIRED_IDENTITY_REPOSITORY_FACADES = frozenset(
         "consent_receipts",
         "guest_disclosure_challenges",
         "guest_session_consents",
+        "enrollments",
+        "biometric_templates",
         "sessions",
         "event_receipts",
         "subject_revocation_outbox",
@@ -759,6 +768,7 @@ class ProductionContainer:
         profiles: ProfileProjectionPort | None = None,
         prompt_root: Path = Path("prompts"),
         context_provider: PersonalizedTurnContextProvider | None = None,
+        provider_egress: ProviderEgressBoundary | None = None,
         workflow_name: Literal["linear", "langgraph"] = "linear",
     ) -> InstalledSimulatedGuestApp:
         if type(workflow_name) is not str or workflow_name not in {"linear", "langgraph"}:
@@ -767,6 +777,8 @@ class ProductionContainer:
             raise RuntimeError("simulated_guest_app_already_installed")
         if self.turn_coordinator is None or self.session_manager is None:
             raise RuntimeError("simulated_guest_roots_unavailable")
+        if type(provider_egress) is not ProviderEgressAuthorizer:
+            raise TypeError("production provider egress authorizer required")
         if context_provider is None:
             if identity is None or profiles is None:
                 raise TypeError("personalized identity and profile ports required")
@@ -786,6 +798,7 @@ class ProductionContainer:
             linear_engine = LinearConversationEngine(
                 ports,
                 context_provider=context_provider,
+                provider_egress=provider_egress,
                 accepts_results=self.session_manager.accepts_results,
             )
             engine: ConversationEngine = linear_engine
@@ -793,6 +806,7 @@ class ProductionContainer:
             langgraph_engine = LangGraphConversationEngine(
                 cast(WorkflowPorts, ports),
                 context_provider=context_provider,
+                provider_egress=provider_egress,
                 accepts_results=self.session_manager.accepts_results,
             )
             engine = langgraph_engine
@@ -803,6 +817,7 @@ class ProductionContainer:
             completed_audio,
             self.turn_coordinator,
             context_provider=context_provider,
+            provider_egress=provider_egress,
             engine=engine,
             session_manager=self.session_manager,
             workflow_name=workflow_name,
@@ -852,6 +867,7 @@ def build_workflow(
     coordinator: TurnCoordinator,
     *,
     context_provider: PersonalizedTurnContextProvider | None = None,
+    provider_egress: ProviderEgressBoundary | None = None,
     engine: ConversationEngine | None = None,
     session_manager: SessionManager | None = None,
     workflow_name: Literal["linear", "langgraph"] = "linear",
@@ -864,12 +880,14 @@ def build_workflow(
             engine = LinearConversationEngine(
                 ports,
                 context_provider=context_provider,
+                provider_egress=provider_egress,
                 accepts_results=cleanup.accepts_results,
             )
         elif workflow_name == "langgraph":
             engine = LangGraphConversationEngine(
                 cast(WorkflowPorts, ports),
                 context_provider=context_provider,
+                provider_egress=provider_egress,
                 accepts_results=cleanup.accepts_results,
             )
         else:
@@ -1094,7 +1112,7 @@ def _build_task1_identity_services(
     cloud_route_revocation = CloudRouteConsentRevocationHandler(
         _DiscardingCloudRouteRevocation(SqlProviderRouteAuthorityRevocation())
     )
-    biometric_revocation = BiometricConsentRevocationHandler()
+    biometric_revocation = BiometricConsentRevocationHandler(identity_audit_ledger)
     consent_revocations = ConsentRevocationCascade(
         {
             ConsentPurpose.FACE: biometric_revocation,
@@ -1116,6 +1134,15 @@ def _build_task1_identity_services(
         consent_revocations,
         clock,
     )
+    enrollments = EnrollmentService(
+        identity_uow_factory,
+        mutation_scope,
+        consents,
+        parameter_verifier,
+        binding_verifier,
+        identity_audit_ledger,
+        clock,
+    )
     profiles = ProfileService(
         identity_uow_factory,
         mutation_scope,
@@ -1134,16 +1161,27 @@ def _build_task1_identity_services(
         profiles,
         consents,
     )
+    enrollment_mutations = EnrollmentMutationCoordinator(
+        mutation_scope,
+        authentication,
+        enrollments,
+    )
     guest_consents = GuestSessionConsentService(
         identity_uow_factory,
         identity_audit_ledger,
         receipt_signer,
     )
+    consent_evidence = ConsentEvidenceService(consents, guest_consents)
+    consent_hmac_verifier = ConsentHmacVerifier(receipt_signer, consents, clock)
     return Task1IdentityMutationServices(
         profiles=profiles,
         consents=consents,
         guest_consents=guest_consents,
+        enrollments=enrollments,
         mutations=mutations,
+        enrollment_mutations=enrollment_mutations,
+        consent_evidence=consent_evidence,
+        consent_hmac_verifier=consent_hmac_verifier,
         authentication=authentication,
         audit_ledger=identity_audit_ledger,
     )

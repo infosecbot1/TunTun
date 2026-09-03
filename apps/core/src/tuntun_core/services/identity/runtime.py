@@ -24,7 +24,15 @@ from tuntun_core.services.identity.consent import (
     GuestSessionConsentService,
     IdentityMutationCoordinator,
 )
+from tuntun_core.services.identity.enrollment import (
+    EnrollmentMutationCoordinator,
+    EnrollmentService,
+)
 from tuntun_core.services.identity.profiles import ProfileService
+from tuntun_core.services.providers.consent_guard import (
+    ConsentEvidenceService,
+    ConsentHmacVerifier,
+)
 from tuntun_core.services.transactions.identity_uow import IdentityUnitOfWork
 
 _KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$", flags=re.ASCII)
@@ -157,7 +165,11 @@ class Task1IdentityMutationServices:
     profiles: ProfileService
     consents: ConsentService
     guest_consents: GuestSessionConsentService
+    enrollments: EnrollmentService
     mutations: IdentityMutationCoordinator
+    enrollment_mutations: EnrollmentMutationCoordinator
+    consent_evidence: ConsentEvidenceService
+    consent_hmac_verifier: ConsentHmacVerifier
     authentication: AuthenticationPort
     audit_ledger: IdentityAuditLedger
 

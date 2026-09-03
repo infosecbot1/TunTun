@@ -9,7 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from tuntun_core.services.personalized_turn_context import TranscribedTurn
 from tuntun_core.workflows import langgraph_adapter
 from tuntun_core.workflows.contract_workflow import ContractConversationWorkflow
-from tuntun_core.workflows.conversation import TurnRequest
+from tuntun_core.workflows.conversation import SYNTHETIC_NO_PROVIDER_TRANSPORT, TurnRequest
 from tuntun_core.workflows.ephemeral_turn_context import EphemeralTurnContext
 from tuntun_core.workflows.langgraph_adapter import (
     NODE_ORDER,
@@ -126,6 +126,7 @@ async def test_every_serialized_checkpoint_is_content_free() -> None:
         ephemeral,
         lifecycle,
         lambda _: False,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
         checkpointer=saver,
     )
 
@@ -172,6 +173,7 @@ async def test_node_error_pending_writes_are_content_free() -> None:
         ephemeral,
         lifecycle,
         lambda _: False,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
         checkpointer=saver,
     )
 
@@ -206,6 +208,7 @@ async def test_external_tracing_is_rejected_before_graph_or_content_work(
     engine = LangGraphConversationEngine(
         case.ports,
         context_provider=case.context_provider,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
     )
     monkeypatch.setattr(
         langgraph_adapter,
@@ -227,7 +230,11 @@ async def test_external_tracing_is_rejected_before_graph_or_content_work(
 @pytest.mark.parametrize("terminal", ("start", "transcribe", "generate", "synthesize", "play"))
 async def test_graph_drops_every_store_after_each_node_failure(terminal: str) -> None:
     ports = _FailingPorts(terminal)
-    engine = LangGraphConversationEngine(ports, context_provider=_ContextProvider())
+    engine = LangGraphConversationEngine(
+        ports,
+        context_provider=_ContextProvider(),
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    )
     turn_id = uuid4()
 
     with pytest.raises(RuntimeError, match="private-content-must-not-survive"):
@@ -251,7 +258,11 @@ async def test_timeout_and_privacy_denial_clear_every_graph_store(
     error_type: type[Exception],
 ) -> None:
     ports = _FailingPorts("generate", error_type=error_type)
-    engine = LangGraphConversationEngine(ports, context_provider=_ContextProvider())
+    engine = LangGraphConversationEngine(
+        ports,
+        context_provider=_ContextProvider(),
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    )
     turn_id = uuid4()
 
     with pytest.raises(error_type, match="private-content-must-not-survive"):
@@ -267,7 +278,11 @@ async def test_timeout_and_privacy_denial_clear_every_graph_store(
 @pytest.mark.asyncio
 async def test_cleanup_failures_use_fixed_codes_and_do_not_replace_primary_error() -> None:
     ports = _FailingPorts("generate", fail_finish=True)
-    engine = LangGraphConversationEngine(ports, context_provider=_ContextProvider())
+    engine = LangGraphConversationEngine(
+        ports,
+        context_provider=_ContextProvider(),
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    )
 
     def fail_before_clear(turn_id: UUID) -> None:
         del turn_id
@@ -299,7 +314,11 @@ async def test_checkpoint_delete_failure_uses_independent_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ports = _FailingPorts("generate")
-    engine = LangGraphConversationEngine(ports, context_provider=_ContextProvider())
+    engine = LangGraphConversationEngine(
+        ports,
+        context_provider=_ContextProvider(),
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    )
 
     async def fail_before_delete(thread_id: str) -> None:
         del thread_id
@@ -323,7 +342,11 @@ async def test_lifecycle_clear_failure_uses_independent_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ports = _FailingPorts("generate")
-    engine = LangGraphConversationEngine(ports, context_provider=_ContextProvider())
+    engine = LangGraphConversationEngine(
+        ports,
+        context_provider=_ContextProvider(),
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    )
 
     def fail_before_clear(turn_id: UUID) -> None:
         del turn_id

@@ -9,7 +9,11 @@ from tuntun_core.adapters.reachy.completed_audio import (
     CompletedAudioStream,
     PersistentTurnAudioClaims,
 )
-from tuntun_core.workflows.conversation import LinearConversationEngine, TurnRequest
+from tuntun_core.workflows.conversation import (
+    SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    LinearConversationEngine,
+    TurnRequest,
+)
 
 pytest_plugins = ("tests.fixtures.provider_routes",)
 
@@ -73,6 +77,7 @@ async def test_linear_engine_drops_ephemeral_audio_transcript_and_answer_sentine
     engine = LinearConversationEngine(
         _SentinelPorts(transcript, answer),
         allow_legacy_guest_identity=True,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
     )
 
     await engine.run(TurnRequest(turn_id=turn_id, wav_bytes=b"private-audio-sentinel"))

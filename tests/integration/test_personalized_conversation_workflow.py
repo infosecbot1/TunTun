@@ -22,7 +22,11 @@ from tuntun_core.services.personalized_turn_context import (
     TranscribedTurn,
     provider_messages_sha256,
 )
-from tuntun_core.workflows.conversation import LinearConversationEngine, TurnRequest
+from tuntun_core.workflows.conversation import (
+    SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    LinearConversationEngine,
+    TurnRequest,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -251,6 +255,7 @@ class _PersonalizedWorkflowCase:
         self.linear_engine = LinearConversationEngine(
             self.ports,
             context_provider=self.production_context_provider,
+            provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
         )
 
     @property

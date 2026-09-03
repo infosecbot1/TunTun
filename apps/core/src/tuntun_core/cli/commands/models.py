@@ -13,7 +13,7 @@ _REPOSITORY_ROOT = Path(__file__).parents[6]
 _REPOSITORY_MANIFEST = _REPOSITORY_ROOT / "models" / "manifest.yaml"
 _PACKAGED_MANIFEST = Path(__file__).parents[2] / "resources" / "model-manifest.yaml"
 _MODEL_ROOT = Path(user_data_path("Tuntun", appauthor=False)) / "models"
-_DOWNLOAD_HOSTS = frozenset({"huggingface.co"})
+_DOWNLOAD_HOSTS = frozenset({"alphacephei.com"})
 
 
 def _manifest_path() -> Path:
@@ -55,6 +55,8 @@ def verify() -> None:
     registry = _registry()
     verified: list[dict[str, object]] = []
     for entry in registry.models:
+        if not (_MODEL_ROOT / entry.model_id).is_dir():
+            continue
         activated = registry.activate(entry.model_id)
         try:
             if not activated.all_files_verified:

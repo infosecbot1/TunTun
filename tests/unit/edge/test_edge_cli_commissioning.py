@@ -17,8 +17,13 @@ def test_edge_cli_keeps_importable_typer_app_and_single_dispatcher() -> None:
     assert inspect.signature(main).parameters["argv"].default is None
     assert inspect.signature(main).return_annotation == "int"
     assert command.params == []
-    assert list(command.commands) == ["ptt", "reachy"]  # type: ignore[attr-defined]
+    assert list(command.commands) == ["ptt", "managed", "simulate-ptt", "reachy"]  # type: ignore[attr-defined]
     assert command.commands["ptt"].params == []  # type: ignore[attr-defined]
+    assert [param.name for param in command.commands["simulate-ptt"].params] == [  # type: ignore[attr-defined]
+        "turn_id",
+        "input_mode",
+        "capture_hex",
+    ]
     reachy = command.commands["reachy"]  # type: ignore[attr-defined]
     assert list(reachy.commands) == ["commission", "recommission"]
     assert reachy.commands["commission"].params == []

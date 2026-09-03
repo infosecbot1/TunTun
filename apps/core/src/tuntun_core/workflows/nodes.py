@@ -5,7 +5,11 @@ from typing import Any, cast
 from uuid import UUID
 
 from tuntun_core.services.personalized_turn_context import ProviderTurnContext
-from tuntun_core.workflows.conversation import WorkflowPorts
+from tuntun_core.workflows.conversation import (
+    ProviderEgressBoundary,
+    WorkflowPorts,
+    authorize_provider_egress,
+)
 from tuntun_core.workflows.ephemeral_turn_context import EphemeralTurnContext
 from tuntun_core.workflows.state import GraphPhase, GraphState
 from tuntun_core.workflows.turn_lifecycle import TurnLifecycleRegistry
@@ -52,6 +56,8 @@ def build_nodes(
     ephemeral: EphemeralTurnContext[dict[str, object]],
     lifecycle: TurnLifecycleRegistry,
     is_cancelled: Callable[[UUID], bool],
+    *,
+    provider_egress: ProviderEgressBoundary,
 ) -> dict[str, Node]:
     def enter(state: GraphState, phase: GraphPhase) -> GraphState:
         if state.cancelled or is_cancelled(state.turn_id):
@@ -112,6 +118,22 @@ def build_nodes(
                 context["answer"] = answer
         return state
 
+    async def authorize_provider_egress_node(state: GraphState) -> GraphState:
+        state = enter(state, "authorize_provider_egress")
+        if not state.cancelled:
+            context = ephemeral.get(state.turn_id)
+            provider_context = await _content_free_await(
+                context,
+                lambda: authorize_provider_egress(
+                    provider_egress,
+                    cast(ProviderTurnContext, context["provider_context"]),
+                ),
+            )
+            state = enter(state, "authorize_provider_egress")
+            if not state.cancelled:
+                context["provider_context"] = provider_context
+        return state
+
     async def synthesize(state: GraphState) -> GraphState:
         state = enter(state, "synthesize")
         if not state.cancelled:
@@ -151,6 +173,7 @@ def build_nodes(
         "authorize_recall": phase_only("authorize_recall"),
         "retrieve_context": phase_only("retrieve_context"),
         "sanitize_and_reserve": phase_only("sanitize_and_reserve"),
+        "authorize_provider_egress": authorize_provider_egress_node,
         "generate": generate,
         "validate": phase_only("validate"),
         "synthesize": synthesize,

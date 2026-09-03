@@ -253,6 +253,11 @@ async def test_production_container_installs_task1_facades_on_foundation_uow_fac
         assert production.task1_identity is not None
         assert production.task1_identity.uow_factory is async_uow_factory
         assert production.core.sqlcipher_uow_factory is async_uow_factory
+        identity_services = production.task1_identity.identity_services
+        assert identity_services.enrollments is not None
+        assert identity_services.enrollment_mutations is not None
+        assert identity_services.consent_evidence is not None
+        assert identity_services.consent_hmac_verifier is not None
         async with async_uow_factory() as uow:
             for facade_name in (
                 "profiles",
@@ -265,6 +270,8 @@ async def test_production_container_installs_task1_facades_on_foundation_uow_fac
                 "subject_revocation_effects",
                 "provider_calls",
                 "budget_reservations",
+                "enrollments",
+                "biometric_templates",
             ):
                 assert hasattr(uow, facade_name), facade_name
             await uow.rollback()

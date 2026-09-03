@@ -1365,6 +1365,16 @@ with Path(os.environ["TUNTUN_UV_LOG"]).open("a", encoding="utf-8") as handle:
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "current dependency ranges" in makefile
     assert "dependency_intent=" not in makefile
+    assert "migration_module.upgrade_encrypted" in makefile
+    assert "0003_biometric_template_enrollment_binding" in makefile
+    assert '"synthetic_template_id" in enrollment_columns' in makefile
+    assert '"enrollment_session_id" in template_columns' in makefile
+    core = tomllib.loads((ROOT / "apps/core/pyproject.toml").read_text(encoding="utf-8"))
+    force_include = core["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    assert force_include["migrations/versions/0003_biometric_template_enrollment_binding.py"] == (
+        "tuntun_core/_migration_assets/migrations/versions/"
+        "0003_biometric_template_enrollment_binding.py"
+    )
 
 
 def test_guard_is_active_before_a_failing_yaml_import_and_error_is_content_free(

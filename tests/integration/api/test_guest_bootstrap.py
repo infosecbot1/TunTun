@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -17,6 +18,10 @@ from tuntun_core.services.personalized_turn_context import ProviderTurnContext, 
 from tuntun_core.services.sessions.manager import SessionAdmission, SessionRejected
 from tuntun_core.services.sessions.manager import SessionManager as RealSessionManager
 from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
+from tuntun_core.workflows.conversation import (
+    SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    ProviderEgressAuthorizer,
+)
 from tuntun_testing.fake_clock import FakeClock
 
 
@@ -212,6 +217,100 @@ class _Profiles:
             depth="brief",
             learning_level="none",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _ConsentEvidence:
+    receipt_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderRouteDraft:
+    household_id: UUID
+    subject_id: UUID | None
+    session_id: UUID
+    required_consent_purposes: tuple[str, ...]
+    consent_receipt_ids: tuple[UUID, ...] = ()
+
+    def with_consent_receipt_ids(self, receipt_ids: tuple[UUID, ...]) -> _ProviderRouteDraft:
+        return replace(self, consent_receipt_ids=receipt_ids)
+
+    def to_route_authorization_request(self) -> _ProviderRouteDraft:
+        return self
+
+
+class _ProviderRouteDraftSource:
+    def __init__(self, draft: _ProviderRouteDraft) -> None:
+        self._draft = draft
+        self.contexts: list[ProviderTurnContext] = []
+
+    async def provider_route_draft(self, context: ProviderTurnContext) -> _ProviderRouteDraft:
+        self.contexts.append(context)
+        return self._draft
+
+
+class _ProviderConsentEvidence:
+    def __init__(self, receipt_id: UUID) -> None:
+        self.receipt_id = receipt_id
+        self.calls: list[tuple[UUID, UUID | None, UUID, tuple[str, ...], datetime]] = []
+
+    async def require(
+        self,
+        household_id: UUID,
+        subject_id: UUID | None,
+        session_id: UUID,
+        purposes: tuple[str, ...],
+        now: datetime,
+    ) -> tuple[_ConsentEvidence, ...]:
+        self.calls.append((household_id, subject_id, session_id, purposes, now))
+        return (_ConsentEvidence(self.receipt_id),)
+
+
+class _ProviderRouteAuthorizer:
+    def __init__(self, expected_receipt_id: UUID) -> None:
+        self.expected_receipt_id = expected_receipt_id
+        self.requests: list[_ProviderRouteDraft] = []
+
+    async def authorize(self, request: _ProviderRouteDraft) -> object:
+        self.requests.append(request)
+        if request.consent_receipt_ids != (self.expected_receipt_id,):
+            raise PermissionError("consent_required:cloud_reasoning")
+        return object()
+
+
+class _ProviderRouteAuthorizationBinder:
+    def __init__(self) -> None:
+        self.authorizations: list[object] = []
+
+    async def bind_route_authorization(
+        self,
+        context: ProviderTurnContext,
+        authorization: object,
+    ) -> ProviderTurnContext:
+        self.authorizations.append(authorization)
+        return context
+
+
+def _provider_egress(
+    *,
+    receipt_id: UUID | None = None,
+    expected_receipt_id: UUID | None = None,
+) -> ProviderEgressAuthorizer:
+    attached_receipt_id = receipt_id or uuid4()
+    return ProviderEgressAuthorizer(
+        route_drafts=_ProviderRouteDraftSource(
+            _ProviderRouteDraft(
+                household_id=uuid4(),
+                subject_id=uuid4(),
+                session_id=uuid4(),
+                required_consent_purposes=("cloud_reasoning",),
+            )
+        ),
+        consent_evidence=_ProviderConsentEvidence(attached_receipt_id),
+        route_authorizer=_ProviderRouteAuthorizer(expected_receipt_id or attached_receipt_id),
+        binder=_ProviderRouteAuthorizationBinder(),
+        clock=FakeClock(datetime(2026, 8, 27, tzinfo=UTC)),
+    )
 
 
 class _Lifecycle:
@@ -790,6 +889,7 @@ async def test_production_container_installs_single_guest_app_with_existing_root
         loopback_host="127.0.0.1",
         identity=_Identity(uuid4()),
         profiles=_Profiles(),
+        provider_egress=_provider_egress(),
         workflow_name=workflow_name,  # type: ignore[arg-type]
     )
 
@@ -844,7 +944,98 @@ async def test_production_container_installs_single_guest_app_with_existing_root
             loopback_host="127.0.0.1",
             identity=_Identity(uuid4()),
             profiles=_Profiles(),
+            provider_egress=_provider_egress(),
         )
+
+
+@pytest.mark.parametrize("provider_egress", (None, SYNTHETIC_NO_PROVIDER_TRANSPORT))
+def test_production_container_install_requires_provider_egress_authorizer(
+    provider_egress,
+) -> None:
+    reachy = _Reachy()
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    coordinator = TurnCoordinator(
+        budget=_Budget(),
+        reachy=reachy,
+        clock=clock,
+    )
+    session_manager = RealSessionManager(coordinator)
+    process_lease = object()
+    startup = _Startup(process_lease)
+    reconciler = object()
+    lifecycle = _Lifecycle(reconciler, startup)
+    container = ProductionContainer(
+        core=_Core(clock),  # type: ignore[arg-type]
+        core_process_lease=process_lease,  # type: ignore[arg-type]
+        budget_reconciler=reconciler,  # type: ignore[arg-type]
+        startup_turn_recovery=startup,  # type: ignore[arg-type]
+        budget_lifecycle=lifecycle,  # type: ignore[arg-type]
+        turn_coordinator=coordinator,
+        session_manager=session_manager,
+    )
+
+    with pytest.raises(TypeError, match="production provider egress authorizer required"):
+        container.install_simulated_guest_app(
+            ports=_Ports(),
+            completed_audio=_CompletedAudio(),
+            household_id=uuid4(),
+            device_id=uuid4(),
+            loopback_host="127.0.0.1",
+            identity=_Identity(uuid4()),
+            profiles=_Profiles(),
+            provider_egress=provider_egress,
+        )
+
+
+@pytest.mark.asyncio
+async def test_production_provider_egress_wrong_consent_cannot_reach_generate() -> None:
+    reachy = _Reachy()
+    clock = FakeClock(datetime(2026, 8, 27, tzinfo=UTC))
+    coordinator = TurnCoordinator(
+        budget=_Budget(),
+        reachy=reachy,
+        clock=clock,
+    )
+    session_manager = RealSessionManager(coordinator)
+    process_lease = object()
+    startup = _Startup(process_lease)
+    reconciler = object()
+    lifecycle = _Lifecycle(reconciler, startup)
+    container = ProductionContainer(
+        core=_Core(clock),  # type: ignore[arg-type]
+        core_process_lease=process_lease,  # type: ignore[arg-type]
+        budget_reconciler=reconciler,  # type: ignore[arg-type]
+        startup_turn_recovery=startup,  # type: ignore[arg-type]
+        budget_lifecycle=lifecycle,  # type: ignore[arg-type]
+        turn_coordinator=coordinator,
+        session_manager=session_manager,
+    )
+    ports = _Ports()
+    installed = container.install_simulated_guest_app(
+        ports=ports,
+        completed_audio=_CompletedAudio(),
+        household_id=uuid4(),
+        device_id=uuid4(),
+        loopback_host="127.0.0.1",
+        identity=_Identity(uuid4()),
+        profiles=_Profiles(),
+        provider_egress=_provider_egress(
+            receipt_id=uuid4(),
+            expected_receipt_id=uuid4(),
+        ),
+    )
+    transport = httpx.ASGITransport(
+        app=installed.composition.app,
+        client=("127.0.0.1", 42_000),
+    )
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/session/simulated-turn", json={})
+
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "denied"
+    assert "ports.generate" not in ports.events
+    assert reachy.stopped_turns
 
 
 @pytest.mark.asyncio
@@ -889,6 +1080,7 @@ async def test_production_api_language_prior_survives_turn_finish_until_explicit
         loopback_host="127.0.0.1",
         identity=_Identity(uuid4()),
         profiles=_Profiles(),
+        provider_egress=_provider_egress(),
     )
     first_context_session_id = installed.composition.dependencies.context_session_id
     transport = httpx.ASGITransport(

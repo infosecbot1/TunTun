@@ -4,7 +4,12 @@ import asyncio
 from uuid import UUID, uuid4
 
 import pytest
-from tuntun_core.workflows.conversation import LinearConversationEngine, TurnOutcome, TurnRequest
+from tuntun_core.workflows.conversation import (
+    SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    LinearConversationEngine,
+    TurnOutcome,
+    TurnRequest,
+)
 from tuntun_core.workflows.langgraph_adapter import LangGraphConversationEngine
 from tuntun_testing.scenario import guest_hinglish_scenario
 
@@ -16,10 +21,12 @@ async def test_langgraph_executes_same_effects_as_linear_and_clears_all_state() 
     linear = LinearConversationEngine(
         linear_case.ports,
         context_provider=linear_case.context_provider,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
     )
     graph = LangGraphConversationEngine(
         graph_case.ports,
         context_provider=graph_case.context_provider,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
     )
     linear_turn = uuid4()
     graph_turn = uuid4()
@@ -88,7 +95,11 @@ class _ContextProvider:
 @pytest.mark.asyncio
 async def test_external_cancellation_finishes_and_clears_graph_ephemeral_and_lifecycle() -> None:
     ports = _BlockingPorts()
-    engine = LangGraphConversationEngine(ports, context_provider=_ContextProvider())
+    engine = LangGraphConversationEngine(
+        ports,
+        context_provider=_ContextProvider(),
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    )
     turn_id = uuid4()
     running = asyncio.create_task(
         engine.run(TurnRequest(turn_id=turn_id, wav_bytes=b"private-audio"))
@@ -114,7 +125,11 @@ async def test_external_cancellation_finishes_and_clears_graph_ephemeral_and_lif
 @pytest.mark.asyncio
 async def test_repeated_cancellation_cannot_abandon_finish_or_store_cleanup() -> None:
     ports = _BlockingPorts(block_finish=True)
-    engine = LangGraphConversationEngine(ports, context_provider=_ContextProvider())
+    engine = LangGraphConversationEngine(
+        ports,
+        context_provider=_ContextProvider(),
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    )
     turn_id = uuid4()
     running = asyncio.create_task(
         engine.run(TurnRequest(turn_id=turn_id, wav_bytes=b"private-audio"))
@@ -140,7 +155,11 @@ async def test_repeated_cancellation_cannot_abandon_finish_or_store_cleanup() ->
 @pytest.mark.asyncio
 async def test_private_cancel_flag_blocks_late_content_effects_and_is_cleared() -> None:
     ports = _BlockingPorts()
-    engine = LangGraphConversationEngine(ports, context_provider=_ContextProvider())
+    engine = LangGraphConversationEngine(
+        ports,
+        context_provider=_ContextProvider(),
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
+    )
     turn_id = uuid4()
     running = asyncio.create_task(
         engine.run(TurnRequest(turn_id=turn_id, wav_bytes=b"private-audio"))
@@ -165,6 +184,7 @@ async def test_closed_result_gate_still_runs_start_and_finish_but_no_content_nod
     engine = LangGraphConversationEngine(
         case.ports,
         context_provider=case.context_provider,
+        provider_egress=SYNTHETIC_NO_PROVIDER_TRANSPORT,
         accepts_results=lambda _: False,
     )
 

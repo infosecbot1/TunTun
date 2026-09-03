@@ -9,14 +9,19 @@ from typing import cast
 from uuid import UUID, uuid4, uuid5
 
 import pytest
-import tuntun_core.services.identity.consent as consent_module
+import rfc8785
+from rfc8785._impl import _Value as Rfc8785Value
 from tuntun_contracts.actions import ActionBinding
 from tuntun_contracts.base import Commitment, Sensitivity, canonical_bytes
+from tuntun_contracts.commitments import commit_private
 from tuntun_contracts.policy import AssuranceLevel, AuthContext
 from tuntun_contracts.provider import RouteAuthorization
 from tuntun_core.adapters.keychain.provider import InMemorySecretProvider
 from tuntun_core.adapters.sqlcipher.async_unit_of_work import AsyncUnitOfWorkFactory
-from tuntun_core.adapters.sqlcipher.identity_repositories import SqlProviderCallsRevocationPort
+from tuntun_core.adapters.sqlcipher.identity_repositories import (
+    SqlProviderCallsRevocationPort,
+    _receipt_ids_blob,
+)
 from tuntun_core.adapters.sqlcipher.subject_revocation_effect_repository import (
     DownstreamEffectReceipt,
 )
@@ -26,9 +31,18 @@ from tuntun_core.bootstrap.container import (
     build_task1_identity_container,
     build_task1_sqlcipher_uow_factory,
 )
-from tuntun_core.domain.profile import ConsentPurpose, ConsentReceipt, Profile, ProfileClass
+from tuntun_core.domain.profile import (
+    ConsentPurpose,
+    ConsentReceipt,
+    Profile,
+    ProfileClass,
+    RevokeConsent,
+)
+from tuntun_core.services.actions.parameter_binding import consent_parameters
 from tuntun_core.services.audit.ledger import AsyncAuditLedger, AuditLedger
+from tuntun_core.services.identity.consent import _subject_consent_receipt_fields
 from tuntun_core.services.identity.runtime import (
+    HmacReceiptSigner,
     IdentityAuditLedger,
     PrivateCommitmentService,
     Task1ConsentRevocationAuditMapper,
@@ -729,6 +743,23 @@ async def test_biometric_consent_revocation_handler_revokes_live_face_authority_
     voice_template_id = UUID("00000000-0000-4000-8000-00000000b008")
     now = clock.now()
     later = now + timedelta(days=30)
+    receipt_signer = HmacReceiptSigner(keys.receipt.root_key, key_id=keys.receipt.key_id)
+    receipt_key_id, receipt_hmac = receipt_signer.sign_fields(
+        "subject_consent_receipt",
+        _subject_consent_receipt_fields(
+            household_id=household_id,
+            subject_id=subject_id,
+            purpose=ConsentPurpose.FACE,
+            actor_id=subject_id,
+            guardian_id=None,
+            guardian_generation=None,
+            granted=True,
+            policy_version="phase1-v1",
+            disclosure_version="phase1-disclosure-v1",
+            created_at=now,
+            expires_at=None,
+        ),
+    )
     with migrated_sqlcipher_engine.engine.begin() as connection:
         connection.exec_driver_sql(
             "INSERT INTO households(id,display_label_ciphertext,timezone,created_at) "
@@ -764,7 +795,7 @@ async def test_biometric_consent_revocation_handler_revokes_live_face_authority_
                 "adult",
                 b"profile-label-ciphertext-has-enough-bytes",
                 None,
-                b"[]",
+                _receipt_ids_blob((face_consent_id,)),
                 1,
                 1,
                 1,
@@ -804,8 +835,8 @@ async def test_biometric_consent_revocation_handler_revokes_live_face_authority_
                 1,
                 "phase1-v1",
                 "phase1-disclosure-v1",
-                keys.receipt.key_id,
-                b"h" * 32,
+                receipt_key_id,
+                receipt_hmac,
                 utc_storage(now),
             ),
         )
@@ -832,11 +863,12 @@ async def test_biometric_consent_revocation_handler_revokes_live_face_authority_
         ):
             connection.exec_driver_sql(
                 "INSERT INTO biometric_templates "
-                "(id,subject_id,modality,model_version,ciphertext,nonce,wrapped_dek,"
+                "(id,enrollment_session_id,subject_id,modality,model_version,ciphertext,nonce,wrapped_dek,"
                 "root_key_id,consent_receipt_id,created_at,expires_at,revoked_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
                 (
                     str(template_id),
+                    str(face_enrollment_id) if modality == "face" else None,
                     str(subject_id),
                     modality,
                     f"{modality}-model-v1",
@@ -849,51 +881,59 @@ async def test_biometric_consent_revocation_handler_revokes_live_face_authority_
                     utc_storage(later),
                 ),
             )
-    receipt = ConsentReceipt(
-        id=face_consent_id,
+    binding = ActionBinding(
         household_id=household_id,
+        proposal_id=uuid4(),
+        turn_id=uuid4(),
+        idempotency_key=uuid4(),
+        action_name="consent.revoke",
+        resource_type="consent",
+        resource_id=subject_id,
+        parameter_commitment=Commitment(
+            algorithm="HMAC-SHA-256",
+            key_id=keys.action_parameters.key_id,
+            value_b64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ),
+        policy_version="phase1-v1",
+        session_id=session_id,
+        subject_id=subject_id,
+    )
+    command = RevokeConsent(
         subject_id=subject_id,
         actor_id=subject_id,
-        guardian_id=None,
-        guardian_generation=None,
         purpose=ConsentPurpose.FACE,
-        granted=False,
+        expected_latest_receipt_id=face_consent_id,
+        guardian_generation=None,
         policy_version="phase1-v1",
         disclosure_version="phase1-disclosure-v1",
-        commitment_key_id=keys.receipt.key_id,
-        receipt_hmac=b"h" * 32,
-        created_at=now,
-        expires_at=now,
+        action_binding=binding,
+    )
+    bound_command = command.model_copy(
+        update={
+            "action_binding": binding.model_copy(
+                update={
+                    "parameter_commitment": commit_private(
+                        keys.action_parameters.root_key,
+                        keys.action_parameters.key_id,
+                        "action.parameters",
+                        rfc8785.dumps(cast(Rfc8785Value, consent_parameters(command))),
+                    )
+                }
+            )
+        }
     )
     auth = AuthContext(
         grant_id=uuid4(),
         subject_id=subject_id,
-        binding=ActionBinding(
-            household_id=household_id,
-            proposal_id=uuid4(),
-            turn_id=uuid4(),
-            idempotency_key=uuid4(),
-            action_name="consent.revoke",
-            resource_type="consent",
-            resource_id=subject_id,
-            parameter_commitment=Commitment(
-                algorithm="HMAC-SHA-256",
-                key_id=keys.action_parameters.key_id,
-                value_b64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            ),
-            policy_version="phase1-v1",
-            session_id=session_id,
-            subject_id=subject_id,
-        ),
+        binding=bound_command.action_binding,
         assurance=AssuranceLevel.PASSKEY_VERIFIED,
         assurance_source="passkey",
         consumed_at=now,
     )
-    handler = consent_module.BiometricConsentRevocationHandler()
+    container = build_task1_identity_container(uow_factory, clock, keys)
 
-    async with uow_factory() as uow:
-        await handler.apply_in_uow(cast(IdentityUnitOfWork, uow), receipt, auth, now)
-        await uow.commit()
+    revoked = await container.identity_services.consents.revoke(bound_command, auth)
+    revocation_time = revoked.created_at
 
     with migrated_sqlcipher_engine.engine.connect() as connection:
         speaker_subject_id, last_activity_at = connection.exec_driver_sql(
@@ -912,12 +952,19 @@ async def test_biometric_consent_revocation_handler_revokes_live_face_authority_
             "SELECT revoked_at,expires_at FROM biometric_templates WHERE id=?",
             (str(voice_template_id),),
         ).one()
+        erasure_audit_count = sum(
+            json.loads(str(body))["action_code"] == "identity.biometric_template.erasure_requested"
+            for (body,) in connection.exec_driver_sql(
+                "SELECT canonical_body_json FROM audit_receipts",
+            ).all()
+        )
 
     assert speaker_subject_id is None
-    assert last_activity_at == utc_storage(now)
-    assert (face_state, face_closed_at) == ("cancelled", utc_storage(now))
-    assert face_template == (utc_storage(now), utc_storage(now))
+    assert last_activity_at == utc_storage(revocation_time)
+    assert (face_state, face_closed_at) == ("cancelled", utc_storage(revocation_time))
+    assert face_template == (utc_storage(revocation_time), utc_storage(revocation_time))
     assert voice_template == (None, utc_storage(later))
+    assert erasure_audit_count == 1
 
 
 def test_absent_search_build_uses_closed_concrete_no_authority_handler(
@@ -1514,11 +1561,12 @@ async def test_transactional_revocation_handlers_mutate_real_authority_rows_and_
         )
         connection.exec_driver_sql(
             "INSERT INTO biometric_templates "
-            "(id,subject_id,modality,model_version,ciphertext,nonce,wrapped_dek,root_key_id,"
-            "consent_receipt_id,created_at,expires_at,revoked_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,NULL,NULL)",
+            "(id,enrollment_session_id,subject_id,modality,model_version,ciphertext,nonce,"
+            "wrapped_dek,root_key_id,consent_receipt_id,created_at,expires_at,revoked_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)",
             (
                 str(UUID("00000000-0000-4000-8000-000000000116")),
+                str(UUID("00000000-0000-4000-8000-000000000114")),
                 str(subject_id),
                 "face",
                 "face-v1",

@@ -26,7 +26,9 @@ from tuntun_core.services.actions.parameter_binding import (
     ActionParameterBindingVerifier,
     consent_parameters,
 )
-from tuntun_core.services.storage_time import utc_storage
+from tuntun_core.services.identity.revocation_handlers import (
+    BiometricConsentRevocationHandler as BiometricConsentRevocationHandler,
+)
 from tuntun_core.services.transactions.identity_uow import (
     IdentityUnitOfWork,
     IdentityUnitOfWorkFactory,
@@ -553,56 +555,6 @@ class CloudRouteConsentRevocationHandler:
             receipt.subject_id,
             receipt.purpose.value,
             now,
-        )
-
-
-class BiometricConsentRevocationHandler:
-    """Close live biometric authority for FACE/VOICE consent revocation."""
-
-    _MODALITIES = {
-        ConsentPurpose.FACE: "face",
-        ConsentPurpose.VOICE: "voice",
-    }
-
-    async def apply_in_uow(
-        self,
-        uow: IdentityUnitOfWork,
-        receipt: ConsentReceipt,
-        auth: AuthContext,
-        now: datetime,
-    ) -> None:
-        del auth
-        modality = self._MODALITIES.get(receipt.purpose)
-        if modality is None:
-            raise RuntimeError("biometric_consent_revocation_purpose_mismatch")
-        await uow.sessions.invalidate_identity_subject(
-            receipt.subject_id,
-            f"{modality}_consent_revoked",
-            now,
-        )
-        stored_now = utc_storage(now)
-        await uow.run_sync(
-            lambda transaction: (
-                transaction.exec_driver_sql(
-                    "UPDATE enrollment_sessions SET state='cancelled',closed_at=? "
-                    "WHERE subject_id=? AND modality=? AND closed_at IS NULL "
-                    "AND state IN ('requested','capturing','calibrating')",
-                    (stored_now, str(receipt.subject_id), modality),
-                ).rowcount,
-                transaction.exec_driver_sql(
-                    "UPDATE biometric_templates SET revoked_at=?,"
-                    "expires_at=CASE WHEN expires_at IS NULL OR expires_at>? "
-                    "THEN ? ELSE expires_at END "
-                    "WHERE subject_id=? AND modality=? AND revoked_at IS NULL",
-                    (
-                        stored_now,
-                        stored_now,
-                        stored_now,
-                        str(receipt.subject_id),
-                        modality,
-                    ),
-                ).rowcount,
-            )
         )
 
 

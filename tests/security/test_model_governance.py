@@ -16,10 +16,12 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
+import yaml
 from jsonschema import Draft202012Validator
 from model_governance_cases import EXPECTED_BYTES, EXPECTED_SHA256, ScriptedModelTransport
 from tuntun_core.cli.commands import models as models_command
@@ -811,6 +813,46 @@ def test_runtime_loader_receipt_is_authenticated_and_exact_bound(
     with pytest.raises(ModelVerificationError, match="runtime model receipt mismatch"):
         activated.load_with(runtime_adapter, runtime_receipt_verifier)
     assert runtime_adapter.open_duplicate_fd_count == 0  # type: ignore[attr-defined]
+    assert runtime_adapter.abort_calls == 1  # type: ignore[attr-defined]
+
+
+def test_archive_backed_model_runtime_load_fails_closed_without_bounded_archive_adapter(
+    governed_model_case: object,
+    runtime_adapter: object,
+    runtime_receipt_verifier: object,
+) -> None:
+    document = yaml.safe_load(
+        governed_model_case.manifest.read_text(encoding="utf-8")  # type: ignore[attr-defined]
+    )
+    archive_model_id = "vosk-small-en-us-0.15"
+    entry = document["models"][0]
+    entry["id"] = archive_model_id
+    entry["approved_purpose"] = "offline_command"
+    entry["runtime"] = "vosk==0.3.44"
+    entry["runtime_max_bytes"] = 256_000_000
+    entry["architecture"] = "Vosk/Kaldi small-model ZIP archive"
+    entry["input_contract"] = "PCM16 mono post-wake bytes"
+    entry["output_contract"] = "bounded offline command transcript"
+    entry["benchmark_gate"] = "tests/unit/offline/test_local_asr.py"
+    entry["files"][0]["path"] = "vosk-model-small-en-us-0.15.zip"
+    entry["files"][0]["url"] = "https://models.example.test/vosk-model-small-en-us-0.15.zip"
+    governed_model_case.manifest.write_text(  # type: ignore[attr-defined]
+        yaml.safe_dump(document, sort_keys=False),
+        encoding="utf-8",
+    )
+    governed_model_case.manifest.chmod(0o600)  # type: ignore[attr-defined]
+
+    activated = governed_model_case._installer().install(archive_model_id)  # type: ignore[attr-defined]
+
+    try:
+        with pytest.raises(ModelVerificationError, match="bounded archive runtime"):
+            activated.load_with(runtime_adapter, runtime_receipt_verifier)
+    finally:
+        activated.close()
+
+    assert runtime_adapter.open_duplicate_fd_count == 0  # type: ignore[attr-defined]
+    assert runtime_adapter.pending_runtime_count == 0  # type: ignore[attr-defined]
+    assert runtime_adapter.published_runtime_count == 0  # type: ignore[attr-defined]
     assert runtime_adapter.abort_calls == 1  # type: ignore[attr-defined]
 
 
@@ -5401,7 +5443,150 @@ def test_non_install_model_cli_commands_never_open_network(
     monkeypatch.setattr(socket, "socket", blocked_socket)
     result = CliRunner().invoke(app, ["models", *command])
     assert result.exit_code == 0, result.output
-    assert result.stdout == "[]\n"
+    payload = json.loads(result.stdout)
+    if command == ("list",):
+        assert payload == [
+            {
+                "id": "vosk-small-en-us-0.15",
+                "revision": "30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498",
+                "runtime": "vosk==0.3.44",
+                "files": [
+                    {
+                        "path": "vosk-model-small-en-us-0.15.zip",
+                        "size": 41205931,
+                        "sha256": (
+                            "30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498"
+                        ),
+                    }
+                ],
+            },
+            {
+                "id": "vosk-small-hi-0.22",
+                "revision": "7c50a10866889f0ac21d912c20537a055a597ed09fc1d3e5bcd798f9f0017e48",
+                "runtime": "vosk==0.3.44",
+                "files": [
+                    {
+                        "path": "vosk-model-small-hi-0.22.zip",
+                        "size": 44458845,
+                        "sha256": (
+                            "7c50a10866889f0ac21d912c20537a055a597ed09fc1d3e5bcd798f9f0017e48"
+                        ),
+                    }
+                ],
+            },
+        ]
+    else:
+        assert payload == []
+
+
+@pytest.mark.parametrize(
+    ("repository_manifest_exists", "model_id"),
+    (
+        (True, "vosk-small-en-us-0.15"),
+        (False, "vosk-small-hi-0.22"),
+    ),
+    ids=("repository-manifest", "packaged-manifest"),
+)
+def test_model_install_cli_uses_exact_alphacephei_allowlist_for_root_and_packaged_manifests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    repository_manifest_exists: bool,
+    model_id: str,
+) -> None:
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_bytes(Path("models/manifest.yaml").read_bytes())
+    missing_manifest = tmp_path / "missing.yaml"
+    model_root = tmp_path / "models"
+    calls: list[tuple[str, frozenset[str], str, Path]] = []
+
+    class _Activated:
+        all_files_verified = True
+
+        def close(self) -> None:
+            return None
+
+    class _InstallProbe:
+        def __init__(self, registry: ModelRegistry, allowed_hosts: frozenset[str]) -> None:
+            self._registry = registry
+            self._allowed_hosts = frozenset(allowed_hosts)
+
+        def install(self, requested_model_id: str) -> _Activated:
+            entry = self._registry.entry(requested_model_id)
+            assert len(entry.files) == 1
+            expected_url = f"https://alphacephei.com/vosk/models/{entry.files[0].path}"
+            if self._allowed_hosts != frozenset({"alphacephei.com"}):
+                raise RuntimeError("model download allowlist mismatch")
+            if entry.files[0].url != expected_url:
+                raise RuntimeError("model download URL mismatch")
+            calls.append(
+                (
+                    requested_model_id,
+                    self._allowed_hosts,
+                    entry.files[0].url,
+                    self._registry._root,
+                )
+            )
+            return _Activated()
+
+    monkeypatch.setattr(
+        models_command,
+        "_REPOSITORY_MANIFEST",
+        manifest if repository_manifest_exists else missing_manifest,
+    )
+    monkeypatch.setattr(
+        models_command,
+        "_PACKAGED_MANIFEST",
+        missing_manifest if repository_manifest_exists else manifest,
+    )
+    monkeypatch.setattr(models_command, "_MODEL_ROOT", model_root)
+    monkeypatch.setattr(models_command, "ModelInstaller", _InstallProbe)
+
+    result = CliRunner().invoke(app, ["models", "install", model_id, "--approve"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["id"] == model_id
+    assert calls == [
+        (
+            model_id,
+            frozenset({"alphacephei.com"}),
+            f"https://alphacephei.com/vosk/models/vosk-model-{model_id.removeprefix('vosk-')}.zip",
+            model_root,
+        )
+    ]
+
+
+def test_manifest_schema_rejects_zip_backed_offline_asr_with_extra_file() -> None:
+    document = json.loads(json.dumps({"schema_version": "1.0", "models": []}))
+    entry = yaml.safe_load(Path("models/manifest.yaml").read_text(encoding="utf-8"))["models"][0]
+    entry["files"].append(
+        {
+            "path": "metadata.json",
+            "size": 2,
+            "sha256": "0" * 64,
+            "url": "https://alphacephei.com/vosk/models/metadata.json",
+        }
+    )
+    document["models"] = [entry]
+
+    assert _schema_errors(document)
+
+
+def test_manifest_schema_rejects_zip_backed_offline_asr_runtime_bound_drift() -> None:
+    document = yaml.safe_load(Path("models/manifest.yaml").read_text(encoding="utf-8"))
+    document["models"][0]["runtime_max_bytes"] = 123_456_789
+
+    assert _schema_errors(document)
+
+
+def test_vosk_runtime_lock_contains_macos_universal2_wheel() -> None:
+    lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
+    packages = tuple(package for package in lock["package"] if package["name"] == "vosk")
+
+    assert len(packages) == 1
+    assert packages[0]["version"] == "0.3.44"
+    wheel_urls = tuple(wheel["url"] for wheel in packages[0]["wheels"])
+    assert any("macosx_10_6_universal2" in url for url in wheel_urls)
+    assert all("0.3.45" not in url for url in wheel_urls)
 
 
 def test_installed_cli_uses_the_packaged_governed_manifest(

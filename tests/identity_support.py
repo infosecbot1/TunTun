@@ -28,6 +28,7 @@ from tuntun_contracts.base import Commitment
 from tuntun_contracts.commitments import commit_private
 from tuntun_contracts.identity import PersonaTraits
 from tuntun_contracts.policy import AssuranceLevel, AuthContext, CurrentOwnerAuthority
+from tuntun_contracts.provider import RouteAuthorizationRequest, Sensitivity
 from tuntun_core.adapters.sqlcipher.async_unit_of_work import AsyncUnitOfWorkFactory
 from tuntun_core.adapters.sqlcipher.foundation_0001 import FOUNDATION_0001_METADATA
 from tuntun_core.adapters.sqlcipher.subject_revocation_effect_repository import (
@@ -46,15 +47,20 @@ from tuntun_core.bootstrap.container import (
     build_task1_sqlcipher_uow_factory,
 )
 from tuntun_core.domain.profile import (
+    BiometricTemplate,
+    CancelEnrollment,
     ConsentPurpose,
     ConsentReceipt,
     CreateProfile,
+    EnrollmentSession,
     GrantConsent,
     GuestConsentPurpose,
     GuestDisclosureChallenge,
     GuestSessionConsentReceipt,
+    Modality,
     Profile,
     ProfileClass,
+    RequestEnrollment,
     RevokeConsent,
     RevokeProfile,
     UpdatePersonaTraits,
@@ -63,6 +69,8 @@ from tuntun_core.services.actions.parameter_binding import (
     ActionBindingVerifier,
     ActionParameterBindingVerifier,
     consent_parameters,
+    enrollment_cancel_parameters,
+    enrollment_request_parameters,
     profile_create_parameters,
     profile_persona_parameters,
     profile_revoke_parameters,
@@ -78,10 +86,17 @@ from tuntun_core.services.identity.consent import (
 from tuntun_core.services.identity.consent import (
     MutationScopePort as ConsentMutationScopePort,
 )
+from tuntun_core.services.identity.enrollment import (
+    EnrollmentMutationCoordinator,
+    EnrollmentService,
+)
 from tuntun_core.services.identity.profiles import (
     MutationScopePort as ProfileMutationScopePort,
 )
 from tuntun_core.services.identity.profiles import ProfileCrypto, ProfileService
+from tuntun_core.services.identity.revocation_handlers import (
+    BiometricConsentRevocationHandler as EnrollmentBiometricConsentRevocationHandler,
+)
 from tuntun_core.services.identity.runtime import (
     Task1IdentityKeyBundle,
     Task1IdentityKeyMaterial,
@@ -105,6 +120,8 @@ from tuntun_core.services.identity.subject_revocation_processor import (
     SubjectRevocationProcessingReceipt,
     SubjectRevocationProcessor,
 )
+from tuntun_core.services.providers.consent_guard import ConsentHmacVerifier
+from tuntun_core.services.providers.route_verifier import authorization_from_request
 from tuntun_core.services.storage_time import utc_storage
 from tuntun_core.services.transactions.identity_uow import (
     IdentityUnitOfWork,
@@ -214,8 +231,8 @@ class FakeClock:
     def monotonic(self) -> float:
         return self._now.timestamp()
 
-    def advance(self, *, seconds: int) -> None:
-        self._now = self._now + timedelta(seconds=seconds)
+    def advance(self, *, seconds: int = 0, days: int = 0) -> None:
+        self._now = self._now + timedelta(days=days, seconds=seconds)
         self._flush_waiters()
 
     async def advance_and_flush(self, *, seconds: int) -> None:
@@ -351,6 +368,10 @@ class IdentityStoreSnapshot(TypedDict):
     profiles: dict[UUID, Profile]
     persisted_subject_ids: set[UUID]
     consents: list[ConsentReceipt]
+    enrollments: dict[UUID, EnrollmentSession]
+    biometric_templates: dict[UUID, BiometricTemplate]
+    sessions: dict[UUID, FakeSession]
+    disclosure_receipts: dict[UUID, DisclosureReceipt]
     guest_challenges: dict[UUID, GuestDisclosureChallenge]
     guest_receipts: list[GuestSessionConsentReceipt]
     invalidated: dict[UUID, set[str]]
@@ -372,6 +393,8 @@ class InMemoryIdentityStore:
         self.profiles: dict[UUID, Profile] = {}
         self.persisted_subject_ids: set[UUID] = set()
         self.consents: list[ConsentReceipt] = []
+        self.enrollments: dict[UUID, EnrollmentSession] = {}
+        self.biometric_templates: dict[UUID, BiometricTemplate] = {}
         self.sessions: dict[UUID, FakeSession] = {}
         self.disclosure_receipts: dict[UUID, DisclosureReceipt] = {}
         self.guest_challenges: dict[UUID, GuestDisclosureChallenge] = {}
@@ -390,6 +413,8 @@ class InMemoryIdentityStore:
         self.auth = FakeAuthentication(self)
         self.profile_repo = FakeProfileRepository(self)
         self.consent_repo = FakeConsentRepository(self)
+        self.enrollment_repo = FakeEnrollmentRepository(self)
+        self.biometric_template_repo = FakeBiometricTemplateRepository(self)
         self.guest_challenge_repo = FakeGuestDisclosureChallengeRepository(self)
         self.guest_consent_repo = FakeGuestSessionConsentRepository(self)
         self.session_repo = FakeSessionRepository(self)
@@ -405,7 +430,15 @@ class InMemoryIdentityStore:
             key_id="test-action-key",
         )
         self.binding_verifier = ActionBindingVerifier()
-        self.consent_revocations = ConsentRevocationCascade({}, self.audit_mapper, self.audit)
+        biometric_revocation = EnrollmentBiometricConsentRevocationHandler(self.audit)
+        self.consent_revocations = ConsentRevocationCascade(
+            {
+                ConsentPurpose.FACE: biometric_revocation,
+                ConsentPurpose.VOICE: biometric_revocation,
+            },
+            self.audit_mapper,
+            self.audit,
+        )
         identity_uow_factory = cast(IdentityUnitOfWorkFactory, self.uow_factory)
         consent_scope = cast(ConsentMutationScopePort, self.scope)
         profile_scope = cast(ProfileMutationScopePort, self.scope)
@@ -417,6 +450,15 @@ class InMemoryIdentityStore:
             self.parameter_verifier,
             self.binding_verifier,
             self.consent_revocations,
+            self.clock,
+        )
+        self.enrollment_service = EnrollmentService(
+            identity_uow_factory,
+            consent_scope,
+            self.consent_service,
+            self.parameter_verifier,
+            self.binding_verifier,
+            self.audit,
             self.clock,
         )
         self.subject_revocation_cascade = SubjectAuthorityRevocationCascade(
@@ -443,6 +485,12 @@ class InMemoryIdentityStore:
             self.profile_service,
             self.consent_service,
         )
+        self.enrollment_mutations = EnrollmentMutationCoordinator(
+            consent_scope,
+            cast(AuthenticationPort, self.auth),
+            self.enrollment_service,
+        )
+        self.route_authorizer = InMemoryRouteAuthorizer(self)
         self.profile_factory = ProfileFactory(self)
         self.owner = self.profile_factory(ProfileClass.OWNER, name="owner")
         self.current_owner_subject_id = self.owner.id
@@ -462,6 +510,10 @@ class InMemoryIdentityStore:
             "profiles": copy.deepcopy(self.profiles),
             "persisted_subject_ids": copy.deepcopy(self.persisted_subject_ids),
             "consents": copy.deepcopy(self.consents),
+            "enrollments": copy.deepcopy(self.enrollments),
+            "biometric_templates": copy.deepcopy(self.biometric_templates),
+            "sessions": copy.deepcopy(self.sessions),
+            "disclosure_receipts": copy.deepcopy(self.disclosure_receipts),
             "guest_challenges": copy.deepcopy(self.guest_challenges),
             "guest_receipts": copy.deepcopy(self.guest_receipts),
             "invalidated": copy.deepcopy(self.invalidated),
@@ -477,6 +529,10 @@ class InMemoryIdentityStore:
         self.profiles = copy.deepcopy(snapshot["profiles"])
         self.persisted_subject_ids = copy.deepcopy(snapshot["persisted_subject_ids"])
         self.consents = copy.deepcopy(snapshot["consents"])
+        self.enrollments = copy.deepcopy(snapshot["enrollments"])
+        self.biometric_templates = copy.deepcopy(snapshot["biometric_templates"])
+        self.sessions = copy.deepcopy(snapshot["sessions"])
+        self.disclosure_receipts = copy.deepcopy(snapshot["disclosure_receipts"])
         self.guest_challenges = copy.deepcopy(snapshot["guest_challenges"])
         self.guest_receipts = copy.deepcopy(snapshot["guest_receipts"])
         self.invalidated = copy.deepcopy(snapshot["invalidated"])
@@ -487,17 +543,23 @@ class InMemoryIdentityStore:
         self.current_owner_subject_id = snapshot["current_owner_subject_id"]
         self.current_owner_generation = snapshot["current_owner_generation"]
 
-    def install_personalization(self, profile: Profile, actor_id: UUID) -> ConsentReceipt:
+    def install_consent(
+        self,
+        profile: Profile,
+        actor_id: UUID,
+        purpose: ConsentPurpose,
+        *,
+        expires_at: datetime | None = None,
+    ) -> ConsentReceipt:
         guardian_id = (
             actor_id if profile.profile_class in {ProfileClass.K2, ProfileClass.N1} else None
         )
         guardian_generation = profile.guardian_generation if guardian_id is not None else None
         now = self.clock.now()
-        expires_at = None
         fields = (
             profile.household_id,
             profile.id,
-            ConsentPurpose.PERSONALIZATION,
+            purpose,
             actor_id,
             guardian_id,
             guardian_generation,
@@ -515,7 +577,7 @@ class InMemoryIdentityStore:
             actor_id=actor_id,
             guardian_id=guardian_id,
             guardian_generation=guardian_generation,
-            purpose=ConsentPurpose.PERSONALIZATION,
+            purpose=purpose,
             granted=True,
             policy_version="phase1-v1",
             disclosure_version="phase1-disclosure-v1",
@@ -527,6 +589,9 @@ class InMemoryIdentityStore:
         self.consents.append(receipt)
         self._install_current_consent_pointer(profile, receipt)
         return receipt
+
+    def install_personalization(self, profile: Profile, actor_id: UUID) -> ConsentReceipt:
+        return self.install_consent(profile, actor_id, ConsentPurpose.PERSONALIZATION)
 
     def _install_current_consent_pointer(
         self,
@@ -589,6 +654,8 @@ class FakeUow:
         self.scope = scope
         self.profiles = store.profile_repo
         self.consent_receipts = store.consent_repo
+        self.enrollments = store.enrollment_repo
+        self.biometric_templates = store.biometric_template_repo
         self.guest_disclosure_challenges = store.guest_challenge_repo
         self.guest_session_consents = store.guest_consent_repo
         self.sessions = store.session_repo
@@ -721,6 +788,34 @@ def _audit(action_code: str, auth: AuthContext, *, event_id: UUID | None = None)
     )
 
 
+def _system_auth(household_id: UUID | None, now: datetime) -> AuthContext:
+    actor_id = _uuid("system-actor")
+    return AuthContext(
+        grant_id=uuid4(),
+        subject_id=actor_id,
+        binding=ActionBinding(
+            household_id=household_id or _uuid("system-household"),
+            proposal_id=uuid4(),
+            turn_id=uuid4(),
+            idempotency_key=uuid4(),
+            action_name="system.status",
+            resource_type="system",
+            resource_id=None,
+            parameter_commitment=Commitment(
+                algorithm="HMAC-SHA-256",
+                key_id="system-audit",
+                value_b64=base64.b64encode(b"0" * 32).decode("ascii"),
+            ),
+            policy_version="phase1-v1",
+            session_id=uuid4(),
+            subject_id=actor_id,
+        ),
+        assurance=AssuranceLevel.CONFIRMED,
+        assurance_source="explicit_confirmation",
+        consumed_at=now,
+    )
+
+
 class FakeProfileRepository:
     def __init__(self, store: InMemoryIdentityStore) -> None:
         self.store = store
@@ -761,6 +856,36 @@ class FakeProfileRepository:
         if profile is None or profile.household_id != household_id:
             return None
         return profile
+
+    async def list_children_due_for_reenrollment_reminder(
+        self,
+        household_id: UUID,
+        now: datetime,
+    ) -> tuple[Profile, ...]:
+        self.read_count += 1
+        return tuple(
+            profile
+            for profile in sorted(
+                self.store.profiles.values(),
+                key=lambda item: (
+                    item.next_reenrollment_reminder_at or datetime.max.replace(tzinfo=UTC),
+                    item.id,
+                ),
+            )
+            if profile.household_id == household_id
+            and profile.active
+            and profile.revoked_at is None
+            and profile.profile_class in {ProfileClass.K2, ProfileClass.N1}
+            and profile.next_reenrollment_reminder_at is not None
+            and profile.next_reenrollment_reminder_at <= now
+        )
+
+    async def disable_biometric_identity(self, subject_id: UUID, now: datetime) -> None:
+        self.write_count += 1
+        profile = self.store.profiles[subject_id]
+        self.store.profiles[subject_id] = profile.model_copy(
+            update={"next_reenrollment_reminder_at": None, "updated_at": now}
+        )
 
     async def require_current_owner_guardian_generation(
         self,
@@ -1023,6 +1148,352 @@ class FakeConsentRepository:
             if item.subject_id == subject_id and item.purpose is purpose
         ]
         return max(matches, key=lambda item: item.created_at) if matches else None
+
+
+class FakeEnrollmentRepository:
+    def __init__(self, store: InMemoryIdentityStore) -> None:
+        self.store = store
+        self.read_count = 0
+        self.write_count = 0
+
+    def bump_profile_version(self, subject_id: UUID) -> None:
+        profile = self.store.profiles[subject_id]
+        self.store.profiles[subject_id] = profile.model_copy(
+            update={"version": profile.version + 1}
+        )
+
+    def force_calibrating_for_test(self, enrollment_id: UUID) -> EnrollmentSession:
+        session = self.store.enrollments[enrollment_id]
+        if session.closed_at is not None:
+            raise RuntimeError("enrollment_calibration_transition_lost_ownership")
+        if session.state == "requested":
+            session = session.model_copy(update={"state": "capturing"})
+            self.store.enrollments[enrollment_id] = session
+        if session.state != "capturing":
+            raise RuntimeError("enrollment_calibration_transition_lost_ownership")
+        calibrated = session.model_copy(update={"state": "calibrating"})
+        self.store.enrollments[enrollment_id] = calibrated
+        return calibrated
+
+    async def create(
+        self,
+        command: RequestEnrollment,
+        auth: AuthContext,
+        *,
+        household_id: UUID,
+        consent_receipt_id: UUID,
+        subject_is_child: bool,
+        now: datetime,
+        expires_at: datetime,
+        synthetic_template_id: UUID,
+    ) -> EnrollmentSession:
+        self.write_count += 1
+        if auth.grant_id is None:
+            raise RuntimeError("enrollment_auth_receipt_required")
+        session = EnrollmentSession(
+            id=uuid4(),
+            household_id=household_id,
+            subject_id=command.subject_id,
+            modality=command.modality,
+            state="requested",
+            consent_receipt_id=consent_receipt_id,
+            reenrollment_days=command.reenrollment_days,
+            subject_is_child=subject_is_child,
+            synthetic_template_id=synthetic_template_id,
+            created_at=now,
+            expires_at=expires_at,
+            closed_at=None,
+            next_reenrollment_reminder_at=None,
+            biometric_hard_expires_at=None,
+        )
+        self.store.enrollments[session.id] = session
+        return session
+
+    async def require_for_update(self, enrollment_id: UUID) -> EnrollmentSession:
+        self.read_count += 1
+        return self.store.enrollments[enrollment_id]
+
+    async def require_state(
+        self,
+        enrollment_id: UUID,
+        states: str | tuple[str, ...],
+    ) -> EnrollmentSession:
+        allowed = (states,) if type(states) is str else states
+        session = await self.require_for_update(enrollment_id)
+        if session.state not in allowed:
+            raise RuntimeError("enrollment_state_mismatch")
+        return session
+
+    async def begin_capture(self, enrollment_id: UUID, now: datetime) -> EnrollmentSession:
+        del now
+        self.write_count += 1
+        session = self.store.enrollments[enrollment_id]
+        if session.closed_at is not None or session.state != "requested":
+            raise RuntimeError("enrollment_capture_transition_lost_ownership")
+        if session.synthetic_template_id is None:
+            raise RuntimeError("enrollment_expected_template_required")
+        capturing = session.model_copy(update={"state": "capturing"})
+        self.store.enrollments[enrollment_id] = capturing
+        return capturing
+
+    async def mark_calibrating(self, enrollment_id: UUID, now: datetime) -> EnrollmentSession:
+        del now
+        self.write_count += 1
+        session = self.store.enrollments[enrollment_id]
+        if session.closed_at is not None or session.state != "capturing":
+            raise RuntimeError("enrollment_calibration_transition_lost_ownership")
+        if session.synthetic_template_id is None:
+            raise RuntimeError("enrollment_expected_template_required")
+        calibrated = session.model_copy(update={"state": "calibrating"})
+        self.store.enrollments[enrollment_id] = calibrated
+        return calibrated
+
+    async def cancel_pending(self, enrollment_id: UUID, now: datetime) -> EnrollmentSession:
+        self.write_count += 1
+        session = self.store.enrollments[enrollment_id]
+        if session.closed_at is not None or session.state not in (
+            "requested",
+            "capturing",
+            "calibrating",
+        ):
+            raise RuntimeError("enrollment_cancel_lost_ownership")
+        cancelled = session.model_copy(update={"state": "cancelled", "closed_at": now})
+        self.store.enrollments[enrollment_id] = cancelled
+        return cancelled
+
+    async def approve(
+        self,
+        enrollment_id: UUID,
+        template_ids: tuple[UUID, ...],
+        reminder_at: datetime | None,
+        hard_expires_at: datetime | None,
+        now: datetime,
+    ) -> EnrollmentSession:
+        self.write_count += 1
+        session = self.store.enrollments[enrollment_id]
+        if session.closed_at is not None or session.state != "calibrating":
+            raise RuntimeError("enrollment_approval_lost_ownership")
+        if session.synthetic_template_id is None or template_ids != (
+            session.synthetic_template_id,
+        ):
+            raise RuntimeError("enrollment_approval_lost_ownership")
+        assert session.household_id is not None
+        assert session.consent_receipt_id is not None
+        templates = tuple(
+            self.store.biometric_templates.get(template_id) for template_id in template_ids
+        )
+        if any(
+            template is None
+            or template.id != session.synthetic_template_id
+            or template.household_id != session.household_id
+            or template.enrollment_session_id != enrollment_id
+            or template.subject_id != session.subject_id
+            or template.modality != session.modality
+            or template.consent_receipt_id != session.consent_receipt_id
+            or template.expires_at is not None
+            or template.revoked_at is not None
+            for template in templates
+        ):
+            raise RuntimeError("biometric_template_link_lost_ownership")
+        approved = session.model_copy(
+            update={
+                "state": "approved",
+                "closed_at": now,
+                "next_reenrollment_reminder_at": reminder_at,
+                "biometric_hard_expires_at": hard_expires_at,
+            }
+        )
+        self.store.enrollments[enrollment_id] = approved
+        if reminder_at is not None:
+            profile = self.store.profiles[session.subject_id]
+            self.store.profiles[session.subject_id] = profile.model_copy(
+                update={"next_reenrollment_reminder_at": reminder_at, "updated_at": now}
+            )
+        for template_id, template in zip(template_ids, templates, strict=True):
+            assert template is not None
+            self.store.biometric_templates[template_id] = template.model_copy(
+                update={"expires_at": hard_expires_at}
+            )
+        return approved
+
+    async def cancel_subject_modality(
+        self,
+        subject_id: UUID,
+        modality: str,
+        now: datetime,
+    ) -> int:
+        self.write_count += 1
+        changed = 0
+        for enrollment_id, session in tuple(self.store.enrollments.items()):
+            if (
+                session.subject_id == subject_id
+                and session.modality.value == modality
+                and session.closed_at is None
+                and session.state in ("requested", "capturing", "calibrating")
+            ):
+                self.store.enrollments[enrollment_id] = session.model_copy(
+                    update={"state": "cancelled", "closed_at": now}
+                )
+                changed += 1
+        return changed
+
+    def requested_audit(self, session: EnrollmentSession, auth: AuthContext) -> AuditDraft:
+        del session
+        return _audit("identity.enrollment.requested", auth)
+
+    def cancelled_audit(self, session: EnrollmentSession, auth: AuthContext) -> AuditDraft:
+        del session
+        return _audit("identity.enrollment.cancelled", auth)
+
+    def approved_audit(self, session: EnrollmentSession) -> AuditDraft:
+        auth = _system_auth(session.household_id, session.closed_at or self.store.clock.now())
+        return _audit("identity.enrollment.approved", auth, event_id=session.id)
+
+    def expiry_batch_audit(
+        self,
+        templates: tuple[BiometricTemplate, ...],
+        now: datetime,
+    ) -> AuditDraft:
+        event_id = templates[0].id if templates else uuid4()
+        return _audit(
+            "identity.biometric_template.expired", _system_auth(None, now), event_id=event_id
+        )
+
+
+class FakeBiometricTemplateRepository:
+    def __init__(self, store: InMemoryIdentityStore) -> None:
+        self.store = store
+
+    def capture_for_enrollment(
+        self,
+        session: EnrollmentSession,
+        *,
+        template_id: UUID | None = None,
+        subject_id: UUID | None = None,
+        modality: Modality | None = None,
+        consent_receipt_id: UUID | None = None,
+    ) -> UUID:
+        if session.synthetic_template_id is None:
+            raise RuntimeError("enrollment_expected_template_required")
+        resolved_template_id = template_id or session.synthetic_template_id
+        assert session.household_id is not None
+        assert session.consent_receipt_id is not None
+        self.store.biometric_templates[resolved_template_id] = BiometricTemplate(
+            id=resolved_template_id,
+            enrollment_session_id=session.id,
+            household_id=session.household_id,
+            subject_id=subject_id or session.subject_id,
+            modality=modality or session.modality,
+            model_version=f"{(modality or session.modality).value}-template-v1",
+            consent_receipt_id=consent_receipt_id or session.consent_receipt_id,
+            created_at=self.store.clock.now(),
+            expires_at=None,
+            revoked_at=None,
+        )
+        return resolved_template_id
+
+    async def require_ready_for_approval(
+        self,
+        template_ids: tuple[UUID, ...],
+        *,
+        enrollment_session_id: UUID,
+        expected_template_id: UUID,
+        household_id: UUID,
+        subject_id: UUID,
+        modality: str,
+        consent_receipt_id: UUID,
+    ) -> tuple[BiometricTemplate, ...]:
+        if template_ids != (expected_template_id,):
+            raise RuntimeError("biometric_template_scope_mismatch")
+        templates = tuple(
+            self.store.biometric_templates[template_id] for template_id in template_ids
+        )
+        for template in templates:
+            if (
+                template.id != expected_template_id
+                or template.household_id != household_id
+                or template.enrollment_session_id != enrollment_session_id
+                or template.subject_id != subject_id
+                or template.modality.value != modality
+                or template.consent_receipt_id != consent_receipt_id
+                or template.expires_at is not None
+                or template.revoked_at is not None
+            ):
+                raise RuntimeError("biometric_template_scope_mismatch")
+        return templates
+
+    async def list_child_templates_past_hard_expiry(
+        self,
+        household_id: UUID,
+        now: datetime,
+    ) -> tuple[BiometricTemplate, ...]:
+        return tuple(
+            template
+            for template in sorted(
+                self.store.biometric_templates.values(),
+                key=lambda item: (item.expires_at or datetime.max.replace(tzinfo=UTC), item.id),
+            )
+            if template.household_id == household_id
+            and template.revoked_at is None
+            and template.expires_at is not None
+            and template.expires_at <= now
+            and self.store.profiles[template.subject_id].profile_class
+            in {ProfileClass.K2, ProfileClass.N1}
+            and self.store.profiles[template.subject_id].active
+            and self.store.profiles[template.subject_id].revoked_at is None
+        )
+
+    async def expire_template(self, template_id: UUID, now: datetime) -> None:
+        template = self.store.biometric_templates[template_id]
+        self.store.biometric_templates[template_id] = template.model_copy(
+            update={"revoked_at": now, "expires_at": now}
+        )
+
+    async def revoke_subject_modality(
+        self,
+        subject_id: UUID,
+        modality: str,
+        now: datetime,
+    ) -> tuple[BiometricTemplate, ...]:
+        revoked: list[BiometricTemplate] = []
+        for template_id, template in tuple(self.store.biometric_templates.items()):
+            if (
+                template.subject_id == subject_id
+                and template.modality.value == modality
+                and template.revoked_at is None
+            ):
+                updated = template.model_copy(update={"revoked_at": now, "expires_at": now})
+                self.store.biometric_templates[template_id] = updated
+                revoked.append(updated)
+        return tuple(revoked)
+
+    async def revoke_subject_authorities_in_uow(
+        self,
+        subject_id: UUID,
+        through_generation: int,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        del through_generation, reason
+        for template_id, template in tuple(self.store.biometric_templates.items()):
+            if template.subject_id == subject_id and template.revoked_at is None:
+                self.store.biometric_templates[template_id] = template.model_copy(
+                    update={"revoked_at": now, "expires_at": now}
+                )
+
+    def managed_erasure_requested_audit(
+        self,
+        template: BiometricTemplate,
+        *,
+        stores: tuple[str, ...],
+        requested_at: datetime,
+    ) -> AuditDraft:
+        del stores
+        return _audit(
+            "identity.biometric_template.erasure_requested",
+            _system_auth(template.household_id, requested_at),
+            event_id=template.id,
+        )
 
 
 class FakeGuestDisclosureChallengeRepository:
@@ -1632,6 +2103,280 @@ def _revoke_consent_command(
     )
 
 
+def _enrollment_request_command(
+    store: InMemoryIdentityStore,
+    subject: Profile,
+    modality: Modality,
+    consent_receipt_id: UUID,
+    *,
+    actor_id: UUID | None = None,
+    expected_profile_version: int | None = None,
+    reenrollment_days: int = 180,
+) -> RequestEnrollment:
+    actor = store.owner.id if actor_id is None else actor_id
+    command = RequestEnrollment(
+        subject_id=subject.id,
+        modality=modality,
+        expected_profile_version=(
+            subject.version if expected_profile_version is None else expected_profile_version
+        ),
+        expected_consent_receipt_id=consent_receipt_id,
+        reenrollment_days=reenrollment_days,
+        action_binding=_binding(
+            subject.household_id,
+            actor,
+            "identity.enroll",
+            "identity",
+            subject.id,
+            {},
+        ),
+    )
+    return command.model_copy(
+        update={
+            "action_binding": _binding(
+                subject.household_id,
+                actor,
+                "identity.enroll",
+                "identity",
+                subject.id,
+                enrollment_request_parameters(command),
+            )
+        }
+    )
+
+
+def _cancel_enrollment_command(
+    store: InMemoryIdentityStore,
+    session: EnrollmentSession,
+    *,
+    actor_id: UUID | None = None,
+) -> CancelEnrollment:
+    actor = store.owner.id if actor_id is None else actor_id
+    command = CancelEnrollment(
+        subject_id=session.subject_id,
+        enrollment_id=session.id,
+        action_binding=_binding(
+            session.household_id or store.household_id,
+            actor,
+            "identity.enrollment.cancel",
+            "identity",
+            session.id,
+            {},
+        ),
+    )
+    return command.model_copy(
+        update={
+            "action_binding": _binding(
+                session.household_id or store.household_id,
+                actor,
+                "identity.enrollment.cancel",
+                "identity",
+                session.id,
+                enrollment_cancel_parameters(command),
+            )
+        }
+    )
+
+
+class OwnerPasskeyGrantFactory:
+    def __init__(self, store: InMemoryIdentityStore, owner: Profile) -> None:
+        self.store = store
+        self.owner = owner
+
+    def binding_for_request(
+        self,
+        subject: Profile,
+        modality: Modality,
+        consent_receipt_id: UUID,
+        *,
+        expected_profile_version: int | None = None,
+        reenrollment_days: int = 180,
+    ) -> ActionBinding:
+        return _enrollment_request_command(
+            self.store,
+            subject,
+            modality,
+            consent_receipt_id,
+            actor_id=self.owner.id,
+            expected_profile_version=expected_profile_version,
+            reenrollment_days=reenrollment_days,
+        ).action_binding
+
+    def __call__(self, binding: ActionBinding) -> GrantHandle:
+        return self.store.grant_for(self.owner.id, binding)
+
+
+class BoundEnrollmentRequestFactory:
+    def __init__(
+        self,
+        store: InMemoryIdentityStore,
+        child: Profile,
+        consent: ConsentReceipt,
+    ) -> None:
+        self.store = store
+        self.child = child
+        self.consent = consent
+        self._base: RequestEnrollment | None = None
+
+    def __call__(
+        self,
+        *,
+        changed_field: str | None = None,
+        keep_binding: ActionBinding | None = None,
+    ) -> RequestEnrollment:
+        command = self._base_command()
+        if changed_field is not None:
+            replacements = {
+                "subject_id": self.store.adult_b.id,
+                "modality": Modality.VOICE,
+                "expected_profile_version": command.expected_profile_version + 1,
+                "expected_consent_receipt_id": uuid4(),
+                "reenrollment_days": command.reenrollment_days + 1,
+            }
+            command = command.model_copy(update={changed_field: replacements[changed_field]})
+        if keep_binding is not None:
+            command = command.model_copy(update={"action_binding": keep_binding})
+        return command
+
+    def _base_command(self) -> RequestEnrollment:
+        if self._base is None:
+            self._base = _enrollment_request_command(
+                self.store,
+                self.child,
+                Modality.FACE,
+                self.consent.id,
+                actor_id=self.store.owner.id,
+            )
+        return self._base
+
+
+class BoundCancelEnrollmentFactory:
+    def __init__(
+        self,
+        store: InMemoryIdentityStore,
+        child: Profile,
+        consent: ConsentReceipt,
+    ) -> None:
+        self.store = store
+        self.child = child
+        self.consent = consent
+        self._base: CancelEnrollment | None = None
+
+    def __call__(
+        self,
+        *,
+        changed_field: str | None = None,
+        keep_binding: ActionBinding | None = None,
+    ) -> CancelEnrollment:
+        command = self._base_command()
+        if changed_field is not None:
+            replacements = {
+                "subject_id": self.store.adult_b.id,
+                "enrollment_id": uuid4(),
+            }
+            command = command.model_copy(update={changed_field: replacements[changed_field]})
+        if keep_binding is not None:
+            command = command.model_copy(update={"action_binding": keep_binding})
+        return command
+
+    def _base_command(self) -> CancelEnrollment:
+        if self._base is None:
+            session = EnrollmentSession(
+                id=uuid4(),
+                household_id=self.child.household_id,
+                subject_id=self.child.id,
+                modality=Modality.FACE,
+                state="requested",
+                consent_receipt_id=self.consent.id,
+                reenrollment_days=180,
+                subject_is_child=True,
+                synthetic_template_id=uuid4(),
+                created_at=self.store.clock.now(),
+                expires_at=self.store.clock.now() + timedelta(minutes=30),
+                closed_at=None,
+            )
+            self.store.enrollments[session.id] = session
+            self._base = _cancel_enrollment_command(
+                self.store, session, actor_id=self.store.owner.id
+            )
+        return self._base
+
+
+@dataclass(frozen=True, slots=True)
+class ConsentWithRevoke:
+    receipt: ConsentReceipt
+    revoke_command: RevokeConsent
+
+    @property
+    def id(self) -> UUID:
+        return self.receipt.id
+
+
+@dataclass(frozen=True, slots=True)
+class CloudRequestDraft:
+    household_id: UUID
+    session_id: UUID
+    consent_receipt_ids: tuple[UUID, ...]
+    subject_id: UUID | None = None
+    purpose: Literal["cloud_reasoning"] = "cloud_reasoning"
+
+    def for_subject(self, subject_id: UUID) -> CloudRequestDraft:
+        return CloudRequestDraft(
+            household_id=self.household_id,
+            session_id=self.session_id,
+            consent_receipt_ids=self.consent_receipt_ids,
+            subject_id=subject_id,
+            purpose=self.purpose,
+        )
+
+    def to_route_authorization_request(self) -> RouteAuthorizationRequest:
+        return RouteAuthorizationRequest(
+            request_id=uuid4(),
+            attempt_id=uuid4(),
+            purpose=self.purpose,
+            household_id=self.household_id,
+            subject_id=self.subject_id,
+            session_id=self.session_id,
+            turn_id=uuid4(),
+            provider="openai",
+            model="gpt-5.6-sol",
+            request_commitment=Commitment(
+                algorithm="HMAC-SHA-256",
+                key_id="route-request",
+                value_b64=base64.b64encode(b"1" * 32).decode("ascii"),
+            ),
+            max_input_bytes=1024,
+            max_input_units=1,
+            privacy_receipt_id=uuid4(),
+            consent_receipt_ids=self.consent_receipt_ids,
+            budget_reservation_id=uuid4(),
+            maximum_sensitivity=Sensitivity.PERSONAL,
+        )
+
+
+class InMemoryRouteAuthorizer:
+    def __init__(self, store: InMemoryIdentityStore) -> None:
+        self.store = store
+        self._consent = ConsentHmacVerifier(store.signer, store.consent_service, store.clock)
+
+    async def authorize(self, request: RouteAuthorizationRequest):
+        async with self.store.uow_factory() as uow:
+            await self._consent.require_exact_in_uow(
+                uow,
+                request.household_id,
+                request.subject_id,
+                request.session_id,
+                request.purpose,
+                request.consent_receipt_ids,
+            )
+            await uow.rollback()
+        return authorization_from_request(
+            request,
+            authorization_id=uuid4(),
+            expires_at=self.store.clock.now() + timedelta(seconds=30),
+        )
+
+
 @pytest.fixture
 def identity_env() -> InMemoryIdentityStore:
     return InMemoryIdentityStore()
@@ -1703,6 +2448,34 @@ def identity_mutations(identity_env: InMemoryIdentityStore) -> IdentityMutationC
 
 
 @pytest.fixture
+def enrollment_service(identity_env: InMemoryIdentityStore) -> EnrollmentService:
+    return identity_env.enrollment_service
+
+
+@pytest.fixture
+def enrollment_mutations(identity_env: InMemoryIdentityStore) -> EnrollmentMutationCoordinator:
+    return identity_env.enrollment_mutations
+
+
+@pytest.fixture
+def mutation_scope(identity_env: InMemoryIdentityStore) -> FakeMutationScope:
+    return identity_env.scope
+
+
+@pytest_asyncio.fixture
+async def uow(identity_env: InMemoryIdentityStore):
+    async with identity_env.scope.open() as opened_uow:
+        yield opened_uow
+
+
+@pytest.fixture
+def enrollment_repository_spy(identity_env: InMemoryIdentityStore) -> FakeEnrollmentRepository:
+    identity_env.enrollment_repo.read_count = 0
+    identity_env.enrollment_repo.write_count = 0
+    return identity_env.enrollment_repo
+
+
+@pytest.fixture
 def owner(identity_env: InMemoryIdentityStore) -> Profile:
     return identity_env.owner
 
@@ -1725,6 +2498,79 @@ def guardian(identity_env: InMemoryIdentityStore) -> Profile:
 @pytest.fixture
 def child(identity_env: InMemoryIdentityStore) -> Profile:
     return identity_env.child
+
+
+@pytest.fixture
+def guardian_face_consent(
+    identity_env: InMemoryIdentityStore,
+    guardian: Profile,
+    child: Profile,
+) -> ConsentReceipt:
+    return identity_env.install_consent(child, guardian.id, ConsentPurpose.FACE)
+
+
+@pytest.fixture
+def owner_passkey_grant_factory(
+    identity_env: InMemoryIdentityStore,
+    owner: Profile,
+) -> OwnerPasskeyGrantFactory:
+    return OwnerPasskeyGrantFactory(identity_env, owner)
+
+
+@pytest.fixture
+def owner_auth_factory(
+    identity_env: InMemoryIdentityStore,
+    owner: Profile,
+) -> Callable[[ActionBinding], AuthContext]:
+    return lambda binding: identity_env.auth_context(owner.id, binding)
+
+
+@pytest.fixture
+def bound_enrollment_request_factory(
+    identity_env: InMemoryIdentityStore,
+    child: Profile,
+    guardian_face_consent: ConsentReceipt,
+) -> BoundEnrollmentRequestFactory:
+    return BoundEnrollmentRequestFactory(identity_env, child, guardian_face_consent)
+
+
+@pytest.fixture
+def bound_cancel_enrollment_factory(
+    identity_env: InMemoryIdentityStore,
+    child: Profile,
+    guardian_face_consent: ConsentReceipt,
+) -> BoundCancelEnrollmentFactory:
+    return BoundCancelEnrollmentFactory(identity_env, child, guardian_face_consent)
+
+
+@pytest.fixture
+def identified_grant(
+    identity_env: InMemoryIdentityStore,
+    owner: Profile,
+    bound_enrollment_request_factory: BoundEnrollmentRequestFactory,
+) -> GrantHandle:
+    command = bound_enrollment_request_factory()
+    grant = GrantHandle(uuid4(), command.action_binding)
+    identity_env.auth.grants[grant.id] = AuthContext(
+        grant_id=None,
+        subject_id=owner.id,
+        binding=command.action_binding,
+        assurance=AssuranceLevel.IDENTIFIED,
+        assurance_source="identity",
+        consumed_at=identity_env.clock.now(),
+    )
+    return grant
+
+
+@pytest.fixture
+def calibrated_enrollment_factory(
+    identity_env: InMemoryIdentityStore,
+) -> Callable[[EnrollmentSession], UUID]:
+    def factory(session: EnrollmentSession) -> UUID:
+        calibrated = identity_env.enrollment_repo.force_calibrating_for_test(session.id)
+        return identity_env.biometric_template_repo.capture_for_enrollment(calibrated)
+
+    return factory
 
 
 @pytest.fixture
@@ -2647,6 +3493,65 @@ def revoke_consume_race() -> RevokeConsumeRace:
 
 
 @pytest.fixture
+def route_authorizer(identity_env: InMemoryIdentityStore) -> InMemoryRouteAuthorizer:
+    return identity_env.route_authorizer
+
+
+@pytest.fixture
+def adult_cloud_reasoning_consent(
+    identity_env: InMemoryIdentityStore,
+    adult_a: Profile,
+) -> ConsentWithRevoke:
+    receipt = identity_env.install_consent(
+        adult_a,
+        adult_a.id,
+        ConsentPurpose.CLOUD_REASONING,
+    )
+    revoke = _revoke_consent_command(
+        adult_a,
+        adult_a.id,
+        ConsentPurpose.CLOUD_REASONING,
+        receipt.id,
+        policy_version=receipt.policy_version,
+        disclosure_version=receipt.disclosure_version,
+    )
+    return ConsentWithRevoke(receipt, revoke)
+
+
+@pytest.fixture
+def passkey_grant_for_revoke_consent(
+    identity_env: InMemoryIdentityStore,
+) -> Callable[[RevokeConsent], GrantHandle]:
+    return lambda command: identity_env.grant_for(command.actor_id, command.action_binding)
+
+
+@pytest.fixture
+def cloud_request(
+    identity_env: InMemoryIdentityStore,
+    active_session: FakeSession,
+    adult_cloud_reasoning_consent: ConsentWithRevoke,
+) -> CloudRequestDraft:
+    return CloudRequestDraft(
+        household_id=identity_env.household_id,
+        session_id=active_session.id,
+        consent_receipt_ids=(adult_cloud_reasoning_consent.id,),
+    )
+
+
+@pytest.fixture
+def guest_cloud_request(
+    identity_env: InMemoryIdentityStore,
+    active_session: FakeSession,
+) -> CloudRequestDraft:
+    return CloudRequestDraft(
+        household_id=identity_env.household_id,
+        session_id=active_session.id,
+        subject_id=None,
+        consent_receipt_ids=(uuid4(),),
+    )
+
+
+@pytest.fixture
 def network_capture() -> list[object]:
     return []
 
@@ -2699,26 +3604,36 @@ class AsyncConnectionAdapter:
 
 
 def _apply_identity_migration(engine: sa.Engine) -> None:
-    migration = importlib.import_module(
+    migration_0002 = importlib.import_module(
         "apps.core.migrations.versions.0002_profiles_consent_enrollment"
+    )
+    migration_0003 = importlib.import_module(
+        "apps.core.migrations.versions.0003_biometric_template_enrollment_binding"
     )
 
     with engine.begin() as connection:
         FOUNDATION_0001_METADATA.create_all(bind=connection)
         context = MigrationContext.configure(connection)
-        migration.op = Operations(context)  # type: ignore[attr-defined]
-        migration.upgrade()
+        migration_0002.op = Operations(context)  # type: ignore[attr-defined]
+        migration_0002.upgrade()
+        migration_0003.op = Operations(context)  # type: ignore[attr-defined]
+        migration_0003.upgrade()
 
 
 def _drop_identity_migration(engine: sa.Engine) -> None:
-    migration = importlib.import_module(
+    migration_0002 = importlib.import_module(
         "apps.core.migrations.versions.0002_profiles_consent_enrollment"
+    )
+    migration_0003 = importlib.import_module(
+        "apps.core.migrations.versions.0003_biometric_template_enrollment_binding"
     )
 
     with engine.begin() as connection:
         context = MigrationContext.configure(connection)
-        migration.op = Operations(context)  # type: ignore[attr-defined]
-        migration.downgrade()
+        migration_0003.op = Operations(context)  # type: ignore[attr-defined]
+        migration_0003.downgrade()
+        migration_0002.op = Operations(context)  # type: ignore[attr-defined]
+        migration_0002.downgrade()
 
 
 def _sqlite_engine(path: Path) -> sa.Engine:

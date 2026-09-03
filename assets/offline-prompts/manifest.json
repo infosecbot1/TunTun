@@ -1,0 +1,29 @@
+{
+  "schema_version": "tuntun.offline-prompts.v1",
+  "version": 1,
+  "generated_by": "scripts/build_offline_tones.py",
+  "assets": [
+    {
+      "id": "confirm",
+      "path": "confirm.wav",
+      "sha256": "90a1d8db8ce933937181954b71c8d28acff657e60e1ad0e67425211f8f2af822",
+      "license": "CC0-1.0",
+      "format": "wav-pcm16-mono",
+      "sample_rate_hz": 24000,
+      "channels": 1,
+      "duration_ms": 250,
+      "size_bytes": 12044
+    },
+    {
+      "id": "unavailable",
+      "path": "unavailable.wav",
+      "sha256": "768cb24891237a6a70d2dd9c3642998db27bfa6739b7924587b827cc2e57ed35",
+      "license": "CC0-1.0",
+      "format": "wav-pcm16-mono",
+      "sample_rate_hz": 24000,
+      "channels": 1,
+      "duration_ms": 250,
+      "size_bytes": 12044
+    }
+  ]
+}

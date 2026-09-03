@@ -16,6 +16,7 @@ dependencies = [
   "structlog>=25.4,<26",
   "tuntun-contracts==0.1.0.dev0",
   "typer>=0.16,<1",
+  "vosk==0.3.44",
   "openai==2.54.0",
   "httpx==0.28.1",
   "websockets==15.0.1",
@@ -42,3 +43,4 @@ build-backend = "hatchling.build"
 "migrations/script.py.mako" = "tuntun_core/_migration_assets/migrations/script.py.mako"
 "migrations/versions/0001_foundation.py" = "tuntun_core/_migration_assets/migrations/versions/0001_foundation.py"
 "migrations/versions/0002_profiles_consent_enrollment.py" = "tuntun_core/_migration_assets/migrations/versions/0002_profiles_consent_enrollment.py"
+"migrations/versions/0003_biometric_template_enrollment_binding.py" = "tuntun_core/_migration_assets/migrations/versions/0003_biometric_template_enrollment_binding.py"

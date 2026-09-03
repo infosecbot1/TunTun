@@ -13,6 +13,7 @@ GraphPhase = Literal[
     "authorize_recall",
     "retrieve_context",
     "sanitize_and_reserve",
+    "authorize_provider_egress",
     "generate",
     "validate",
     "synthesize",

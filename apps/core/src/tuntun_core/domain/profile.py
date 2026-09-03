@@ -156,11 +156,32 @@ class CancelEnrollment(DomainModel):
 
 class EnrollmentSession(DomainModel):
     id: UUID
+    household_id: UUID | None = None
     subject_id: UUID
     modality: Modality
     state: Literal["requested", "capturing", "calibrating", "approved", "cancelled", "expired"]
+    consent_receipt_id: UUID | None = None
+    reenrollment_days: int = Field(default=180, ge=30, le=365)
+    subject_is_child: bool = False
+    synthetic_template_id: UUID | None = None
+    created_at: AwareDatetime | None = None
+    expires_at: AwareDatetime | None = None
+    closed_at: AwareDatetime | None = None
     next_reenrollment_reminder_at: AwareDatetime | None = None
     biometric_hard_expires_at: AwareDatetime | None = None
+
+
+class BiometricTemplate(DomainModel):
+    id: UUID
+    enrollment_session_id: UUID | None = None
+    household_id: UUID
+    subject_id: UUID
+    modality: Modality
+    model_version: str = Field(min_length=1, max_length=128)
+    consent_receipt_id: UUID
+    created_at: AwareDatetime
+    expires_at: AwareDatetime | None = None
+    revoked_at: AwareDatetime | None = None
 
 
 class Profile(BaseModel):

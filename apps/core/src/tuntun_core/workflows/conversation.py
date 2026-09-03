@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from datetime import datetime
+from typing import Any, Final, Literal, Protocol, cast
 from uuid import UUID
 
 from tuntun_core.services.personalized_turn_context import ProviderTurnContext, TranscribedTurn
+from tuntun_core.services.providers.route_authorization import (
+    ConsentEvidenceReader,
+    ConsentReceiptAttachable,
+    attach_current_consent_receipts,
+)
 from tuntun_core.workflows.ephemeral_turn_context import EphemeralTurnContext
 
 
@@ -76,6 +82,82 @@ class LegacyWorkflowPorts(Protocol):
     async def finish(self, turn_id: UUID) -> None: ...
 
 
+class ProviderRouteDraft(ConsentReceiptAttachable, Protocol):
+    def to_route_authorization_request(self) -> object: ...
+
+
+class ProviderRouteDraftSource(Protocol):
+    async def provider_route_draft(self, context: ProviderTurnContext) -> ProviderRouteDraft: ...
+
+
+class ProviderRouteAuthorizer(Protocol):
+    async def authorize(self, request: object) -> object: ...
+
+
+class ProviderRouteAuthorizationBinder(Protocol):
+    async def bind_route_authorization(
+        self,
+        context: ProviderTurnContext,
+        authorization: object,
+    ) -> ProviderTurnContext: ...
+
+
+class ProviderEgressClock(Protocol):
+    def now(self) -> datetime: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SyntheticNoProviderTransport:
+    mode: Literal["synthetic_no_provider_transport"] = "synthetic_no_provider_transport"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEgressAuthorizer:
+    route_drafts: ProviderRouteDraftSource
+    consent_evidence: ConsentEvidenceReader
+    route_authorizer: ProviderRouteAuthorizer
+    binder: ProviderRouteAuthorizationBinder
+    clock: ProviderEgressClock
+
+    async def authorize(self, context: ProviderTurnContext) -> ProviderTurnContext:
+        draft = await self.route_drafts.provider_route_draft(context)
+        if draft is None:
+            raise PermissionError("provider_route_draft_required")
+        draft_with_consent = cast(
+            ProviderRouteDraft,
+            await attach_current_consent_receipts(
+                draft,
+                self.consent_evidence,
+                self.clock.now(),
+            ),
+        )
+        authorization = await self.route_authorizer.authorize(
+            draft_with_consent.to_route_authorization_request()
+        )
+        return await self.binder.bind_route_authorization(context, authorization)
+
+
+ProviderEgressBoundary = ProviderEgressAuthorizer | SyntheticNoProviderTransport
+SYNTHETIC_NO_PROVIDER_TRANSPORT: Final = SyntheticNoProviderTransport()
+
+
+def _require_provider_egress(value: object) -> ProviderEgressBoundary:
+    if type(value) in {ProviderEgressAuthorizer, SyntheticNoProviderTransport}:
+        return cast(ProviderEgressBoundary, value)
+    raise TypeError("provider egress boundary required")
+
+
+async def authorize_provider_egress(
+    provider_egress: ProviderEgressBoundary,
+    context: ProviderTurnContext,
+) -> ProviderTurnContext:
+    if type(provider_egress) is SyntheticNoProviderTransport:
+        return context
+    if type(provider_egress) is ProviderEgressAuthorizer:
+        return await provider_egress.authorize(context)
+    raise TypeError("provider egress boundary required")
+
+
 def _always_accepts_results(turn_id: UUID) -> bool:
     del turn_id
     return True
@@ -89,6 +171,7 @@ class LinearConversationEngine:
         ports: Any,
         *,
         context_provider: Any | None = None,
+        provider_egress: ProviderEgressBoundary | None = None,
         allow_legacy_guest_identity: bool = False,
         accepts_results: Callable[[UUID], bool] = _always_accepts_results,
     ) -> None:
@@ -96,6 +179,7 @@ class LinearConversationEngine:
             raise TypeError("personalized context_provider required")
         self._ports = ports
         self._context_provider = context_provider
+        self._provider_egress = _require_provider_egress(provider_egress)
         self._allow_legacy_guest_identity = allow_legacy_guest_identity
         self._accepts_results = accepts_results
         self.ephemeral: EphemeralTurnContext[dict[str, object]] = EphemeralTurnContext()
@@ -132,6 +216,9 @@ class LinearConversationEngine:
                 answer = await self._ports.generate(transcript, identity)
             else:
                 context = await self._context_provider.prepare(turn.turn_id, transcript)
+                if not self._accepts_turn_results(turn.turn_id):
+                    return TurnOutcome(spoken=False)
+                context = await authorize_provider_egress(self._provider_egress, context)
                 if not self._accepts_turn_results(turn.turn_id):
                     return TurnOutcome(spoken=False)
                 answer = await self._ports.generate(context)
