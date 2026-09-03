@@ -144,6 +144,7 @@ class ReachyPttSession:
         self._edge_sequence = 0
         self._receipt_attempted = False
         self._session_open = asyncio.Event()
+        self._session_open_accepted_before_cleanup = False
         self._ptt_started = asyncio.Event()
         self._ptt_submitted = asyncio.Event()
         self._ptt_started_at: float | None = None
@@ -703,7 +704,22 @@ class ReachyPttSession:
                 and prior_core_frame is not None
                 and now >= prior_core_frame + _HANDSHAKE_SECONDS
             )
-            suppress_dispatch = self._clock_faulted or turn_expired or heartbeat_expired
+            handshake_open_expired = (
+                direction is StreamDirection.CORE_TO_EDGE
+                and not cleanup_latched
+                and not turn_expired
+                and prior_core_frame is None
+                and self._run_started_at is not None
+                and isinstance(frame, ControlFrame)
+                and frame.control.kind is ControlKind.SESSION_OPEN
+                and now >= self._run_started_at + _HANDSHAKE_SECONDS
+            )
+            suppress_dispatch = (
+                self._clock_faulted
+                or turn_expired
+                or heartbeat_expired
+                or handshake_open_expired
+            )
             guarded = (
                 None
                 if self._clock_faulted
@@ -748,7 +764,7 @@ class ReachyPttSession:
             else:
                 assert guarded is not None
                 disposition = guarded.disposition
-        if turn_expired or heartbeat_expired:
+        if turn_expired or heartbeat_expired or handshake_open_expired:
             await self._request_cleanup(
                 PttStopSource.WATCHDOG,
                 PttSessionOutcome.SESSION_TIMEOUT,
@@ -1039,7 +1055,16 @@ class ReachyPttSession:
             return
         control = frame.control
         if control.kind is ControlKind.SESSION_OPEN:
-            self._session_open.set()
+            run_started_at = self._run_started_at
+            handshake_deadline = (
+                None if run_started_at is None else run_started_at + _HANDSHAKE_SECONDS
+            )
+            if (
+                self._cleanup_started_at is None
+                and (handshake_deadline is None or triggered_at < handshake_deadline)
+            ):
+                self._session_open_accepted_before_cleanup = True
+                self._session_open.set()
         elif control.kind is ControlKind.PTT_START:
             self._ptt_started.set()
         elif control.kind is ControlKind.PTT_SUBMIT:
@@ -1262,12 +1287,19 @@ class ReachyPttSession:
             if task is not None and task is not asyncio.current_task()
         ]
 
-    async def _join_runtime_tasks(self) -> None:
+    def _cancel_runtime_tasks(self) -> list[asyncio.Task[None]]:
         tasks = self._owned_runtime_tasks()
         for task in tasks:
             task.cancel()
+        return tasks
+
+    @staticmethod
+    async def _join_cancelled_runtime_tasks(tasks: list[asyncio.Task[None]]) -> None:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _join_runtime_tasks(self) -> None:
+        await self._join_cancelled_runtime_tasks(self._cancel_runtime_tasks())
 
     async def _gather_effect_tasks(self) -> None:
         tasks = [
@@ -1319,12 +1351,13 @@ class ReachyPttSession:
             if self._decoder is not None:
                 self._decoder.abort()
             return
+        runtime_tasks = self._cancel_runtime_tasks()
         try:
             await self._within_deadline(
-                self._join_runtime_tasks(),
+                self._transport.close(),
                 deadline,
-                name="reachy-ptt-task-join",
-                retry_factory=self._join_runtime_tasks,
+                name="reachy-ptt-transport-close",
+                retry_factory=self._transport.close,
                 cleanup_only=True,
             )
         except BaseException:
@@ -1337,10 +1370,10 @@ class ReachyPttSession:
             return
         try:
             await self._within_deadline(
-                self._transport.close(),
+                self._join_cancelled_runtime_tasks(runtime_tasks),
                 deadline,
-                name="reachy-ptt-transport-close",
-                retry_factory=self._transport.close,
+                name="reachy-ptt-task-join",
+                retry_factory=lambda: self._join_cancelled_runtime_tasks(runtime_tasks),
                 cleanup_only=True,
             )
         except BaseException:
@@ -1543,32 +1576,42 @@ class ReachyPttSession:
             else:
                 receipt_sent = True
         if receipt_sent:
-            try:
-                ack_was_valid = await self._wait_ack_or_poison(cleanup_started_at + _ACK_SECONDS)
-            except BaseException:
-                self._final_outcome = PttSessionOutcome.CLEANUP_INCOMPLETE
-            else:
-                guard_finished = False
-                try:
-                    async with self._guard_lock:
-                        guarded_outcome = self._guard_instance().finish()
-                except BaseException:
-                    guarded_outcome = PttSessionOutcome.CLEANUP_INCOMPLETE
-                else:
-                    guard_finished = True
-                if (
-                    not ack_was_valid
-                    or self._guard_poisoned
-                    or not guard_finished
-                    or not receipt.is_complete()
-                    or not effects_joined
-                    or self._ack_accepted is not True
-                ):
+            if not self._session_open_accepted_before_cleanup:
+                if not receipt.is_complete() or not effects_joined:
                     self._final_outcome = PttSessionOutcome.CLEANUP_INCOMPLETE
                 elif self._semantic_outcome is not PttSessionOutcome.COMPLETED:
                     self._final_outcome = self._semantic_outcome
                 else:
-                    self._final_outcome = guarded_outcome
+                    self._final_outcome = PttSessionOutcome.CLEANUP_INCOMPLETE
+            else:
+                try:
+                    ack_was_valid = await self._wait_ack_or_poison(
+                        cleanup_started_at + _ACK_SECONDS
+                    )
+                except BaseException:
+                    self._final_outcome = PttSessionOutcome.CLEANUP_INCOMPLETE
+                else:
+                    guard_finished = False
+                    try:
+                        async with self._guard_lock:
+                            guarded_outcome = self._guard_instance().finish()
+                    except BaseException:
+                        guarded_outcome = PttSessionOutcome.CLEANUP_INCOMPLETE
+                    else:
+                        guard_finished = True
+                    if (
+                        not ack_was_valid
+                        or self._guard_poisoned
+                        or not guard_finished
+                        or not receipt.is_complete()
+                        or not effects_joined
+                        or self._ack_accepted is not True
+                    ):
+                        self._final_outcome = PttSessionOutcome.CLEANUP_INCOMPLETE
+                    elif self._semantic_outcome is not PttSessionOutcome.COMPLETED:
+                        self._final_outcome = self._semantic_outcome
+                    else:
+                        self._final_outcome = guarded_outcome
         else:
             self._final_outcome = PttSessionOutcome.CLEANUP_INCOMPLETE
         if observation_owner_failed:

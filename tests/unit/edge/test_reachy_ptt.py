@@ -266,6 +266,36 @@ class SilentAckTransport(FakeTransport):
         self.inbound.put_nowait(b"")
 
 
+class ManualOpenNoAckTransport(SilentAckTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.receive_started = asyncio.Event()
+        self.close_started = asyncio.Event()
+
+    def queue_session_open(self) -> None:
+        self.inbound.put_nowait(
+            encode_control_frame(
+                sequence=self.core_sequence,
+                control=PttControl.session_open(TURN_ID, PttInputMode.CORE_TERMINAL_TOGGLE),
+            )
+        )
+        self.core_sequence += 1
+
+    async def receive(self, max_bytes: int) -> bytes:
+        self.receive_started.set()
+        return await super().receive(max_bytes)
+
+    async def send(self, frame: bytes) -> None:
+        await FakeTransport.send(self, frame)
+        decoded = self.edge_decoder.feed(frame)
+        assert len(decoded) == 1
+        self.edge_frames.append(decoded[0])
+
+    async def close(self) -> None:
+        self.close_started.set()
+        await super().close()
+
+
 class FailingCloseTransport(SilentAckTransport):
     async def close(self) -> None:
         self.close_calls += 1
@@ -286,6 +316,38 @@ class BlockingCloseTransport(FakeTransport):
         except asyncio.CancelledError:
             self.close_cancelled = True
             raise
+
+
+class CloseReleasedReceiveTransport(FakeTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.edge_decoder = FrameDecoder()
+        self.edge_frames: list[ControlFrame | PcmFrame] = []
+        self.receive_started = asyncio.Event()
+        self.receive_cancelled = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def receive(self, max_bytes: int) -> bytes:
+        self.receive_calls += 1
+        self.receive_started.set()
+        while not self.closed.is_set():
+            try:
+                await self.closed.wait()
+            except asyncio.CancelledError:
+                self.receive_cancelled.set()
+        return b""
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.close_started.set()
+        self.closed.set()
+
+    async def send(self, frame: bytes) -> None:
+        await super().send(frame)
+        decoded = self.edge_decoder.feed(frame)
+        assert len(decoded) == 1
+        self.edge_frames.append(decoded[0])
 
 
 class BlockingReadyTransport(SilentAckTransport):
@@ -2250,6 +2312,99 @@ async def test_no_session_open_at_exact_t0_plus_five_is_session_timeout() -> Non
             await session.stop(PttStopSource.SUPERVISOR_INPUT)
             run_task.cancel()
             await asyncio.gather(run_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_no_session_open_timeout_closes_reader_without_waiting_for_ack_deadline() -> None:
+    clock = FakeClock()
+    transport = CloseReleasedReceiveTransport()
+    arguments = session_arguments()
+    arguments.update(clock=clock, transport=transport)
+    session = ReachyPttSession(**arguments)  # type: ignore[arg-type]
+    run_task = asyncio.create_task(session.run(), name="test-reachy-ptt-run")
+    try:
+        await asyncio.wait_for(transport.receive_started.wait(), timeout=0.2)
+        for _attempt in range(20):
+            if 15.0 in clock.deadlines:
+                break
+            await asyncio.sleep(0)
+        assert 15.0 in clock.deadlines
+
+        clock.advance_to(15.0)
+        controls: list[ControlKind] = []
+        for _attempt in range(200):
+            controls = [
+                frame.control.kind
+                for frame in transport.edge_frames
+                if isinstance(frame, ControlFrame)
+            ]
+            if ControlKind.SAFETY_RECEIPT in controls:
+                break
+            await asyncio.sleep(0)
+        assert controls == [ControlKind.ERROR, ControlKind.SAFETY_RECEIPT]
+
+        for _attempt in range(20):
+            if transport.close_started.is_set():
+                break
+            await asyncio.sleep(0)
+        assert transport.close_started.is_set()
+        assert await asyncio.wait_for(run_task, timeout=0.2) is PttSessionOutcome.SESSION_TIMEOUT
+    finally:
+        transport.closed.set()
+        cleanup_started_at = session._cleanup_started_at
+        if cleanup_started_at is not None:
+            clock.advance_to(cleanup_started_at + 4.0)
+        if not run_task.done():
+            await asyncio.wait_for(run_task, timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_boundary_session_open_after_handshake_timeout_does_not_wait_for_ack() -> None:
+    clock = FakeClock()
+    transport = ManualOpenNoAckTransport()
+    arguments = session_arguments()
+    arguments.update(clock=clock, transport=transport)
+    session = ReachyPttSession(**arguments)  # type: ignore[arg-type]
+    run_task = asyncio.create_task(session.run(), name="test-reachy-ptt-run")
+    try:
+        await asyncio.wait_for(transport.receive_started.wait(), timeout=0.2)
+        for _attempt in range(20):
+            if 15.0 in clock.deadlines:
+                break
+            await asyncio.sleep(0)
+        assert 15.0 in clock.deadlines
+
+        clock.current = 15.0
+        transport.queue_session_open()
+        clock.advance_to(15.0)
+
+        controls: list[ControlKind] = []
+        for _attempt in range(200):
+            controls = [
+                frame.control.kind
+                for frame in transport.edge_frames
+                if isinstance(frame, ControlFrame)
+            ]
+            if ControlKind.SAFETY_RECEIPT in controls:
+                break
+            await asyncio.sleep(0)
+        assert controls == [ControlKind.ERROR, ControlKind.SAFETY_RECEIPT]
+        assert not session._session_open.is_set()
+
+        for _attempt in range(20):
+            if transport.close_started.is_set():
+                break
+            await asyncio.sleep(0)
+        assert transport.close_started.is_set()
+        assert await asyncio.wait_for(run_task, timeout=0.2) is PttSessionOutcome.SESSION_TIMEOUT
+    finally:
+        await transport.close()
+        cleanup_started_at = session._cleanup_started_at
+        if cleanup_started_at is not None:
+            clock.advance_to(cleanup_started_at + 4.0)
+        if not run_task.done():
+            run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -5921,7 +6076,7 @@ async def test_capture_cleanup_wait_failure_delegates_blocked_turn_to_t4_teardow
         await asyncio.wait_for(teardown_task, timeout=0.2)
 
         assert session._final_outcome is PttSessionOutcome.CLEANUP_INCOMPLETE
-        assert transport.close_calls == 0
+        assert transport.close_calls == 1
         await asyncio.sleep(0)
         assert not {
             task.get_name()
@@ -6144,6 +6299,53 @@ async def test_teardown_at_exact_t_plus_four_starts_no_bounded_await() -> None:
     assert transport.close_calls == 0
     assert clock.deadlines == []
     assert session._final_outcome is PttSessionOutcome.CLEANUP_INCOMPLETE
+
+
+@pytest.mark.asyncio
+async def test_teardown_closes_transport_before_joining_cancel_suppressed_receive() -> None:
+    clock = FakeClock()
+    transport = CloseReleasedReceiveTransport()
+    arguments = session_arguments()
+    arguments.update(clock=clock, transport=transport)
+    session = ReachyPttSession(**arguments)  # type: ignore[arg-type]
+    session._run_started_at = clock.now()
+    session._last_clock_value = session._run_started_at
+    session._cleanup_started_at = clock.now()
+    session._cleanup_source = PttStopSource.WATCHDOG
+    session._semantic_outcome = PttSessionOutcome.SESSION_TIMEOUT
+    session._terminal = True
+    session._clear_result = True
+    session._guard = PttDuplexGuard(turn_id=TURN_ID, input_mode=PttInputMode.CORE_TERMINAL_TOGGLE)
+    session._decoder = FrameDecoder()
+    reader = asyncio.create_task(session._reader_loop(), name="reachy-ptt-reader")
+    session._reader_task = reader
+    teardown = None
+    try:
+        await asyncio.wait_for(transport.receive_started.wait(), timeout=0.2)
+
+        teardown = asyncio.create_task(session._teardown_runtime(), name="test-reachy-ptt-teardown")
+        for _attempt in range(20):
+            if transport.close_started.is_set():
+                break
+            await asyncio.sleep(0)
+
+        assert transport.receive_cancelled.is_set()
+        assert transport.close_started.is_set()
+        await asyncio.wait_for(teardown, timeout=0.2)
+        await asyncio.sleep(0)
+
+        assert transport.close_calls == 1
+        assert reader.done()
+        assert not {
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task() and task.get_name().startswith("reachy-ptt-")
+        }
+    finally:
+        transport.closed.set()
+        if teardown is not None and not teardown.done():
+            await asyncio.wait_for(teardown, timeout=0.2)
+        await asyncio.gather(reader, return_exceptions=True)
 
 
 @pytest.mark.asyncio
