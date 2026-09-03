@@ -7179,7 +7179,7 @@ def test_edge_cli_has_exact_parameter_free_ptt_surface() -> None:
     assert app.info.no_args_is_help is True
     assert app._add_completion is False
     assert command.params == []
-    assert list(command.commands) == ["ptt", "reachy"]  # type: ignore[attr-defined]
+    assert list(command.commands) == ["ptt", "managed", "reachy"]  # type: ignore[attr-defined]
     assert command.commands["ptt"].params == []  # type: ignore[attr-defined]
 
 
