@@ -215,6 +215,8 @@ class RuntimeEvidence(ContractModel):
             ("3.12", "cp312"),
         }:
             raise ValueError("unsupported Reachy interpreter ABI pair")
+        if len(set(self.sys_tags)) != len(self.sys_tags):
+            raise ValueError("Reachy target tag set must be duplicate-free")
         if "py3-none-any" not in self.sys_tags:
             raise ValueError("Reachy target tag set must include py3-none-any")
         if self.edge_wheel_tags != ("py3-none-any",) or self.contracts_wheel_tags != (

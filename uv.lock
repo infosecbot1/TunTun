@@ -1306,6 +1306,7 @@ version = "0.1.0.dev0"
 source = { editable = "apps/edge" }
 dependencies = [
     { name = "cryptography" },
+    { name = "packaging" },
     { name = "tuntun-contracts" },
     { name = "typer" },
     { name = "websockets" },
@@ -1314,6 +1315,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=45,<46" },
+    { name = "packaging", specifier = ">=26,<27" },
     { name = "tuntun-contracts", editable = "packages/contracts" },
     { name = "typer", specifier = ">=0.16,<1" },
     { name = "websockets", specifier = "==15.0.1" },

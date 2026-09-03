@@ -377,6 +377,24 @@ def test_ceremony_rejects_unbound_principal_interpreter_wheel_or_runtime_facts(
         )
 
 
+def test_ceremony_rejects_duplicate_runtime_sys_tags(tmp_path: Path) -> None:
+    descriptor = _descriptor()
+    cast(dict[str, object], descriptor["runtime"])["sys_tags"] = [
+        "cp312-cp312-linux_aarch64",
+        "py3-none-any",
+        "py3-none-any",
+    ]
+    _write_fixture(tmp_path, descriptor=descriptor)
+
+    with pytest.raises(ceremony.ReachyLocalCeremonyError, match="unsafe Reachy local ceremony"):
+        _composition(tmp_path).ceremony.issue_proof(
+            operation="commission",
+            request=_request_model(),
+            current=None,
+            one_time_code=ONE_TIME_CODE,
+        )
+
+
 @pytest.mark.parametrize(
     "runtime_packages",
     (
