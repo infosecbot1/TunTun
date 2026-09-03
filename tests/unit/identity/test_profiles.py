@@ -12,7 +12,11 @@ from tuntun_core.services.actions.parameter_binding import ActionBindingVerifier
 from tuntun_core.services.identity.consent import ConsentDenied
 from tuntun_core.services.identity.profiles import StaleProfileVersion, require_fresh_passkey
 
-from tests.identity_support import _profile_create_command, _revoke_profile_command
+from tests.identity_support import (
+    _persona_command,
+    _profile_create_command,
+    _revoke_profile_command,
+)
 
 
 def test_profile_consent_receipt_inventory_is_bounded_and_unique(profile_factory) -> None:
@@ -142,6 +146,55 @@ async def test_guest_is_projection_not_persisted(
 
     assert projection.profile_class is ProfileClass.GUEST
     assert await profile_repository.count_subjects(household_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_active_profile_projection_and_current_active_guard_preserve_subject_class(
+    profile_service,
+    mutation_scope,
+    adult_a,
+) -> None:
+    projection = await profile_service.get_projection(adult_a.household_id, adult_a.id)
+
+    assert projection.subject_id == adult_a.id
+    assert projection.profile_class is ProfileClass.ADULT
+    assert projection.may_retrieve_private_memory is False
+    async with mutation_scope.open() as uow:
+        current = await profile_service.require_current_active_in_uow(
+            uow,
+            adult_a.household_id,
+            adult_a.id,
+        )
+        await uow.rollback()
+
+    assert current.id == adult_a.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["inactive", "revoked"])
+async def test_current_active_guard_rejects_inactive_or_revoked_subject(
+    identity_env,
+    profile_service,
+    mutation_scope,
+    state,
+) -> None:
+    profile = identity_env.profile_factory(ProfileClass.ADULT, name=f"active-guard-{state}")
+    if state == "inactive":
+        profile = profile.model_copy(update={"active": False})
+    else:
+        profile = profile.model_copy(
+            update={"active": False, "revoked_at": identity_env.clock.now()}
+        )
+    identity_env.profiles[profile.id] = profile
+
+    async with mutation_scope.open() as uow:
+        with pytest.raises(PermissionError, match="current_active_subject_required"):
+            await profile_service.require_current_active_in_uow(
+                uow,
+                profile.household_id,
+                profile.id,
+            )
+        await uow.rollback()
 
 
 @pytest.mark.asyncio
@@ -320,6 +373,114 @@ async def test_adult_profile_create_requires_authenticated_current_owner(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "operation"),
+    [
+        ("create_in_uow", "create"),
+        ("update_persona_traits_in_uow", "update_persona_traits"),
+        ("revoke_in_uow", "revoke"),
+    ],
+)
+async def test_profile_in_uow_methods_reject_cross_scope_uow_before_mutation(
+    identity_env,
+    profile_service,
+    mutation_scope,
+    bound_profile_command_factory,
+    passkey_auth_factory,
+    profile_repository_spy,
+    method_name,
+    operation,
+) -> None:
+    command = bound_profile_command_factory(operation=operation)
+    auth = passkey_auth_factory(command.action_binding)
+
+    async with mutation_scope.open() as active_uow:
+        async with identity_env.uow_factory() as other_uow:
+            assert active_uow is not other_uow
+            with pytest.raises(RuntimeError, match="profile_uow_scope_mismatch"):
+                await getattr(profile_service, method_name)(other_uow, command, auth)
+            await other_uow.rollback()
+        await active_uow.rollback()
+
+    assert profile_repository_spy.read_count == 0 and profile_repository_spy.write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_profile_create_update_and_revoke_in_uow_use_active_scope(
+    identity_env,
+    profile_service,
+    mutation_scope,
+    passkey_auth_factory,
+    adult_a,
+    adult_b,
+) -> None:
+    create_command = _profile_create_command(identity_env, profile_class=ProfileClass.ADULT)
+    async with mutation_scope.open() as uow:
+        created = await profile_service.create_in_uow(
+            uow,
+            create_command,
+            passkey_auth_factory(create_command.action_binding),
+        )
+        await uow.commit()
+
+    traits = PersonaTraits(
+        context="household_practical",
+        tone="practical",
+        depth="standard",
+        learning_level="none",
+    )
+    update_command = _persona_command(identity_env, adult_a, adult_a.id, traits)
+    async with mutation_scope.open() as uow:
+        updated = await profile_service.update_persona_traits_in_uow(
+            uow,
+            update_command,
+            passkey_auth_factory(update_command.action_binding),
+        )
+        await uow.commit()
+
+    revoke_command = _revoke_profile_command(identity_env, adult_b)
+    async with mutation_scope.open() as uow:
+        revoked = await profile_service.revoke_in_uow(
+            uow,
+            revoke_command,
+            passkey_auth_factory(revoke_command.action_binding),
+        )
+        await uow.commit()
+
+    assert created.id == create_command.subject_id
+    assert updated.encrypted_persona_traits is not None
+    assert revoked.active is False
+    assert revoked.authority_generation == adult_b.authority_generation + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile_class", "guardian_id", "expected_error"),
+    [
+        (ProfileClass.OWNER, None, "ordinary_profile_create_owner_forbidden"),
+        (ProfileClass.ADULT, "owner", "adult_profile_guardian_forbidden"),
+    ],
+)
+async def test_profile_create_rejects_owner_creation_and_adult_guardian_lineage(
+    identity_env,
+    identity_mutations,
+    owner,
+    profile_class,
+    guardian_id,
+    expected_error,
+) -> None:
+    command = _profile_create_command(
+        identity_env,
+        profile_class=profile_class,
+        guardian_id=owner.id if guardian_id == "owner" else None,
+    )
+    grant = identity_env.grant_for(owner.id, command.action_binding)
+
+    with pytest.raises(PermissionError, match=expected_error):
+        await identity_mutations.create_profile(command, grant.id)
+
+
+@pytest.mark.asyncio
 async def test_child_profile_create_requires_authenticated_actor_to_be_current_owner_guardian(
     identity_env,
     identity_mutations,
@@ -350,6 +511,76 @@ async def test_one_adult_cannot_revoke_another_profile_without_owner_authority(
 
     with pytest.raises(PermissionError, match="profile_revoke_authority_required"):
         await identity_mutations.revoke_profile(command, grant.id)
+
+
+@pytest.mark.asyncio
+async def test_current_owner_can_revoke_another_adult_profile(
+    identity_env,
+    identity_mutations,
+    owner,
+    adult_b,
+) -> None:
+    command = _revoke_profile_command(identity_env, adult_b, actor_id=owner.id)
+    grant = identity_env.grant_for(owner.id, command.action_binding)
+
+    revoked = await identity_mutations.revoke_profile(command, grant.id)
+
+    assert revoked.active is False
+    assert revoked.revoked_at == identity_env.clock.now()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        ("non_guardian_actor", "profile_revoke_authority_required"),
+        ("stale_guardian_generation", "profile_revoke_authority_required"),
+    ],
+)
+async def test_child_profile_revoke_requires_current_owner_guardian_lineage(
+    identity_env,
+    identity_mutations,
+    owner,
+    adult_a,
+    failure,
+    expected_error,
+) -> None:
+    child = identity_env.profile_factory(
+        ProfileClass.K2,
+        name=f"child-revoke-{failure}",
+        guardian_id=owner.id,
+    )
+    actor_id = owner.id
+    if failure == "non_guardian_actor":
+        actor_id = adult_a.id
+    else:
+        child = child.model_copy(update={"guardian_generation": child.guardian_generation + 1})
+        identity_env.profiles[child.id] = child
+    command = _revoke_profile_command(identity_env, child, actor_id=actor_id)
+    grant = identity_env.grant_for(actor_id, command.action_binding)
+
+    with pytest.raises(PermissionError, match=expected_error):
+        await identity_mutations.revoke_profile(command, grant.id)
+
+
+@pytest.mark.asyncio
+async def test_current_owner_guardian_can_revoke_child_profile(
+    identity_env,
+    identity_mutations,
+    owner,
+) -> None:
+    child = identity_env.profile_factory(
+        ProfileClass.N1,
+        name="child-revoke-current-owner",
+        guardian_id=owner.id,
+    )
+    command = _revoke_profile_command(identity_env, child, actor_id=owner.id)
+    grant = identity_env.grant_for(owner.id, command.action_binding)
+
+    revoked = await identity_mutations.revoke_profile(command, grant.id)
+
+    assert revoked.active is False
+    assert revoked.authority_generation == child.authority_generation + 1
 
 
 @pytest.mark.asyncio
@@ -550,6 +781,25 @@ async def test_stale_profile_version_or_stale_guardian_cannot_change_persona(
     for command, grant, reason in stale_persona_commands:
         with pytest.raises((PermissionError, StaleProfileVersion), match=reason):
             await identity_mutations.update_persona_traits(command, grant.id)
+
+
+@pytest.mark.asyncio
+async def test_adult_persona_rejects_child_learning_level_even_with_valid_consent(
+    identity_env,
+    identity_mutations,
+    adult_a,
+) -> None:
+    invalid_traits = PersonaTraits(
+        context="household_practical",
+        tone="warm",
+        depth="standard",
+        learning_level="k2",
+    )
+    command = _persona_command(identity_env, adult_a, adult_a.id, invalid_traits)
+    grant = identity_env.grant_for(adult_a.id, command.action_binding)
+
+    with pytest.raises(PermissionError, match="adult_persona_learning_level_invalid"):
+        await identity_mutations.update_persona_traits(command, grant.id)
 
 
 @pytest.mark.asyncio

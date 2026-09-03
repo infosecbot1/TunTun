@@ -17,7 +17,10 @@ from tuntun_core.services.actions.parameter_binding import (
     ActionParameterBindingVerifier,
     consent_parameters,
 )
-from tuntun_core.services.identity.consent import ConsentDenied
+from tuntun_core.services.identity.consent import (
+    CloudRouteConsentRevocationHandler,
+    ConsentDenied,
+)
 
 from tests.identity_support import COMMITMENT_ROOT, _grant_consent_command, _revoke_consent_command
 
@@ -482,6 +485,162 @@ async def test_consent_passkey_consumed_at_must_not_be_future(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["grant", "revoke"])
+@pytest.mark.parametrize(
+    ("forgery", "expected_error"),
+    [
+        ("source", "subject_bound_passkey_required"),
+        ("binding", "subject_bound_passkey_required"),
+        ("actor", "authenticated_actor_mismatch"),
+    ],
+)
+async def test_consent_requires_fresh_subject_bound_passkey_before_receipt_access(
+    consent_service,
+    bound_consent_command_factory,
+    actor_auth_factory,
+    repository_spies,
+    operation,
+    forgery,
+    expected_error,
+) -> None:
+    command = bound_consent_command_factory(operation=operation)
+    auth = actor_auth_factory(command.actor_id, command.action_binding)
+    if forgery == "source":
+        auth = auth.model_copy(update={"assurance_source": "voice"})
+    elif forgery == "binding":
+        other = bound_consent_command_factory(operation=operation, changed_field="purpose")
+        auth = auth.model_copy(update={"binding": other.action_binding})
+    else:
+        auth = auth.model_copy(update={"subject_id": uuid4()})
+
+    with pytest.raises(ConsentDenied, match=expected_error):
+        await getattr(consent_service, operation)(command, auth)
+
+    assert repository_spies.profile_reads == 0 and repository_spies.consent_reads == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "operation"),
+    [("grant_in_uow", "grant"), ("revoke_in_uow", "revoke")],
+)
+async def test_consent_in_uow_methods_reject_cross_scope_uow_before_receipt_access(
+    identity_env,
+    consent_service,
+    mutation_scope,
+    bound_consent_command_factory,
+    actor_auth_factory,
+    repository_spies,
+    method_name,
+    operation,
+) -> None:
+    command = bound_consent_command_factory(operation=operation)
+    auth = actor_auth_factory(command.actor_id, command.action_binding)
+
+    async with mutation_scope.open() as active_uow:
+        async with identity_env.uow_factory() as other_uow:
+            assert active_uow is not other_uow
+            with pytest.raises(RuntimeError, match="consent_uow_scope_mismatch"):
+                await getattr(consent_service, method_name)(other_uow, command, auth)
+            await other_uow.rollback()
+        await active_uow.rollback()
+
+    assert repository_spies.profile_reads == 0 and repository_spies.consent_reads == 0
+
+
+@pytest.mark.asyncio
+async def test_consent_grant_and_revoke_in_uow_use_active_transaction_scope(
+    identity_env,
+    identity_mutations,
+    consent_service,
+    mutation_scope,
+    adult_a,
+) -> None:
+    grant_command = _grant_consent_command(
+        identity_env,
+        adult_a,
+        adult_a.id,
+        ConsentPurpose.CLOUD_TTS,
+    )
+    grant_auth = identity_env.auth_context(adult_a.id, grant_command.action_binding)
+
+    async with mutation_scope.open() as uow:
+        granted = await consent_service.grant_in_uow(uow, grant_command, grant_auth)
+        await uow.commit()
+
+    assert granted.granted is True
+    revoke_command = _revoke_consent_command(
+        adult_a,
+        adult_a.id,
+        ConsentPurpose.CLOUD_TTS,
+        granted.id,
+        policy_version=granted.policy_version,
+        disclosure_version=granted.disclosure_version,
+    )
+    revoke_grant = identity_env.grant_for(adult_a.id, revoke_command.action_binding)
+    revoked = await identity_mutations.revoke_consent(revoke_command, revoke_grant.id)
+
+    assert revoked.granted is False
+
+
+@pytest.mark.asyncio
+async def test_consent_public_current_helpers_preserve_household_and_boolean_denials(
+    identity_env,
+    consent_service,
+    adult_a,
+    now,
+) -> None:
+    receipt = identity_env.install_consent(adult_a, adult_a.id, ConsentPurpose.CLOUD_TTS)
+
+    assert (
+        await consent_service.require_current_hmac_valid(
+            adult_a.household_id,
+            adult_a.id,
+            ConsentPurpose.CLOUD_TTS,
+            now,
+        )
+    ).id == receipt.id
+    with pytest.raises(ConsentDenied, match="consent_household_mismatch"):
+        await consent_service.require_current_hmac_valid(
+            uuid4(),
+            adult_a.id,
+            ConsentPurpose.CLOUD_TTS,
+            now,
+        )
+    assert await consent_service.is_current(adult_a.id, ConsentPurpose.CLOUD_TTS, now) is True
+    assert await consent_service.is_current(adult_a.id, ConsentPurpose.WEB_SEARCH, now) is False
+
+
+@pytest.mark.asyncio
+async def test_cloud_route_consent_revocation_handler_invalidates_only_revoked_subject_purpose(
+    identity_env,
+    adult_a,
+    now,
+) -> None:
+    class RecordingRouteAuthorizations:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, object, str, object]] = []
+
+        async def invalidate_subject_purpose_in_uow(
+            self,
+            uow,
+            subject_id,
+            purpose,
+            timestamp,
+        ) -> None:
+            self.calls.append((uow, subject_id, purpose, timestamp))
+
+    routes = RecordingRouteAuthorizations()
+    handler = CloudRouteConsentRevocationHandler(routes)
+    uow = object()
+    receipt = identity_env.install_consent(adult_a, adult_a.id, ConsentPurpose.CLOUD_REASONING)
+
+    await handler.apply_in_uow(uow, receipt, object(), now)
+
+    assert routes.calls == [(uow, adult_a.id, ConsentPurpose.CLOUD_REASONING.value, now)]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "forgery", ["cross_adult_actor", "guardian_actor", "legacy_restored_guardian"]
 )
@@ -694,6 +853,12 @@ async def test_guest_receipt_is_challenge_and_session_bound(
 
     assert receipt.expires_at == active_session.expires_at
     await guest_consent_service.require_current(
+        active_session.household_id,
+        active_session.id,
+        ConsentPurpose.CLOUD_STT,
+        now,
+    )
+    await guest_consent_service.require_current_hmac_valid(
         active_session.household_id,
         active_session.id,
         ConsentPurpose.CLOUD_STT,
