@@ -35,6 +35,33 @@ jobs:
           forbidden=('tuntun_core','tuntun_testing','reachy_mini');
           found=[name for name in forbidden if importlib.util.find_spec(name) is not None];
           assert not found, found"
+  openssh-forced-command-local:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with: {version: "0.8.13", enable-cache: true}
+      - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: uv sync --all-packages --locked --managed-python
+      - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: >-
+          python .github/ci/verify_openssh_ubuntu_lock.py verify-download
+          --lock-path .github/ci/openssh-ubuntu-24.04.lock
+          --download-root /tmp/t4-openssh-${{ github.run_id }}-${{ github.run_attempt }}
+      - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: >-
+          sudo /usr/bin/python3 .github/ci/verify_openssh_ubuntu_lock.py install
+          --lock-path .github/ci/openssh-ubuntu-24.04.lock
+          --download-root /tmp/t4-openssh-${{ github.run_id }}-${{ github.run_attempt }}
+      - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: >-
+          python .github/ci/verify_openssh_ubuntu_lock.py verify-installed
+          --lock-path .github/ci/openssh-ubuntu-24.04.lock
+      - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: >-
+          PYTEST_ADDOPTS=--basetemp=/tmp/t4-openssh-test-${{ github.run_id }}-${{
+          github.run_attempt }} .venv/bin/pytest
+          tests/integration/test_ssh_forced_command_local.py -q
   check:
     strategy:
       fail-fast: false
