@@ -1,0 +1,3 @@
+# Reachy Compatibility Record
+
+Production pins are accepted only from `var/hardware/reachy-capabilities.json` generated on the delivered robot. AEC-dependent conversational barge-in remains disabled when `aec_available=false`; the independent stop path in Task 13 remains mandatory. Direct strict-TLS boot requires `rtc_qualified=true`, proven by an unplugged cold boot and at most five seconds measured 30-day drift; otherwise signed-core secure-time bootstrap is mandatory. If secure key storage is unavailable, owner-only files plus immediate theft/reimage revocation are the recorded residual control. Any competing-controller signal enters error-safe.
