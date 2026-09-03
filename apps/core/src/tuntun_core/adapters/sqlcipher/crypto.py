@@ -5,12 +5,12 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Lock
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from tuntun_contracts.base import ContractModel, canonical_mapping_bytes
 
 _DEK_BYTES = 32
@@ -39,18 +39,22 @@ def _exact_bytes(value: object, *, label: str) -> bytes:
 class RecordContext(ContractModel):
     household_id: UUID
     table: Literal[
+        "subjects",
         "biometric_templates",
         "memory_embeddings",
         "recovery_sensitive_values",
     ]
     row_id: UUID
     purpose: Literal[
+        "profile-display-label",
+        "profile-persona-traits",
         "face-template",
         "voice-template",
         "memory-embedding",
         "recovery-sensitive",
     ]
     schema_version: Literal["1.0"]
+    profile_version: Annotated[int | None, Field(default=None, ge=1)] = None
 
     @field_validator("household_id", "row_id")
     @classmethod
@@ -63,11 +67,25 @@ class RecordContext(ContractModel):
     def exact_table_purpose(self) -> Self:
         valid = (
             (
+                self.table == "subjects"
+                and self.purpose in {"profile-display-label", "profile-persona-traits"}
+                and self.profile_version is not None
+            )
+            or (
                 self.table == "biometric_templates"
                 and self.purpose in {"face-template", "voice-template"}
+                and self.profile_version is None
             )
-            or (self.table == "memory_embeddings" and self.purpose == "memory-embedding")
-            or (self.table == "recovery_sensitive_values" and self.purpose == "recovery-sensitive")
+            or (
+                self.table == "memory_embeddings"
+                and self.purpose == "memory-embedding"
+                and self.profile_version is None
+            )
+            or (
+                self.table == "recovery_sensitive_values"
+                and self.purpose == "recovery-sensitive"
+                and self.profile_version is None
+            )
         )
         if not valid:
             raise ValueError("record table/purpose mismatch")
@@ -78,16 +96,17 @@ class RecordContext(ContractModel):
             raise TypeError("associated-data domain must be an exact string")
         if domain not in {"record-data", "dek-wrap"}:
             raise ValueError("unknown associated-data domain")
-        return canonical_mapping_bytes(
-            {
-                "domain": domain,
-                "household_id": self.household_id,
-                "purpose": self.purpose,
-                "row_id": self.row_id,
-                "schema_version": self.schema_version,
-                "table": self.table,
-            }
-        )
+        fields: dict[str, object] = {
+            "domain": domain,
+            "household_id": self.household_id,
+            "purpose": self.purpose,
+            "row_id": self.row_id,
+            "schema_version": self.schema_version,
+            "table": self.table,
+        }
+        if self.profile_version is not None:
+            fields["profile_version"] = self.profile_version
+        return canonical_mapping_bytes(fields)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +178,7 @@ class RecordCipher:
             row_id=context.row_id,
             purpose=context.purpose,
             schema_version=context.schema_version,
+            profile_version=context.profile_version,
         )
 
     @staticmethod

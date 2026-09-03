@@ -6,13 +6,14 @@ import fcntl
 import math
 import os
 import stat
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from tuntun_contracts.reachy import SafetyReceipt
 from tuntun_core.services.budget.reconciler import ExpiredBudgetReconciler
+from tuntun_core.services.identity.subject_revocation_processor import POST_COMMIT_FAMILIES
 from tuntun_core.services.sessions.turn_coordinator import TurnCoordinator
 from tuntun_core.services.storage_time import utc_storage
 
@@ -755,3 +756,49 @@ def _bounded_session_ready_timeout(value: float) -> float:
     if not math.isfinite(timeout) or timeout <= 0 or timeout > 30:
         raise ValueError("reachy_session_ready_timeout_invalid")
     return timeout
+
+
+class _IdentityStopEventPort(Protocol):
+    def is_set(self) -> bool: ...
+
+
+class _IdentityRevocationWorkerPort(Protocol):
+    @property
+    def available(self) -> bool: ...
+
+    async def recover_and_drain_before_ready(self) -> None: ...
+
+    async def run_periodically(
+        self,
+        stop: _IdentityStopEventPort,
+        on_fatal: Callable[[BaseException], object],
+    ) -> None: ...
+
+    async def wait_running(self) -> None: ...
+
+
+class _IdentityTaskGroupPort(Protocol):
+    def create_task(self, coroutine: Coroutine[object, object, None]) -> object: ...
+
+
+async def start_identity_runtime(
+    handler_registry: Mapping[str, object],
+    revocation_worker: _IdentityRevocationWorkerPort,
+    readiness: asyncio.Event,
+    task_group: _IdentityTaskGroupPort,
+    stop: _IdentityStopEventPort,
+) -> None:
+    if set(handler_registry) != set(POST_COMMIT_FAMILIES):
+        raise RuntimeError("complete_post_commit_revocation_handlers_required")
+    readiness.clear()
+    if revocation_worker is None or not revocation_worker.available:
+        raise RuntimeError("subject revocation worker unavailable")
+    await revocation_worker.recover_and_drain_before_ready()
+    task_group.create_task(
+        revocation_worker.run_periodically(
+            stop,
+            lambda _error: readiness.clear(),
+        )
+    )
+    await revocation_worker.wait_running()
+    readiness.set()

@@ -10,6 +10,8 @@ import pytest
 from tuntun_contracts.budget import BudgetReservationRequest, LlmUsageUnits
 from tuntun_core.services.providers.review import SqlcipherCurrentProviderReviews
 
+from tests.identity_support import StaticTask1IdentityKeyProvider
+
 pytest_plugins = ("tests.fixtures.provider_egress",)
 
 PROJECT_ROOT = Path(__file__).parents[3]
@@ -183,6 +185,7 @@ def test_production_container_build_loads_explicit_provider_defaults_path(
         configured_state_root=state_root,
         reachy=object(),
         sqlcipher_uow_factory=async_uow_factory,
+        task1_identity_key_provider=StaticTask1IdentityKeyProvider(),
         clock=clock,
         route_authorizer=_UnusedRouteAuthorizer(),
         price_catalog=catalog,
@@ -220,6 +223,7 @@ async def test_static_provider_defaults_do_not_satisfy_missing_provider_review(
         configured_state_root=state_root,
         reachy=object(),
         sqlcipher_uow_factory=async_uow_factory,
+        task1_identity_key_provider=StaticTask1IdentityKeyProvider(),
         clock=clock,
         route_authorizer=_UnusedRouteAuthorizer(),
         price_catalog=catalog,

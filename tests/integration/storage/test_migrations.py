@@ -46,9 +46,22 @@ EXPECTED_TABLES = {
     "reachy_duplex_correlations",
 }
 EXPECTED_TRIGGERS = {"audit_receipts_no_update", "audit_receipts_no_delete"}
+TASK1_TABLES = {
+    "subjects",
+    "current_owner_authority",
+    "consent_receipts",
+    "guest_disclosure_challenges",
+    "guest_session_consent_receipts",
+    "enrollment_sessions",
+    "biometric_templates",
+    "subject_revocation_outbox",
+    "subject_revocation_effects",
+}
+EXPECTED_HEAD_TABLES = EXPECTED_TABLES | TASK1_TABLES
 MAX_QUOTE_MICROS_SGD = 1_000_000_000_000
 
 assert len(EXPECTED_TABLES) == 17
+assert len(EXPECTED_HEAD_TABLES) == 26
 
 
 def _private_path(tmp_path: Path, name: str) -> Path:
@@ -451,7 +464,7 @@ def test_foundation_upgrade_downgrade_upgrade(tmp_path: Path) -> None:
 
     command.upgrade(config, "head")
     db = open_sqlcipher(path, KEY)
-    assert _non_sqlite_tables(db) == EXPECTED_TABLES
+    assert _non_sqlite_tables(db) == EXPECTED_HEAD_TABLES
     assert _triggers(db) == EXPECTED_TRIGGERS
     db.close()
 
@@ -529,10 +542,10 @@ def test_downgrade_ddl_is_atomic_when_revision_fails(
         command.downgrade(config, "base")
 
     db = open_sqlcipher(path, KEY)
-    assert _non_sqlite_tables(db) == EXPECTED_TABLES
+    assert _non_sqlite_tables(db) == EXPECTED_HEAD_TABLES
     assert _triggers(db) == EXPECTED_TRIGGERS
     assert db.execute("SELECT version_num FROM alembic_version").fetchall() == [
-        ("0001_foundation",)
+        ("0002_profiles_consent_enrollment",)
     ]
     db.close()
 

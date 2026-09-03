@@ -24,6 +24,8 @@ from tuntun_core.api.app import create_app
 from tuntun_core.api.dependencies import SimulatedGuestAppDependencies
 from tuntun_core.bootstrap.lifecycle import CoreProcessLease
 
+from tests.identity_support import StaticTask1IdentityKeyProvider
+
 pytest_plugins = ("tests.fixtures.provider_egress",)
 
 PROJECT_ROOT = Path(__file__).parents[3]
@@ -1305,6 +1307,7 @@ def _build_production_container(
         configured_state_root=state_root,
         reachy=object(),
         sqlcipher_uow_factory=async_uow_factory,  # type: ignore[arg-type]
+        task1_identity_key_provider=StaticTask1IdentityKeyProvider(),
         clock=clock,  # type: ignore[arg-type]
         route_authorizer=_RouteAuthorizer(),
         price_catalog=catalog,  # type: ignore[arg-type]

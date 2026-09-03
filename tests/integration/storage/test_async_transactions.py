@@ -794,6 +794,35 @@ async def test_signal_registration_is_fixed_before_first_unit_and_names_only(
 
 
 @pytest.mark.asyncio
+async def test_repository_facade_registration_is_fixed_before_first_unit(
+    migrated_database: object,
+) -> None:
+    engine = migrated_database.engine  # type: ignore[attr-defined]
+    factory = AsyncUnitOfWorkFactory(engine)
+
+    class FacadeFactory:
+        def bind(self, uow: object) -> object:
+            return uow
+
+    factory.register_repository_facades(
+        {"households": cast(HouseholdFacadeFactory, FacadeFactory())}
+    )
+    pending = factory()
+    with pytest.raises(RuntimeError, match="registration"):
+        factory.register_repository_facades(
+            {"late_households": cast(HouseholdFacadeFactory, FacadeFactory())}
+        )
+    try:
+        async with pending as uow:
+            assert uow.households is uow  # type: ignore[attr-defined]
+            with pytest.raises(AttributeError):
+                _ = uow.late_households  # type: ignore[attr-defined]
+            await uow.rollback()
+    finally:
+        await factory.aclose()
+
+
+@pytest.mark.asyncio
 async def test_signal_registration_rejects_noncallable_and_async_targets(
     migrated_database: object,
 ) -> None:

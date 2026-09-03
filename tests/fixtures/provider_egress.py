@@ -54,6 +54,7 @@ from tuntun_core.services.storage_time import utc_storage
 from tuntun_testing.fake_clock import FakeClock
 
 from tests.fixtures.provider_routes import RouteDatabase
+from tests.identity_support import StaticTask1IdentityKeyProvider
 
 pytest_plugins = ("tests.fixtures.provider_routes", "tests.fixtures.budget")
 
@@ -308,6 +309,24 @@ class BoundAuthorizerFake:
             authorization_id != self.context.route.authorization_id
             or supplied != self.context.consumption
         ):
+            raise PermissionError("route_consumption_mismatch")
+
+
+class DeferredBoundAuthorizerFake:
+    def __init__(self) -> None:
+        self.context: ProviderContext | None = None
+
+    def bind(self, context: ProviderContext) -> None:
+        self.context = context
+
+    async def authorize(self, request):
+        raise AssertionError(f"gateway must not authorize: {request!r}")
+
+    async def consume(self, authorization_id: UUID, supplied: RouteConsumption) -> None:
+        context = self.context
+        if context is None:
+            raise AssertionError("route authorizer consumed before fixture context bound")
+        if authorization_id != context.route.authorization_id or supplied != context.consumption:
             raise PermissionError("route_consumption_mismatch")
 
 
@@ -1758,31 +1777,34 @@ async def production_container(
 ):
     from tuntun_core.bootstrap.container import ProductionContainer
 
-    context, _reservation, _guard = await _create_production_context(
-        async_uow_factory,
-        clock,
-        catalog,
-        provider_reviews,
-        budget_evidence,
-        seed_response_scope=True,
-    )
     state_root = tmp_path / "production-state"
     state_root.mkdir(mode=0o700)
     state_root.chmod(0o700)
     provider_defaults_path = _copy_provider_defaults_to_private_path(tmp_path)
     reachy = _ProductionReachySafety()
+    route_authorizer = DeferredBoundAuthorizerFake()
     container = ProductionContainer.build(
         configured_state_root=state_root,
         reachy=reachy,
         sqlcipher_uow_factory=async_uow_factory,
+        task1_identity_key_provider=StaticTask1IdentityKeyProvider(),
         clock=clock,
-        route_authorizer=BoundAuthorizerFake(context),
+        route_authorizer=route_authorizer,
         price_catalog=catalog,
         runtime_provider_identities=runtime_provider_identities,
         budget_evidence=budget_evidence,
         provider_defaults_path=provider_defaults_path,
     )
     try:
+        context, _reservation, _guard = await _create_production_context(
+            async_uow_factory,
+            clock,
+            catalog,
+            provider_reviews,
+            budget_evidence,
+            seed_response_scope=True,
+        )
+        route_authorizer.bind(context)
         yield _ProductionContainerCase(container, context, reachy)
     finally:
         container.core_process_lease.release_after_shutdown()
