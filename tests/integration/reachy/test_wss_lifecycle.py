@@ -2464,7 +2464,7 @@ async def test_server_tls_rejection_starts_bounded_close_and_observes_cleanup() 
     )
 
     with pytest.raises(PermissionError, match="reachy_tls13_required"):
-        await asyncio.wait_for(server.accept(socket), timeout=0.05)
+        await asyncio.wait_for(server.accept(socket), timeout=0.5)
 
     assert socket.close_started.is_set()
     _assert_pre_session_failure_observed(

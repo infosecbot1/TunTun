@@ -53,6 +53,22 @@ async def _forever(finalized: asyncio.Event) -> None:
         finalized.set()
 
 
+async def _settle_after_loaded_loop_cancellation(
+    entered: asyncio.Event,
+    finalized: asyncio.Event,
+) -> None:
+    entered.set()
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        # A loaded Intel event loop can take materially longer than one scheduler
+        # tick to run ordinary task finalizers, even when they do not suppress
+        # cancellation indefinitely.
+        await asyncio.sleep(0.075)
+        finalized.set()
+        raise
+
+
 async def _raise_private_operation_error() -> None:
     raise RuntimeError("private-operation-error")
 
@@ -753,6 +769,27 @@ async def test_external_cancellation_precedes_cleanup_incomplete_from_cancelled_
         await run
     assert cancellation.value.args == ("owner-cancel",)
     assert guard._quarantine == set()  # noqa: SLF001 - all owned work settled
+
+
+@pytest.mark.asyncio
+async def test_default_cleanup_budget_observes_loaded_loop_task_finalization() -> None:
+    guard = DeadlineGuard(_Clock())
+    entered = asyncio.Event()
+    finalized = asyncio.Event()
+    task = asyncio.create_task(
+        _settle_after_loaded_loop_cancellation(entered, finalized),
+        name="deadline-loaded-loop-finalizer",
+    )
+    await entered.wait()
+
+    try:
+        assert await guard.cancel_many(task)
+        assert finalized.is_set()
+        assert task.cancelled()
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.parametrize(
@@ -2943,7 +2980,7 @@ async def test_hostile_cancel_hook_self_cancelling_cleanup_still_fans_out_siblin
 
     complete = await asyncio.wait_for(
         guard.cancel_many(hostile, sibling),
-        timeout=0.2,
+        timeout=0.75,
     )
 
     assert complete is False

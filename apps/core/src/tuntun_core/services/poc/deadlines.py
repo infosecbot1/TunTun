@@ -15,7 +15,11 @@ from weakref import ReferenceType, ref
 from .ports import MonotonicClock
 
 _T = TypeVar("_T")
-_CANCEL_OBSERVE_SECONDS = 0.05
+# Cancellation remains fail-closed, but a 50 ms join budget was shorter than an
+# ordinary task finalizer can receive on the supported Intel host under load.
+# Output is already fenced before this observation; this only gives owned work
+# enough time to prove that it actually stopped.
+_CANCEL_OBSERVE_SECONDS = 0.250
 _MAX_CLEANUP_OBSERVE_SECONDS = 4.0
 _EXCEPTION_SCAN_LIMIT = 64
 _CAUSE_DESCRIPTOR: Any = vars(BaseException)["__cause__"]
