@@ -9,9 +9,20 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from tuntun_core.bootstrap.container import build_task1_sqlcipher_uow_factory
-from tuntun_core.domain.profile import ConsentPurpose, ConsentReceipt, GuestConsentPurpose
+from tuntun_core.adapters.sqlcipher.identity_repositories import _receipt_ids_blob
+from tuntun_core.bootstrap.container import (
+    build_task1_identity_container,
+    build_task1_sqlcipher_uow_factory,
+)
+from tuntun_core.domain.profile import (
+    ConsentPurpose,
+    ConsentReceipt,
+    GuestConsentPurpose,
+    Profile,
+    ProfileClass,
+)
 from tuntun_core.services.identity.consent import ConsentDenied
+from tuntun_core.services.identity.runtime import HmacReceiptSigner
 from tuntun_core.services.storage_time import utc_storage
 from tuntun_core.services.transactions.identity_uow import IdentityUnitOfWork
 
@@ -85,6 +96,111 @@ def _insert_guest_disclosure_presentation(
             utc_storage(occurred_at),
         ),
     )
+
+
+def _insert_active_session(
+    connection,
+    *,
+    household_id: UUID,
+    device_id: UUID,
+    session_id: UUID,
+    now: datetime,
+    last_activity_at: datetime | None = None,
+    closed_at: datetime | None = None,
+) -> None:
+    connection.exec_driver_sql(
+        "INSERT INTO sessions "
+        "(id,household_id,device_id,state,speaker_subject_id,opened_at,last_activity_at,closed_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (
+            str(session_id),
+            str(household_id),
+            str(device_id),
+            "active",
+            None,
+            utc_storage(now),
+            utc_storage(last_activity_at or now),
+            None if closed_at is None else utc_storage(closed_at),
+        ),
+    )
+
+
+def _build_sql_uow_factory(migrated_sqlcipher_engine, clock, keys=None):
+    return build_task1_sqlcipher_uow_factory(
+        migrated_sqlcipher_engine.engine,
+        clock,
+        keys or task1_test_identity_keys(),
+    )
+
+
+def _build_sql_identity_container(migrated_sqlcipher_engine, clock):
+    keys = task1_test_identity_keys()
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock, keys)
+    return keys, uow_factory, build_task1_identity_container(uow_factory, clock, keys)
+
+
+def _insert_guest_consent_context(
+    connection,
+    *,
+    household_id: UUID,
+    device_id: UUID,
+    session_id: UUID,
+    presentation_receipt_id: UUID,
+    purpose: GuestConsentPurpose,
+    disclosure_version: str,
+    now: datetime,
+) -> None:
+    _insert_guest_disclosure_presentation(
+        connection,
+        household_id=household_id,
+        device_id=device_id,
+        session_id=session_id,
+        presentation_receipt_id=presentation_receipt_id,
+        purpose=purpose,
+        disclosure_version=disclosure_version,
+        occurred_at=now,
+    )
+    _insert_active_session(
+        connection,
+        household_id=household_id,
+        device_id=device_id,
+        session_id=session_id,
+        now=now,
+    )
+
+
+def _restore_guest_challenge_expiry(
+    connection,
+    *,
+    keys,
+    challenge_id: UUID,
+    household_id: UUID,
+    session_id: UUID,
+    purpose: GuestConsentPurpose,
+    disclosure_version: str,
+    presentation_receipt_id: UUID,
+    issued_at: datetime,
+    expires_at: datetime,
+) -> str:
+    signer = HmacReceiptSigner(keys.receipt.root_key, key_id=keys.receipt.key_id)
+    key_id, challenge_hmac = signer.sign_fields(
+        "guest_disclosure_challenge",
+        (
+            challenge_id,
+            household_id,
+            session_id,
+            purpose,
+            disclosure_version,
+            presentation_receipt_id,
+            issued_at,
+            expires_at,
+        ),
+    )
+    connection.exec_driver_sql(
+        "UPDATE guest_disclosure_challenges SET expires_at=?,challenge_hmac=? WHERE id=?",
+        (utc_storage(expires_at), challenge_hmac, str(challenge_id)),
+    )
+    return key_id
 
 
 @pytest.mark.asyncio
@@ -276,6 +392,365 @@ async def test_sql_guest_presentation_receipt_accepts_exact_context(
             now=now,
         )
         await uow.rollback()
+
+
+@pytest.mark.asyncio
+async def test_sql_guest_consent_roundtrip_revokes_current_receipt_and_records_guest_audits(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    _, uow_factory, container = _build_sql_identity_container(
+        migrated_sqlcipher_engine,
+        clock,
+    )
+    household_id = uuid4()
+    device_id = uuid4()
+    session_id = uuid4()
+    presentation_receipt_id = uuid4()
+    purpose: GuestConsentPurpose = "cloud_reasoning"
+    disclosure_version = "phase1-disclosure-v1"
+    now = clock.now()
+    try:
+        with migrated_sqlcipher_engine.engine.begin() as connection:
+            _insert_guest_consent_context(
+                connection,
+                household_id=household_id,
+                device_id=device_id,
+                session_id=session_id,
+                presentation_receipt_id=presentation_receipt_id,
+                purpose=purpose,
+                disclosure_version=disclosure_version,
+                now=now,
+            )
+
+        guest_consents = container.identity_services.guest_consents
+        challenge = await guest_consents.issue_challenge(
+            household_id,
+            session_id,
+            ConsentPurpose.CLOUD_REASONING,
+            disclosure_version,
+            presentation_receipt_id,
+            now,
+        )
+        granted = await guest_consents.accept_challenge(challenge.id, "haan", now)
+        current = await guest_consents.require_current(
+            household_id,
+            session_id,
+            ConsentPurpose.CLOUD_REASONING,
+            now,
+        )
+        revoke_time = now + timedelta(seconds=1)
+        revoked = await guest_consents.revoke(
+            household_id,
+            session_id,
+            ConsentPurpose.CLOUD_REASONING,
+            revoke_time,
+        )
+
+        assert current.id == granted.id
+        assert revoked.granted is False
+        assert revoked.revoked_at == revoke_time
+        with pytest.raises(ConsentDenied, match="current_guest_session_consent_required"):
+            await guest_consents.require_current(
+                household_id,
+                session_id,
+                ConsentPurpose.CLOUD_REASONING,
+                revoke_time,
+            )
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            challenge_state = connection.exec_driver_sql(
+                "SELECT state,consumed_at FROM guest_disclosure_challenges WHERE id=?",
+                (str(challenge.id),),
+            ).one()
+            receipt_rows = connection.exec_driver_sql(
+                "SELECT granted,revoked_at FROM guest_session_consent_receipts "
+                "WHERE session_id=? ORDER BY issued_at,id",
+                (str(session_id),),
+            ).all()
+            audit_actions = [
+                json.loads(str(body))["action_code"]
+                for (body,) in connection.exec_driver_sql(
+                    "SELECT canonical_body_json FROM audit_receipts ORDER BY ordinal",
+                ).all()
+            ]
+
+        assert tuple(challenge_state) == ("accepted", utc_storage(now))
+        assert [tuple(row) for row in receipt_rows] == [
+            (1, None),
+            (0, utc_storage(revoke_time)),
+        ]
+        assert "guest.consent.granted" in audit_actions
+        assert "guest.consent.revoked" in audit_actions
+    finally:
+        await uow_factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sql_guest_challenge_decline_consumes_challenge_without_minting_receipt(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    _, uow_factory, container = _build_sql_identity_container(
+        migrated_sqlcipher_engine,
+        clock,
+    )
+    household_id = uuid4()
+    device_id = uuid4()
+    session_id = uuid4()
+    presentation_receipt_id = uuid4()
+    purpose: GuestConsentPurpose = "cloud_tts"
+    disclosure_version = "phase1-disclosure-v1"
+    now = clock.now()
+    try:
+        with migrated_sqlcipher_engine.engine.begin() as connection:
+            _insert_guest_consent_context(
+                connection,
+                household_id=household_id,
+                device_id=device_id,
+                session_id=session_id,
+                presentation_receipt_id=presentation_receipt_id,
+                purpose=purpose,
+                disclosure_version=disclosure_version,
+                now=now,
+            )
+
+        challenge = await container.identity_services.guest_consents.issue_challenge(
+            household_id,
+            session_id,
+            ConsentPurpose.CLOUD_TTS,
+            disclosure_version,
+            presentation_receipt_id,
+            now,
+        )
+        with pytest.raises(ConsentDenied, match="guest_disclosure_declined"):
+            await container.identity_services.guest_consents.accept_challenge(
+                challenge.id,
+                "no",
+                now,
+            )
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            challenge_state = connection.exec_driver_sql(
+                "SELECT state,consumed_at FROM guest_disclosure_challenges WHERE id=?",
+                (str(challenge.id),),
+            ).one()
+            receipt_count = connection.exec_driver_sql(
+                "SELECT count(*) FROM guest_session_consent_receipts WHERE challenge_id=?",
+                (str(challenge.id),),
+            ).scalar_one()
+
+        assert tuple(challenge_state) == ("denied", utc_storage(now))
+        assert receipt_count == 0
+    finally:
+        await uow_factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sql_guest_challenge_with_restored_within_session_expiry_accepts_hmac(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    keys, uow_factory, container = _build_sql_identity_container(
+        migrated_sqlcipher_engine,
+        clock,
+    )
+    household_id = uuid4()
+    device_id = uuid4()
+    session_id = uuid4()
+    presentation_receipt_id = uuid4()
+    purpose: GuestConsentPurpose = "cloud_stt"
+    disclosure_version = "phase1-disclosure-v1"
+    now = clock.now()
+    try:
+        with migrated_sqlcipher_engine.engine.begin() as connection:
+            _insert_guest_consent_context(
+                connection,
+                household_id=household_id,
+                device_id=device_id,
+                session_id=session_id,
+                presentation_receipt_id=presentation_receipt_id,
+                purpose=purpose,
+                disclosure_version=disclosure_version,
+                now=now,
+            )
+
+        challenge = await container.identity_services.guest_consents.issue_challenge(
+            household_id,
+            session_id,
+            ConsentPurpose.CLOUD_STT,
+            disclosure_version,
+            presentation_receipt_id,
+            now,
+        )
+        restored_expires_at = now + timedelta(minutes=29)
+        with migrated_sqlcipher_engine.engine.begin() as connection:
+            key_id = _restore_guest_challenge_expiry(
+                connection,
+                keys=keys,
+                challenge_id=challenge.id,
+                household_id=household_id,
+                session_id=session_id,
+                purpose=purpose,
+                disclosure_version=disclosure_version,
+                presentation_receipt_id=presentation_receipt_id,
+                issued_at=now,
+                expires_at=restored_expires_at,
+            )
+
+        receipt = await container.identity_services.guest_consents.accept_challenge(
+            challenge.id,
+            "yes",
+            now,
+        )
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            challenge_state = connection.exec_driver_sql(
+                "SELECT state,consumed_at FROM guest_disclosure_challenges WHERE id=?",
+                (str(challenge.id),),
+            ).one()
+            persisted_receipt = connection.exec_driver_sql(
+                "SELECT challenge_id,granted FROM guest_session_consent_receipts WHERE id=?",
+                (str(receipt.id),),
+            ).one()
+
+        assert key_id == keys.receipt.key_id
+        assert receipt.challenge_id == challenge.id
+        assert tuple(challenge_state) == ("accepted", utc_storage(now))
+        assert tuple(persisted_receipt) == (str(challenge.id), 1)
+    finally:
+        await uow_factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sql_guest_challenge_with_restored_overlong_expiry_fails_before_receipt_insert(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    keys, uow_factory, container = _build_sql_identity_container(
+        migrated_sqlcipher_engine,
+        clock,
+    )
+    household_id = uuid4()
+    device_id = uuid4()
+    session_id = uuid4()
+    presentation_receipt_id = uuid4()
+    purpose: GuestConsentPurpose = "cloud_stt"
+    disclosure_version = "phase1-disclosure-v1"
+    now = clock.now()
+    try:
+        with migrated_sqlcipher_engine.engine.begin() as connection:
+            _insert_guest_consent_context(
+                connection,
+                household_id=household_id,
+                device_id=device_id,
+                session_id=session_id,
+                presentation_receipt_id=presentation_receipt_id,
+                purpose=purpose,
+                disclosure_version=disclosure_version,
+                now=now,
+            )
+
+        challenge = await container.identity_services.guest_consents.issue_challenge(
+            household_id,
+            session_id,
+            ConsentPurpose.CLOUD_STT,
+            disclosure_version,
+            presentation_receipt_id,
+            now,
+        )
+        restored_expires_at = now + timedelta(minutes=31)
+        with migrated_sqlcipher_engine.engine.begin() as connection:
+            key_id = _restore_guest_challenge_expiry(
+                connection,
+                keys=keys,
+                challenge_id=challenge.id,
+                household_id=household_id,
+                session_id=session_id,
+                purpose=purpose,
+                disclosure_version=disclosure_version,
+                presentation_receipt_id=presentation_receipt_id,
+                issued_at=now,
+                expires_at=restored_expires_at,
+            )
+
+        with pytest.raises(ConsentDenied, match="active_guest_disclosure_challenge_required"):
+            await container.identity_services.guest_consents.accept_challenge(
+                challenge.id,
+                "yes",
+                now,
+            )
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            state = connection.exec_driver_sql(
+                "SELECT state FROM guest_disclosure_challenges WHERE id=?",
+                (str(challenge.id),),
+            ).scalar_one()
+            receipt_count = connection.exec_driver_sql(
+                "SELECT count(*) FROM guest_session_consent_receipts WHERE challenge_id=?",
+                (str(challenge.id),),
+            ).scalar_one()
+
+        assert key_id == keys.receipt.key_id
+        assert state == "open"
+        assert receipt_count == 0
+    finally:
+        await uow_factory.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("last_activity_delta", "closed_delta"),
+    (
+        (timedelta(minutes=-31), None),
+        (timedelta(), timedelta(seconds=1)),
+    ),
+)
+async def test_sql_guest_session_repository_fails_closed_for_expired_or_closed_sessions(
+    migrated_sqlcipher_engine,
+    clock,
+    last_activity_delta,
+    closed_delta,
+) -> None:
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
+    household_id = uuid4()
+    device_id = uuid4()
+    session_id = uuid4()
+    now = clock.now()
+    try:
+        with migrated_sqlcipher_engine.engine.begin() as connection:
+            _insert_household(connection, household_id, now)
+            connection.exec_driver_sql(
+                "INSERT INTO devices "
+                "(id,household_id,kind,certificate_fingerprint,signing_public_key,signing_key_id,"
+                "last_sequence,paired_at,revoked_at) VALUES (?,?,?,?,?,?,?,?,NULL)",
+                (
+                    str(device_id),
+                    str(household_id),
+                    "simulated-guest",
+                    f"fixture-{device_id}",
+                    b"public-key",
+                    "guest-session-test-key",
+                    1,
+                    utc_storage(now),
+                ),
+            )
+            _insert_active_session(
+                connection,
+                household_id=household_id,
+                device_id=device_id,
+                session_id=session_id,
+                now=now,
+                last_activity_at=now + last_activity_delta,
+                closed_at=None if closed_delta is None else now + closed_delta,
+            )
+
+        async with uow_factory() as uow:
+            with pytest.raises(ConsentDenied, match="active_guest_session_required"):
+                await uow.sessions.require_active(household_id, session_id, now)
+            await uow.rollback()
+    finally:
+        await uow_factory.aclose()
 
 
 @pytest.mark.asyncio
@@ -536,12 +1011,182 @@ def _sql_consent_receipt(
     )
 
 
+def _insert_consent_receipt(connection, receipt: ConsentReceipt) -> None:
+    connection.exec_driver_sql(
+        "INSERT INTO consent_receipts "
+        "(id,household_id,subject_id,actor_id,guardian_id,guardian_generation,purpose,"
+        "granted,policy_version,disclosure_version,commitment_key_id,receipt_hmac,"
+        "created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            str(receipt.id),
+            str(receipt.household_id),
+            str(receipt.subject_id),
+            str(receipt.actor_id),
+            None if receipt.guardian_id is None else str(receipt.guardian_id),
+            receipt.guardian_generation,
+            receipt.purpose.value,
+            int(receipt.granted),
+            receipt.policy_version,
+            receipt.disclosure_version,
+            receipt.commitment_key_id,
+            receipt.receipt_hmac,
+            utc_storage(receipt.created_at),
+            None if receipt.expires_at is None else utc_storage(receipt.expires_at),
+        ),
+    )
+
+
 def _current_consent_pointer(connection, subject_id: UUID) -> tuple[UUID, ...]:
     raw = connection.exec_driver_sql(
         "SELECT current_consent_receipt_ids FROM subjects WHERE id=?",
         (str(subject_id),),
     ).scalar_one()
     return tuple(UUID(item) for item in json.loads(bytes(raw).decode("ascii")))
+
+
+@pytest.mark.asyncio
+async def test_sql_profile_repository_roundtrips_private_fields_and_fails_closed_on_state_drift(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    now = clock.now()
+    household_id = UUID("00000000-0000-4000-8000-000000000601")
+    owner_id = UUID("00000000-0000-4000-8000-000000000602")
+    adult_id = UUID("00000000-0000-4000-8000-000000000603")
+    child_id = UUID("00000000-0000-4000-8000-000000000604")
+    due_at = now - timedelta(seconds=1)
+    adult_label = b"adult-label".ljust(28, b".")
+    adult_persona = b"old-persona".ljust(28, b".")
+    owner = Profile(
+        id=owner_id,
+        household_id=household_id,
+        guardian_id=None,
+        guardian_generation=0,
+        profile_class=ProfileClass.OWNER,
+        encrypted_display_label=b"owner-label".ljust(28, b"."),
+        encrypted_persona_traits=None,
+        current_consent_receipt_ids=(),
+        active=True,
+        authority_generation=1,
+        version=1,
+        next_reenrollment_reminder_at=None,
+        created_at=now,
+        updated_at=now,
+    )
+    adult = owner.model_copy(
+        update={
+            "id": adult_id,
+            "profile_class": ProfileClass.ADULT,
+            "encrypted_display_label": adult_label,
+            "encrypted_persona_traits": adult_persona,
+        }
+    )
+    child = owner.model_copy(
+        update={
+            "id": child_id,
+            "guardian_id": owner_id,
+            "guardian_generation": 1,
+            "profile_class": ProfileClass.K2,
+            "encrypted_display_label": b"child-label".ljust(28, b"."),
+            "next_reenrollment_reminder_at": due_at,
+        }
+    )
+    with migrated_sqlcipher_engine.engine.begin() as connection:
+        _insert_household(connection, household_id, now)
+
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
+    try:
+        async with uow_factory() as uow:
+            await uow.profiles.insert(owner)
+            await uow.profiles.insert(adult)
+            await uow.profiles.insert(child)
+            await uow.commit()
+
+        with migrated_sqlcipher_engine.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO current_owner_authority "
+                "(household_id,subject_id,owner_generation,changed_at) VALUES (?,?,?,?)",
+                (str(household_id), str(owner_id), 1, utc_storage(now)),
+            )
+
+        async with uow_factory() as uow:
+            reloaded = await uow.profiles.get(adult_id)
+            assert reloaded.encrypted_display_label == adult_label
+            assert reloaded.encrypted_persona_traits == adult_persona
+            with pytest.raises(KeyError):
+                await uow.profiles.get(uuid4())
+            with pytest.raises(KeyError):
+                await uow.profiles.get_scoped(uuid4(), adult_id)
+            assert await uow.profiles.get_optional_scoped(uuid4(), adult_id) is None
+
+            due = await uow.profiles.list_children_due_for_reenrollment_reminder(
+                household_id,
+                now,
+            )
+            assert tuple(profile.id for profile in due) == (child_id,)
+            await uow.profiles.disable_biometric_identity(child_id, now)
+            assert (
+                await uow.profiles.require_current_owner_guardian_generation(
+                    household_id,
+                    owner_id,
+                    now,
+                )
+                == 1
+            )
+            with pytest.raises(PermissionError, match="current_owner_guardian_required"):
+                await uow.profiles.require_current_owner_guardian_generation(
+                    household_id,
+                    adult_id,
+                    now,
+                )
+
+            updated = await uow.profiles.update_persona_expected_version(
+                adult_id,
+                1,
+                b"new-persona".ljust(28, b"."),
+                now + timedelta(microseconds=1),
+            )
+            with pytest.raises(RuntimeError, match="stale_profile_version"):
+                await uow.profiles.update_persona_expected_version(
+                    adult_id,
+                    1,
+                    b"stale-persona".ljust(28, b"."),
+                    now + timedelta(microseconds=2),
+                )
+            revoked = await uow.profiles.revoke_and_advance_authority_generation_expected_version(
+                adult_id,
+                updated.version,
+                updated.authority_generation,
+                now + timedelta(microseconds=3),
+            )
+            with pytest.raises(RuntimeError, match="stale_profile_version"):
+                await uow.profiles.revoke_and_advance_authority_generation_expected_version(
+                    adult_id,
+                    updated.version,
+                    updated.authority_generation,
+                    now + timedelta(microseconds=4),
+                )
+            await uow.commit()
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            reminder = connection.exec_driver_sql(
+                "SELECT next_reenrollment_reminder_at FROM subjects WHERE id=?",
+                (str(child_id),),
+            ).scalar_one()
+            adult_state = connection.exec_driver_sql(
+                "SELECT active,authority_generation,version,revoked_at FROM subjects WHERE id=?",
+                (str(adult_id),),
+            ).one()
+
+        assert reminder is None
+        assert tuple(adult_state) == (
+            0,
+            revoked.authority_generation,
+            revoked.version,
+            utc_storage(now + timedelta(microseconds=3)),
+        )
+    finally:
+        await uow_factory.aclose()
 
 
 @pytest.mark.asyncio
@@ -556,11 +1201,7 @@ async def test_sql_consent_append_updates_current_pointer_and_preserves_other_pu
         _insert_household(connection, household_id, now)
         _insert_subject(connection, household_id=household_id, subject_id=subject_id, now=now)
 
-    uow_factory = build_task1_sqlcipher_uow_factory(
-        migrated_sqlcipher_engine.engine,
-        clock,
-        task1_test_identity_keys(),
-    )
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
     stt = _sql_consent_receipt(
         household_id=household_id,
         subject_id=subject_id,
@@ -620,11 +1261,7 @@ async def test_sql_consent_append_rolls_back_receipt_and_current_pointer_togethe
         _insert_household(connection, household_id, now)
         _insert_subject(connection, household_id=household_id, subject_id=subject_id, now=now)
 
-    uow_factory = build_task1_sqlcipher_uow_factory(
-        migrated_sqlcipher_engine.engine,
-        clock,
-        task1_test_identity_keys(),
-    )
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
     receipt = _sql_consent_receipt(
         household_id=household_id,
         subject_id=subject_id,
@@ -649,6 +1286,259 @@ async def test_sql_consent_append_rolls_back_receipt_and_current_pointer_togethe
             == 0
         )
         assert _current_consent_pointer(connection, subject_id) == ()
+
+
+@pytest.mark.asyncio
+async def test_sql_consent_append_rejects_stale_latest_without_changing_pointer(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    now = clock.now()
+    household_id = UUID("00000000-0000-4000-8000-000000000641")
+    subject_id = UUID("00000000-0000-4000-8000-000000000642")
+    with migrated_sqlcipher_engine.engine.begin() as connection:
+        _insert_household(connection, household_id, now)
+        _insert_subject(connection, household_id=household_id, subject_id=subject_id, now=now)
+
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
+    first = _sql_consent_receipt(
+        household_id=household_id,
+        subject_id=subject_id,
+        purpose=ConsentPurpose.CLOUD_STT,
+        created_at=now,
+    )
+    stale = _sql_consent_receipt(
+        household_id=household_id,
+        subject_id=subject_id,
+        purpose=ConsentPurpose.CLOUD_STT,
+        created_at=now + timedelta(microseconds=1),
+    )
+    async with uow_factory() as uow:
+        await uow.consent_receipts.append_replacing_current(
+            first,
+            expected_latest_receipt_id=None,
+            auth=object(),
+        )
+        await uow.commit()
+
+    try:
+        async with uow_factory() as uow:
+            with pytest.raises(ConsentDenied, match="consent_state_changed"):
+                await uow.consent_receipts.append_replacing_current(
+                    stale,
+                    expected_latest_receipt_id=None,
+                    auth=object(),
+                )
+            await uow.rollback()
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            stale_count = connection.exec_driver_sql(
+                "SELECT count(*) FROM consent_receipts WHERE id=?",
+                (str(stale.id),),
+            ).scalar_one()
+            assert stale_count == 0
+            assert _current_consent_pointer(connection, subject_id) == (first.id,)
+    finally:
+        await uow_factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sql_consent_append_requires_active_subject_before_receipt_insert(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    now = clock.now()
+    household_id = UUID("00000000-0000-4000-8000-000000000651")
+    subject_id = UUID("00000000-0000-4000-8000-000000000652")
+    with migrated_sqlcipher_engine.engine.begin() as connection:
+        _insert_household(connection, household_id, now)
+        _insert_subject(
+            connection,
+            household_id=household_id,
+            subject_id=subject_id,
+            now=now,
+            revoked_at=utc_storage(now),
+        )
+
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
+    receipt = _sql_consent_receipt(
+        household_id=household_id,
+        subject_id=subject_id,
+        purpose=ConsentPurpose.CLOUD_TTS,
+        created_at=now,
+    )
+    try:
+        async with uow_factory() as uow:
+            with pytest.raises(ConsentDenied, match="current_active_subject_required"):
+                await uow.consent_receipts.append_replacing_current(
+                    receipt,
+                    expected_latest_receipt_id=None,
+                    auth=object(),
+                )
+            await uow.rollback()
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            receipt_count = connection.exec_driver_sql(
+                "SELECT count(*) FROM consent_receipts WHERE id=?",
+                (str(receipt.id),),
+            ).scalar_one()
+        assert receipt_count == 0
+    finally:
+        await uow_factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sql_consent_append_fails_closed_when_current_pointer_loses_latest_grant(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    now = clock.now()
+    household_id = UUID("00000000-0000-4000-8000-000000000661")
+    subject_id = UUID("00000000-0000-4000-8000-000000000662")
+    with migrated_sqlcipher_engine.engine.begin() as connection:
+        _insert_household(connection, household_id, now)
+        _insert_subject(connection, household_id=household_id, subject_id=subject_id, now=now)
+        first = _sql_consent_receipt(
+            household_id=household_id,
+            subject_id=subject_id,
+            purpose=ConsentPurpose.CLOUD_STT,
+            created_at=now,
+        )
+        _insert_consent_receipt(connection, first)
+
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
+    replacement = _sql_consent_receipt(
+        household_id=household_id,
+        subject_id=subject_id,
+        purpose=ConsentPurpose.CLOUD_STT,
+        created_at=now + timedelta(microseconds=1),
+    )
+    try:
+        async with uow_factory() as uow:
+            with pytest.raises(RuntimeError, match="current_consent_pointer_corrupt"):
+                await uow.consent_receipts.append_replacing_current(
+                    replacement,
+                    expected_latest_receipt_id=first.id,
+                    auth=object(),
+                )
+            await uow.rollback()
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            replacement_count = connection.exec_driver_sql(
+                "SELECT count(*) FROM consent_receipts WHERE id=?",
+                (str(replacement.id),),
+            ).scalar_one()
+        assert replacement_count == 0
+    finally:
+        await uow_factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sql_consent_append_rejects_dangling_current_pointer_before_insert(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    now = clock.now()
+    household_id = UUID("00000000-0000-4000-8000-000000000671")
+    subject_id = UUID("00000000-0000-4000-8000-000000000672")
+    with migrated_sqlcipher_engine.engine.begin() as connection:
+        _insert_household(connection, household_id, now)
+        _insert_subject(
+            connection,
+            household_id=household_id,
+            subject_id=subject_id,
+            now=now,
+            current_consent_receipt_ids=_receipt_ids_blob((uuid4(),)),
+        )
+
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
+    receipt = _sql_consent_receipt(
+        household_id=household_id,
+        subject_id=subject_id,
+        purpose=ConsentPurpose.CLOUD_STT,
+        created_at=now,
+    )
+    try:
+        async with uow_factory() as uow:
+            with pytest.raises(RuntimeError, match="current_consent_pointer_corrupt"):
+                await uow.consent_receipts.append_replacing_current(
+                    receipt,
+                    expected_latest_receipt_id=None,
+                    auth=object(),
+                )
+            await uow.rollback()
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            receipt_count = connection.exec_driver_sql(
+                "SELECT count(*) FROM consent_receipts WHERE id=?",
+                (str(receipt.id),),
+            ).scalar_one()
+        assert receipt_count == 0
+    finally:
+        await uow_factory.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sql_consent_append_rejects_full_pointer_without_receipt_insert(
+    migrated_sqlcipher_engine,
+    clock,
+) -> None:
+    now = clock.now()
+    household_id = UUID("00000000-0000-4000-8000-000000000681")
+    subject_id = UUID("00000000-0000-4000-8000-000000000682")
+    other_subject_id = UUID("00000000-0000-4000-8000-000000000683")
+    pointer_receipts = [
+        _sql_consent_receipt(
+            household_id=household_id,
+            subject_id=subject_id if index < 7 else other_subject_id,
+            purpose=ConsentPurpose.CLOUD_REASONING,
+            created_at=now + timedelta(microseconds=index),
+        )
+        for index in range(8)
+    ]
+    with migrated_sqlcipher_engine.engine.begin() as connection:
+        _insert_household(connection, household_id, now)
+        _insert_subject(
+            connection,
+            household_id=household_id,
+            subject_id=subject_id,
+            now=now,
+            current_consent_receipt_ids=_receipt_ids_blob(
+                tuple(receipt.id for receipt in pointer_receipts)
+            ),
+        )
+        _insert_subject(connection, household_id=household_id, subject_id=other_subject_id, now=now)
+        for receipt in pointer_receipts:
+            _insert_consent_receipt(connection, receipt)
+
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
+    receipt = _sql_consent_receipt(
+        household_id=household_id,
+        subject_id=subject_id,
+        purpose=ConsentPurpose.CLOUD_STT,
+        created_at=now + timedelta(seconds=1),
+    )
+    try:
+        async with uow_factory() as uow:
+            with pytest.raises(RuntimeError, match="current_consent_pointer_full"):
+                await uow.consent_receipts.append_replacing_current(
+                    receipt,
+                    expected_latest_receipt_id=None,
+                    auth=object(),
+                )
+            await uow.rollback()
+
+        with migrated_sqlcipher_engine.engine.connect() as connection:
+            receipt_count = connection.exec_driver_sql(
+                "SELECT count(*) FROM consent_receipts WHERE id=?",
+                (str(receipt.id),),
+            ).scalar_one()
+            assert receipt_count == 0
+            assert _current_consent_pointer(connection, subject_id) == tuple(
+                item.id for item in pointer_receipts
+            )
+    finally:
+        await uow_factory.aclose()
 
 
 @pytest.mark.asyncio
@@ -704,11 +1594,7 @@ async def test_task1_repository_bounds_restored_profile_receipt_json_before_deco
         )
         connection.exec_driver_sql("PRAGMA ignore_check_constraints=OFF")
 
-    uow_factory = build_task1_sqlcipher_uow_factory(
-        migrated_sqlcipher_engine.engine,
-        clock,
-        task1_test_identity_keys(),
-    )
+    uow_factory = _build_sql_uow_factory(migrated_sqlcipher_engine, clock)
     async with uow_factory() as uow:
         identity_uow = cast(IdentityUnitOfWork, uow)
         with pytest.raises(ValueError, match="current consent receipt ids corrupt"):
