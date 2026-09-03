@@ -151,6 +151,11 @@ from .reachy import (
     StopAllReceiptBundleV1,
     StopSignal,
 )
+from .reachy_assistant_qualification import (
+    ReachyAssistantInventoryV1,
+    ReachyBootIdentityV1,
+    ReachyNetworkCountersV1,
+)
 from .reachy_operator import ReachyAcceptedCapabilityV1, ReachyOperatorStateV1
 from .reachy_time import CoreTimeProofV1, CoreTimeRequestV1
 from .speech import (
@@ -254,6 +259,9 @@ _REGISTERED_CONTRACT_MODELS: Final[tuple[type[ContractModel], ...]] = (
     SafetyReceipt,
     StopAllReceiptBundleV1,
     StopSignal,
+    ReachyAssistantInventoryV1,
+    ReachyBootIdentityV1,
+    ReachyNetworkCountersV1,
     ReachyAcceptedCapabilityV1,
     ReachyOperatorStateV1,
     CoreTimeProofV1,
@@ -399,6 +407,9 @@ __all__ = (
     "SafetyReceipt",
     "StopAllReceiptBundleV1",
     "StopSignal",
+    "ReachyAssistantInventoryV1",
+    "ReachyBootIdentityV1",
+    "ReachyNetworkCountersV1",
     "ReachyAcceptedCapabilityV1",
     "ReachyOperatorStateV1",
     "CoreTimeProofV1",

@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
-from typing import Literal, TypeAlias, TypeVar, cast
+from typing import Final, Literal, TypeAlias, TypeVar, cast
 from uuid import UUID
 
 from tuntun_contracts import (
@@ -19,6 +19,7 @@ from tuntun_contracts import (
     ports,
     provider,
     reachy,
+    reachy_assistant_qualification,
     reachy_operator,
     reachy_time,
     speech,
@@ -36,6 +37,10 @@ ContractT = TypeVar("ContractT", bound=ContractModel)
 FixtureBuilder: TypeAlias = Callable[["FixtureFactory"], ContractModel]  # noqa: UP040
 SemanticValues: TypeAlias = Callable[["FixtureFactory"], dict[str, JSONValue]]  # noqa: UP040
 MAX_SCHEMA_ITEMS = 32
+ALLOWED_LARGE_ARRAY_MAX_ITEMS: Final[Mapping[tuple[str, ...], int]] = {
+    ("ReachyAssistantInventoryV1", "properties", "managed_app_ids"): 256,
+    ("ReachyAssistantInventoryV1", "properties", "recovery_hook_ids"): 256,
+}
 SUPPORTED_SCHEMA_KEYWORDS = frozenset(
     {
         "$defs",
@@ -76,7 +81,7 @@ FIXTURE_GROUP_MODULES: Mapping[str, tuple[ModuleType, ...]] = {
     "memory": (memory,),
     "policy": (policy,),
     "provider": (provider,),
-    "reachy": (reachy, reachy_operator, reachy_time),
+    "reachy": (reachy, reachy_assistant_qualification, reachy_operator, reachy_time),
     "speech": (speech,),
 }
 
@@ -300,6 +305,8 @@ class FixtureFactory:
         self,
         schema: dict[str, object],
         root: dict[str, object],
+        *,
+        path: tuple[str, ...] = (),
     ) -> JSONValue:
         reference = schema.get("$ref")
         if reference is not None:
@@ -315,6 +322,7 @@ class FixtureFactory:
             return self._schema_value(
                 _schema_mapping(definitions[name], f"$defs/{name}"),
                 root,
+                path=(*path, "$defs", name),
             )
 
         if "const" in schema:
@@ -342,6 +350,7 @@ class FixtureFactory:
                         return self._schema_value(
                             _schema_mapping(alternative, union_key),
                             root,
+                            path=(*path, union_key, str(len(failures))),
                         )
                     except FixtureBuildError as error:
                         failures.append(error)
@@ -359,6 +368,7 @@ class FixtureFactory:
                 name: self._schema_value(
                     _schema_mapping(properties[name], f"property {name}"),
                     root,
+                    path=(*path, "properties", name),
                 )
                 for name in required
             }
@@ -371,7 +381,11 @@ class FixtureFactory:
                 or type(maximum) is not int
                 or minimum < 0
                 or maximum < minimum
-                or maximum > MAX_SCHEMA_ITEMS
+                or minimum > MAX_SCHEMA_ITEMS
+                or (
+                    maximum > MAX_SCHEMA_ITEMS
+                    and ALLOWED_LARGE_ARRAY_MAX_ITEMS.get(path) != maximum
+                )
             ):
                 raise FixtureBuildError("fixture array bounds are invalid")
             return [self._schema_value(item_schema, root) for _ in range(minimum)]
@@ -432,7 +446,7 @@ class FixtureFactory:
             model_type.__name__,
         )
         _validate_schema_vocabulary(schema, label=model_type.__name__)
-        payload = self._schema_value(schema, schema)
+        payload = self._schema_value(schema, schema, path=(model_type.__name__,))
         if not isinstance(payload, dict):
             raise FixtureBuildError("contract model schema did not produce an object")
         return payload
@@ -1259,6 +1273,13 @@ def semantic_specs() -> dict[type[ContractModel], SemanticSpec]:
                 "expires_at": factory.time_json(offset_microseconds=5_000_000),
             },
         ),
+        reachy_assistant_qualification.ReachyAssistantInventoryV1: SemanticSpec(
+            frozenset({"managed_app_ids", "recovery_hook_ids"}),
+            lambda _factory: {
+                "managed_app_ids": [],
+                "recovery_hook_ids": [],
+            },
+        ),
         reachy_operator.ReachyOperatorStateV1: SemanticSpec(
             frozenset({"ssh_username", "reachy_ipv4", "core_ipv4", "accepted_capability"}),
             _operator_state_values,
@@ -1312,6 +1333,8 @@ SCHEMA_ONLY_MODELS: frozenset[type[ContractModel]] = frozenset(
         reachy.SafetyReceipt,
         reachy.StopAllReceiptBundleV1,
         reachy.StopSignal,
+        reachy_assistant_qualification.ReachyBootIdentityV1,
+        reachy_assistant_qualification.ReachyNetworkCountersV1,
         reachy_operator.ReachyAcceptedCapabilityV1,
         reachy_time.CoreTimeProofV1,
         reachy_time.CoreTimeRequestV1,

@@ -28,6 +28,7 @@ from tuntun_contracts import (
     policy,
     provider,
     reachy,
+    reachy_assistant_qualification,
     speech,
 )
 from tuntun_contracts.base import (
@@ -60,7 +61,12 @@ EXPECTED_GROUP_MODULES: Mapping[str, tuple[str, ...]] = {
     "memory": ("memory",),
     "policy": ("policy",),
     "provider": ("provider",),
-    "reachy": ("reachy", "reachy_operator", "reachy_time"),
+    "reachy": (
+        "reachy",
+        "reachy_assistant_qualification",
+        "reachy_operator",
+        "reachy_time",
+    ),
     "speech": ("speech",),
 }
 EXPECTED_GROUP_COUNTS = {
@@ -72,64 +78,68 @@ EXPECTED_GROUP_COUNTS = {
     "memory": 14,
     "policy": 10,
     "provider": 9,
-    "reachy": 11,
+    "reachy": 14,
     "speech": 6,
 }
-EXPECTED_SEMANTIC_MODELS = frozenset(
-    {
-        Commitment,
-        events.EventEnvelope,
-        events.SignedEventEnvelope,
-        speech.AuthorizedTranscriptionRequest,
-        speech.AuthorizedSynthesisRequest,
-        identity.IdentityEvidence,
-        identity.IdentityRequest,
-        identity.IdentityDecision,
-        memory.EpisodicContent,
-        memory.MemoryProposalDraft,
-        memory.MemoryProposal,
-        memory.MemoryRecord,
-        memory.MemoryQuery,
-        memory.ApprovedMemory,
-        memory.DecideMemoryProposal,
-        actions.TimerCreateActionDraft,
-        actions.TimerTargetActionDraft,
-        actions.SafetyActionDraft,
-        actions.PrivacyReductionActionDraft,
-        actions.ComponentStatusActionDraft,
-        actions.DiagnosticActionDraft,
-        actions.MemoryActionDraft,
-        actions.ProfileActionDraft,
-        actions.ConsentActionDraft,
-        actions.IdentityActionDraft,
-        actions.ProviderActionDraft,
-        actions.CredentialActionDraft,
-        actions.AuditActionDraft,
-        actions.BackupActionDraft,
-        actions.SearchActionDraft,
-        actions.SecurityFindingActionDraft,
-        actions.ReleaseP1R0ActionDraft,
-        actions.LatencyDeviationActionDraft,
-        actions.FamilyStageReviewActionDraft,
-        actions.ValidatedActionProposal,
-        policy.PolicyRequest,
-        policy.PolicyDecision,
-        policy.AuthenticationRequest,
-        policy.AuthenticationChallenge,
-        policy.AuthGrant,
-        policy.AuthContext,
-        policy.AdminSessionPrincipal,
-        policy.TimerIntent,
-        provider.SanitizedProviderRequest,
-        provider.RedactionReceipt,
-        budget.BudgetReservationRequest,
-        budget.BudgetReservation,
-        budget.BudgetAccountingContext,
-        budget.ProviderUsageReceiptV1,
-        budget.BudgetReconciliationRequest,
-        reachy.ReachyCommand,
-        reachy.CameraWindowGrant,
-    }
+EXPECTED_SEMANTIC_MODELS = cast(
+    frozenset[type[ContractModel]],
+    frozenset(
+        {
+            Commitment,
+            events.EventEnvelope,
+            events.SignedEventEnvelope,
+            speech.AuthorizedTranscriptionRequest,
+            speech.AuthorizedSynthesisRequest,
+            identity.IdentityEvidence,
+            identity.IdentityRequest,
+            identity.IdentityDecision,
+            memory.EpisodicContent,
+            memory.MemoryProposalDraft,
+            memory.MemoryProposal,
+            memory.MemoryRecord,
+            memory.MemoryQuery,
+            memory.ApprovedMemory,
+            memory.DecideMemoryProposal,
+            actions.TimerCreateActionDraft,
+            actions.TimerTargetActionDraft,
+            actions.SafetyActionDraft,
+            actions.PrivacyReductionActionDraft,
+            actions.ComponentStatusActionDraft,
+            actions.DiagnosticActionDraft,
+            actions.MemoryActionDraft,
+            actions.ProfileActionDraft,
+            actions.ConsentActionDraft,
+            actions.IdentityActionDraft,
+            actions.ProviderActionDraft,
+            actions.CredentialActionDraft,
+            actions.AuditActionDraft,
+            actions.BackupActionDraft,
+            actions.SearchActionDraft,
+            actions.SecurityFindingActionDraft,
+            actions.ReleaseP1R0ActionDraft,
+            actions.LatencyDeviationActionDraft,
+            actions.FamilyStageReviewActionDraft,
+            actions.ValidatedActionProposal,
+            policy.PolicyRequest,
+            policy.PolicyDecision,
+            policy.AuthenticationRequest,
+            policy.AuthenticationChallenge,
+            policy.AuthGrant,
+            policy.AuthContext,
+            policy.AdminSessionPrincipal,
+            policy.TimerIntent,
+            provider.SanitizedProviderRequest,
+            provider.RedactionReceipt,
+            budget.BudgetReservationRequest,
+            budget.BudgetReservation,
+            budget.BudgetAccountingContext,
+            budget.ProviderUsageReceiptV1,
+            budget.BudgetReconciliationRequest,
+            reachy.ReachyCommand,
+            reachy.CameraWindowGrant,
+            reachy_assistant_qualification.ReachyAssistantInventoryV1,
+        }
+    ),
 )
 EXPECTED_TASK08_SEMANTIC_MODEL_NAMES = frozenset(
     {"tuntun_contracts.reachy_operator.ReachyOperatorStateV1"}
@@ -181,19 +191,14 @@ def _contract_model_by_name(qualified_name: str) -> type[ContractModel]:
         isinstance(value, type) and issubclass(value, ContractModel) and value is not ContractModel
     ):
         raise AssertionError(f"missing fixture ContractModel {qualified_name}")
-    return cast(type[ContractModel], value)
+    return value
 
 
 def _expected_semantic_models() -> frozenset[type[ContractModel]]:
-    return frozenset(
-        {
-            *EXPECTED_SEMANTIC_MODELS,
-            *(
-                _contract_model_by_name(model_name)
-                for model_name in EXPECTED_TASK08_SEMANTIC_MODEL_NAMES
-            ),
-        }
-    )
+    models: set[type[ContractModel]] = set(EXPECTED_SEMANTIC_MODELS)
+    for model_name in EXPECTED_TASK08_SEMANTIC_MODEL_NAMES:
+        models.add(_contract_model_by_name(model_name))
+    return frozenset(models)
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -264,14 +269,14 @@ def _independent_fixture_registry() -> dict[str, dict[str, type[ContractModel]]]
     return dict(sorted(result.items()))
 
 
-def test_fixture_registry_matches_the_independent_99_model_oracle() -> None:
+def test_fixture_registry_matches_the_independent_102_model_oracle() -> None:
     preview = FixtureFactory.preview()
     assert preview.uuid_json() == "00000000-0000-0000-0000-000000000001"
     assert preview.time_json() == "2026-08-27T00:00:00+00:00"
     expected = _independent_fixture_registry()
     expected_models = {model_type for models in expected.values() for model_type in models.values()}
     assert {name: len(models) for name, models in expected.items()} == EXPECTED_GROUP_COUNTS
-    assert len(expected_models) == 99
+    assert len(expected_models) == 102
     assert expected_models == set(registered_contract_models())
     assert fixture_registry() == expected
     assert set(BUILDERS) == expected_models
@@ -279,8 +284,8 @@ def test_fixture_registry_matches_the_independent_99_model_oracle() -> None:
 
 def test_semantic_partition_matches_an_independent_exact_oracle() -> None:
     expected_semantic_models = _expected_semantic_models()
-    assert len(expected_semantic_models) == 53
-    assert len(SCHEMA_ONLY_MODELS) == 46
+    assert len(expected_semantic_models) == 54
+    assert len(SCHEMA_ONLY_MODELS) == 48
     assert set(semantic_specs()) == set(expected_semantic_models)
     assert set(REQUIRED_SEMANTIC_MODELS) == set(expected_semantic_models)
     assert not (set(REQUIRED_SEMANTIC_MODELS) & set(SCHEMA_ONLY_MODELS))
@@ -343,6 +348,9 @@ def test_repaired_task5_correlations_are_explicit_and_valid() -> None:
                 "issued_at",
                 "expires_at",
             }
+        ),
+        reachy_assistant_qualification.ReachyAssistantInventoryV1: frozenset(
+            {"managed_app_ids", "recovery_hook_ids"}
         ),
         operator_state_type: frozenset(
             {"ssh_username", "reachy_ipv4", "core_ipv4", "accepted_capability"}
@@ -500,7 +508,7 @@ def test_semantic_misclassification_fails_before_output_creation(
     assert not output.exists()
 
 
-def test_all_99_schemas_use_the_exact_supported_keyword_and_format_matrix() -> None:
+def test_all_102_schemas_use_the_exact_supported_keyword_and_format_matrix() -> None:
     keywords: set[str] = set()
     schema_types: set[str] = set()
     formats: set[str] = set()
@@ -556,6 +564,15 @@ def test_schema_builder_executes_every_claimed_shape_and_format() -> None:
             "type": "array",
         }
     ) == [False]
+    with pytest.raises(contract_fixture_builders.FixtureBuildError):
+        value(
+            {
+                "items": {"type": "boolean"},
+                "maxItems": 256,
+                "minItems": 0,
+                "type": "array",
+            }
+        )
     assert value({"maxLength": 2, "minLength": 2, "type": "string"}) == "xx"
     assert value({"default": "ignored", "title": "Text", "type": "string"}) == "x"
     for pattern, witness in contract_fixture_builders._PATTERN_VALUES.items():

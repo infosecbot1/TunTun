@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
 
 import pytest
 import tuntun_contracts
-import yaml  # type: ignore[import-untyped]  # PyYAML 6 has no py.typed marker.
+import yaml
 from tuntun_contracts.base import ContractModel, registered_contract_models
 
 from scripts import contract_generator_common, generate_openapi, generate_schemas
@@ -87,6 +87,14 @@ EXPECTED_REACHY_OPERATOR_CROSS_FIELD_INVARIANTS = [
         "relation": "equal_when_present",
         "runtime_authoritative": True,
     },
+]
+EXPECTED_REACHY_ASSISTANT_INVENTORY_CROSS_FIELD_INVARIANTS = [
+    {
+        "constraint": "sorted-unique-reachy-assistant-inventory-id-arrays",
+        "fields": ["managed_app_ids", "recovery_hook_ids"],
+        "relation": "each_array_sorted_unique",
+        "runtime_authoritative": True,
+    }
 ]
 
 
@@ -346,9 +354,7 @@ def test_generated_reachy_schemas_publish_machine_readable_safety_constraints() 
         _mapping(json.loads(generate_schemas.render())["models"]),
         _mapping(yaml.safe_load(generate_openapi.render())["components"]["schemas"]),
         _mapping(
-            json.loads(read_regular_file(ROOT / SCHEMA_OUTPUT, max_bytes=4 * 1024 * 1024))[
-                "models"
-            ]
+            json.loads(read_regular_file(ROOT / SCHEMA_OUTPUT, max_bytes=4 * 1024 * 1024))["models"]
         ),
         _mapping(
             yaml.safe_load(read_regular_file(ROOT / OPENAPI_OUTPUT, max_bytes=4 * 1024 * 1024))[
@@ -357,9 +363,7 @@ def test_generated_reachy_schemas_publish_machine_readable_safety_constraints() 
         ),
     )
     for models in documents:
-        accepted = _mapping(
-            models["tuntun_contracts.reachy_operator.ReachyAcceptedCapabilityV1"]
-        )
+        accepted = _mapping(models["tuntun_contracts.reachy_operator.ReachyAcceptedCapabilityV1"])
         accepted_properties = _mapping(accepted["properties"])
         operator = _mapping(models["tuntun_contracts.reachy_operator.ReachyOperatorStateV1"])
         operator_properties = _mapping(operator["properties"])
@@ -393,10 +397,7 @@ def test_generated_reachy_schemas_publish_machine_readable_safety_constraints() 
             assert isinstance(username_pattern, str)
             assert re.fullmatch(username_pattern, "tuntunops")
             assert re.fullmatch(username_pattern, "root") is None
-            assert (
-                field_schema["x-tuntun-field-safety"]
-                == EXPECTED_REACHY_NON_ROOT_USERNAME_SAFETY
-            )
+            assert field_schema["x-tuntun-field-safety"] == EXPECTED_REACHY_NON_ROOT_USERNAME_SAFETY
 
         for field_name in ("reachy_ipv4", "core_ipv4"):
             field_schema = _mapping(operator_properties[field_name])
@@ -410,6 +411,36 @@ def test_generated_reachy_schemas_publish_machine_readable_safety_constraints() 
             assert re.fullmatch(ipv4_pattern, "100.64.0.1") is None
             assert re.fullmatch(ipv4_pattern, "192.168.010.020") is None
             assert field_schema["x-tuntun-field-safety"] == EXPECTED_REACHY_RFC1918_IPV4_SAFETY
+
+
+def test_generated_reachy_assistant_inventory_schema_publishes_item_bounds_and_ordering() -> None:
+    documents = (
+        _mapping(json.loads(generate_schemas.render())["models"]),
+        _mapping(yaml.safe_load(generate_openapi.render())["components"]["schemas"]),
+        _mapping(
+            json.loads(read_regular_file(ROOT / SCHEMA_OUTPUT, max_bytes=4 * 1024 * 1024))["models"]
+        ),
+        _mapping(
+            yaml.safe_load(read_regular_file(ROOT / OPENAPI_OUTPUT, max_bytes=4 * 1024 * 1024))[
+                "components"
+            ]["schemas"]
+        ),
+    )
+    for models in documents:
+        inventory = _mapping(
+            models["tuntun_contracts.reachy_assistant_qualification.ReachyAssistantInventoryV1"]
+        )
+        assert (
+            inventory["x-tuntun-cross-field-invariants"]
+            == EXPECTED_REACHY_ASSISTANT_INVENTORY_CROSS_FIELD_INVARIANTS
+        )
+        properties = _mapping(inventory["properties"])
+        for field_name in ("managed_app_ids", "recovery_hook_ids"):
+            field_schema = _mapping(properties[field_name])
+            item_schema = _mapping(field_schema["items"])
+            assert field_schema["maxItems"] == 256
+            assert item_schema["minLength"] == 1
+            assert item_schema["maxLength"] == 128
 
 
 def test_schema_reference_rewrite_is_limited_to_supported_reference_positions() -> None:

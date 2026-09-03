@@ -12598,6 +12598,104 @@ components:
       - occurred_at
       title: StopSignal
       type: object
+    tuntun_contracts.reachy_assistant_qualification.ReachyAssistantInventoryV1:
+      additionalProperties: false
+      properties:
+        schema_version:
+          const: tuntun.reachy-assistant-inventory.v1
+          title: Schema Version
+          type: string
+        managed_app_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            type: string
+          maxItems: 256
+          title: Managed App Ids
+          type: array
+        recovery_hook_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            type: string
+          maxItems: 256
+          title: Recovery Hook Ids
+          type: array
+      required:
+      - schema_version
+      - managed_app_ids
+      - recovery_hook_ids
+      title: ReachyAssistantInventoryV1
+      type: object
+      x-tuntun-cross-field-invariants:
+      - constraint: sorted-unique-reachy-assistant-inventory-id-arrays
+        fields:
+        - managed_app_ids
+        - recovery_hook_ids
+        relation: each_array_sorted_unique
+        runtime_authoritative: true
+    tuntun_contracts.reachy_assistant_qualification.ReachyBootIdentityV1:
+      additionalProperties: false
+      properties:
+        schema_version:
+          const: tuntun.reachy-boot-identity.v1
+          title: Schema Version
+          type: string
+        commissioning_generation:
+          minimum: 1
+          title: Commissioning Generation
+          type: integer
+        boot_uuid:
+          format: uuid
+          title: Boot Uuid
+          type: string
+      required:
+      - schema_version
+      - commissioning_generation
+      - boot_uuid
+      title: ReachyBootIdentityV1
+      type: object
+    tuntun_contracts.reachy_assistant_qualification.ReachyNetworkCountersV1:
+      additionalProperties: false
+      properties:
+        schema_version:
+          const: tuntun.reachy-network-counters.v1
+          title: Schema Version
+          type: string
+        commissioning_generation:
+          minimum: 1
+          title: Commissioning Generation
+          type: integer
+        firewall_generation:
+          minimum: 1
+          title: Firewall Generation
+          type: integer
+        counter_epoch:
+          pattern: ^[0-9a-f]{64}$
+          title: Counter Epoch
+          type: string
+        boot_uuid:
+          format: uuid
+          title: Boot Uuid
+          type: string
+        sample_sequence:
+          minimum: 1
+          title: Sample Sequence
+          type: integer
+        cumulative_package_download_dns_or_connect_count:
+          minimum: 0
+          title: Cumulative Package Download Dns Or Connect Count
+          type: integer
+      required:
+      - schema_version
+      - commissioning_generation
+      - firewall_generation
+      - counter_epoch
+      - boot_uuid
+      - sample_sequence
+      - cumulative_package_download_dns_or_connect_count
+      title: ReachyNetworkCountersV1
+      type: object
     tuntun_contracts.reachy_operator.ReachyAcceptedCapabilityV1:
       additionalProperties: false
       properties:

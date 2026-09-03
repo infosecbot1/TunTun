@@ -132,7 +132,7 @@ def _task08_model(module_name: str, model_name: str) -> type[ContractModel]:
         isinstance(value, type) and issubclass(value, ContractModel) and value is not ContractModel
     ):
         raise AssertionError(f"missing public ContractModel {module_name}.{model_name}")
-    return cast(type[ContractModel], value)
+    return value
 
 
 def _core_time_request_type() -> type[ContractModel]:
@@ -336,8 +336,8 @@ def test_every_registered_contract_model_is_strict_closed_and_frozen() -> None:
 def test_root_exports_registry_and_public_type_families_are_exact() -> None:
     exports = tuntun_contracts.__all__
     assert type(exports) is tuple
-    assert len(exports) == len(set(exports)) == 142
-    assert len(registered_contract_models()) == 99
+    assert len(exports) == len(set(exports)) == 145
+    assert len(registered_contract_models()) == 102
 
     enum_names = {
         name
@@ -411,6 +411,18 @@ def test_root_exports_registry_and_public_type_families_are_exact() -> None:
         for name in expected_task08_exports
     )
 
+    expected_task12_exports = {
+        "ReachyAssistantInventoryV1",
+        "ReachyBootIdentityV1",
+        "ReachyNetworkCountersV1",
+    }
+    assert expected_task12_exports <= set(exports)
+    assert all(
+        isinstance(getattr(tuntun_contracts, name), type)
+        and issubclass(getattr(tuntun_contracts, name), ContractModel)
+        for name in expected_task12_exports
+    )
+
 
 def test_task08_reachy_registry_order_is_between_existing_reachy_and_speech() -> None:
     names = tuple(
@@ -421,6 +433,9 @@ def test_task08_reachy_registry_order_is_between_existing_reachy_and_speech() ->
             "tuntun_contracts.speech.AudioFormat"
         )
     ] == (
+        "tuntun_contracts.reachy_assistant_qualification.ReachyAssistantInventoryV1",
+        "tuntun_contracts.reachy_assistant_qualification.ReachyBootIdentityV1",
+        "tuntun_contracts.reachy_assistant_qualification.ReachyNetworkCountersV1",
         "tuntun_contracts.reachy_operator.ReachyAcceptedCapabilityV1",
         "tuntun_contracts.reachy_operator.ReachyOperatorStateV1",
         "tuntun_contracts.reachy_time.CoreTimeProofV1",
@@ -529,8 +544,7 @@ def test_core_time_proof_requires_utc_offset_zero_and_publishes_runtime_metadata
     with pytest.raises(ValidationError, match="UTC"):
         proof_type.model_validate_json(
             json.dumps(
-                _valid_time_proof_payload()
-                | {"core_utc": "2026-08-27T09:02:03.000004+08:00"}
+                _valid_time_proof_payload() | {"core_utc": "2026-08-27T09:02:03.000004+08:00"}
             )
         )
 
