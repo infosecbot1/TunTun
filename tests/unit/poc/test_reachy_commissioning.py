@@ -1452,6 +1452,14 @@ def test_spawn_lease_child_cleanup_cannot_remove_parent_snapshot(tmp_path: Path)
     assert not snapshot_root.exists()
 
 
+def _restore_trace_after_interrupt(previous_trace: object) -> None:
+    sys.settrace(previous_trace)
+    if previous_trace is not None and previous_trace.__class__.__module__ == "coverage":
+        restart = getattr(previous_trace, "start", None)
+        if callable(restart):
+            restart()
+
+
 def _interrupt_after_cleanup_state_transition(
     function: Callable[..., object],
     callback: Callable[[], None],
@@ -1482,13 +1490,40 @@ def _interrupt_after_cleanup_state_transition(
             raise KeyboardInterrupt
         return interrupt_once
 
+    previous_trace = sys.gettrace()
     sys.settrace(interrupt_once)
     try:
         with pytest.raises(KeyboardInterrupt):
             callback()
     finally:
-        sys.settrace(None)
+        _restore_trace_after_interrupt(previous_trace)
     assert interrupted
+
+
+class _TraceRestorationProbe:
+    def __init__(self) -> None:
+        self._closing = False
+        self.reached_after_marker = False
+
+    def close(self) -> None:
+        self._closing = True
+        self.reached_after_marker = True
+
+
+def test_interrupt_trace_helper_restores_existing_trace() -> None:
+    probe = _TraceRestorationProbe()
+    outer_trace = sys.gettrace()
+
+    def previous_trace(frame: object, event: str, argument: object) -> object:
+        del frame, event, argument
+        return previous_trace
+
+    sys.settrace(previous_trace)
+    try:
+        _interrupt_after_cleanup_state_transition(_TraceRestorationProbe.close, probe.close)
+        assert sys.gettrace() is previous_trace
+    finally:
+        _restore_trace_after_interrupt(outer_trace)
 
 
 @pytest.mark.parametrize("owner", ("lease", "snapshot"))
@@ -1673,12 +1708,13 @@ def test_initial_lock_creation_transition_interruption_is_recoverable(tmp_path: 
         return interrupt_once
 
     old_umask = os.umask(0o777)
+    previous_trace = sys.gettrace()
     sys.settrace(interrupt_once)
     try:
         with pytest.raises(KeyboardInterrupt):
             publish_initial_state(repository)
     finally:
-        sys.settrace(None)
+        _restore_trace_after_interrupt(previous_trace)
         os.umask(old_umask)
 
     assert interrupted
