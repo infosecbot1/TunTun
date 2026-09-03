@@ -86,7 +86,7 @@ CONTRACT_STEPS = [
         "run": (
             "/usr/bin/env -u PYTHONPATH .venv-contracts-edge-py311/bin/python -m pytest "
             "tests/contract/test_v1_types_and_ports.py tests/unit/poc/test_framing.py "
-            "tests/unit/edge/test_reachy_ptt.py -q"
+            "tests/unit/edge/test_reachy_ptt.py --confcutdir=tests/contract -q"
         ),
     },
     {
@@ -677,6 +677,74 @@ def test_openssh_verifier_script_is_present_for_signed_metadata_and_closure_chec
         "verify_installed_packages",
     ):
         assert required in text
+
+
+def test_locked_package_install_replays_only_the_verified_closure_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_openssh_verifier()
+    packages = (
+        {"filename": "pool/main/libpam-modules-bin.deb"},
+        {"filename": "pool/main/libpam-modules.deb"},
+    )
+    calls: list[tuple[list[str], bool]] = []
+
+    monkeypatch.setattr(
+        verifier,
+        "verify_downloaded_packages",
+        lambda _lock, *, download_root: None,
+    )
+    monkeypatch.setattr(verifier, "package_install_order", lambda _lock: packages)
+
+    def fake_run(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, check))
+        return subprocess.CompletedProcess(argv, 1 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(verifier.subprocess, "run", fake_run)
+
+    verifier.install_packages({"packages": []}, download_root=tmp_path)
+
+    expected_argv = [
+        "dpkg",
+        "-i",
+        str(tmp_path / "libpam-modules-bin.deb"),
+        str(tmp_path / "libpam-modules.deb"),
+    ]
+    assert calls == [(expected_argv, False), (expected_argv, True)]
+
+
+def test_locked_package_install_does_not_replay_a_successful_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_openssh_verifier()
+    packages = ({"filename": "pool/main/libpam-modules-bin.deb"},)
+    calls: list[tuple[list[str], bool]] = []
+
+    monkeypatch.setattr(
+        verifier,
+        "verify_downloaded_packages",
+        lambda _lock, *, download_root: None,
+    )
+    monkeypatch.setattr(verifier, "package_install_order", lambda _lock: packages)
+
+    def fake_run(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, check))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(verifier.subprocess, "run", fake_run)
+
+    verifier.install_packages({"packages": []}, download_root=tmp_path)
+
+    assert calls == [(["dpkg", "-i", str(tmp_path / "libpam-modules-bin.deb")], False)]
+
+
+def test_identity_fixture_plugin_is_registered_only_at_test_root() -> None:
+    root_conftest = Path("tests/conftest.py").read_text(encoding="utf-8")
+    assert 'pytest_plugins = ("tests.identity_support",)' in root_conftest
+    assert not Path("tests/unit/identity/conftest.py").exists()
+    assert not Path("tests/integration/identity/conftest.py").exists()
 
 
 def test_bootstrap_keyring_tar_extraction_extracts_only_required_keyring(

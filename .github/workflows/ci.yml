@@ -27,7 +27,7 @@ jobs:
         run: >-
           /usr/bin/env -u PYTHONPATH .venv-contracts-edge-py311/bin/python -m pytest
           tests/contract/test_v1_types_and_ports.py tests/unit/poc/test_framing.py
-          tests/unit/edge/test_reachy_ptt.py -q
+          tests/unit/edge/test_reachy_ptt.py --confcutdir=tests/contract -q
       - shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: >-
           /usr/bin/env -u PYTHONPATH .venv-contracts-edge-py311/bin/python -c

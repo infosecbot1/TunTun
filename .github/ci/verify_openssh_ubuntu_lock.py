@@ -786,7 +786,15 @@ def install_packages(lock: Mapping[str, Any], *, download_root: Path) -> None:
         str(download_root / Path(str(package["filename"])).name)
         for package in package_install_order(lock)
     ]
-    subprocess.run(["dpkg", "-i", *paths], check=True)
+    argv = ["dpkg", "-i", *paths]
+    # A package already installed on the rolling runner may be one patch behind a
+    # locked Pre-Depends peer.  The first exact-closure pass unpacks/configures
+    # that peer while dpkg truthfully returns non-zero for the dependent package;
+    # one bounded replay of the identical verified paths then completes it.  No
+    # repository resolver, network fetch, or unverified package is permitted.
+    first_attempt = subprocess.run(argv, check=False)
+    if first_attempt.returncode != 0:
+        subprocess.run(argv, check=True)
 
 
 def verify_installed_packages(lock: Mapping[str, Any]) -> None:

@@ -20,6 +20,8 @@ from tuntun_core.services.audit.ledger import AuditLedger, AuditSegment
 from tuntun_core.services.audit.verifier import AuditVerification, AuditVerifier
 from tuntun_testing.fake_clock import FakeClock  # type: ignore[import-untyped]
 
+pytest_plugins = ("tests.identity_support",)
+
 
 class AuditTestClock(ClockPort, Protocol):
     @property
