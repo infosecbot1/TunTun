@@ -26,6 +26,8 @@ from evals.scorers.corpus_bound import (
 )
 from tests.acceptance.test_bilingual_personas import (
     _EVALUATED_AT,
+    _EXPECTED_MODEL,
+    _EXPECTED_PROVIDER,
     _FixtureResponseReceiptVerifier,
     _FixtureUsageReceiptVerifier,
     _provider_evidence,
@@ -78,7 +80,8 @@ def test_evaluation_contract_collections_and_strings_are_schema_bounded() -> Non
         )
 
 
-def test_provider_capture_evidence_is_exact_and_separates_action_memory_counts() -> None:
+@pytest.mark.asyncio
+async def test_provider_capture_evidence_is_exact_and_separates_action_memory_counts() -> None:
     evaluator = CorpusBoundEvaluator(
         _EnglishLanguageJudge(),
         _NoLeakageJudge(),
@@ -88,20 +91,20 @@ def test_provider_capture_evidence_is_exact_and_separates_action_memory_counts()
     )
     claim = ProtectedClaimV1.model_validate(_valid_claim())
     with pytest.raises(TypeError):
-        evaluator.evaluate(
+        await evaluator.evaluate(
             expected_reply_mode="en",
             protected_claims=(claim,),
             answer="I cannot share private details.",
             provider_capture=object(),
         )
     with pytest.raises(TypeError):
-        evaluator.evaluate(
+        await evaluator.evaluate(
             expected_reply_mode="en",
             protected_claims=(claim,),
             answer=cast(str, object()),
             provider_capture=_provider_evidence("I cannot share private details.", "en"),
         )
-    result = evaluator.evaluate(
+    result = await evaluator.evaluate(
         expected_reply_mode="en",
         protected_claims=(claim,),
         answer="I can set a timer and remember a preference.",
@@ -118,7 +121,8 @@ def test_provider_capture_evidence_is_exact_and_separates_action_memory_counts()
     assert result.action_or_memory_proposals == 5
 
 
-def test_provider_capture_boundary_rejects_forged_gateway_and_redaction_booleans() -> None:
+@pytest.mark.asyncio
+async def test_provider_capture_boundary_rejects_forged_gateway_and_redaction_booleans() -> None:
     evaluator = CorpusBoundEvaluator(
         _EnglishLanguageJudge(),
         _NoLeakageJudge(),
@@ -129,7 +133,7 @@ def test_provider_capture_boundary_rejects_forged_gateway_and_redaction_booleans
     claim = ProtectedClaimV1.model_validate(_valid_claim())
 
     with pytest.raises(TypeError, match="ProviderBoundaryEvidence"):
-        evaluator.evaluate(
+        await evaluator.evaluate(
             expected_reply_mode="en",
             protected_claims=(claim,),
             answer="I cannot share private details.",
@@ -146,7 +150,8 @@ def test_provider_capture_boundary_rejects_forged_gateway_and_redaction_booleans
         )
 
 
-def test_provider_response_text_must_match_scored_answer() -> None:
+@pytest.mark.asyncio
+async def test_provider_response_text_must_match_scored_answer() -> None:
     evaluator = CorpusBoundEvaluator(
         _EnglishLanguageJudge(),
         _NoLeakageJudge(),
@@ -157,7 +162,7 @@ def test_provider_response_text_must_match_scored_answer() -> None:
     claim = ProtectedClaimV1.model_validate(_valid_claim())
 
     with pytest.raises(PermissionError, match="ProviderResponse"):
-        evaluator.evaluate(
+        await evaluator.evaluate(
             expected_reply_mode="en",
             protected_claims=(claim,),
             answer="Different answer text.",
@@ -178,9 +183,12 @@ async def test_child_private_facts_never_cross_provider_boundary_or_leak() -> No
             _NoLeakageJudge(),
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
             response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+            clock=lambda: _EVALUATED_AT,
         ),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
@@ -204,9 +212,12 @@ async def test_child_runner_accepts_candidate_turn_execution_and_binds_prompt_en
             _NoLeakageJudge(),
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
             response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+            clock=lambda: _EVALUATED_AT,
         ),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
@@ -231,6 +242,8 @@ async def test_child_runner_uses_trusted_clock_not_candidate_supplied_evaluation
         ),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT + timedelta(minutes=10),
     )
 
@@ -270,11 +283,43 @@ async def test_child_runner_rejects_prompt_model_message_or_raw_evidence_substit
         ),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
     with pytest.raises((PermissionError, TypeError, ValueError), match=message):
         await runner.run_case(case)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("self_consistent_provider", "expected provider"),
+        ("self_consistent_model", "expected model"),
+    ),
+)
+async def test_child_runner_rejects_self_consistent_provider_or_model_substitution_before_scoring(
+    mutation: str,
+    message: str,
+) -> None:
+    case = ChildSafetyCaseV1.model_validate(_child_privacy_row("child-privacy-9", "en", 90_009))
+    evaluator = _ExplodingEvaluator()
+    runner = ChildSafetyRunner(
+        candidate=cast(Any, _EnvelopeChildCandidate(mutation=mutation)),
+        evaluator=evaluator,
+        usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
+        response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
+        clock=lambda: _EVALUATED_AT,
+    )
+
+    with pytest.raises(PermissionError, match=message):
+        await runner.run_case(case)
+
+    assert evaluator.called == 0
 
 
 @pytest.mark.asyncio
@@ -288,9 +333,12 @@ async def test_child_candidate_input_excludes_protected_claims_and_expected_labe
             _NoLeakageJudge(),
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
             response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+            clock=lambda: _EVALUATED_AT,
         ),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
@@ -319,9 +367,12 @@ async def test_child_runner_binds_candidate_route_to_issued_opaque_handles() -> 
             _NoLeakageJudge(),
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
             response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+            clock=lambda: _EVALUATED_AT,
         ),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
@@ -348,6 +399,8 @@ async def test_child_candidate_output_is_bounded_before_judges_run(candidate: st
         evaluator=evaluator,
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
@@ -365,8 +418,7 @@ def _write_jsonl(path: Path, rows: Iterable[dict[str, object]]) -> None:
 
 def _load_jsonl(path: Path) -> list[dict[str, object]]:
     return [
-        __import__("json").loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
+        __import__("json").loads(line) for line in path.read_text(encoding="utf-8").splitlines()
     ]
 
 
@@ -495,7 +547,17 @@ class _EnvelopeChildCandidate:
             request_id=turn.request_id,
             session_id=turn.session_id,
             turn_id=turn.turn_id,
-            mutation=self._mutation if self._mutation in {"provider", "model"} else None,
+            mutation=(
+                self._mutation
+                if self._mutation
+                in {
+                    "provider",
+                    "model",
+                    "self_consistent_provider",
+                    "self_consistent_model",
+                }
+                else None
+            ),
         )
         provider_hash = (
             "7" * 64
@@ -546,18 +608,18 @@ class _BadAnswerChildCandidate:
 
 
 class _ExplodingEvaluator:
-    called = 0
+    def __init__(self) -> None:
+        self.called = 0
 
-    def evaluate(
+    async def evaluate(
         self,
         *,
         expected_reply_mode: str,
         protected_claims: tuple[ProtectedClaimV1, ...],
         answer: str,
         provider_capture: object,
-        evaluated_at: object | None = None,
     ) -> TurnEvaluation:
-        del expected_reply_mode, protected_claims, answer, provider_capture, evaluated_at
+        del expected_reply_mode, protected_claims, answer, provider_capture
         self.called += 1
         raise AssertionError("evaluator should not run for unbounded candidate output")
 

@@ -36,6 +36,7 @@ from tuntun_core.services.personalized_turn_context import (  # type: ignore[imp
 from tuntun_core.services.providers.output_validator import (  # type: ignore[import-untyped]
     AssistantTurn,
 )
+from tuntun_core.services.providers.response_receipts import VerifiedProviderResponseReceipt
 
 from evals.cases.bilingual_schema import BilingualPersonaCaseV1
 from evals.cases.build_bilingual_family import CorpusProvisioningError, build_cases
@@ -53,6 +54,8 @@ from evals.scorers.corpus_bound import (
 )
 
 _EVALUATED_AT = datetime(2026, 8, 27, 12, 0, tzinfo=UTC)
+_EXPECTED_PROVIDER = "openai"
+_EXPECTED_MODEL = "fixture-model"
 
 
 def test_corpus_is_balanced_closed_and_covers_four_classes(tmp_path: Path) -> None:
@@ -119,12 +122,15 @@ async def test_runner_executes_candidate_prompts_and_switches_per_turn() -> None
         _NoLeakageJudge(),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        clock=lambda: _EVALUATED_AT,
     )
     runner = BilingualPersonaRunner(
         candidate_executor=_ProductionPathExecutor(),
         evaluator=evaluator,
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
@@ -149,12 +155,15 @@ async def test_runner_uses_authorized_candidate_identity_not_corpus_label() -> N
         _NoLeakageJudge(),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        clock=lambda: _EVALUATED_AT,
     )
     runner = BilingualPersonaRunner(
         candidate_executor=_ProductionPathExecutor(resolved_role="guest"),
         evaluator=evaluator,
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
@@ -178,9 +187,12 @@ async def test_runner_rejects_raw_provider_adapter_and_forged_boundary_booleans(
             _NoLeakageJudge(),
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
             response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+            clock=lambda: _EVALUATED_AT,
         ),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
@@ -203,9 +215,12 @@ async def test_runner_candidate_input_excludes_corpus_persona_and_expected_label
             _NoLeakageJudge(),
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
             response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+            clock=lambda: _EVALUATED_AT,
         ),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT,
     )
 
@@ -236,6 +251,7 @@ async def test_runner_binds_candidate_route_to_issued_opaque_handles() -> None:
         _NoLeakageJudge(),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        clock=lambda: _EVALUATED_AT,
     )
 
     for mutation in ("foreign_request_id", "route_session_id", "route_turn_id"):
@@ -244,6 +260,8 @@ async def test_runner_binds_candidate_route_to_issued_opaque_handles() -> None:
             evaluator=evaluator,
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
             response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+            expected_provider=_EXPECTED_PROVIDER,
+            expected_model=_EXPECTED_MODEL,
             clock=lambda: _EVALUATED_AT,
         )
 
@@ -263,6 +281,7 @@ async def test_runner_rejects_provider_message_hash_or_request_message_substitut
         _NoLeakageJudge(),
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        clock=lambda: _EVALUATED_AT,
     )
     with pytest.raises(PermissionError, match="provider message"):
         await BilingualPersonaRunner(
@@ -270,6 +289,8 @@ async def test_runner_rejects_provider_message_hash_or_request_message_substitut
             evaluator=evaluator,
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
             response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+            expected_provider=_EXPECTED_PROVIDER,
+            expected_model=_EXPECTED_MODEL,
             clock=lambda: _EVALUATED_AT,
         ).run_case(switching_case)
     with pytest.raises(PermissionError, match="provider message"):
@@ -278,8 +299,47 @@ async def test_runner_rejects_provider_message_hash_or_request_message_substitut
             evaluator=evaluator,
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
             response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+            expected_provider=_EXPECTED_PROVIDER,
+            expected_model=_EXPECTED_MODEL,
             clock=lambda: _EVALUATED_AT,
         ).run_case(switching_case)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("self_consistent_provider", "expected provider"),
+        ("self_consistent_model", "expected model"),
+    ),
+)
+async def test_runner_rejects_self_consistent_provider_or_model_substitution_before_scoring(
+    mutation: str,
+    message: str,
+) -> None:
+    switching_case = BilingualPersonaCaseV1.model_validate(_switching_case_row())
+    language = _CountingLanguageJudge()
+    evaluator = CorpusBoundEvaluator(
+        language,
+        _NoLeakageJudge(),
+        usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
+        response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        clock=lambda: _EVALUATED_AT,
+    )
+    runner = BilingualPersonaRunner(
+        candidate_executor=_ProductionPathExecutor(mutation=mutation),
+        evaluator=evaluator,
+        usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
+        response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
+        clock=lambda: _EVALUATED_AT,
+    )
+
+    with pytest.raises(PermissionError, match=message):
+        await runner.run_case(switching_case)
+
+    assert language.called == 0
 
 
 @pytest.mark.parametrize(
@@ -333,7 +393,8 @@ def test_redaction_receipt_commitment_binding_uses_constant_time_compare(
         ("identity_expired", "expired identity decision"),
     ),
 )
-def test_provider_boundary_evidence_rejects_expired_authorization_or_identity(
+@pytest.mark.asyncio
+async def test_provider_boundary_evidence_rejects_expired_authorization_or_identity(
     mutation: str,
     message: str,
 ) -> None:
@@ -344,7 +405,7 @@ def test_provider_boundary_evidence_rejects_expired_authorization_or_identity(
     )
 
     with pytest.raises(PermissionError, match=message):
-        normalize_provider_capture(
+        await normalize_provider_capture(
             evidence,
             evaluated_at=_EVALUATED_AT,
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
@@ -363,6 +424,16 @@ def test_provider_boundary_evidence_no_longer_accepts_public_verified_wrapper_as
     field_names = {item.name for item in fields(ProviderBoundaryEvidence)}
 
     assert "verified_response_receipt" not in field_names
+    assert "evaluated_at" not in field_names
+
+
+def test_provider_boundary_evidence_digest_is_not_candidate_supplied() -> None:
+    digest_field = next(
+        item for item in fields(ProviderBoundaryEvidence) if item.name == "provider_attempt_sha256"
+    )
+
+    assert not digest_field.init
+    assert "provider_attempt_sha256" not in ProviderBoundaryEvidence.__match_args__
 
 
 def test_provider_boundary_evidence_parses_exact_production_assistant_turn() -> None:
@@ -398,7 +469,8 @@ def test_provider_boundary_evidence_parses_exact_production_assistant_turn() -> 
         ("usage_receipt_future", "provider usage receipt observed in future"),
     ),
 )
-def test_provider_boundary_evidence_rejects_unrelated_response_or_usage_receipts(
+@pytest.mark.asyncio
+async def test_provider_boundary_evidence_rejects_unrelated_response_or_usage_receipts(
     mutation: str,
     message: str,
 ) -> None:
@@ -408,7 +480,7 @@ def test_provider_boundary_evidence_rejects_unrelated_response_or_usage_receipts
             "en",
             mutation=mutation,
         )
-        normalize_provider_capture(
+        await normalize_provider_capture(
             evidence,
             evaluated_at=_EVALUATED_AT,
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
@@ -424,7 +496,8 @@ def test_provider_boundary_evidence_rejects_unrelated_response_or_usage_receipts
         "response_text_after_receipt",
     ),
 )
-def test_response_receipt_attestation_rejects_forgery_before_judges(
+@pytest.mark.asyncio
+async def test_response_receipt_attestation_rejects_forgery_before_judges(
     mutation: str,
 ) -> None:
     language = _CountingLanguageJudge()
@@ -438,7 +511,7 @@ def test_response_receipt_attestation_rejects_forgery_before_judges(
     evidence = _provider_evidence("Rain forms from water in clouds.", "en", mutation=mutation)
 
     with pytest.raises(PermissionError, match="provider response receipt"):
-        evaluator.evaluate(
+        await evaluator.evaluate(
             expected_reply_mode="en",
             protected_claims=(),
             answer=evidence.answer_text,
@@ -448,7 +521,8 @@ def test_response_receipt_attestation_rejects_forgery_before_judges(
     assert language.called == 0
 
 
-def test_response_receipt_verifier_is_mandatory_before_judges() -> None:
+@pytest.mark.asyncio
+async def test_response_receipt_verifier_is_mandatory_before_judges() -> None:
     language = _CountingLanguageJudge()
     evaluator = CorpusBoundEvaluator(
         language,
@@ -459,7 +533,7 @@ def test_response_receipt_verifier_is_mandatory_before_judges() -> None:
     evidence = _provider_evidence("Rain forms from water in clouds.", "en")
 
     with pytest.raises(PermissionError, match="provider response receipt verifier"):
-        evaluator.evaluate(
+        await evaluator.evaluate(
             expected_reply_mode="en",
             protected_claims=(),
             answer=evidence.answer_text,
@@ -469,7 +543,8 @@ def test_response_receipt_verifier_is_mandatory_before_judges() -> None:
     assert language.called == 0
 
 
-def test_failing_response_receipt_verifier_blocks_before_judges() -> None:
+@pytest.mark.asyncio
+async def test_failing_response_receipt_verifier_blocks_before_judges() -> None:
     language = _CountingLanguageJudge()
     evaluator = CorpusBoundEvaluator(
         language,
@@ -481,7 +556,7 @@ def test_failing_response_receipt_verifier_blocks_before_judges() -> None:
     evidence = _provider_evidence("Rain forms from water in clouds.", "en")
 
     with pytest.raises(PermissionError, match="provider response receipt"):
-        evaluator.evaluate(
+        await evaluator.evaluate(
             expected_reply_mode="en",
             protected_claims=(),
             answer=evidence.answer_text,
@@ -491,7 +566,8 @@ def test_failing_response_receipt_verifier_blocks_before_judges() -> None:
     assert language.called == 0
 
 
-def test_distinct_valid_response_and_usage_commitments_are_accepted() -> None:
+@pytest.mark.asyncio
+async def test_distinct_valid_response_and_usage_commitments_are_accepted() -> None:
     evidence = _provider_evidence(
         "Rain forms from water in clouds.",
         "en",
@@ -502,7 +578,7 @@ def test_distinct_valid_response_and_usage_commitments_are_accepted() -> None:
         evidence.usage_receipt.provider_response_commitment
     )
     assert (
-        normalize_provider_capture(
+        await normalize_provider_capture(
             evidence,
             evaluated_at=_EVALUATED_AT,
             usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
@@ -510,9 +586,32 @@ def test_distinct_valid_response_and_usage_commitments_are_accepted() -> None:
         )
         is evidence
     )
+    assert len(evidence.provider_attempt_sha256) == 64
 
 
-def test_genuine_response_receipt_and_independent_usage_commitment_are_accepted() -> None:
+@pytest.mark.asyncio
+async def test_evaluator_has_no_public_evaluated_at_escape_hatch() -> None:
+    evaluator = CorpusBoundEvaluator(
+        _CountingLanguageJudge(),
+        _NoLeakageJudge(),
+        clock=lambda: _EVALUATED_AT + timedelta(minutes=10),
+        usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
+        response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+    )
+    evidence = _provider_evidence("Rain forms from water in clouds.", "en")
+
+    with pytest.raises(TypeError, match="evaluated_at"):
+        await evaluator.evaluate(
+            expected_reply_mode="en",
+            protected_claims=(),
+            answer=evidence.answer_text,
+            provider_capture=evidence,
+            evaluated_at=_EVALUATED_AT,
+        )
+
+
+@pytest.mark.asyncio
+async def test_genuine_response_receipt_and_independent_usage_commitment_are_accepted() -> None:
     language = _CountingLanguageJudge()
     evaluator = CorpusBoundEvaluator(
         language,
@@ -527,7 +626,7 @@ def test_genuine_response_receipt_and_independent_usage_commitment_are_accepted(
         mutation="valid_distinct_usage_response_commitment",
     )
 
-    result = evaluator.evaluate(
+    result = await evaluator.evaluate(
         expected_reply_mode="en",
         protected_claims=(),
         answer=evidence.answer_text,
@@ -560,6 +659,8 @@ async def test_runner_uses_trusted_clock_not_candidate_supplied_evaluation_time(
         evaluator=evaluator,
         usage_receipt_verifier=_FixtureUsageReceiptVerifier(),
         response_receipt_verifier=_FixtureResponseReceiptVerifier(),
+        expected_provider=_EXPECTED_PROVIDER,
+        expected_model=_EXPECTED_MODEL,
         clock=lambda: _EVALUATED_AT + timedelta(minutes=10),
     )
 
@@ -747,28 +848,34 @@ class _FixtureUsageReceiptVerifier:
         if type(receipt) is not ProviderUsageReceiptV1:
             raise PermissionError("usage receipt must be exact")
         accepted_response_commitments = (_commitment(), _other_commitment())
-        if not any(
-            receipt.provider_response_commitment == item
-            for item in accepted_response_commitments
-        ) or receipt.receipt_commitment != _commitment():
+        if (
+            not any(
+                receipt.provider_response_commitment == item
+                for item in accepted_response_commitments
+            )
+            or receipt.receipt_commitment != _commitment()
+        ):
             raise PermissionError("usage receipt commitment mismatch")
         return "{}"
 
 
 class _FixtureResponseReceiptVerifier:
-    def require_attested_receipt(
+    async def require_exact(
         self,
-        receipt: ProviderResponseReceipt,
-        request: SanitizedProviderRequest,
-        response: ProviderResponse,
+        receipt_id: UUID,
+        route: RouteAuthorization,
         turn: AssistantTurn,
-    ) -> str:
+        *,
+        provider_usage_receipt_id: UUID | None,
+    ) -> VerifiedProviderResponseReceipt:
+        del provider_usage_receipt_id
+        receipt = _response_receipt(route, turn)
+        if receipt.receipt_id != receipt_id:
+            raise PermissionError("provider response receipt binding")
         if type(receipt) is not ProviderResponseReceipt:
             raise PermissionError("response receipt must be exact")
-        if type(request) is not SanitizedProviderRequest:
-            raise PermissionError("request must be exact")
-        if type(response) is not ProviderResponse:
-            raise PermissionError("response must be exact")
+        if type(route) is not RouteAuthorization:
+            raise PermissionError("route must be exact")
         if type(turn) is not AssistantTurn:
             raise PermissionError("turn must be exact")
         unsigned = receipt.model_dump(mode="python", exclude={"receipt_hmac_b64"})
@@ -780,25 +887,33 @@ class _FixtureResponseReceiptVerifier:
         )
         response_commitment = _response_commitment(turn)
         if (
-            receipt.request_id != request.request_id
-            or receipt.request_id != response.request_id
+            receipt.request_id != route.request_id
+            or receipt.attempt_id != route.attempt_id
+            or receipt.authorization_id != route.authorization_id
+            or receipt.household_id != route.household_id
+            or receipt.subject_id != route.subject_id
+            or receipt.session_id != route.session_id
+            or receipt.turn_id != route.turn_id
+            or receipt.provider != route.provider
+            or receipt.model != route.model
             or receipt.response_commitment != response_commitment
             or receipt.receipt_hmac_key_id != _RESPONSE_RECEIPT_KEY_ID
             or receipt.receipt_hmac_b64 != expected_receipt_hmac.value_b64
         ):
             raise PermissionError("provider response receipt commitment")
-        return "{}"
+        return VerifiedProviderResponseReceipt(receipt)
 
 
 class _FailingResponseReceiptVerifier:
-    def require_attested_receipt(
+    async def require_exact(
         self,
-        receipt: ProviderResponseReceipt,
-        request: SanitizedProviderRequest,
-        response: ProviderResponse,
+        receipt_id: UUID,
+        route: RouteAuthorization,
         turn: AssistantTurn,
-    ) -> str:
-        del receipt, request, response, turn
+        *,
+        provider_usage_receipt_id: UUID | None,
+    ) -> VerifiedProviderResponseReceipt:
+        del receipt_id, route, turn, provider_usage_receipt_id
         raise PermissionError("provider response receipt rejected by fixture")
 
 
@@ -878,6 +993,9 @@ def _provider_evidence(
     request_id = request_id or UUID("00000000-0000-0000-0000-000000000101")
     if mutation == "foreign_request_id":
         request_id = UUID("00000000-0000-0000-0000-000000000119")
+    provider = "qwen" if mutation == "self_consistent_provider" else "openai"
+    request_provider = ProviderName.QWEN if provider == "qwen" else ProviderName.OPENAI
+    model = "other-model" if mutation == "self_consistent_model" else _EXPECTED_MODEL
     session_id = session_id or UUID("00000000-0000-0000-0000-000000000106")
     turn_id = turn_id or UUID("00000000-0000-0000-0000-000000000107")
     subject_id = None if resolved_role == "guest" else UUID("00000000-0000-0000-0000-000000000105")
@@ -892,9 +1010,7 @@ def _provider_evidence(
         else session_id
     )
     route_turn_id = (
-        UUID("00000000-0000-0000-0000-000000000115")
-        if mutation == "route_turn_id"
-        else turn_id
+        UUID("00000000-0000-0000-0000-000000000115") if mutation == "route_turn_id" else turn_id
     )
     route_expires_at = _EVALUATED_AT + timedelta(minutes=5)
     if mutation == "route_expired":
@@ -908,8 +1024,8 @@ def _provider_evidence(
         subject_id=subject_id,
         session_id=route_session_id,
         turn_id=route_turn_id,
-        provider="openai",
-        model="fixture-model",
+        provider=provider,
+        model=model,
         request_commitment=_commitment(),
         max_input_bytes=4_096,
         max_input_units=4_096,
@@ -923,8 +1039,8 @@ def _provider_evidence(
     context = _provider_context(language)
     request = SanitizedProviderRequest(
         request_id=request_id,
-        provider=ProviderName.OPENAI,
-        model="fixture-model",
+        provider=request_provider,
+        model=model,
         messages=_sanitized_messages(context),
         allowed_tools=(),
         max_output_tokens=512,
@@ -966,9 +1082,7 @@ def _provider_evidence(
     identity_decision = _identity_decision(
         subject_id=subject_id,
         expires_at=(
-            _EVALUATED_AT - timedelta(seconds=1)
-            if mutation == "identity_expired"
-            else None
+            _EVALUATED_AT - timedelta(seconds=1) if mutation == "identity_expired" else None
         ),
     )
     persona_projection = PersonaProjection.model_validate(_persona(resolved_role))
@@ -1103,7 +1217,6 @@ def _provider_evidence(
         persona_projection=persona_projection,
         protected_claim_ids=(),
         protected_value_commitments=(),
-        evaluated_at=_EVALUATED_AT,
     )
 
 

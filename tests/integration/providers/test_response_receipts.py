@@ -1,16 +1,35 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
+from types import SimpleNamespace
+from typing import Literal, cast
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from tuntun_contracts.provider import ProviderResponse
+from tuntun_contracts.identity import IdentityDecision, IdentityStatus, PersonaProjection
+from tuntun_contracts.provider import (
+    ProviderName,
+    ProviderResponse,
+    SanitizedProviderMessage,
+    SanitizedProviderRequest,
+)
+from tuntun_core.services.personalized_turn_context import (
+    ProviderTurnContext,
+    provider_messages_sha256,
+)
 from tuntun_core.services.providers.gateway import ProviderUsageUnknownError
 from tuntun_core.services.providers.output_validator import AssistantTurn
 from tuntun_core.services.providers.response_receipts import (
     ProviderResponseReceiptRepository,
     ProviderResponseReceiptService,
+)
+
+from evals.scorers.corpus_bound import (
+    CorpusBoundEvaluator,
+    ProviderBoundaryEvidence,
+    normalize_provider_capture,
 )
 
 pytest_plugins = ("tests.fixtures.provider_egress",)
@@ -99,6 +118,95 @@ async def test_validated_response_receipt_is_exact_persistent_and_tamper_evident
             case.assistant_turn.model_copy(update={"answer_text": "changed"}),
             provider_usage_receipt_id=case.provider_response.provider_usage_receipt_id,
         )
+
+
+@pytest.mark.asyncio
+async def test_task15_normalization_accepts_real_production_response_receipt_service(
+    response_receipt_case,
+) -> None:
+    case = response_receipt_case
+    receipt = await case.receipt_service.record(
+        case.route,
+        case.assistant_turn,
+        provider_usage_receipt_id=case.provider_response.provider_usage_receipt_id,
+    )
+    evidence = _task15_provider_boundary_evidence(case, receipt)
+
+    normalized = await normalize_provider_capture(
+        evidence,
+        evaluated_at=case.clock.now(),
+        usage_receipt_verifier=case.evidence,
+        response_receipt_verifier=case.receipt_service,
+    )
+
+    assert normalized is evidence
+    assert normalized.response_receipt == receipt
+    assert len(normalized.provider_attempt_sha256) == 64
+
+
+@pytest.mark.asyncio
+async def test_task15_missing_stored_response_receipt_blocks_before_judges(
+    response_receipt_case,
+) -> None:
+    case = response_receipt_case
+    receipt = await case.receipt_service.record(
+        case.route,
+        case.assistant_turn,
+        provider_usage_receipt_id=case.provider_response.provider_usage_receipt_id,
+    )
+    evidence = _task15_provider_boundary_evidence(
+        case,
+        receipt.model_copy(update={"receipt_id": uuid4()}),
+    )
+    language = _CountingLanguageJudge()
+    evaluator = CorpusBoundEvaluator(
+        language,
+        _NoLeakageJudge(),
+        usage_receipt_verifier=case.evidence,
+        response_receipt_verifier=case.receipt_service,
+        clock=lambda: case.clock.now(),
+    )
+
+    with pytest.raises(PermissionError, match="provider_response_receipt_binding"):
+        await evaluator.evaluate(
+            expected_reply_mode="en",
+            protected_claims=(),
+            answer=evidence.answer_text,
+            provider_capture=evidence,
+        )
+
+    assert language.called == 0
+
+
+@pytest.mark.asyncio
+async def test_task15_rejects_forged_response_receipt_wrapper_before_judges(
+    response_receipt_case,
+) -> None:
+    case = response_receipt_case
+    receipt = await case.receipt_service.record(
+        case.route,
+        case.assistant_turn,
+        provider_usage_receipt_id=case.provider_response.provider_usage_receipt_id,
+    )
+    evidence = _task15_provider_boundary_evidence(case, receipt)
+    language = _CountingLanguageJudge()
+    evaluator = CorpusBoundEvaluator(
+        language,
+        _NoLeakageJudge(),
+        usage_receipt_verifier=case.evidence,
+        response_receipt_verifier=_ForgedWrapperResponseReceiptVerifier(),
+        clock=lambda: case.clock.now(),
+    )
+
+    with pytest.raises(PermissionError, match="provider response receipt"):
+        await evaluator.evaluate(
+            expected_reply_mode="en",
+            protected_claims=(),
+            answer=evidence.answer_text,
+            provider_capture=evidence,
+        )
+
+    assert language.called == 0
 
 
 @pytest.mark.asyncio
@@ -219,3 +327,90 @@ async def test_object_and_raw_paths_share_exact_32000_byte_cap(response_receipt_
             b"{" + b" " * 32_000,
             provider_usage_receipt_id=case.provider_response.provider_usage_receipt_id,
         )
+
+
+def _task15_provider_boundary_evidence(case, response_receipt) -> ProviderBoundaryEvidence:
+    usage_receipt_id = case.provider_response.provider_usage_receipt_id
+    assert usage_receipt_id is not None
+    assert case.context.receipt is not None
+    messages = (
+        {"role": "system", "content": "Answer briefly."},
+        {"role": "user", "content": "Fixture user text."},
+    )
+    turn_context = ProviderTurnContext(
+        messages=messages,
+        reply_mode=cast(Literal["en", "hi", "hi_romanized", "hinglish"], "en"),
+        prompt_bundle_sha256="9" * 64,
+        provider_messages_sha256=provider_messages_sha256(messages),
+    )
+    request = SanitizedProviderRequest(
+        request_id=case.route.request_id,
+        provider=ProviderName.OPENAI,
+        model=case.route.model,
+        messages=tuple(
+            SanitizedProviderMessage(
+                role=cast(Literal["system", "user"], message["role"]),
+                content=message["content"],
+            )
+            for message in messages
+        ),
+        allowed_tools=(),
+        max_output_tokens=512,
+        store=False,
+        redaction_receipt_id=case.context.receipt.receipt_id,
+        route=case.route,
+        timeout_ms=1_000,
+    )
+    return ProviderBoundaryEvidence(
+        turn_context=turn_context,
+        request=request,
+        response=case.provider_response,
+        response_receipt=response_receipt,
+        usage_receipt=case.receipt(usage_receipt_id),
+        redaction_receipt=case.context.receipt,
+        identity_decision=IdentityDecision(
+            status=IdentityStatus.VERIFIED,
+            subject_id=case.route.subject_id,
+            reason_code="fixture",
+            expires_at=case.clock.now() + timedelta(seconds=30),
+        ),
+        persona_projection=PersonaProjection(
+            role="adult",
+            context="general",
+            tone="neutral",
+            depth="standard",
+            learning_level="none",
+        ),
+        protected_claim_ids=(),
+        protected_value_commitments=(),
+    )
+
+
+class _CountingLanguageJudge:
+    artifact_sha256 = "d" * 64
+
+    def __init__(self) -> None:
+        self.called = 0
+
+    def classify(self, answer: str) -> str:
+        del answer
+        self.called += 1
+        return "en"
+
+
+class _NoLeakageJudge:
+    artifact_sha256 = "e" * 64
+
+    def evaluate(self, answer: str, claims: tuple[object, ...]) -> object:
+        del answer, claims
+        return type("Verdict", (), {"leaked_claims": ()})()
+
+
+class _ForgedWrapperResponseReceiptVerifier:
+    def require_attested_receipt(self, *args) -> str:
+        del args
+        return "{}"
+
+    async def require_exact(self, *args, **kwargs) -> object:
+        del args, kwargs
+        return SimpleNamespace(receipt=None)

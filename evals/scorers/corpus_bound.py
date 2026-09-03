@@ -26,12 +26,9 @@ from tuntun_contracts.provider import (
     RouteAuthorization,
     SanitizedProviderRequest,
 )
-from tuntun_core.services.personalized_turn_context import (  # type: ignore[import-untyped]
-    ProviderTurnContext,
-)
-from tuntun_core.services.providers.output_validator import (  # type: ignore[import-untyped]
-    AssistantTurn,
-)
+from tuntun_core.services.personalized_turn_context import ProviderTurnContext
+from tuntun_core.services.providers.output_validator import AssistantTurn
+from tuntun_core.services.providers.response_receipts import VerifiedProviderResponseReceipt
 
 from evals.cases.child_safety_schema import ProtectedClaimV1
 from evals.judges.pinned_language import read_regular_file_bytes
@@ -64,9 +61,8 @@ class ProviderBoundaryEvidence:
     persona_projection: PersonaProjection
     protected_claim_ids: tuple[str, ...]
     protected_value_commitments: tuple[str, ...]
-    evaluated_at: datetime
     assistant_turn: AssistantTurn = field(init=False, repr=False)
-    provider_attempt_sha256: str = field(init=False)
+    provider_attempt_sha256: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.turn_context) is not ProviderTurnContext:
@@ -87,7 +83,6 @@ class ProviderBoundaryEvidence:
             raise TypeError("identity_decision must be an exact IdentityDecision")
         if type(self.persona_projection) is not PersonaProjection:
             raise TypeError("persona_projection must be an exact PersonaProjection")
-        _require_aware_utc(self.evaluated_at, name="evaluated_at")
         _require_reasoning_request(self.request)
         _require_provider_context_binding(self.turn_context, self.request)
         _require_identity_binding(
@@ -128,11 +123,10 @@ class ProviderBoundaryEvidence:
         if assistant_turn.answer_language != self.response.language:
             raise ValueError("ProviderResponse language does not match assistant turn")
         object.__setattr__(self, "assistant_turn", assistant_turn)
-        object.__setattr__(self, "provider_attempt_sha256", _provider_attempt_sha256(self))
 
     @property
     def answer_text(self) -> str:
-        return cast(str, self.assistant_turn.answer_text)
+        return self.assistant_turn.answer_text
 
     @property
     def resolved_role(self) -> ResolvedRole:
@@ -141,9 +135,7 @@ class ProviderBoundaryEvidence:
     @property
     def search_calls(self) -> int:
         return sum(
-            1
-            for tool in self.request.allowed_tools
-            if "search" in tool.registered_name.casefold()
+            1 for tool in self.request.allowed_tools if "search" in tool.registered_name.casefold()
         )
 
     @property
@@ -214,13 +206,14 @@ class ProviderUsageReceiptVerifier(Protocol):
 
 
 class ProviderResponseReceiptVerifier(Protocol):
-    def require_attested_receipt(
+    async def require_exact(
         self,
-        receipt: ProviderResponseReceipt,
-        request: SanitizedProviderRequest,
-        response: ProviderResponse,
+        receipt_id: UUID,
+        route: RouteAuthorization,
         turn: AssistantTurn,
-    ) -> str: ...
+        *,
+        provider_usage_receipt_id: UUID | None,
+    ) -> VerifiedProviderResponseReceipt: ...
 
 
 class EvaluatorCalibrationCaseV1(ContractModel):
@@ -281,20 +274,19 @@ class CorpusBoundEvaluator:
         self._response_receipt_verifier = response_receipt_verifier
         self._clock = clock or _system_utc_now
 
-    def evaluate(
+    async def evaluate(
         self,
         *,
         expected_reply_mode: str,
         protected_claims: tuple[ProtectedClaimV1, ...],
         answer: str,
         provider_capture: object,
-        evaluated_at: datetime | None = None,
     ) -> TurnEvaluation:
         evaluation_instant = _require_aware_utc(
-            self._clock() if evaluated_at is None else evaluated_at,
+            self._clock(),
             name="evaluated_at",
         )
-        capture = normalize_provider_capture(
+        capture = await normalize_provider_capture(
             provider_capture,
             evaluated_at=evaluation_instant,
             usage_receipt_verifier=self._require_usage_receipt_verifier(),
@@ -406,7 +398,7 @@ def calibration_corpus_sha256(path: Path) -> str:
     return hashlib.sha256(calibration_corpus_bytes(path)).hexdigest()
 
 
-def normalize_provider_capture(
+async def normalize_provider_capture(
     provider_capture: object,
     *,
     evaluated_at: datetime,
@@ -432,12 +424,17 @@ def normalize_provider_capture(
             provider_capture.request.route,
             evaluation_instant,
         )
-        _require_verified_response_receipt(
+        await _require_verified_response_receipt(
             provider_capture.response_receipt,
             provider_capture.request,
             provider_capture.response,
             provider_capture.assistant_turn,
             response_receipt_verifier,
+        )
+        object.__setattr__(
+            provider_capture,
+            "provider_attempt_sha256",
+            _provider_attempt_sha256(provider_capture, evaluation_instant),
         )
         return provider_capture
     raise TypeError("provider_capture must be an exact ProviderBoundaryEvidence")
@@ -530,7 +527,10 @@ def _commitments_match(left: object, right: object) -> bool:
     )
 
 
-def _provider_attempt_sha256(evidence: ProviderBoundaryEvidence) -> str:
+def _provider_attempt_sha256(
+    evidence: ProviderBoundaryEvidence,
+    evaluated_at: datetime,
+) -> str:
     return hashlib.sha256(
         canonical_mapping_bytes(
             {
@@ -552,7 +552,7 @@ def _provider_attempt_sha256(evidence: ProviderBoundaryEvidence) -> str:
                 "persona_projection": evidence.persona_projection.model_dump(mode="python"),
                 "protected_claim_ids": evidence.protected_claim_ids,
                 "protected_value_commitments": evidence.protected_value_commitments,
-                "evaluated_at": evidence.evaluated_at,
+                "evaluated_at": evaluated_at,
             }
         )
     ).hexdigest()
@@ -563,11 +563,7 @@ def _system_utc_now() -> datetime:
 
 
 def _require_aware_utc(value: object, *, name: str) -> datetime:
-    if (
-        type(value) is not datetime
-        or value.tzinfo is None
-        or value.utcoffset() != timedelta(0)
-    ):
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise ValueError(f"{name} must be an aware UTC datetime")
     return value
 
@@ -678,7 +674,7 @@ def _require_verified_usage_receipt(
         raise PermissionError("provider usage receipt commitment")
 
 
-def _require_verified_response_receipt(
+async def _require_verified_response_receipt(
     receipt: ProviderResponseReceipt,
     request: SanitizedProviderRequest,
     response: ProviderResponse,
@@ -686,11 +682,20 @@ def _require_verified_response_receipt(
     verifier: ProviderResponseReceiptVerifier,
 ) -> None:
     try:
-        canonical = verifier.require_attested_receipt(receipt, request, response, turn)
+        verified = await verifier.require_exact(
+            receipt.receipt_id,
+            request.route,
+            turn,
+            provider_usage_receipt_id=response.provider_usage_receipt_id,
+        )
+    except PermissionError:
+        raise
     except Exception as error:
         raise PermissionError("provider response receipt commitment") from error
-    if type(canonical) is not str or not canonical:
+    if type(verified) is not VerifiedProviderResponseReceipt:
         raise PermissionError("provider response receipt commitment")
+    if verified.receipt != receipt:
+        raise PermissionError("provider response receipt stored mismatch")
 
 
 def _require_scored_answer(value: object) -> str:

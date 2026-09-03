@@ -73,15 +73,15 @@ class CandidateTurnExecution:
         if type(self.boundary_evidence) is not ProviderBoundaryEvidence:
             raise TypeError("boundary_evidence must be an exact ProviderBoundaryEvidence")
 
+
 class TurnEvaluator(Protocol):
-    def evaluate(
+    async def evaluate(
         self,
         *,
         expected_reply_mode: str,
         protected_claims: tuple[ProtectedClaimV1, ...],
         answer: str,
         provider_capture: object,
-        evaluated_at: datetime | None = None,
     ) -> TurnEvaluation: ...
 
 
@@ -106,6 +106,8 @@ class BilingualPersonaRunner:
         evaluator: TurnEvaluator,
         usage_receipt_verifier: ProviderUsageReceiptVerifier,
         response_receipt_verifier: ProviderResponseReceiptVerifier,
+        expected_provider: Literal["openai", "qwen"],
+        expected_model: str,
         uuid_factory: Callable[[], UUID] = uuid4,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
@@ -116,6 +118,8 @@ class BilingualPersonaRunner:
         self._evaluator = evaluator
         self._usage_receipt_verifier = usage_receipt_verifier
         self._response_receipt_verifier = response_receipt_verifier
+        self._expected_provider = _require_expected_provider(expected_provider)
+        self._expected_model = _require_expected_model(expected_model)
         self._uuid_factory = uuid_factory
         self._clock = clock
         self._issued_session_ids: set[UUID] = set()
@@ -153,11 +157,16 @@ class BilingualPersonaRunner:
             if execution.prompt_bundle_sha256 != self.prompt_bundle_sha256:
                 raise ValueError("candidate prompt bundle changed within eval run")
             self.provider_requests += 1
-            capture = normalize_provider_capture(
+            capture = await normalize_provider_capture(
                 execution.boundary_evidence,
                 evaluated_at=evaluated_at,
                 usage_receipt_verifier=self._usage_receipt_verifier,
                 response_receipt_verifier=self._response_receipt_verifier,
+            )
+            _require_expected_provider_model(
+                capture,
+                expected_provider=self._expected_provider,
+                expected_model=self._expected_model,
             )
             self._require_issued_handles(
                 capture,
@@ -176,12 +185,11 @@ class BilingualPersonaRunner:
                 resolved_role = turn_resolved_role
             elif resolved_role != turn_resolved_role:
                 raise ValueError("candidate resolved identity changed within eval case")
-            evaluation = self._evaluator.evaluate(
+            evaluation = await self._evaluator.evaluate(
                 expected_reply_mode=turn.expected.reply_mode,
                 protected_claims=(),
                 answer=answer,
                 provider_capture=capture,
-                evaluated_at=evaluated_at,
             )
             rows.append(
                 {
@@ -269,11 +277,43 @@ def _require_word_cap(answer: str, maximum_words: int) -> None:
         raise ValueError("answer exceeds word cap")
 
 
+def _require_expected_provider(value: object) -> Literal["openai", "qwen"]:
+    if type(value) is not str or value not in {"openai", "qwen"}:
+        raise ValueError("expected_provider must be openai or qwen")
+    return cast(Literal["openai", "qwen"], value)
+
+
+def _require_expected_model(value: object) -> str:
+    if type(value) is not str or not 1 <= len(value) <= 128:
+        raise ValueError("expected_model must be a bounded provider model")
+    return value
+
+
+def _require_expected_provider_model(
+    capture: ProviderBoundaryEvidence,
+    *,
+    expected_provider: Literal["openai", "qwen"],
+    expected_model: str,
+) -> None:
+    providers = (
+        capture.request.provider.value,
+        capture.request.route.provider,
+        capture.response_receipt.provider,
+        capture.usage_receipt.provider,
+    )
+    if providers != (expected_provider,) * len(providers):
+        raise PermissionError("provider evidence does not match expected provider")
+    models = (
+        capture.request.model,
+        capture.request.route.model,
+        capture.response_receipt.model,
+        capture.usage_receipt.model,
+    )
+    if models != (expected_model,) * len(models):
+        raise PermissionError("provider evidence does not match expected model")
+
+
 def _require_aware_utc_datetime(value: object, *, name: str) -> datetime:
-    if (
-        type(value) is not datetime
-        or value.tzinfo is None
-        or value.utcoffset() != timedelta(0)
-    ):
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise ValueError(f"{name} must be an aware UTC datetime")
     return value

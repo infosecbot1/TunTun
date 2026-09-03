@@ -7,7 +7,12 @@ from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 from evals.cases.child_safety_schema import ChildSafetyCaseV1, ProtectedClaimV1
-from evals.run_bilingual_personas import CandidateTurnExecution
+from evals.run_bilingual_personas import (
+    CandidateTurnExecution,
+    _require_expected_model,
+    _require_expected_provider,
+    _require_expected_provider_model,
+)
 from evals.scorers.corpus_bound import (
     ProviderBoundaryEvidence,
     ProviderResponseReceiptVerifier,
@@ -47,14 +52,13 @@ class ChildCandidateTurn:
 
 
 class ChildTurnEvaluator(Protocol):
-    def evaluate(
+    async def evaluate(
         self,
         *,
         expected_reply_mode: str,
         protected_claims: tuple[ProtectedClaimV1, ...],
         answer: str,
         provider_capture: object,
-        evaluated_at: datetime | None = None,
     ) -> TurnEvaluation: ...
 
 
@@ -72,6 +76,8 @@ class ChildSafetyRunner:
         usage_receipt_verifier: ProviderUsageReceiptVerifier,
         response_receipt_verifier: ProviderResponseReceiptVerifier,
         *,
+        expected_provider: Literal["openai", "qwen"],
+        expected_model: str,
         uuid_factory: Callable[[], UUID] = uuid4,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
@@ -82,6 +88,8 @@ class ChildSafetyRunner:
         self._evaluator = evaluator
         self._usage_receipt_verifier = usage_receipt_verifier
         self._response_receipt_verifier = response_receipt_verifier
+        self._expected_provider = _require_expected_provider(expected_provider)
+        self._expected_model = _require_expected_model(expected_model)
         self._uuid_factory = uuid_factory
         self._clock = clock
         self._issued_session_ids: set[UUID] = set()
@@ -111,11 +119,16 @@ class ChildSafetyRunner:
             raise TypeError("child candidate must return an exact CandidateTurnExecution")
         if execution.prompt_bundle_sha256 != self.prompt_bundle_sha256:
             raise ValueError("candidate prompt bundle changed within eval run")
-        capture = normalize_provider_capture(
+        capture = await normalize_provider_capture(
             execution.boundary_evidence,
             evaluated_at=evaluated_at,
             usage_receipt_verifier=self._usage_receipt_verifier,
             response_receipt_verifier=self._response_receipt_verifier,
+        )
+        _require_expected_provider_model(
+            capture,
+            expected_provider=self._expected_provider,
+            expected_model=self._expected_model,
         )
         self._require_issued_handles(
             capture,
@@ -128,12 +141,11 @@ class ChildSafetyRunner:
         if capture.turn_context.prompt_bundle_sha256 != execution.prompt_bundle_sha256:
             raise PermissionError("provider message prompt bundle does not match execution")
         answer = capture.answer_text
-        evaluation = self._evaluator.evaluate(
+        evaluation = await self._evaluator.evaluate(
             expected_reply_mode={"en": "en", "hi": "hi", "hinglish": "hinglish"}[case.input_mode],
             protected_claims=case.protected_claims,
             answer=answer,
             provider_capture=capture,
-            evaluated_at=evaluated_at,
         )
         return ChildCaseResult(provider_capture=capture, evaluation=evaluation)
 
@@ -176,10 +188,6 @@ def _require_sha256(value: object, *, name: str) -> str:
 
 
 def _require_aware_utc_datetime(value: object, *, name: str) -> datetime:
-    if (
-        type(value) is not datetime
-        or value.tzinfo is None
-        or value.utcoffset() != timedelta(0)
-    ):
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise ValueError(f"{name} must be an aware UTC datetime")
     return value
