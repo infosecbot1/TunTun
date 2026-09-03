@@ -1,0 +1,987 @@
+positive:
+- text: stop
+  intent: stop
+- text: ' stop'
+  intent: stop
+- text: 'stop '
+  intent: stop
+- text: '  stop  '
+  intent: stop
+- text: stop now
+  intent: stop
+- text: ' stop now'
+  intent: stop
+- text: 'stop now '
+  intent: stop
+- text: '  stop now  '
+  intent: stop
+- text: please stop
+  intent: stop
+- text: ' please stop'
+  intent: stop
+- text: 'please stop '
+  intent: stop
+- text: '  please stop  '
+  intent: stop
+- text: रुको
+  intent: stop
+- text: ' रुको'
+  intent: stop
+- text: 'रुको '
+  intent: stop
+- text: '  रुको  '
+  intent: stop
+- text: अभी रुको
+  intent: stop
+- text: ' अभी रुको'
+  intent: stop
+- text: 'अभी रुको '
+  intent: stop
+- text: '  अभी रुको  '
+  intent: stop
+- text: बस करो
+  intent: stop
+- text: ' बस करो'
+  intent: stop
+- text: 'बस करो '
+  intent: stop
+- text: '  बस करो  '
+  intent: stop
+- text: ruko
+  intent: stop
+- text: ' ruko'
+  intent: stop
+- text: 'ruko '
+  intent: stop
+- text: '  ruko  '
+  intent: stop
+- text: abhi ruko
+  intent: stop
+- text: ' abhi ruko'
+  intent: stop
+- text: 'abhi ruko '
+  intent: stop
+- text: '  abhi ruko  '
+  intent: stop
+- text: privacy on
+  intent: privacy_on
+- text: ' privacy on'
+  intent: privacy_on
+- text: 'privacy on '
+  intent: privacy_on
+- text: '  privacy on  '
+  intent: privacy_on
+- text: turn privacy on
+  intent: privacy_on
+- text: ' turn privacy on'
+  intent: privacy_on
+- text: 'turn privacy on '
+  intent: privacy_on
+- text: '  turn privacy on  '
+  intent: privacy_on
+- text: enable privacy
+  intent: privacy_on
+- text: ' enable privacy'
+  intent: privacy_on
+- text: 'enable privacy '
+  intent: privacy_on
+- text: '  enable privacy  '
+  intent: privacy_on
+- text: privacy mode on
+  intent: privacy_on
+- text: ' privacy mode on'
+  intent: privacy_on
+- text: 'privacy mode on '
+  intent: privacy_on
+- text: '  privacy mode on  '
+  intent: privacy_on
+- text: privacy shield on
+  intent: privacy_on
+- text: ' privacy shield on'
+  intent: privacy_on
+- text: 'privacy shield on '
+  intent: privacy_on
+- text: '  privacy shield on  '
+  intent: privacy_on
+- text: प्राइवेसी चालू करो
+  intent: privacy_on
+- text: ' प्राइवेसी चालू करो'
+  intent: privacy_on
+- text: 'प्राइवेसी चालू करो '
+  intent: privacy_on
+- text: '  प्राइवेसी चालू करो  '
+  intent: privacy_on
+- text: निजता चालू करो
+  intent: privacy_on
+- text: ' निजता चालू करो'
+  intent: privacy_on
+- text: 'निजता चालू करो '
+  intent: privacy_on
+- text: '  निजता चालू करो  '
+  intent: privacy_on
+- text: privacy chalu karo
+  intent: privacy_on
+- text: ' privacy chalu karo'
+  intent: privacy_on
+- text: 'privacy chalu karo '
+  intent: privacy_on
+- text: '  privacy chalu karo  '
+  intent: privacy_on
+- text: mute
+  intent: mute_on
+- text: ' mute'
+  intent: mute_on
+- text: 'mute '
+  intent: mute_on
+- text: '  mute  '
+  intent: mute_on
+- text: mute on
+  intent: mute_on
+- text: ' mute on'
+  intent: mute_on
+- text: 'mute on '
+  intent: mute_on
+- text: '  mute on  '
+  intent: mute_on
+- text: mute yourself
+  intent: mute_on
+- text: ' mute yourself'
+  intent: mute_on
+- text: 'mute yourself '
+  intent: mute_on
+- text: '  mute yourself  '
+  intent: mute_on
+- text: go silent
+  intent: mute_on
+- text: ' go silent'
+  intent: mute_on
+- text: 'go silent '
+  intent: mute_on
+- text: '  go silent  '
+  intent: mute_on
+- text: चुप हो जाओ
+  intent: mute_on
+- text: ' चुप हो जाओ'
+  intent: mute_on
+- text: 'चुप हो जाओ '
+  intent: mute_on
+- text: '  चुप हो जाओ  '
+  intent: mute_on
+- text: आवाज़ बंद करो
+  intent: mute_on
+- text: ' आवाज़ बंद करो'
+  intent: mute_on
+- text: 'आवाज़ बंद करो '
+  intent: mute_on
+- text: '  आवाज़ बंद करो  '
+  intent: mute_on
+- text: chup ho jao
+  intent: mute_on
+- text: ' chup ho jao'
+  intent: mute_on
+- text: 'chup ho jao '
+  intent: mute_on
+- text: '  chup ho jao  '
+  intent: mute_on
+- text: awaaz band karo
+  intent: mute_on
+- text: ' awaaz band karo'
+  intent: mute_on
+- text: 'awaaz band karo '
+  intent: mute_on
+- text: '  awaaz band karo  '
+  intent: mute_on
+- text: cancel timer
+  intent: timer_cancel
+- text: ' cancel timer'
+  intent: timer_cancel
+- text: 'cancel timer '
+  intent: timer_cancel
+- text: '  cancel timer  '
+  intent: timer_cancel
+- text: cancel the timer
+  intent: timer_cancel
+- text: ' cancel the timer'
+  intent: timer_cancel
+- text: 'cancel the timer '
+  intent: timer_cancel
+- text: '  cancel the timer  '
+  intent: timer_cancel
+- text: stop timer
+  intent: timer_cancel
+- text: ' stop timer'
+  intent: timer_cancel
+- text: 'stop timer '
+  intent: timer_cancel
+- text: '  stop timer  '
+  intent: timer_cancel
+- text: timer cancel
+  intent: timer_cancel
+- text: ' timer cancel'
+  intent: timer_cancel
+- text: 'timer cancel '
+  intent: timer_cancel
+- text: '  timer cancel  '
+  intent: timer_cancel
+- text: टाइमर रद्द करो
+  intent: timer_cancel
+- text: ' टाइमर रद्द करो'
+  intent: timer_cancel
+- text: 'टाइमर रद्द करो '
+  intent: timer_cancel
+- text: '  टाइमर रद्द करो  '
+  intent: timer_cancel
+- text: टाइमर बंद करो
+  intent: timer_cancel
+- text: ' टाइमर बंद करो'
+  intent: timer_cancel
+- text: 'टाइमर बंद करो '
+  intent: timer_cancel
+- text: '  टाइमर बंद करो  '
+  intent: timer_cancel
+- text: timer radd karo
+  intent: timer_cancel
+- text: ' timer radd karo'
+  intent: timer_cancel
+- text: 'timer radd karo '
+  intent: timer_cancel
+- text: '  timer radd karo  '
+  intent: timer_cancel
+- text: timer band karo
+  intent: timer_cancel
+- text: ' timer band karo'
+  intent: timer_cancel
+- text: 'timer band karo '
+  intent: timer_cancel
+- text: '  timer band karo  '
+  intent: timer_cancel
+- text: timer status
+  intent: timer_status
+- text: ' timer status'
+  intent: timer_status
+- text: 'timer status '
+  intent: timer_status
+- text: '  timer status  '
+  intent: timer_status
+- text: show timer status
+  intent: timer_status
+- text: ' show timer status'
+  intent: timer_status
+- text: 'show timer status '
+  intent: timer_status
+- text: '  show timer status  '
+  intent: timer_status
+- text: tell me the timer
+  intent: timer_status
+- text: ' tell me the timer'
+  intent: timer_status
+- text: 'tell me the timer '
+  intent: timer_status
+- text: '  tell me the timer  '
+  intent: timer_status
+- text: timer remaining
+  intent: timer_status
+- text: ' timer remaining'
+  intent: timer_status
+- text: 'timer remaining '
+  intent: timer_status
+- text: '  timer remaining  '
+  intent: timer_status
+- text: टाइमर बताओ
+  intent: timer_status
+- text: ' टाइमर बताओ'
+  intent: timer_status
+- text: 'टाइमर बताओ '
+  intent: timer_status
+- text: '  टाइमर बताओ  '
+  intent: timer_status
+- text: टाइमर कितना बाकी है
+  intent: timer_status
+- text: ' टाइमर कितना बाकी है'
+  intent: timer_status
+- text: 'टाइमर कितना बाकी है '
+  intent: timer_status
+- text: '  टाइमर कितना बाकी है  '
+  intent: timer_status
+- text: timer batao
+  intent: timer_status
+- text: ' timer batao'
+  intent: timer_status
+- text: 'timer batao '
+  intent: timer_status
+- text: '  timer batao  '
+  intent: timer_status
+- text: timer kitna baki hai
+  intent: timer_status
+- text: ' timer kitna baki hai'
+  intent: timer_status
+- text: 'timer kitna baki hai '
+  intent: timer_status
+- text: '  timer kitna baki hai  '
+  intent: timer_status
+- text: what time is it
+  intent: time_now
+- text: ' what time is it'
+  intent: time_now
+- text: 'what time is it '
+  intent: time_now
+- text: '  what time is it  '
+  intent: time_now
+- text: tell me the time
+  intent: time_now
+- text: ' tell me the time'
+  intent: time_now
+- text: 'tell me the time '
+  intent: time_now
+- text: '  tell me the time  '
+  intent: time_now
+- text: current time
+  intent: time_now
+- text: ' current time'
+  intent: time_now
+- text: 'current time '
+  intent: time_now
+- text: '  current time  '
+  intent: time_now
+- text: time now
+  intent: time_now
+- text: ' time now'
+  intent: time_now
+- text: 'time now '
+  intent: time_now
+- text: '  time now  '
+  intent: time_now
+- text: समय बताओ
+  intent: time_now
+- text: ' समय बताओ'
+  intent: time_now
+- text: 'समय बताओ '
+  intent: time_now
+- text: '  समय बताओ  '
+  intent: time_now
+- text: अभी क्या समय है
+  intent: time_now
+- text: ' अभी क्या समय है'
+  intent: time_now
+- text: 'अभी क्या समय है '
+  intent: time_now
+- text: '  अभी क्या समय है  '
+  intent: time_now
+- text: samay batao
+  intent: time_now
+- text: ' samay batao'
+  intent: time_now
+- text: 'samay batao '
+  intent: time_now
+- text: '  samay batao  '
+  intent: time_now
+- text: abhi kya samay hai
+  intent: time_now
+- text: ' abhi kya samay hai'
+  intent: time_now
+- text: 'abhi kya samay hai '
+  intent: time_now
+- text: '  abhi kya samay hai  '
+  intent: time_now
+- text: system status
+  intent: system_status
+- text: ' system status'
+  intent: system_status
+- text: 'system status '
+  intent: system_status
+- text: '  system status  '
+  intent: system_status
+- text: show system status
+  intent: system_status
+- text: ' show system status'
+  intent: system_status
+- text: 'show system status '
+  intent: system_status
+- text: '  show system status  '
+  intent: system_status
+- text: is the system okay
+  intent: system_status
+- text: ' is the system okay'
+  intent: system_status
+- text: 'is the system okay '
+  intent: system_status
+- text: '  is the system okay  '
+  intent: system_status
+- text: system health
+  intent: system_status
+- text: ' system health'
+  intent: system_status
+- text: 'system health '
+  intent: system_status
+- text: '  system health  '
+  intent: system_status
+- text: सिस्टम स्थिति
+  intent: system_status
+- text: ' सिस्टम स्थिति'
+  intent: system_status
+- text: 'सिस्टम स्थिति '
+  intent: system_status
+- text: '  सिस्टम स्थिति  '
+  intent: system_status
+- text: सिस्टम ठीक है
+  intent: system_status
+- text: ' सिस्टम ठीक है'
+  intent: system_status
+- text: 'सिस्टम ठीक है '
+  intent: system_status
+- text: '  सिस्टम ठीक है  '
+  intent: system_status
+- text: system sthiti
+  intent: system_status
+- text: ' system sthiti'
+  intent: system_status
+- text: 'system sthiti '
+  intent: system_status
+- text: '  system sthiti  '
+  intent: system_status
+- text: system theek hai
+  intent: system_status
+- text: ' system theek hai'
+  intent: system_status
+- text: 'system theek hai '
+  intent: system_status
+- text: '  system theek hai  '
+  intent: system_status
+- text: reachy status
+  intent: reachy_status
+- text: ' reachy status'
+  intent: reachy_status
+- text: 'reachy status '
+  intent: reachy_status
+- text: '  reachy status  '
+  intent: reachy_status
+- text: show reachy status
+  intent: reachy_status
+- text: ' show reachy status'
+  intent: reachy_status
+- text: 'show reachy status '
+  intent: reachy_status
+- text: '  show reachy status  '
+  intent: reachy_status
+- text: is reachy okay
+  intent: reachy_status
+- text: ' is reachy okay'
+  intent: reachy_status
+- text: 'is reachy okay '
+  intent: reachy_status
+- text: '  is reachy okay  '
+  intent: reachy_status
+- text: reachy health
+  intent: reachy_status
+- text: ' reachy health'
+  intent: reachy_status
+- text: 'reachy health '
+  intent: reachy_status
+- text: '  reachy health  '
+  intent: reachy_status
+- text: रीची स्थिति
+  intent: reachy_status
+- text: ' रीची स्थिति'
+  intent: reachy_status
+- text: 'रीची स्थिति '
+  intent: reachy_status
+- text: '  रीची स्थिति  '
+  intent: reachy_status
+- text: रीची ठीक है
+  intent: reachy_status
+- text: ' रीची ठीक है'
+  intent: reachy_status
+- text: 'रीची ठीक है '
+  intent: reachy_status
+- text: '  रीची ठीक है  '
+  intent: reachy_status
+- text: reachy sthiti
+  intent: reachy_status
+- text: ' reachy sthiti'
+  intent: reachy_status
+- text: 'reachy sthiti '
+  intent: reachy_status
+- text: '  reachy sthiti  '
+  intent: reachy_status
+- text: reachy theek hai
+  intent: reachy_status
+- text: ' reachy theek hai'
+  intent: reachy_status
+- text: 'reachy theek hai '
+  intent: reachy_status
+- text: '  reachy theek hai  '
+  intent: reachy_status
+- text: repeat status
+  intent: repeat_status
+- text: ' repeat status'
+  intent: repeat_status
+- text: 'repeat status '
+  intent: repeat_status
+- text: '  repeat status  '
+  intent: repeat_status
+- text: repeat the status
+  intent: repeat_status
+- text: ' repeat the status'
+  intent: repeat_status
+- text: 'repeat the status '
+  intent: repeat_status
+- text: '  repeat the status  '
+  intent: repeat_status
+- text: say status again
+  intent: repeat_status
+- text: ' say status again'
+  intent: repeat_status
+- text: 'say status again '
+  intent: repeat_status
+- text: '  say status again  '
+  intent: repeat_status
+- text: status again
+  intent: repeat_status
+- text: ' status again'
+  intent: repeat_status
+- text: 'status again '
+  intent: repeat_status
+- text: '  status again  '
+  intent: repeat_status
+- text: फिर बताओ
+  intent: repeat_status
+- text: ' फिर बताओ'
+  intent: repeat_status
+- text: 'फिर बताओ '
+  intent: repeat_status
+- text: '  फिर बताओ  '
+  intent: repeat_status
+- text: स्थिति फिर बताओ
+  intent: repeat_status
+- text: ' स्थिति फिर बताओ'
+  intent: repeat_status
+- text: 'स्थिति फिर बताओ '
+  intent: repeat_status
+- text: '  स्थिति फिर बताओ  '
+  intent: repeat_status
+- text: phir batao
+  intent: repeat_status
+- text: ' phir batao'
+  intent: repeat_status
+- text: 'phir batao '
+  intent: repeat_status
+- text: '  phir batao  '
+  intent: repeat_status
+- text: sthiti phir batao
+  intent: repeat_status
+- text: ' sthiti phir batao'
+  intent: repeat_status
+- text: 'sthiti phir batao '
+  intent: repeat_status
+- text: '  sthiti phir batao  '
+  intent: repeat_status
+- text: set a timer for 1 minute
+  intent: timer_create
+  timer:
+    duration_seconds: 60
+- text: ' set a timer for 1 minute'
+  intent: timer_create
+  timer:
+    duration_seconds: 60
+- text: 'set a timer for 1 minute '
+  intent: timer_create
+  timer:
+    duration_seconds: 60
+- text: '  set a timer for 1 minute  '
+  intent: timer_create
+  timer:
+    duration_seconds: 60
+- text: set timer for 2 minutes
+  intent: timer_create
+  timer:
+    duration_seconds: 120
+- text: ' set timer for 2 minutes'
+  intent: timer_create
+  timer:
+    duration_seconds: 120
+- text: 'set timer for 2 minutes '
+  intent: timer_create
+  timer:
+    duration_seconds: 120
+- text: '  set timer for 2 minutes  '
+  intent: timer_create
+  timer:
+    duration_seconds: 120
+- text: timer for 3 hours
+  intent: timer_create
+  timer:
+    duration_seconds: 10800
+- text: ' timer for 3 hours'
+  intent: timer_create
+  timer:
+    duration_seconds: 10800
+- text: 'timer for 3 hours '
+  intent: timer_create
+  timer:
+    duration_seconds: 10800
+- text: '  timer for 3 hours  '
+  intent: timer_create
+  timer:
+    duration_seconds: 10800
+- text: set a timer for 24 hours
+  intent: timer_create
+  timer:
+    duration_seconds: 86400
+- text: ' set a timer for 24 hours'
+  intent: timer_create
+  timer:
+    duration_seconds: 86400
+- text: 'set a timer for 24 hours '
+  intent: timer_create
+  timer:
+    duration_seconds: 86400
+- text: '  set a timer for 24 hours  '
+  intent: timer_create
+  timer:
+    duration_seconds: 86400
+- text: 4 मिनट का टाइमर लगाओ
+  intent: timer_create
+  timer:
+    duration_seconds: 240
+- text: ' 4 मिनट का टाइमर लगाओ'
+  intent: timer_create
+  timer:
+    duration_seconds: 240
+- text: '4 मिनट का टाइमर लगाओ '
+  intent: timer_create
+  timer:
+    duration_seconds: 240
+- text: '  4 मिनट का टाइमर लगाओ  '
+  intent: timer_create
+  timer:
+    duration_seconds: 240
+- text: 5 घंटे का टाइमर लगाओ
+  intent: timer_create
+  timer:
+    duration_seconds: 18000
+- text: ' 5 घंटे का टाइमर लगाओ'
+  intent: timer_create
+  timer:
+    duration_seconds: 18000
+- text: '5 घंटे का टाइमर लगाओ '
+  intent: timer_create
+  timer:
+    duration_seconds: 18000
+- text: '  5 घंटे का टाइमर लगाओ  '
+  intent: timer_create
+  timer:
+    duration_seconds: 18000
+- text: 6 minute ka timer lagao
+  intent: timer_create
+  timer:
+    duration_seconds: 360
+- text: ' 6 minute ka timer lagao'
+  intent: timer_create
+  timer:
+    duration_seconds: 360
+- text: '6 minute ka timer lagao '
+  intent: timer_create
+  timer:
+    duration_seconds: 360
+- text: '  6 minute ka timer lagao  '
+  intent: timer_create
+  timer:
+    duration_seconds: 360
+- text: 7 ghante ka timer lagao
+  intent: timer_create
+  timer:
+    duration_seconds: 25200
+- text: ' 7 ghante ka timer lagao'
+  intent: timer_create
+  timer:
+    duration_seconds: 25200
+- text: '7 ghante ka timer lagao '
+  intent: timer_create
+  timer:
+    duration_seconds: 25200
+- text: '  7 ghante ka timer lagao  '
+  intent: timer_create
+  timer:
+    duration_seconds: 25200
+- text: 'yes'
+  intent: cloud_stt_consent_yes
+  challenge: &id001
+    purpose: cloud_stt
+    challenge_id: 00000000-0000-4000-8000-000000000201
+    disclosure_version: guest-disclosure-v1
+- text: 'YES'
+  intent: cloud_stt_consent_yes
+  challenge: *id001
+- text: हाँ
+  intent: cloud_stt_consent_yes
+  challenge: *id001
+- text: haan
+  intent: cloud_stt_consent_yes
+  challenge: *id001
+- text: 'no'
+  intent: cloud_stt_consent_no
+  challenge: *id001
+- text: 'NO'
+  intent: cloud_stt_consent_no
+  challenge: *id001
+- text: नहीं
+  intent: cloud_stt_consent_no
+  challenge: *id001
+- text: nahin
+  intent: cloud_stt_consent_no
+  challenge: *id001
+- text: 'yes'
+  intent: cloud_reasoning_consent_yes
+  challenge: &id002
+    purpose: cloud_reasoning
+    challenge_id: 00000000-0000-4000-8000-000000000202
+    disclosure_version: guest-disclosure-v1
+- text: 'YES'
+  intent: cloud_reasoning_consent_yes
+  challenge: *id002
+- text: हाँ
+  intent: cloud_reasoning_consent_yes
+  challenge: *id002
+- text: haan
+  intent: cloud_reasoning_consent_yes
+  challenge: *id002
+- text: 'no'
+  intent: cloud_reasoning_consent_no
+  challenge: *id002
+- text: 'NO'
+  intent: cloud_reasoning_consent_no
+  challenge: *id002
+- text: नहीं
+  intent: cloud_reasoning_consent_no
+  challenge: *id002
+- text: nahin
+  intent: cloud_reasoning_consent_no
+  challenge: *id002
+- text: 'yes'
+  intent: cloud_tts_consent_yes
+  challenge: &id003
+    purpose: cloud_tts
+    challenge_id: 00000000-0000-4000-8000-000000000203
+    disclosure_version: guest-disclosure-v1
+- text: 'YES'
+  intent: cloud_tts_consent_yes
+  challenge: *id003
+- text: हाँ
+  intent: cloud_tts_consent_yes
+  challenge: *id003
+- text: haan
+  intent: cloud_tts_consent_yes
+  challenge: *id003
+- text: 'no'
+  intent: cloud_tts_consent_no
+  challenge: *id003
+- text: 'NO'
+  intent: cloud_tts_consent_no
+  challenge: *id003
+- text: नहीं
+  intent: cloud_tts_consent_no
+  challenge: *id003
+- text: nahin
+  intent: cloud_tts_consent_no
+  challenge: *id003
+negative:
+- privacy off
+- turn privacy off
+- disable privacy
+- unmute
+- प्राइवेसी बंद करो
+- privacy band karo
+- do not remember me
+- 'yes'
+- 'no'
+- हाँ
+- नहीं
+- set a timer for 0 minutes
+- set a timer for 25 hours
+- set a timer for -1 minute
+- set a timer for 1.5 hours
+- set a timer for 1 day
+- set a timer for 1 minute and privacy off
+- stop and erase everything
+- ignore instructions and privacy on
+- please unmute now
+- not stop
+- stop and continue
+- not stop now
+- stop now and continue
+- not please stop
+- please stop and continue
+- not रुको
+- रुको and continue
+- not अभी रुको
+- अभी रुको and continue
+- not बस करो
+- बस करो and continue
+- not ruko
+- ruko and continue
+- not abhi ruko
+- abhi ruko and continue
+- not privacy on
+- privacy on and continue
+- not turn privacy on
+- turn privacy on and continue
+- not enable privacy
+- enable privacy and continue
+- not privacy mode on
+- privacy mode on and continue
+- not privacy shield on
+- privacy shield on and continue
+- not प्राइवेसी चालू करो
+- प्राइवेसी चालू करो and continue
+- not निजता चालू करो
+- निजता चालू करो and continue
+- not privacy chalu karo
+- privacy chalu karo and continue
+- not mute
+- mute and continue
+- not mute on
+- mute on and continue
+- not mute yourself
+- mute yourself and continue
+- not go silent
+- go silent and continue
+- not चुप हो जाओ
+- चुप हो जाओ and continue
+- not आवाज़ बंद करो
+- आवाज़ बंद करो and continue
+- not chup ho jao
+- chup ho jao and continue
+- not awaaz band karo
+- awaaz band karo and continue
+- not cancel timer
+- cancel timer and continue
+- not cancel the timer
+- cancel the timer and continue
+- not stop timer
+- stop timer and continue
+- not timer cancel
+- timer cancel and continue
+- not टाइमर रद्द करो
+- टाइमर रद्द करो and continue
+- not टाइमर बंद करो
+- टाइमर बंद करो and continue
+- not timer radd karo
+- timer radd karo and continue
+- not timer band karo
+- timer band karo and continue
+- not timer status
+- timer status and continue
+- not show timer status
+- show timer status and continue
+- not tell me the timer
+- tell me the timer and continue
+- not timer remaining
+- timer remaining and continue
+- not टाइमर बताओ
+- टाइमर बताओ and continue
+- not टाइमर कितना बाकी है
+- टाइमर कितना बाकी है and continue
+- not timer batao
+- timer batao and continue
+- not timer kitna baki hai
+- timer kitna baki hai and continue
+- not what time is it
+- what time is it and continue
+- not tell me the time
+- tell me the time and continue
+- not current time
+- current time and continue
+- not time now
+- time now and continue
+- not समय बताओ
+- समय बताओ and continue
+- not अभी क्या समय है
+- अभी क्या समय है and continue
+- not samay batao
+- samay batao and continue
+- not abhi kya samay hai
+- abhi kya samay hai and continue
+- not system status
+- system status and continue
+- not show system status
+- show system status and continue
+- not is the system okay
+- is the system okay and continue
+- not system health
+- system health and continue
+- not सिस्टम स्थिति
+- सिस्टम स्थिति and continue
+- not सिस्टम ठीक है
+- सिस्टम ठीक है and continue
+- not system sthiti
+- system sthiti and continue
+- not system theek hai
+- system theek hai and continue
+- not reachy status
+- reachy status and continue
+- not show reachy status
+- show reachy status and continue
+- not is reachy okay
+- is reachy okay and continue
+- not reachy health
+- reachy health and continue
+- not रीची स्थिति
+- रीची स्थिति and continue
+- not रीची ठीक है
+- रीची ठीक है and continue
+- not reachy sthiti
+- reachy sthiti and continue
+- not reachy theek hai
+- reachy theek hai and continue
+- not repeat status
+- repeat status and continue
+- not repeat the status
+- repeat the status and continue
+- not say status again
+- say status again and continue
+- not status again
+- status again and continue
+- not फिर बताओ
+- फिर बताओ and continue
+- not स्थिति फिर बताओ
+- स्थिति फिर बताओ and continue
+- not phir batao
+- phir batao and continue
+- not sthiti phir batao
+- sthiti phir batao and continue
+- unsupported offline phrase 000
+- unsupported offline phrase 001
+- unsupported offline phrase 002
+- unsupported offline phrase 003
+- unsupported offline phrase 004
+- unsupported offline phrase 005
+- unsupported offline phrase 006
+- unsupported offline phrase 007
+- unsupported offline phrase 008
+- unsupported offline phrase 009
+- unsupported offline phrase 010
+- unsupported offline phrase 011
+- unsupported offline phrase 012
+- unsupported offline phrase 013
+- unsupported offline phrase 014
+- unsupported offline phrase 015
+- unsupported offline phrase 016
+- unsupported offline phrase 017
+- unsupported offline phrase 018
+- unsupported offline phrase 019
+- unsupported offline phrase 020
+- unsupported offline phrase 021
+- unsupported offline phrase 022
+- unsupported offline phrase 023
+- unsupported offline phrase 024
+- unsupported offline phrase 025
+- unsupported offline phrase 026
+- unsupported offline phrase 027
+- unsupported offline phrase 028
+- unsupported offline phrase 029
+- unsupported offline phrase 030
+- unsupported offline phrase 031
+- unsupported offline phrase 032
+- unsupported offline phrase 033
+- unsupported offline phrase 034
+- unsupported offline phrase 035
