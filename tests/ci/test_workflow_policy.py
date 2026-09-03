@@ -122,6 +122,8 @@ OPENSSH_CONTRACT_COMMAND = (
     "tests/integration/test_ssh_forced_command_local.py -q"
 )
 BOOTSTRAP_KEYRING_TAR_PATH = "usr/share/keyrings/ubuntu-archive-keyring.gpg"
+OPENSSH_SNAPSHOT_ID = "20260903T143000Z"
+OPENSSH_SNAPSHOT_BASE_URL = f"https://snapshot.ubuntu.com/ubuntu/{OPENSSH_SNAPSHOT_ID}/"
 
 
 def _load_openssh_verifier() -> ModuleType:
@@ -517,8 +519,9 @@ def test_ci_matrix_remains_exact() -> None:
 def test_openssh_lock_freezes_signed_ubuntu_origin_and_openssh_package_set() -> None:
     lock = json.loads(OPENSSH_LOCK_PATH.read_text(encoding="utf-8"))
 
-    assert lock["schema_version"] == "tuntun.openssh-ubuntu-24.04.lock.v1"
+    assert lock["schema_version"] == "tuntun.openssh-ubuntu-24.04.lock.v2"
     assert lock["runner"] == "ubuntu-24.04"
+    assert lock["snapshot_id"] == OPENSSH_SNAPSHOT_ID
     closure_scope = lock["closure_scope"]
     assert closure_scope == {
         "locked_package_set": (
@@ -558,10 +561,7 @@ def test_openssh_lock_freezes_signed_ubuntu_origin_and_openssh_package_set() -> 
         assert origin["origin"] == "Ubuntu"
         assert origin["component"] == "main"
         assert origin["architecture"] == "amd64"
-        assert origin["base_url"] in {
-            "https://archive.ubuntu.com/ubuntu/",
-            "https://security.ubuntu.com/ubuntu/",
-        }
+        assert origin["base_url"] == OPENSSH_SNAPSHOT_BASE_URL
         assert origin["inrelease_url"] == (f"{origin['base_url']}dists/{origin['suite']}/InRelease")
         assert isinstance(origin["inrelease_size_bytes"], int)
         assert origin["inrelease_size_bytes"] > 0
@@ -623,12 +623,7 @@ def test_openssh_lock_freezes_signed_ubuntu_origin_and_openssh_package_set() -> 
         assert package["architecture"] in {"amd64", "all"}
         assert package["source_index_id"] in index_ids
         assert package["filename"].startswith("pool/main/")
-        assert package["url"].startswith(
-            (
-                "https://archive.ubuntu.com/ubuntu/pool/main/",
-                "https://security.ubuntu.com/ubuntu/pool/main/",
-            )
-        )
+        assert package["url"].startswith(f"{OPENSSH_SNAPSHOT_BASE_URL}pool/main/")
         assert package["url"].endswith(package["filename"])
         assert package["filename"].endswith(".deb")
         assert isinstance(package["size_bytes"], int) and package["size_bytes"] > 0
@@ -677,6 +672,51 @@ def test_openssh_verifier_script_is_present_for_signed_metadata_and_closure_chec
         "verify_installed_packages",
     ):
         assert required in text
+
+
+def test_openssh_snapshot_sources_are_exact_and_invalid_ids_are_rejected() -> None:
+    verifier = _load_openssh_verifier()
+
+    sources = verifier.snapshot_source_order(OPENSSH_SNAPSHOT_ID)
+
+    assert [source["suite"] for source in sources] == [
+        "noble",
+        "noble-updates",
+        "noble-security",
+    ]
+    assert {source["base_url"] for source in sources} == {
+        OPENSSH_SNAPSHOT_BASE_URL,
+    }
+    for invalid in (
+        "",
+        "20260903",
+        "20260903T143000",
+        "2026-09-03T14:30:00Z",
+        "../../archive",
+        "20260903T143000Z/extra",
+    ):
+        with pytest.raises(SystemExit, match="invalid Ubuntu snapshot id"):
+            verifier.snapshot_source_order(invalid)
+
+
+def test_openssh_lock_rejects_mixed_or_live_archive_sources() -> None:
+    verifier = _load_openssh_verifier()
+    lock = json.loads(OPENSSH_LOCK_PATH.read_text(encoding="utf-8"))
+    lock["signed_origins"][1]["base_url"] = "https://archive.ubuntu.com/ubuntu/"
+
+    with pytest.raises(SystemExit, match="Ubuntu snapshot source mismatch"):
+        verifier.verify_complete_dependency_closure(lock)
+
+
+def test_openssh_lock_derivation_requires_an_explicit_snapshot() -> None:
+    verifier = _load_openssh_verifier()
+    parser = verifier.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["derive-lock"])
+
+    args = parser.parse_args(["derive-lock", "--snapshot-id", OPENSSH_SNAPSHOT_ID])
+    assert args.snapshot_id == OPENSSH_SNAPSHOT_ID
 
 
 def test_locked_package_install_replays_only_the_verified_closure_once(

@@ -17,10 +17,11 @@ import tempfile
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-LOCK_SCHEMA_VERSION = "tuntun.openssh-ubuntu-24.04.lock.v1"
+LOCK_SCHEMA_VERSION = "tuntun.openssh-ubuntu-24.04.lock.v2"
 RUNNER = "ubuntu-24.04"
 ROOT_PACKAGES = ("openssh-client", "openssh-server", "openssh-sftp-server")
 DEPENDENCY_FIELDS = ("Pre-Depends", "Depends")
@@ -74,6 +75,8 @@ RELATION_RE = re.compile(
     r"^\s*([A-Za-z0-9][A-Za-z0-9+.-]*)(?::[A-Za-z0-9-]+)?"
     r"(?:\s*\((<<|<=|=|>=|>>)\s*([^)]+)\))?"
 )
+SNAPSHOT_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+SNAPSHOT_BASE_URL = "https://snapshot.ubuntu.com/ubuntu/"
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,15 +227,33 @@ def source_packages_url(source: Mapping[str, str]) -> str:
     return f"{source['base_url']}dists/{source['suite']}/{PACKAGE_INDEX_RELATIVE_PATH}"
 
 
+def snapshot_source_order(snapshot_id: str) -> tuple[dict[str, str], ...]:
+    if type(snapshot_id) is not str or SNAPSHOT_ID_RE.fullmatch(snapshot_id) is None:
+        raise SystemExit("invalid Ubuntu snapshot id")
+    try:
+        parsed = datetime.strptime(snapshot_id, "%Y%m%dT%H%M%SZ")
+    except ValueError:
+        raise SystemExit("invalid Ubuntu snapshot id") from None
+    if parsed.strftime("%Y%m%dT%H%M%SZ") != snapshot_id:
+        raise SystemExit("invalid Ubuntu snapshot id")
+    base_url = f"{SNAPSHOT_BASE_URL}{snapshot_id}/"
+    return tuple({**source, "base_url": base_url} for source in SOURCE_ORDER)
+
+
 def fetch_verified_metadata(
     *,
     lock: Mapping[str, Any] | None,
     keyring: Path,
     work_root: Path,
+    source_order: Sequence[Mapping[str, str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, PackageRecord]]]:
     if lock is None:
-        sources = [dict(source) for source in SOURCE_ORDER]
+        if source_order is None:
+            raise SystemExit("Ubuntu snapshot source order required")
+        sources = [dict(source) for source in source_order]
     else:
+        if source_order is not None:
+            raise TypeError("source_order is derive-only")
         signed_origins = lock.get("signed_origins")
         if not isinstance(signed_origins, list):
             raise SystemExit("lock signed_origins must be a list")
@@ -554,16 +575,19 @@ def package_to_lock_record(record: PackageRecord) -> dict[str, Any]:
     }
 
 
-def derive_lock(*, keyring: Path, work_root: Path) -> dict[str, Any]:
+def derive_lock(*, keyring: Path, work_root: Path, snapshot_id: str) -> dict[str, Any]:
+    source_order = snapshot_source_order(snapshot_id)
     origins, indexes, records_by_index = fetch_verified_metadata(
         lock=None,
         keyring=keyring,
         work_root=work_root,
+        source_order=source_order,
     )
     package_records = resolve_complete_closure(records_by_index)
     lock = {
         "schema_version": LOCK_SCHEMA_VERSION,
         "runner": RUNNER,
+        "snapshot_id": snapshot_id,
         "closure_scope": {
             "locked_package_set": (
                 "Complete transitive Depends/Pre-Depends closure for openssh-client, "
@@ -575,7 +599,7 @@ def derive_lock(*, keyring: Path, work_root: Path) -> dict[str, Any]:
             "dependency_fields": list(DEPENDENCY_FIELDS),
             "components": [COMPONENT],
             "architectures": list(ARCHITECTURES),
-            "suites": [source["suite"] for source in SOURCE_ORDER],
+            "suites": [source["suite"] for source in source_order],
         },
         "signed_origins": origins,
         "package_indexes": indexes,
@@ -605,6 +629,7 @@ def verify_complete_dependency_closure(lock: Mapping[str, Any]) -> None:
         raise SystemExit("unexpected lock schema version")
     if lock.get("runner") != RUNNER:
         raise SystemExit("unexpected lock runner")
+    verify_snapshot_sources(lock)
     closure = lock.get("closure_scope")
     if not isinstance(closure, dict):
         raise SystemExit("lock closure_scope must be an object")
@@ -638,6 +663,89 @@ def verify_complete_dependency_closure(lock: Mapping[str, Any]) -> None:
                     raise SystemExit(
                         f"unresolved locked dependency for {package['name']}: {relation_group}"
                     )
+
+
+def verify_snapshot_sources(lock: Mapping[str, Any]) -> None:
+    snapshot_id = lock.get("snapshot_id")
+    if type(snapshot_id) is not str:
+        raise SystemExit("invalid Ubuntu snapshot id")
+    expected_sources = {source["id"]: source for source in snapshot_source_order(snapshot_id)}
+    signed_origins = lock.get("signed_origins")
+    if not isinstance(signed_origins, list) or len(signed_origins) != len(expected_sources):
+        raise SystemExit("Ubuntu snapshot source mismatch")
+    observed_origin_ids: set[str] = set()
+    for origin in signed_origins:
+        if not isinstance(origin, dict):
+            raise SystemExit("Ubuntu snapshot source mismatch")
+        origin_id = origin.get("id")
+        if type(origin_id) is not str or origin_id in observed_origin_ids:
+            raise SystemExit("Ubuntu snapshot source mismatch")
+        observed_origin_ids.add(origin_id)
+        expected = expected_sources.get(origin_id)
+        if expected is None:
+            raise SystemExit("Ubuntu snapshot source mismatch")
+        for field in ("origin", "suite", "component", "architecture", "base_url"):
+            if origin.get(field) != expected[field]:
+                raise SystemExit("Ubuntu snapshot source mismatch")
+        if origin.get("inrelease_url") != source_inrelease_url(expected):
+            raise SystemExit("Ubuntu snapshot source mismatch")
+    if observed_origin_ids != set(expected_sources):
+        raise SystemExit("Ubuntu snapshot source mismatch")
+
+    package_indexes = lock.get("package_indexes")
+    if not isinstance(package_indexes, list) or len(package_indexes) != len(expected_sources):
+        raise SystemExit("Ubuntu snapshot source mismatch")
+    expected_index_ids = {f"{source_id}-packages-xz" for source_id in expected_sources}
+    observed_index_ids: set[str] = set()
+    for index in package_indexes:
+        if not isinstance(index, dict):
+            raise SystemExit("Ubuntu snapshot source mismatch")
+        index_id = index.get("id")
+        origin_id = index.get("origin_id")
+        if (
+            type(index_id) is not str
+            or index_id in observed_index_ids
+            or type(origin_id) is not str
+        ):
+            raise SystemExit("Ubuntu snapshot source mismatch")
+        source = expected_sources.get(origin_id)
+        if source is None or index_id != f"{origin_id}-packages-xz":
+            raise SystemExit("Ubuntu snapshot source mismatch")
+        observed_index_ids.add(index_id)
+        if (
+            index.get("suite") != source["suite"]
+            or index.get("component") != source["component"]
+            or index.get("architecture") != source["architecture"]
+            or index.get("relative_path") != PACKAGE_INDEX_RELATIVE_PATH
+            or index.get("url") != source_packages_url(source)
+            or index.get("compression") != "xz"
+        ):
+            raise SystemExit("Ubuntu snapshot source mismatch")
+    if observed_index_ids != expected_index_ids:
+        raise SystemExit("Ubuntu snapshot source mismatch")
+
+    indexes_by_id = {str(index["id"]): index for index in package_indexes}
+    packages = lock.get("packages")
+    if not isinstance(packages, list):
+        raise SystemExit("Ubuntu snapshot source mismatch")
+    for package in packages:
+        if not isinstance(package, dict):
+            raise SystemExit("Ubuntu snapshot source mismatch")
+        source_index_id = package.get("source_index_id")
+        filename = package.get("filename")
+        if (
+            type(source_index_id) is not str
+            or source_index_id not in indexes_by_id
+            or type(filename) is not str
+            or not filename.startswith("pool/main/")
+            or PurePosixPath(filename).is_absolute()
+            or any(part in {"", ".", ".."} for part in PurePosixPath(filename).parts)
+        ):
+            raise SystemExit("Ubuntu snapshot source mismatch")
+        origin_id = str(indexes_by_id[source_index_id]["origin_id"])
+        source = expected_sources[origin_id]
+        if package.get("url") != f"{source['base_url']}{filename}":
+            raise SystemExit("Ubuntu snapshot source mismatch")
 
 
 def dependency_is_satisfied(
@@ -683,6 +791,7 @@ def verify_package_records(
 
 def verify_lock_against_signed_metadata(*, lock_path: Path, keyring: Path) -> dict[str, Any]:
     lock = read_json(lock_path)
+    verify_complete_dependency_closure(lock)
     with tempfile.TemporaryDirectory(prefix="tuntun-openssh-metadata-") as tmp:
         _origins, _indexes, records_by_index = fetch_verified_metadata(
             lock=lock,
@@ -690,7 +799,6 @@ def verify_lock_against_signed_metadata(*, lock_path: Path, keyring: Path) -> di
             work_root=Path(tmp),
         )
     verify_package_records(lock, records_by_index)
-    verify_complete_dependency_closure(lock)
     return lock
 
 
@@ -934,7 +1042,11 @@ def command_derive_lock(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix="tuntun-openssh-lock-") as tmp:
         work_root = Path(tmp)
         keyring = resolve_keyring(args, work_root=work_root)
-        lock = derive_lock(keyring=keyring, work_root=work_root)
+        lock = derive_lock(
+            keyring=keyring,
+            work_root=work_root,
+            snapshot_id=args.snapshot_id,
+        )
     if args.output is None:
         print(json.dumps(lock, indent=2, sort_keys=False, ensure_ascii=False))
     else:
@@ -968,6 +1080,7 @@ def build_parser() -> argparse.ArgumentParser:
     derive.add_argument("--output", type=Path)
     derive.add_argument("--keyring", type=Path)
     derive.add_argument("--bootstrap-keyring", action="store_true")
+    derive.add_argument("--snapshot-id", required=True)
     derive.set_defaults(func=command_derive_lock)
 
     verify_download = subparsers.add_parser("verify-download")
