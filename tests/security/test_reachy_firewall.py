@@ -15,7 +15,11 @@ import pytest
 from pydantic import ValidationError
 from tuntun_contracts.base import ContractParseError, canonical_bytes
 from tuntun_edge.config import ReachyNetworkConfigV1
-from tuntun_edge.reachy.probe import CapabilityReport
+from tuntun_edge.reachy.probe import (
+    CapabilityReport,
+    ReachyMediaFacts,
+    TuntunTransportMediaFacts,
+)
 from tuntun_edge.transport.commissioning import ReachyCoreEndpointV1
 
 from deploy.reachy.render_firewall import build_nftables_ruleset, restore_firewall_inputs
@@ -208,15 +212,34 @@ def firewall_case() -> FirewallCase:
         reachy_ingress_interface="eth0",
     )
     capabilities = CapabilityReport(
-        schema_version="tuntun.reachy-capability-report.v1",
+        schema_version="tuntun.reachy-capability-report.v2",
         source="hardware",
         probe_version="0.1.0",
         sdk_version="1.2.3",
         daemon_version="4.5.6",
-        input_rate_hz=16000,
-        input_channels=1,
-        output_rate_hz=16000,
-        output_channels=1,
+        native_capture_media=ReachyMediaFacts(
+            sample_format="float32_le",
+            sample_rate_hz=16000,
+            channels=2,
+            interleaved=True,
+            channel_layout="stereo",
+            evidence_basis="physical_observed",
+        ),
+        native_playback_media=ReachyMediaFacts(
+            sample_format="float32_le",
+            sample_rate_hz=16000,
+            channels=2,
+            interleaved=True,
+            channel_layout="stereo",
+            evidence_basis="physical_observed",
+        ),
+        tuntun_transport_media=TuntunTransportMediaFacts(
+            sample_format="s16le",
+            sample_rate_hz=16000,
+            channels=1,
+            interleaved=False,
+            channel_layout="mono",
+        ),
         aec_available=True,
         doa_available=True,
         daemon_ports=(8000, 8001),

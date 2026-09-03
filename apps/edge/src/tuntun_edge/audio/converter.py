@@ -289,7 +289,7 @@ def _append_bounded(
 
 
 class StreamingAudioConverter:
-    """Bounded converter to Reachy's exact 16 kHz mono s16le stream contract."""
+    """Bounded converter to Tuntun's 16 kHz mono s16le transport contract."""
 
     def convert(
         self,

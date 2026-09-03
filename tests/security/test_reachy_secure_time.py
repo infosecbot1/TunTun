@@ -448,17 +448,37 @@ def capability_report(
     rtc_qualified: bool,
     source: Literal["hardware", "synthetic"] = "hardware",
 ) -> CapabilityReport:
+    media_basis = "physical_observed" if source == "hardware" else "sdk_declared"
     return CapabilityReport.model_validate(
         {
-            "schema_version": "tuntun.reachy-capability-report.v1",
+            "schema_version": "tuntun.reachy-capability-report.v2",
             "source": source,
             "probe_version": "0.1.0",
             "sdk_version": "1.2.3",
             "daemon_version": "4.5.6",
-            "input_rate_hz": 16000,
-            "input_channels": 1,
-            "output_rate_hz": 16000,
-            "output_channels": 1,
+            "native_capture_media": {
+                "sample_format": "float32_le",
+                "sample_rate_hz": 16000,
+                "channels": 2,
+                "interleaved": True,
+                "channel_layout": "stereo",
+                "evidence_basis": media_basis,
+            },
+            "native_playback_media": {
+                "sample_format": "float32_le",
+                "sample_rate_hz": 16000,
+                "channels": 2,
+                "interleaved": True,
+                "channel_layout": "stereo",
+                "evidence_basis": media_basis,
+            },
+            "tuntun_transport_media": {
+                "sample_format": "s16le",
+                "sample_rate_hz": 16000,
+                "channels": 1,
+                "interleaved": False,
+                "channel_layout": "mono",
+            },
             "aec_available": True,
             "doa_available": False,
             "daemon_ports": (8000, 8001),

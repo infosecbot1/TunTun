@@ -17,8 +17,10 @@ from tuntun_contracts.base import (
     canonical_mapping_bytes,
     parse_bounded_json_value,
 )
+from tuntun_contracts.poc.framing import TRANSPORT_AUDIO_FORMAT as TUNTUN_TRANSPORT_AUDIO_FORMAT
 
 from tuntun_edge.config import load_edge_config
+from tuntun_edge.reachy.native_media import REACHY_SDK_DECLARED_NATIVE_AUDIO_FORMAT
 
 _STABLE_SEMVER_PATTERN = r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$"
 _STABLE_SEMVER_MAX_LENGTH = 32
@@ -716,9 +718,36 @@ def _daemon_status_content_length(headers: Mapping[str, str]) -> int:
 
 
 class ReachyMediaFacts(ContractModel):
+    sample_format: Literal["float32_le"] | None = None
+    sample_rate_hz: Literal[16000] | None = None
+    channels: Literal[2] | None = None
+    interleaved: Literal[True] | None = None
+    channel_layout: Literal["stereo"] | None = None
+    evidence_basis: Literal["sdk_declared", "physical_observed", "unknown"]
+
+    @model_validator(mode="after")
+    def require_known_basis_to_carry_exact_native_format(self) -> Self:
+        fields = (
+            self.sample_format,
+            self.sample_rate_hz,
+            self.channels,
+            self.interleaved,
+            self.channel_layout,
+        )
+        if self.evidence_basis == "unknown":
+            if any(value is not None for value in fields):
+                raise ValueError("unknown native media evidence cannot carry format facts")
+            return self
+        if fields != ("float32_le", 16000, 2, True, "stereo"):
+            raise ValueError("known native media evidence must match the SDK-declared format")
+        return self
+
+
+class TuntunTransportMediaFacts(ContractModel):
     sample_format: Literal["s16le"]
     sample_rate_hz: Literal[16000]
     channels: Literal[1]
+    interleaved: Literal[False]
     channel_layout: Literal["mono"]
 
 
@@ -754,7 +783,7 @@ class ReachyRtcFacts(ContractModel):
         return self
 
 
-class CapabilityReport(ContractModel):
+class ReachyCapabilityReportV1(ContractModel):
     schema_version: Literal["tuntun.reachy-capability-report.v1"]
     source: Literal["synthetic", "hardware"]
     probe_version: StableSemver
@@ -781,22 +810,12 @@ class CapabilityReport(ContractModel):
         return self.sdk_version
 
     @property
-    def microphone(self) -> ReachyMediaFacts:
-        return ReachyMediaFacts(
-            sample_format="s16le",
-            sample_rate_hz=self.input_rate_hz,
-            channels=self.input_channels,
-            channel_layout="mono",
-        )
+    def microphone(self) -> TuntunTransportMediaFacts:
+        return _tuntun_transport_media()
 
     @property
-    def speaker(self) -> ReachyMediaFacts:
-        return ReachyMediaFacts(
-            sample_format="s16le",
-            sample_rate_hz=self.output_rate_hz,
-            channels=self.output_channels,
-            channel_layout="mono",
-        )
+    def speaker(self) -> TuntunTransportMediaFacts:
+        return _tuntun_transport_media()
 
     @property
     def observed_ports(self) -> tuple[int, ...]:
@@ -851,13 +870,93 @@ class CapabilityReport(ContractModel):
         return self
 
 
+class CapabilityReport(ContractModel):
+    schema_version: Literal["tuntun.reachy-capability-report.v2"]
+    source: Literal["synthetic", "hardware"]
+    probe_version: StableSemver
+    sdk_version: StableSemver
+    daemon_version: StableSemver
+    native_capture_media: ReachyMediaFacts
+    native_playback_media: ReachyMediaFacts
+    tuntun_transport_media: TuntunTransportMediaFacts
+    aec_available: bool
+    doa_available: bool
+    daemon_ports: Annotated[tuple[NetworkPort, ...], Field(min_length=1, max_length=16)]
+    secure_key_storage_available: bool
+    managed_app_lock_available: bool
+    competing_controller_detectable: bool
+    stop_during_playback_tested: bool
+    rtc_available: bool
+    rtc_cold_boot_retains_utc: bool
+    rtc_max_drift_seconds_30d: Annotated[float, Field(ge=0, le=86_400)] | None
+    rtc_qualified: bool
+
+    @property
+    def reachy_sdk_version(self) -> str:
+        return self.sdk_version
+
+    @property
+    def microphone(self) -> ReachyMediaFacts:
+        return self.native_capture_media
+
+    @property
+    def speaker(self) -> ReachyMediaFacts:
+        return self.native_playback_media
+
+    @property
+    def observed_ports(self) -> tuple[int, ...]:
+        return self.daemon_ports
+
+    @property
+    def rtc(self) -> ReachyRtcFacts:
+        return ReachyRtcFacts(
+            rtc_available=self.rtc_available,
+            unplugged_cold_boot_retained=self.rtc_cold_boot_retains_utc,
+            real_drift_measurement_days=30 if self.rtc_max_drift_seconds_30d is not None else 0,
+            max_observed_drift_seconds=self.rtc_max_drift_seconds_30d,
+            rtc_qualified=self.rtc_qualified,
+        )
+
+    @field_validator("daemon_ports")
+    @classmethod
+    def require_unique_sorted_ports(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(type(port) is not int for port in value):
+            raise ValueError("daemon ports must be strict integers")
+        if tuple(sorted(value)) != value:
+            raise ValueError("daemon ports must be sorted")
+        if len(set(value)) != len(value):
+            raise ValueError("daemon ports must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def require_consistent_sanitized_facts(self) -> Self:
+        if self.source == "synthetic" and (
+            self.native_capture_media.evidence_basis == "physical_observed"
+            or self.native_playback_media.evidence_basis == "physical_observed"
+        ):
+            raise ValueError("synthetic Reachy reports cannot claim physical media observations")
+        if not self.rtc_available and self.rtc_cold_boot_retains_utc:
+            raise ValueError("RTC cold-boot retention requires RTC availability")
+        if self.rtc_max_drift_seconds_30d is not None and (
+            not self.rtc_available or not self.rtc_cold_boot_retains_utc
+        ):
+            raise ValueError("RTC drift evidence requires available retained RTC")
+        computed = (
+            self.rtc_available
+            and self.rtc_cold_boot_retains_utc
+            and self.rtc_max_drift_seconds_30d is not None
+            and self.rtc_max_drift_seconds_30d <= 5.0
+        )
+        if self.rtc_qualified is not computed:
+            raise ValueError("RTC qualification must match explicit 30-day facts")
+        return self
+
+
 class ProbeSource(Protocol):
     sdk_version: str
     daemon_version: str
-    input_rate_hz: int
-    input_channels: int
-    output_rate_hz: int
-    output_channels: int
+    native_capture_media: ReachyMediaFacts
+    native_playback_media: ReachyMediaFacts
     aec_available: bool
     doa_available: bool
     daemon_ports: tuple[int, ...]
@@ -870,7 +969,19 @@ class ProbeSource(Protocol):
     rtc_max_drift_seconds_30d: float | None
 
 
-ReachyCapabilityEvidenceV1 = CapabilityReport
+ReachyCapabilityEvidenceV1 = ReachyCapabilityReportV1
+ReachyCapabilityEvidenceV2 = CapabilityReport
+
+
+def _sdk_declared_native_media() -> ReachyMediaFacts:
+    return ReachyMediaFacts(
+        **REACHY_SDK_DECLARED_NATIVE_AUDIO_FORMAT.model_dump(),
+        evidence_basis="sdk_declared",
+    )
+
+
+def _tuntun_transport_media() -> TuntunTransportMediaFacts:
+    return TuntunTransportMediaFacts.model_validate(TUNTUN_TRANSPORT_AUDIO_FORMAT.model_dump())
 
 
 def _build_capability_report(
@@ -886,15 +997,14 @@ def _build_capability_report(
     )
     return CapabilityReport.model_validate(
         {
-            "schema_version": "tuntun.reachy-capability-report.v1",
+            "schema_version": "tuntun.reachy-capability-report.v2",
             "source": report_source,
             "probe_version": _PROBE_VERSION,
             "sdk_version": source.sdk_version,
             "daemon_version": source.daemon_version,
-            "input_rate_hz": source.input_rate_hz,
-            "input_channels": source.input_channels,
-            "output_rate_hz": source.output_rate_hz,
-            "output_channels": source.output_channels,
+            "native_capture_media": source.native_capture_media,
+            "native_playback_media": source.native_playback_media,
+            "tuntun_transport_media": _tuntun_transport_media(),
             "aec_available": source.aec_available,
             "doa_available": source.doa_available,
             "daemon_ports": source.daemon_ports,
@@ -917,10 +1027,8 @@ def probe(source: ProbeSource) -> CapabilityReport:
 class _SyntheticProbeSource:
     sdk_version = _SYNTHETIC_VERSION
     daemon_version = _SYNTHETIC_VERSION
-    input_rate_hz = 16000
-    input_channels = 1
-    output_rate_hz = 16000
-    output_channels = 1
+    native_capture_media = _sdk_declared_native_media()
+    native_playback_media = _sdk_declared_native_media()
     aec_available = False
     doa_available = False
     daemon_ports: tuple[int, ...] = (8000, 8001)
@@ -968,3 +1076,29 @@ def probe_reachy_hardware_capabilities(
     raise ReachyHardwareProbeUnavailableError(
         "Reachy hardware capability probing needs the future supervised physical procedure"
     )
+
+
+__all__ = [
+    "CapabilityReport",
+    "LocalRuntimeCompatibility",
+    "ProbeSource",
+    "REACHY_SDK_DECLARED_NATIVE_AUDIO_FORMAT",
+    "REQUIRED_RUNTIME_IMPORTS",
+    "TUNTUN_TRANSPORT_AUDIO_FORMAT",
+    "ReachyCapabilityEvidenceV1",
+    "ReachyCapabilityEvidenceV2",
+    "ReachyCapabilityReportV1",
+    "ReachyHardwareNotAllowedError",
+    "ReachyHardwareProbeUnavailableError",
+    "ReachyMediaFacts",
+    "ReachyRtcFacts",
+    "ReachyRuntimeCompatibilityError",
+    "ReachyRuntimeCompatibilityUnavailable",
+    "TuntunTransportMediaFacts",
+    "canonical_target_tag_set_sha256",
+    "probe",
+    "probe_local_runtime_compatibility",
+    "probe_reachy_capabilities",
+    "probe_reachy_hardware_capabilities",
+    "synthetic_reachy_capabilities",
+]
