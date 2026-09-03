@@ -2525,11 +2525,15 @@ def test_every_private_regular_file_descriptor_rejects_targeted_acl(
     target_identity = (target.stat().st_dev, target.stat().st_ino)
     real_inspector = secure_paths_module._descriptor_has_unsafe_acl
 
-    def targeted_inspector(descriptor: int) -> bool:
+    def targeted_inspector(
+        descriptor: int,
+        *,
+        reject_default_acl: bool = True,
+    ) -> bool:
         metadata = os.fstat(descriptor)
         if (metadata.st_dev, metadata.st_ino) == target_identity:
             return True
-        return real_inspector(descriptor)
+        return real_inspector(descriptor, reject_default_acl=reject_default_acl)
 
     monkeypatch.setattr(
         secure_paths_module,
@@ -2582,12 +2586,16 @@ def test_repository_rejects_unsafe_or_uninspectable_acl_on_regular_files(
     state = publish_initial_state(repository)
     real_inspector = secure_paths_module._descriptor_has_unsafe_acl
 
-    def inspect_regular_file(descriptor: int) -> bool:
+    def inspect_regular_file(
+        descriptor: int,
+        *,
+        reject_default_acl: bool = True,
+    ) -> bool:
         if stat.S_ISREG(os.fstat(descriptor).st_mode):
             if isinstance(inspection_result, OSError):
                 raise inspection_result
             return inspection_result
-        return real_inspector(descriptor)
+        return real_inspector(descriptor, reject_default_acl=reject_default_acl)
 
     monkeypatch.setattr(
         secure_paths_module,

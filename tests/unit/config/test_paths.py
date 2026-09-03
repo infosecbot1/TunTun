@@ -159,8 +159,8 @@ def test_linux_acl_policy_matches_the_task6_allowlist() -> None:
         with pytest.raises(ValueError, match="unsupported Linux filesystem ACL semantics"):
             secure_paths._require_supported_linux_acl_filesystem_magic(magic)
 
-    for attribute in (b"system.posix_acl_access", b"system.posix_acl_default"):
-        assert secure_paths._classify_linux_acl_attribute(attribute) == "posix"
+    assert secure_paths._classify_linux_acl_attribute(b"system.posix_acl_access") == "access"
+    assert secure_paths._classify_linux_acl_attribute(b"system.posix_acl_default") == "default"
     assert secure_paths._classify_linux_acl_attribute(b"security.selinux") == "other"
     for attribute in (
         b"system.nfs4_acl",
@@ -171,6 +171,28 @@ def test_linux_acl_policy_matches_the_task6_allowlist() -> None:
     ):
         with pytest.raises(ValueError, match="unsupported Linux discretionary ACL"):
             secure_paths._classify_linux_acl_attribute(attribute)
+
+
+def test_linux_default_acl_is_not_current_access_but_remains_unsafe_for_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(secure_paths, "_linux_filesystem_magic", lambda library, fd: 0xEF53)
+    monkeypatch.setattr(
+        secure_paths,
+        "_linux_extended_attribute_names",
+        lambda library, fd: (b"system.posix_acl_default",),
+    )
+
+    assert not secure_paths._linux_descriptor_has_unsafe_acl(
+        object(),
+        42,
+        reject_default_acl=False,
+    )
+    assert secure_paths._linux_descriptor_has_unsafe_acl(
+        object(),
+        42,
+        reject_default_acl=True,
+    )
 
 
 def test_linux_acl_inventory_is_bounded_and_fails_closed_when_unsupported() -> None:
@@ -906,7 +928,12 @@ def test_every_walked_directory_rejects_an_injected_unsafe_acl(
         expected: tuple[int, int],
         inspected: list[tuple[int, int]],
     ):
-        def has_unsafe_acl(descriptor: int) -> bool:
+        def has_unsafe_acl(
+            descriptor: int,
+            *,
+            reject_default_acl: bool = True,
+        ) -> bool:
+            del reject_default_acl
             metadata = os.fstat(descriptor)
             identity = (metadata.st_dev, metadata.st_ino)
             inspected.append(identity)
@@ -946,7 +973,12 @@ def test_directory_unsafe_acl_inspection_failure_is_content_free(
     target = _fixture_root(tmp_path) / "private"
     target.mkdir(mode=0o700)
 
-    def fail_inspection(descriptor: int) -> bool:
+    def fail_inspection(
+        descriptor: int,
+        *,
+        reject_default_acl: bool = True,
+    ) -> bool:
+        del reject_default_acl
         del descriptor
         raise inspection_error
 
@@ -976,9 +1008,18 @@ def test_unsafe_creation_parent_acl_rejects_before_missing_child_without_mutatio
     parent_identity = (metadata.st_dev, metadata.st_ino)
     before = (parent_identity, stat.S_IMODE(metadata.st_mode), tuple(parent.iterdir()))
 
-    def has_unsafe_acl(descriptor: int) -> bool:
+    inspection_policies: list[bool] = []
+
+    def has_unsafe_acl(
+        descriptor: int,
+        *,
+        reject_default_acl: bool = True,
+    ) -> bool:
         opened = os.fstat(descriptor)
-        return (opened.st_dev, opened.st_ino) == parent_identity
+        if (opened.st_dev, opened.st_ino) != parent_identity:
+            return False
+        inspection_policies.append(reject_default_acl)
+        return reject_default_acl
 
     monkeypatch.setattr(
         secure_paths,
@@ -991,6 +1032,7 @@ def test_unsafe_creation_parent_acl_rejects_before_missing_child_without_mutatio
 
     after_metadata = parent.stat(follow_symlinks=False)
     assert not child.exists()
+    assert inspection_policies == [False, True]
     assert (
         (after_metadata.st_dev, after_metadata.st_ino),
         stat.S_IMODE(after_metadata.st_mode),
@@ -1008,6 +1050,22 @@ def test_native_granting_directory_acl_is_rejected_without_mutating_raw_acl(
 
     with pytest.raises(PermissionError, match="unsafe application path"):
         open_owned_directory(target)
+
+    lease.assert_installed_unchanged()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux default-ACL witness")
+def test_native_default_acl_on_existing_traversal_ancestor_does_not_grant_access(
+    tmp_path: Path,
+    native_unsafe_acl_installer,
+) -> None:
+    ancestor = _fixture_root(tmp_path) / "default-acl-ancestor"
+    target = ancestor / "private"
+    target.mkdir(mode=0o700, parents=True)
+    lease = native_unsafe_acl_installer(ancestor, "inherit")
+
+    with open_owned_directory(target) as opened:
+        opened.revalidate()
 
     lease.assert_installed_unchanged()
 

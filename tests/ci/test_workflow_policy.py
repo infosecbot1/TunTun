@@ -58,11 +58,6 @@ SETUP_PNPM_ACTION = "pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86"
 SETUP_NODE_ACTION = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
 CONTRACT_STEPS = [
     {"uses": CHECKOUT_ACTION},
-    {
-        "name": "Diagnose prompt path guard metadata",
-        "shell": ARCHITECTURE_CHECK_SHELL,
-        "run": "/usr/bin/python3 .github/ci/diagnose_prompt_path.py",
-    },
     {"uses": SETUP_UV_ACTION, "with": {"version": "0.8.13", "enable-cache": True}},
     {"shell": ARCHITECTURE_CHECK_SHELL, "run": "uv python install 3.11"},
     {
